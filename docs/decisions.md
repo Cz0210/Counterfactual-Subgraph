@@ -1,5 +1,82 @@
 # Decisions Log
 
+## [2026-09-01] Keep Taste T12 blocked on deterministic cross-process VRRW resume
+
+### Motivation
+
+The requested TasteMolNet T12 main-table route needs a real 10,000--20,000
+step native GCFExplainer walk that can survive worker exit and resume in a new
+process.  The existing T7 proof is intentionally narrower: it saves at step
+eight, erases live state, and reloads for steps nine through sixteen while the
+same Python interpreter, imported official modules, model instances, private
+temporary directory, and held file descriptors remain alive.  Treating that
+in-process proof as production restart would make a bounded smoke look like a
+full experiment.
+
+The vendored official implementation also defines graph identity as
+`hash(graph_embedding.tobytes())`.  The production T7 chain starts workers
+with Python isolated mode (`-I`), which ignores `PYTHONHASHSEED`.  A local
+four-process probe with the same bytes and `PYTHONHASHSEED=7` produced four
+different identities under `-I`, while four non-isolated processes produced
+one common identity.  A restored `graph_map`, `graph_index_map`, candidate
+list, transition map, traversed trace, and current cursor would therefore use
+the previous process's integer namespace while newly evaluated neighbours use
+the new process's namespace.  Reinforcement, frequency ordering, and walk
+transitions can silently diverge.
+
+### Decision
+
+Do not add a T12 runner, CLI, Slurm wrapper, PASS marker, or placeholder.  Keep
+T12 explicitly unimplemented until the native walk has a reviewed
+cross-process identity and checkpoint contract.  In particular:
+
+- do not change the official embedding-byte identity to a project hash without
+  an explicit scientific-method decision;
+- do not claim that setting `PYTHONHASHSEED` repairs the current isolated
+  production command, and do not remove `-I` without a separate execution and
+  reproducibility review;
+- do not persist or reopen the T7 private checkpoint as-is.  Its holder has no
+  `open_existing` path, relies on live descriptors and inode ancestry, lives in
+  a `TemporaryDirectory`, states
+  `checkpoint_payload_persisted_to_terminal_output=false`, and is deleted with
+  the worker runtime;
+- do not generalize the T7 schema by relabeling it.  Its validator is fixed to
+  T7, an 8/16 step split, and one checkpoint; it has no 10k/20k cursor,
+  interval, attempt, source-cohort, release, GPU/runtime, or official-source
+  binding;
+- do not promote T7 terminal evidence into a T12 candidate pool.  T7
+  deliberately omits graph tensors, SMILES, and molecule payloads and records
+  selector/full-route status as `NOT_EVALUATED` and paper eligibility as
+  false.
+
+A future implementation must first prove an exact uninterrupted-versus-
+process-restarted trace on the real GPU path, including graph identities,
+candidate frequencies/order, transitions, current cursor, bridge and scorer
+state, Python/NumPy/Torch CPU and CUDA RNG, generated-to-original NeuroSED
+coverage, and the official native result.  This proof must account for the
+official raw GPU-embedding-byte identity; prior BACE replay work showed that
+batch/process floating-point differences can change those bytes and therefore
+the walk.  Only after that gate may a persistent 10k/20k checkpoint be used by
+calibration ordering, held-out test evaluation, standardized export, and an
+independent terminal verifier.  The NeuroSED distance threshold remains a
+required external typed pin and must never receive a default.
+
+### Consequences
+
+- T7 remains a valid 16-step in-process checkpoint/reload smoke and no more.
+- No classifier, split, NeuroSED, threshold, official VRRW, or graph-identity
+  semantics are changed by this audit.
+- No local or remote science is started, and no T12 result or matrix cell is
+  claimed.
+- T12 remains a main-table blocker rather than a mislabeled bounded run.
+
+### Status
+
+Blocked pending a reviewed deterministic cross-process VRRW identity and
+checkpoint protocol.
+
+---
+
 ## [2026-08-31] Preserve frozen AIDS graph node order across canonical SMILES fallback
 
 ### Motivation

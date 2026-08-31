@@ -1,5 +1,41 @@
 # Refactor Plan
 
+## 2026-09-01: TasteMolNet T12 cross-process VRRW blocker
+
+- [x] Audit the complete T7 checkpoint payload: official mutable maps/lists,
+  current cursor, bridge/adapter/scorer counters, action counts, and
+  Python/NumPy/Torch CPU and CUDA RNG are captured for an in-process 8+8
+  restore.
+- [x] Confirm that the checkpoint cannot be reopened after process exit: its
+  holder has no `open_existing`, depends on live descriptors, is stored below
+  a private temporary directory, and is explicitly absent from terminal
+  output.
+- [x] Reproduce the official identity blocker.  The vendored VRRW uses
+  `hash(embedding.tobytes())`; Python `-I` ignores `PYTHONHASHSEED`, so four
+  isolated processes assign four identities to identical bytes.
+- [x] Confirm that T7's checkpoint validator is fixed to stage T7 and steps
+  8/16 and that its terminal output intentionally contains no persistent graph,
+  molecule, or candidate payload for calibration/test.
+- [ ] Before implementing T12, obtain an explicit scientific decision for any
+  change to the official raw-embedding-byte identity.  Do not make that change
+  as an engineering convenience.
+- [ ] Build and review a persistent checkpoint contract binding a fresh UUID,
+  10k/20k budget and exact cursor, train cohort, calibrated three-class GINE,
+  adopted NeuroSED, external typed threshold pin, official source, runtime/GPU
+  identity, complete mutable walk state, and CPU/CUDA RNG.
+- [ ] Prove exact uninterrupted-versus-new-process continuation on the real GPU
+  route, including trace, transitions, frequencies/order, cursor, candidate
+  graph bytes, generated-query-to-original-target coverage, and terminal
+  native result.  A seed-only replay or approximate/allclose comparison is not
+  sufficient.
+- [ ] Only after that proof, implement the dataset-specific T12 20k train-only
+  generation, calibration-only ordering, post-freeze held-out test,
+  standardized export, paired CLI/Slurm entrypoints, and separate terminal
+  verifier.  The NeuroSED threshold must remain a required typed external pin
+  with no guessed default.
+- [x] Under the 90-minute engineering timebox, add no runner, CLI, Slurm
+  wrapper, placeholder, PASS marker, remote launch, or matrix claim.
+
 ## 2026-08-31: Repair AIDS ComRecGC canonical-fallback node ordering
 
 - [x] Reopen the failed v4 chemistry evidence and isolate the failure from the
