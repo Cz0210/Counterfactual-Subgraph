@@ -108,6 +108,7 @@ _SEALED_CHECKPOINT_DIRECTORY = "sealed-planned-checkpoint"
 _POST_CALLBACK_SETTLE_ATTEMPTS = 16
 _POST_CALLBACK_SETTLE_SECONDS = 0.025
 _POST_CALLBACK_STABLE_SAMPLES = 3
+_EMPTY_REGULAR_SOURCE_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 class TasteGlobalGCESmokeError(RuntimeError):
@@ -1807,6 +1808,8 @@ def _validate_official_startup_documents(
         module_file = row.get("module_file")
         realpath = row.get("realpath")
         roots = row.get("expected_roots")
+        source_sha256 = row.get("sha256")
+        source_bytes = row.get("bytes")
         if (
             type(module) is not str
             or not module
@@ -1818,14 +1821,23 @@ def _validate_official_startup_documents(
             or type(realpath) is not str
             or not realpath.startswith("/")
             or realpath.endswith((".pyc", ".pyo"))
-            or not _is_sha256(row.get("sha256"))
+            or not _is_sha256(source_sha256)
             or any(
                 type(row.get(field)) is not int or row[field] < minimum
                 for field, minimum in (
                     ("device", 0),
                     ("inode", 1),
-                    ("bytes", 1),
                 )
+            )
+            or type(source_bytes) is not int
+            or source_bytes < 0
+            or (
+                source_bytes == 0
+                and source_sha256 != _EMPTY_REGULAR_SOURCE_SHA256
+            )
+            or (
+                source_bytes > 0
+                and source_sha256 == _EMPTY_REGULAR_SOURCE_SHA256
             )
             or type(row.get("package_version")) is not str
             or not row["package_version"]
@@ -1840,7 +1852,11 @@ def _validate_official_startup_documents(
             raise TasteGlobalGCESmokeError(
                 "T8 Python module provenance entry changed"
             )
-        if module.startswith(("models.", "data.")) or module == "utils":
+        if module.startswith(("models.", "data.")) or module in {
+            "models",
+            "data",
+            "utils",
+        }:
             if row["package_version"] != OFFICIAL_GLOBALGCE_COMMIT:
                 raise TasteGlobalGCESmokeError(
                     "T8 official module commit provenance changed"

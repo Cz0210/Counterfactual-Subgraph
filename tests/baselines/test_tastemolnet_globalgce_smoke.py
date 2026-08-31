@@ -37,6 +37,112 @@ def test_t8_stage_marker_contract_is_exact() -> None:
     assert t8.PASS_MARKER == "[TASTE_T8_GLOBALGCE_SMOKE_PASS]"
 
 
+def _startup_provenance_row(module: str, source: Path) -> dict:
+    observed = source.stat()
+    payload = source.read_bytes()
+    return {
+        "module": module,
+        "module_file": str(source),
+        "realpath": str(source.resolve()),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "device": int(observed.st_dev),
+        "inode": int(observed.st_ino),
+        "bytes": len(payload),
+        "package_version": (
+            t8.OFFICIAL_GLOBALGCE_COMMIT
+            if module.startswith(("models.", "data."))
+            or module in {"models", "data", "utils"}
+            else (
+                "project-source"
+                if module.startswith("src.")
+                else "test-package"
+            )
+        ),
+        "expected_roots": [str(source.resolve().parent)],
+    }
+
+
+def _startup_documents(*extra_entries: dict) -> dict:
+    source = Path(__file__).resolve()
+    required_modules = (
+        "models.GTGNN",
+        "models.GlobalGCE",
+        "models.models_utils",
+        "models.fsg",
+        "models.gSpan.gSpan",
+        "torch",
+        "torch_geometric",
+        "src.baselines.globalgce_mutagenicity_adapter",
+        "src.baselines.globalgce_frozen_gine_bridge",
+        "src.oracles.gnn_oracle",
+    )
+    api_sha256 = "a" * 64
+    provenance_sha256 = "b" * 64
+    return {
+        "api": {
+            "schema_version": t8.OFFICIAL_GLOBALGCE_API_SIGNATURE_SCHEMA,
+            "official_globalgce_commit": t8.OFFICIAL_GLOBALGCE_COMMIT,
+            "signatures": dict(t8.PINNED_OFFICIAL_GLOBALGCE_API_SIGNATURES),
+        },
+        "provenance": {
+            "schema_version": t8.OFFICIAL_GLOBALGCE_MODULE_PROVENANCE_SCHEMA,
+            "official_globalgce_commit": t8.OFFICIAL_GLOBALGCE_COMMIT,
+            "isolated_python": True,
+            "no_user_site": True,
+            "entries": [
+                *(
+                    _startup_provenance_row(module, source)
+                    for module in required_modules
+                ),
+                *extra_entries,
+            ],
+        },
+        "api_sha256": api_sha256,
+        "provenance_sha256": provenance_sha256,
+        "training_summary": {
+            "official_globalgce_commit": t8.OFFICIAL_GLOBALGCE_COMMIT,
+            "official_api_signature_sha256": api_sha256,
+            "python_module_provenance_sha256": provenance_sha256,
+            "isolated_python": True,
+            "no_user_site": True,
+        },
+    }
+
+
+def test_t8_startup_provenance_accepts_hash_bound_empty_package_source(
+    tmp_path: Path,
+) -> None:
+    empty_init = tmp_path / "official" / "models" / "__init__.py"
+    empty_init.parent.mkdir(parents=True)
+    empty_init.write_bytes(b"")
+
+    evidence = t8._validate_official_startup_documents(
+        **_startup_documents(
+            _startup_provenance_row("models", empty_init),
+        )
+    )
+
+    assert evidence["python_module_provenance_sha256"] == "b" * 64
+
+
+def test_t8_startup_provenance_rejects_empty_source_with_wrong_hash(
+    tmp_path: Path,
+) -> None:
+    empty_init = tmp_path / "official" / "models" / "__init__.py"
+    empty_init.parent.mkdir(parents=True)
+    empty_init.write_bytes(b"")
+    row = _startup_provenance_row("models", empty_init)
+    row["sha256"] = "f" * 64
+
+    with pytest.raises(
+        t8.TasteGlobalGCESmokeError,
+        match="Python module provenance entry changed",
+    ):
+        t8._validate_official_startup_documents(
+            **_startup_documents(row)
+        )
+
+
 class _FakeScorer:
     checkpoint_id = "a" * 64
     num_classes = 3

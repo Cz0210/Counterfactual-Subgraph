@@ -3120,3 +3120,16 @@ Mutagenicity roadmaps.
 - [ ] Produce and review the missing `mut_trace_on_off_parity_v1` PASS receipt,
   then submit the fresh postprocess root.  Until that receipt exists, fail
   before creating output rather than weakening the Mut trace gate.
+
+## 2026-09-01: T8 empty-package provenance validation
+
+- [x] Rehash every module recorded by failed fresh attempt
+  `ebb64920-9ca7-4122-b9c6-b7e4870c07c9`; confirm no recorded source-byte or
+  digest drift.
+- [x] Identify the three zero-byte official package initializers as the only
+  rows rejected by the terminal provenance shape check.
+- [x] Accept zero bytes only with the exact empty-source SHA-256 and retain all
+  canonical startup-document, official-commit, checkpoint, and resume binding.
+- [x] Add positive empty-package and negative wrong-hash regression tests.
+- [ ] Launch only a fresh T8 UUID/root from the reviewed immutable successor;
+  never resume or adopt the failed attempt.

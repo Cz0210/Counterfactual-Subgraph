@@ -122,6 +122,54 @@ Accepted
 
 ---
 
+## [2026-09-01] Accept hash-bound empty Python package sources in T8 provenance
+
+### Motivation
+
+The fresh T8 target-0 attempt
+`ebb64920-9ca7-4122-b9c6-b7e4870c07c9` completed both bounded generation
+chunks and produced a nonempty native-rule catalog, but the terminal startup
+validator rejected its provenance.  Rehashing all 19 recorded module files
+found no source mismatch.  The only structurally rejected rows were the pinned
+official checkout's legitimate zero-byte `data/__init__.py`,
+`models/__init__.py`, and `models/gSpan/__init__.py`, each correctly recorded
+with SHA-256 of the empty byte string.
+
+The startup document is create-once.  On the resumed generator call, a fresh
+capture must produce the exact same canonical document or
+`_write_canonical_identity_once` fails before science continues.  Therefore
+lazy imports did not add a second unbound closure in this attempt; the failure
+was the terminal validator's incorrect assumption that every regular Python
+source must contain at least one byte.
+
+### Decision
+
+Permit a provenance row with `bytes == 0` only when its source SHA-256 is the
+canonical SHA-256 of the empty byte string.  Continue to reject negative byte
+counts, reject the empty-source hash for a positive-length file, and retain the
+exact document hash, module path/root, inode/device, package version, official
+commit, isolated-interpreter, and required-module checks.  Treat the top-level
+`models` and `data` package rows as official-commit-bound entries as well.
+
+Do not alter official GlobalGCE source, API signatures, classifier, split,
+target branch, checkpoint seal, resume identity, or native-rule semantics.
+The failed attempt remains non-adoptable; any rerun requires a fresh UUID and
+root from a reviewed immutable successor.
+
+### Consequences
+
+- Empty pinned `__init__.py` files remain byte-for-byte identified instead of
+  being mistaken for absent evidence.
+- A zero-length row with any other digest fails closed.
+- Source changes, module additions/removals between captures, and resume drift
+  retain their existing rejection paths.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-09-01] Remove only the artificial AIDS edge from Mut trace-off parity v2
 
 ### Motivation
