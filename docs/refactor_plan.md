@@ -1,5 +1,29 @@
 # Refactor Plan
 
+## 2026-09-01: TasteMolNet T12 deterministic restart substrate
+
+- [x] Record the explicit authorization to replace only T12's salted raw-
+  embedding registry key with the existing stable, parent-free canonical
+  attributed-graph SHA-256.
+- [x] Preserve official VRRW actions, scoring, frequency, teleport and
+  generated-query-to-original-target NeuroSED semantics behind a serial
+  graph/embedding call-order assertion.
+- [x] Add a persistent checkpoint that captures the complete official walk,
+  stable bridge, adapter/scorer, current cursor, action counts and Python/
+  NumPy/Torch CPU/CUDA RNG and binds all model/source/runtime/attempt hashes.
+- [x] Restrict production to 20k with durable cursors at 10k and 20k; keep a
+  separately typed bounded GPU-canary purpose.
+- [x] Add the independent exact replay observation/gate and paired CLI/Slurm
+  entrypoint.  It rejects a same-process comparison or any approximate match.
+- [x] Add focused identity, checkpoint/reopen/RNG and canary-gate tests.
+- [ ] Build the dataset-specific real-GPU producer that uses this substrate
+  to emit the uninterrupted and cross-process resumed observations.
+- [ ] Run and adopt the exact A800 replay gate before production.
+- [ ] Add lossless native candidate persistence, calibration-only ordering,
+  held-out test, standardized exports and the separate terminal verifier.
+- [ ] Pin the external NeuroSED distance and shared WNode threshold
+  authorities; never infer either from test/default values.
+
 ## 2026-09-01: TasteMolNet T12 cross-process VRRW blocker
 
 - [x] Audit the complete T7 checkpoint payload: official mutable maps/lists,

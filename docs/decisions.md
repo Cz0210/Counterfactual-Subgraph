@@ -55,6 +55,52 @@ Authorized and implemented; awaiting a fresh CPU-only AutoDL postprocess.
 
 ---
 
+## [2026-09-01] Authorize a stable attributed-graph identity for Taste T12
+
+### Motivation
+
+The T12 audit proved that official `hash(graph_embedding.tobytes())` cannot
+survive a new isolated Python process.  The user has now explicitly authorized
+the recommended deterministic implementation so the 20k native GCFExplainer
+walk can use a real persistent checkpoint without changing classifier, split,
+edit, score, coverage, or test-isolation semantics.
+
+### Decision
+
+For TasteMolNet T12 only, patch the official registry/hash callback at the
+project boundary to return the existing canonical parent-free attributed-
+graph SHA-256.  Keep a queued digest of each returned embedding solely to
+prove official scorer/hash call order.  Do not use raw embedding bytes,
+parent metadata, or Python built-in hash as identity.  Apply the same reviewed
+first canonical GINE row and low-bit reuse envelope as Taste ComRecGC, while
+rejecting any discrete prediction, validity, candidate, coverage, or graph
+change.
+
+Persist the complete official walk/bridge/adapter/action state and Python,
+NumPy, Torch CPU and CUDA RNG.  Bind it to fresh attempt/generation identity,
+20k budget with 10k/20k cursors, source cohort/split, GINE, NeuroSED and
+threshold, official source, execution tree, runtime and GPU.  A bounded real-
+GPU uninterrupted-versus-distinct-process exact replay gate is mandatory
+before production; an `allclose` terminal comparison is insufficient.
+
+### Consequences
+
+- The stable identity/checkpoint/replay-gate substrate is implemented without
+  modifying vendored official source or creating a generic controller.
+- The canary marker is not a T12 cell PASS and explicitly does not release
+  production.
+- The full runner still requires a real-GPU canary producer, lossless native
+  candidate persistence, calibration/test/export wiring, and independent
+  verification.
+- NeuroSED and shared WNode thresholds remain explicit external pins.  No
+  default or held-out value is authorized.
+
+### Status
+
+Identity and restart substrate accepted; production remains gated.
+
+---
+
 ## [2026-09-01] Keep Taste T12 blocked on deterministic cross-process VRRW resume
 
 ### Motivation

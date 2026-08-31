@@ -114,6 +114,11 @@ See:
   full-graph GCFExplainer smoke using the same calibrated three-class GINE;
   binary BACE adapters, NeuroSED claims, RF, test payloads, and molecule-bearing
   output are excluded)
+- `docs/AUTODL_TASTEMOLNET_T12_GCF_FULL.md` (Taste-specific stable attributed-
+  graph identity, persistent 10k/20k VRRW/RNG checkpoint substrate, and the
+  mandatory exact real-GPU uninterrupted-versus-new-process replay gate;
+  production calibration/test/export remains fail-closed until its external
+  thresholds and dataset-specific runner are complete)
 - `docs/AUTODL_TASTEMOLNET_T8_GLOBALGCE_SMOKE.md` (release-disabled contract
   for the real bounded native GlobalGCE two-target smoke on physical GPU 2;
   the paired Slurm entrypoint is an intentional static refusal)
