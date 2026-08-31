@@ -1,5 +1,45 @@
 # Decisions Log
 
+## [2026-08-31] Advance the matrix only by strict authority append
+
+### Background
+
+The shared-threshold BACE GCFExplainer selection, held-out shards, merge,
+freeze, and standardization completed successfully.  A separate fresh audit
+scanned only that cell, however, and truthfully reported one passing cell; it
+did not inherit the already frozen seven-cell authority and therefore cannot
+be called the eight-cell matrix.
+
+### Decision
+
+Add one dataset-specific CPU-only append command.  It reopens the complete
+hash closure of the existing 7/16 authority, re-audits exactly its seven
+passing standardized roots plus the new BACE GCFExplainer standardized root,
+and requires all fifteen non-target rows to remain identical.  The new BACE
+cell must be `FROZEN_PASS`, retain K=20/Table-2 K=10, and match frozen BACE Ours
+on dataset, split, GINE, MolCLR, distance, strict-flip, and shared-threshold
+identities.  No broad scan, scientific recomputation, candidate reordering, or
+raw-test access is allowed.
+
+The successor is a fresh append-only root.  Its combined audit hash-closes an
+append receipt and explicit supersession references before publishing
+`matrix_status.json` last.  Superseded incomplete snapshots are referenced by
+their exact matrix/combined hashes and observed cell count; their directories
+and bytes are never edited or deleted.  If a historical top-level snapshot
+predates combined-audit closure, the successor records that absence plus the
+physical `matrix_status.json` identity instead of fabricating a combined hash.
+
+### Consequences
+
+- A one-cell or zero-cell re-audit cannot replace the seven-cell authority.
+- Any predecessor drift or BACE cross-method identity conflict blocks before
+  the fresh output root is published.
+- A successful run advances exactly 7/16 to 8/16 without rerunning science.
+
+### Status
+
+Accepted for immediate AutoDL deployment.
+
 ## [2026-08-31] Bind BACE GCFExplainer to the frozen Ours B12 threshold grid
 
 ### Background

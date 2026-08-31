@@ -1906,7 +1906,12 @@ def _report(result: RegistryResult) -> str:
     return "\n".join(lines)
 
 
-def write_registry_outputs(result: RegistryResult, output_root: str | Path) -> Path:
+def write_registry_outputs(
+    result: RegistryResult,
+    output_root: str | Path,
+    *,
+    supplemental_outputs: Mapping[str, bytes] | None = None,
+) -> Path:
     root = Path(output_root).expanduser().resolve()
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"Registry output root must be fresh and empty: {root}")
@@ -1950,6 +1955,25 @@ def write_registry_outputs(result: RegistryResult, output_root: str | Path) -> P
             )
             + "\n"
         ).encode("utf-8")
+    reserved_names = {
+        "combined_audit.json",
+        "matrix_status.json",
+        *outputs,
+    }
+    for raw_name, payload in (supplemental_outputs or {}).items():
+        relative = Path(str(raw_name))
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise ValueError(f"Invalid supplemental registry path: {raw_name!r}")
+        name = relative.as_posix()
+        if name in reserved_names:
+            raise ValueError(f"Supplemental registry path is reserved: {name}")
+        if not isinstance(payload, bytes):
+            raise TypeError(f"Supplemental registry payload must be bytes: {name}")
+        outputs[name] = payload
     marker_payload = outputs.pop("matrix_status.json")
     audited_payloads = {**outputs, "matrix_status.json": marker_payload}
     combined_audit = {

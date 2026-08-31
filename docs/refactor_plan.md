@@ -1,5 +1,19 @@
 # Refactor Plan
 
+## 2026-08-31: Append BACE GCFExplainer to the frozen 7/16 authority
+
+- [x] Reopen and hash-close the existing 7/16 matrix authority instead of
+  treating a fresh one-cell scan as its replacement.
+- [x] Re-audit the seven predecessor cells plus the shared-threshold BACE
+  GCFExplainer standardized root through the ordinary registry gate.
+- [x] Require all fifteen non-target rows to remain byte-semantically equal,
+  require BACE Ours/GCF dataset, split, GINE, MolCLR, metric, and threshold
+  identities to match, and publish only an exact 8/16 successor.
+- [x] Hash-close append provenance and stale-snapshot supersession references
+  inside the new authority while leaving every historical root unchanged.
+- [ ] Deploy from a clean immutable AutoDL checkout and run once into a fresh
+  audit root; do not rerun selection, held-out evaluation, or standardization.
+
 ## 2026-08-31: Move T8 exact-top-k working SQLite off the inode-limited store
 
 - [x] Add one explicit exact-top-k scratch-root interface without changing the

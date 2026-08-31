@@ -211,6 +211,37 @@ Use `--require-complete` only for the final 16/16 publication gate. Without it,
 an incomplete audit still returns success because recording missing and blocked
 cells is itself a valid audit result.
 
+## Strict BACE GCFExplainer 7/16 -> 8/16 append
+
+A fresh audit containing only BACE GCFExplainer is not a successor matrix.
+After its shared-threshold standardized root passes, use the dataset-specific
+append entrypoint to reopen the frozen seven-cell authority and prove an exact
+one-cell transition:
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH="$PROJECT" "$PY" -I -B \
+  "$PROJECT/scripts/autodl/append_bace_gcf_matrix_authority.py" \
+  --config configs/hpc.yaml \
+  --set inference.fallback_to_heuristic=false \
+  --prior-authority-root "$MATRIX/audits/bace_ours_frozen_7of16_20260829T062100Z" \
+  --bace-gcf-standardized-root "$BACE_GCF_STANDARDIZED" \
+  --superseded-audit-root "$INCOMPLETE_GCF_ONLY_AUDIT" \
+  --output-root "$MATRIX/audits/bace_gcf_strict_append_8of16_$TS"
+```
+
+The destination must not exist and the execution checkout must be clean and
+committed. The append command scans no ambient output tree. It re-audits only
+the seven passing predecessor roots and the new cell, rejects any change to a
+non-target row, and requires the new BACE cell to share the frozen Ours
+dataset/split/GINE/MolCLR/threshold identities. `append_authority.json` and
+`superseded_snapshots.json` are included in `combined_audit.json`; the terminal
+`matrix_status.json` remains the last publication. Superseded roots are never
+modified. A historical top-level `matrix_status.json` that predates
+`combined_audit.json` is recorded explicitly as
+`LEGACY_MATRIX_STATUS_ONLY_COMBINED_AUDIT_ABSENT`; its exact physical file
+identity and SHA are preserved, and the append does not pretend that it had a
+combined closure.
+
 ## Controller hand-off contract
 
 This is a finite foreground CPU command; it does not daemonize. A controller
