@@ -25,8 +25,10 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import sys
+import time
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from src.baselines.globalgce_bace_native_rules import (
@@ -95,10 +97,16 @@ INPUT_SCHEMA = "tastemolnet_t8_globalgce_smoke_inputs_v1"
 STATE_SCHEMA = "tastemolnet_t8_globalgce_smoke_state_v1"
 MANIFEST_SCHEMA = "tastemolnet_t8_globalgce_smoke_manifest_v1"
 GATE_SCHEMA = "tastemolnet_t8_globalgce_smoke_gate_v1"
-BRANCH_SCHEMA = "tastemolnet_t8_globalgce_branch_resume_v1"
+BRANCH_SCHEMA = "tastemolnet_t8_globalgce_branch_resume_v2"
+CHECKPOINT_SEAL_SCHEMA = "tastemolnet_t8_post_callback_checkpoint_seal_v1"
 SCIENCE_SCHEMA = "tastemolnet_t8_globalgce_science_v1"
 _SAFE_MANAGED_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
 _GPU_UUID = re.compile(r"^GPU-[A-Za-z0-9-]+$")
+_MUTABLE_CHECKPOINT_DIRECTORY = "globalgce_training_checkpoints"
+_SEALED_CHECKPOINT_DIRECTORY = "sealed-planned-checkpoint"
+_POST_CALLBACK_SETTLE_ATTEMPTS = 16
+_POST_CALLBACK_SETTLE_SECONDS = 0.025
+_POST_CALLBACK_STABLE_SAMPLES = 3
 
 
 class TasteGlobalGCESmokeError(RuntimeError):
@@ -743,6 +751,519 @@ class _HeldPlannedCheckpoint:
             setattr(self, field, -1)
             if descriptor >= 0:
                 os.close(descriptor)
+
+
+_POST_CALLBACK_STABLE_FIELDS = frozenset(
+    _RETAINED_FILE_EVIDENCE_KEYS - {"ctime_ns"}
+)
+
+
+def _post_callback_settled_leaf(
+    parent_fd: int,
+    name: str,
+    *,
+    callback_evidence: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], bool]:
+    """Freeze one leaf only after the checkpoint callback has fully unwound.
+
+    AutoFS can publish the final ctime after a completed writer returns through
+    its Python callback.  Content and every other physical field remain exact;
+    only a monotone ctime transition is accepted during this bounded quiet
+    period.  The returned evidence is therefore created after all writer-owned
+    objects have left the callback stack.
+    """
+
+    expected = (
+        _normalize_retained_file_evidence(
+            callback_evidence,
+            field=f"post-callback {name}",
+        )
+        if callback_evidence is not None
+        else None
+    )
+    descriptor = os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_fd,
+    )
+    previous: dict[str, Any] | None = None
+    stable_samples = 0
+    ctime_settled = False
+    try:
+        for attempt in range(_POST_CALLBACK_SETTLE_ATTEMPTS):
+            observed = _regular_fd_evidence(descriptor)
+            named_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            named = {
+                key: int(getattr(named_stat, attribute))
+                for key, attribute in (
+                    ("device", "st_dev"),
+                    ("inode", "st_ino"),
+                    ("mode", "st_mode"),
+                    ("uid", "st_uid"),
+                    ("gid", "st_gid"),
+                    ("link_count", "st_nlink"),
+                    ("bytes", "st_size"),
+                    ("mtime_ns", "st_mtime_ns"),
+                    ("ctime_ns", "st_ctime_ns"),
+                )
+            }
+            if any(named[key] != observed[key] for key in named):
+                stable_samples = 0
+                previous = None
+            else:
+                if expected is not None:
+                    if any(
+                        observed[key] != expected[key]
+                        for key in _POST_CALLBACK_STABLE_FIELDS
+                    ):
+                        raise TasteGlobalGCESmokeError(
+                            f"T8 {name} bytes or physical identity changed "
+                            "after callback unwind"
+                        )
+                    if observed["ctime_ns"] < expected["ctime_ns"]:
+                        raise TasteGlobalGCESmokeError(
+                            f"T8 {name} ctime moved backwards after callback unwind"
+                        )
+                    ctime_settled = (
+                        ctime_settled
+                        or observed["ctime_ns"] != expected["ctime_ns"]
+                    )
+                if observed == previous:
+                    stable_samples += 1
+                else:
+                    previous = observed
+                    stable_samples = 1
+                if stable_samples >= _POST_CALLBACK_STABLE_SAMPLES:
+                    return observed, ctime_settled
+            if attempt + 1 < _POST_CALLBACK_SETTLE_ATTEMPTS:
+                time.sleep(_POST_CALLBACK_SETTLE_SECONDS)
+        raise TasteGlobalGCESmokeError(
+            f"T8 {name} did not settle after callback unwind"
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _checkpoint_content_manifest(
+    inventory: Mapping[str, Any],
+) -> dict[str, Any]:
+    directories = inventory.get("directories")
+    files = inventory.get("files")
+    if type(directories) is not dict or type(files) is not dict:
+        raise TasteGlobalGCESmokeError(
+            "T8 sealed checkpoint inventory schema changed"
+        )
+    return {
+        "directories": sorted(directories),
+        "files": {
+            relative: {
+                "bytes": entry.get("bytes"),
+                "sha256": entry.get("sha256"),
+            }
+            for relative, entry in sorted(files.items())
+        },
+    }
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise TasteGlobalGCESmokeError(
+                "T8 sealed checkpoint copy ended early"
+            )
+        offset += written
+
+
+def _copy_retained_checkpoint_tree(
+    source: RetainedOutputTree,
+    *,
+    parent_fd: int,
+    name: str,
+) -> int:
+    """Create one descriptor-anchored, no-symlink resume copy."""
+
+    source.revalidate()
+    os.mkdir(name, 0o700, dir_fd=parent_fd)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    root_fd = os.open(name, flags, dir_fd=parent_fd)
+    directory_fds: dict[str, int] = {"": root_fd}
+    try:
+        directories = source.inventory["directories"]
+        for relative in sorted(
+            directories,
+            key=lambda value: (len(Path(value).parts), value),
+        ):
+            path = Path(relative)
+            parent = str(path.parent) if str(path.parent) != "." else ""
+            mode = stat.S_IMODE(int(directories[relative]["mode"]))
+            os.mkdir(path.name, mode, dir_fd=directory_fds[parent])
+            child = os.open(path.name, flags, dir_fd=directory_fds[parent])
+            directory_fds[relative] = child
+        files = source.inventory["files"]
+        for relative in sorted(files):
+            path = Path(relative)
+            parent = str(path.parent) if str(path.parent) != "." else ""
+            evidence = files[relative]
+            descriptor = os.open(
+                path.name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                stat.S_IMODE(int(evidence["mode"])),
+                dir_fd=directory_fds[parent],
+            )
+            try:
+                _write_all(descriptor, source.read_bytes(relative))
+                os.fchmod(descriptor, stat.S_IMODE(int(evidence["mode"])))
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        for relative in sorted(
+            (value for value in directory_fds if value),
+            key=lambda value: (len(Path(value).parts), value),
+            reverse=True,
+        ):
+            os.fsync(directory_fds[relative])
+        os.fsync(root_fd)
+        source.revalidate()
+        return root_fd
+    except BaseException:
+        os.close(root_fd)
+        raise
+    finally:
+        for relative, descriptor in list(directory_fds.items())[::-1]:
+            if relative:
+                os.close(descriptor)
+
+
+@dataclass(slots=True)
+class _HeldSealedCheckpointTree:
+    branch: _HeldBranchDirectory
+    name: str
+    descriptor: int
+    identity: _BranchDirectoryIdentity
+    tree: RetainedOutputTree
+
+    def revalidate(self) -> None:
+        self.branch.revalidate()
+        if (
+            _BranchDirectoryIdentity.from_stat(os.fstat(self.descriptor))
+            != self.identity
+            or _BranchDirectoryIdentity.from_stat(
+                os.stat(
+                    self.name,
+                    dir_fd=self.branch.descriptor,
+                    follow_symlinks=False,
+                )
+            )
+            != self.identity
+        ):
+            raise TasteGlobalGCESmokeError(
+                "T8 sealed planned-checkpoint directory changed"
+            )
+        self.tree.revalidate()
+
+    def close(self) -> None:
+        self.tree.close()
+        if self.descriptor >= 0:
+            descriptor, self.descriptor = self.descriptor, -1
+            os.close(descriptor)
+
+
+def _independently_verify_resume_checkpoint(
+    branch: _HeldBranchDirectory,
+    *,
+    checkpoint_evidence: Mapping[str, Any],
+    heartbeat_evidence: Mapping[str, Any],
+) -> None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(
+        _MUTABLE_CHECKPOINT_DIRECTORY,
+        flags,
+        dir_fd=branch.descriptor,
+    )
+    checkpoint_fd = heartbeat_fd = -1
+    try:
+        checkpoint_fd, observed_checkpoint = _HeldPlannedCheckpoint._open_leaf(
+            descriptor, "training_checkpoint.pt"
+        )
+        heartbeat_fd, observed_heartbeat = _HeldPlannedCheckpoint._open_leaf(
+            descriptor, "training_heartbeat.json"
+        )
+        if (
+            observed_checkpoint != dict(checkpoint_evidence)
+            or observed_heartbeat != dict(heartbeat_evidence)
+        ):
+            raise TasteGlobalGCESmokeError(
+                "T8 independent sealed-checkpoint verifier disagreed"
+            )
+    finally:
+        for value in (heartbeat_fd, checkpoint_fd, descriptor):
+            if value >= 0:
+                os.close(value)
+
+
+@dataclass(slots=True)
+class _PostCallbackCheckpointSeal:
+    sealed: _HeldSealedCheckpointTree
+    planned_holder: _HeldPlannedCheckpoint
+    evidence: Mapping[str, Any]
+    resume_checkpoint_evidence: Mapping[str, Any]
+    resume_heartbeat_evidence: Mapping[str, Any]
+
+    @classmethod
+    def create(
+        cls,
+        branch: _HeldBranchDirectory,
+        *,
+        callback_checkpoint: Mapping[str, Any],
+        callback_heartbeat: Mapping[str, Any],
+    ) -> "_PostCallbackCheckpointSeal":
+        """Atomically seal epoch zero after the generator stack has unwound."""
+
+        branch.revalidate()
+        for forbidden in (_SEALED_CHECKPOINT_DIRECTORY,):
+            try:
+                os.stat(
+                    forbidden,
+                    dir_fd=branch.descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise TasteGlobalGCESmokeError(
+                    "T8 sealed planned-checkpoint root must be fresh"
+                )
+        token = secrets.token_hex(16)
+        seal_temporary = f".{_MUTABLE_CHECKPOINT_DIRECTORY}.seal-{token}.tmp"
+        resume_temporary = f".{_MUTABLE_CHECKPOINT_DIRECTORY}.resume-{token}.tmp"
+        sealed: _HeldSealedCheckpointTree | None = None
+        planned_holder: _HeldPlannedCheckpoint | None = None
+        working_tree: RetainedOutputTree | None = None
+        working_fd = -1
+        try:
+            os.rename(
+                _MUTABLE_CHECKPOINT_DIRECTORY,
+                seal_temporary,
+                src_dir_fd=branch.descriptor,
+                dst_dir_fd=branch.descriptor,
+            )
+            os.fsync(branch.descriptor)
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            sealed_fd = os.open(
+                seal_temporary,
+                flags,
+                dir_fd=branch.descriptor,
+            )
+            try:
+                sealed_identity = _BranchDirectoryIdentity.from_stat(
+                    os.fstat(sealed_fd)
+                )
+                callback_checkpoint_ctime = int(callback_checkpoint["ctime_ns"])
+                callback_heartbeat_ctime = int(callback_heartbeat["ctime_ns"])
+                settled_checkpoint, checkpoint_ctime_settled = (
+                    _post_callback_settled_leaf(
+                        sealed_fd,
+                        "training_checkpoint.pt",
+                        callback_evidence=callback_checkpoint,
+                    )
+                )
+                settled_heartbeat, heartbeat_ctime_settled = (
+                    _post_callback_settled_leaf(
+                        sealed_fd,
+                        "training_heartbeat.json",
+                        callback_evidence=callback_heartbeat,
+                    )
+                )
+                sealed_tree = RetainedOutputTree.capture(sealed_fd)
+                sealed_tree.durably_flush()
+                if (
+                    sealed_tree.inventory["files"]["training_checkpoint.pt"][
+                        "sha256"
+                    ]
+                    != settled_checkpoint["sha256"]
+                    or sealed_tree.inventory["files"]["training_heartbeat.json"][
+                        "sha256"
+                    ]
+                    != settled_heartbeat["sha256"]
+                ):
+                    sealed_tree.close()
+                    raise TasteGlobalGCESmokeError(
+                        "T8 sealed tree differs from post-callback leaves"
+                    )
+                os.rename(
+                    seal_temporary,
+                    _SEALED_CHECKPOINT_DIRECTORY,
+                    src_dir_fd=branch.descriptor,
+                    dst_dir_fd=branch.descriptor,
+                )
+                os.fsync(branch.descriptor)
+                sealed = _HeldSealedCheckpointTree(
+                    branch,
+                    _SEALED_CHECKPOINT_DIRECTORY,
+                    sealed_fd,
+                    sealed_identity,
+                    sealed_tree,
+                )
+                sealed.revalidate()
+                sealed_fd = -1
+            finally:
+                if sealed_fd >= 0:
+                    os.close(sealed_fd)
+
+            sealed_content = _checkpoint_content_manifest(sealed.tree.inventory)
+            sealed_content_sha256 = _canonical_sha256(sealed_content)
+            working_fd = _copy_retained_checkpoint_tree(
+                sealed.tree,
+                parent_fd=branch.descriptor,
+                name=resume_temporary,
+            )
+            working_tree = RetainedOutputTree.capture(working_fd)
+            working_tree.durably_flush()
+            resume_content = _checkpoint_content_manifest(working_tree.inventory)
+            resume_content_sha256 = _canonical_sha256(resume_content)
+            if resume_content != sealed_content:
+                raise TasteGlobalGCESmokeError(
+                    "T8 resume copy differs from sealed checkpoint tree"
+                )
+            try:
+                os.stat(
+                    _MUTABLE_CHECKPOINT_DIRECTORY,
+                    dir_fd=branch.descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise TasteGlobalGCESmokeError(
+                    "T8 mutable checkpoint directory reappeared before seal commit"
+                )
+            working_identity = _BranchDirectoryIdentity.from_stat(
+                os.fstat(working_fd)
+            )
+            os.rename(
+                resume_temporary,
+                _MUTABLE_CHECKPOINT_DIRECTORY,
+                src_dir_fd=branch.descriptor,
+                dst_dir_fd=branch.descriptor,
+            )
+            os.fsync(branch.descriptor)
+            if (
+                _BranchDirectoryIdentity.from_stat(
+                    os.stat(
+                        _MUTABLE_CHECKPOINT_DIRECTORY,
+                        dir_fd=branch.descriptor,
+                        follow_symlinks=False,
+                    )
+                )
+                != working_identity
+            ):
+                raise TasteGlobalGCESmokeError(
+                    "T8 atomic resume checkpoint directory identity changed"
+                )
+            resume_checkpoint, _ = _post_callback_settled_leaf(
+                working_fd,
+                "training_checkpoint.pt",
+                callback_evidence=None,
+            )
+            resume_heartbeat, _ = _post_callback_settled_leaf(
+                working_fd,
+                "training_heartbeat.json",
+                callback_evidence=None,
+            )
+            if (
+                resume_checkpoint["sha256"] != settled_checkpoint["sha256"]
+                or resume_heartbeat["sha256"] != settled_heartbeat["sha256"]
+            ):
+                raise TasteGlobalGCESmokeError(
+                    "T8 atomic resume checkpoint hashes differ from seal"
+                )
+            working_tree.revalidate()
+            working_tree.close()
+            working_tree = None
+            os.close(working_fd)
+            working_fd = -1
+            _independently_verify_resume_checkpoint(
+                branch,
+                checkpoint_evidence=resume_checkpoint,
+                heartbeat_evidence=resume_heartbeat,
+            )
+            planned_holder = _HeldPlannedCheckpoint.capture(
+                branch,
+                checkpoint_evidence=resume_checkpoint,
+                heartbeat_evidence=resume_heartbeat,
+            )
+            evidence = {
+                "checkpoint_seal_schema_version": CHECKPOINT_SEAL_SCHEMA,
+                "checkpoint_seal_pass": True,
+                "checkpoint_writer_unwound": True,
+                "checkpoint_durable_flush": True,
+                "checkpoint_sealed_directory": _SEALED_CHECKPOINT_DIRECTORY,
+                "checkpoint_sealed_inventory_sha256": sealed_content_sha256,
+                "checkpoint_resume_copy_inventory_sha256": resume_content_sha256,
+                "checkpoint_no_follow_identity_verified": True,
+                "checkpoint_independent_reopen_verified": True,
+                "checkpoint_callback_ctime_settled": (
+                    checkpoint_ctime_settled or heartbeat_ctime_settled
+                ),
+                "checkpoint_callback_ctime_ns": callback_checkpoint_ctime,
+                "checkpoint_sealed_ctime_ns": settled_checkpoint["ctime_ns"],
+                "heartbeat_callback_ctime_ns": callback_heartbeat_ctime,
+                "heartbeat_sealed_ctime_ns": settled_heartbeat["ctime_ns"],
+            }
+            result = cls(
+                sealed,
+                planned_holder,
+                evidence,
+                resume_checkpoint,
+                resume_heartbeat,
+            )
+            result.revalidate()
+            return result
+        except BaseException:
+            if planned_holder is not None:
+                planned_holder.close()
+            if working_tree is not None:
+                working_tree.close()
+            if working_fd >= 0:
+                os.close(working_fd)
+            if sealed is not None:
+                sealed.close()
+            raise
+
+    def revalidate(self) -> None:
+        self.sealed.revalidate()
+        self.planned_holder.require_named_for_resume()
+
+    def revalidate_after_resume(self) -> None:
+        self.sealed.revalidate()
+        self.planned_holder.revalidate_held()
+
+    def close(self) -> None:
+        self.planned_holder.close()
+        self.sealed.close()
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -1428,10 +1949,9 @@ def run_resumed_target_branch(
     branch_dir = branch.runtime_path
 
     planned: list[dict[str, Any]] = []
-    planned_holder: _HeldPlannedCheckpoint | None = None
+    checkpoint_seal: _PostCallbackCheckpointSeal | None = None
 
     def _planned_stop(event: dict[str, Any]) -> None:
-        nonlocal planned_holder
         if planned:
             raise TasteGlobalGCESmokeError(
                 "T8 branch attempted more than one planned checkpoint stop"
@@ -1440,11 +1960,6 @@ def run_resumed_target_branch(
             event,
             expected_next_epoch=1,
             require_epoch=True,
-        )
-        planned_holder = _HeldPlannedCheckpoint.capture(
-            branch,
-            checkpoint_evidence=normalized["checkpoint_file"],
-            heartbeat_evidence=normalized["heartbeat_file"],
         )
         planned.append(normalized)
         raise PlannedGlobalGCECheckpointStop(
@@ -1469,9 +1984,14 @@ def run_resumed_target_branch(
         raise TasteGlobalGCESmokeError(
             "T8 branch completed without its mandatory planned interruption"
         )
-    if len(planned) != 1 or planned_holder is None:
+    if len(planned) != 1:
         raise TasteGlobalGCESmokeError("T8 branch lacks one planned checkpoint")
-    planned_holder.require_named_for_resume()
+    checkpoint_seal = _PostCallbackCheckpointSeal.create(
+        branch,
+        callback_checkpoint=planned[0]["checkpoint_file"],
+        callback_heartbeat=planned[0]["heartbeat_file"],
+    )
+    checkpoint_seal.revalidate()
 
     resumed: list[dict[str, Any]] = []
 
@@ -1485,7 +2005,10 @@ def run_resumed_target_branch(
             expected_next_epoch=1,
             require_epoch=False,
         )
-        if normalized["checkpoint_file"] != planned[0]["checkpoint_file"]:
+        if (
+            normalized["checkpoint_file"]
+            != checkpoint_seal.resume_checkpoint_evidence
+        ):
             raise TasteGlobalGCESmokeError(
                 "T8 resumed checkpoint physical leaf differs from the planned leaf"
             )
@@ -1512,21 +2035,23 @@ def run_resumed_target_branch(
                 config=config,
                 on_resume_checkpoint=_record_resume,
                 after_epoch_checkpoint=None,
-                expected_resume_checkpoint=planned[0]["checkpoint_file"],
+                expected_resume_checkpoint=(
+                    checkpoint_seal.resume_checkpoint_evidence
+                ),
                 on_generation_complete=_capture_completed_tree,
             ),
         )
     except BaseException:
         if completed_tree is not None:
             completed_tree.close()
-        planned_holder.close()
+        checkpoint_seal.close()
         raise
     if len(resumed) != 1:
         raise TasteGlobalGCESmokeError(
             "T8 branch did not adopt exactly one durable epoch checkpoint"
         )
     if completed_tree is None:
-        planned_holder.close()
+        checkpoint_seal.close()
         raise TasteGlobalGCESmokeError(
             "T8 generator returned without retaining its completed branch tree"
         )
@@ -1538,7 +2063,7 @@ def run_resumed_target_branch(
         raise TasteGlobalGCESmokeError(
             "T8 branch resumed a checkpoint other than the planned durable state"
         )
-    planned_holder.revalidate_held()
+    checkpoint_seal.revalidate_after_resume()
     completed_tree.revalidate()
     branch.revalidate()
 
@@ -1560,7 +2085,7 @@ def run_resumed_target_branch(
         entry = completed_tree.inventory["files"].get(relative)
         if type(entry) is not dict or entry.get("bytes", 0) <= 0:
             completed_tree.close()
-            planned_holder.close()
+            checkpoint_seal.close()
             raise TasteGlobalGCESmokeError(f"T8 {label} is absent after resume")
     heartbeat = _read_json_bytes(
         completed_tree.read_bytes(paths["training heartbeat"]),
@@ -1575,7 +2100,7 @@ def run_resumed_target_branch(
         != resumed[0]["resume_identity_sha256"]
     ):
         completed_tree.close()
-        planned_holder.close()
+        checkpoint_seal.close()
         raise TasteGlobalGCESmokeError(
             "T8 branch terminal heartbeat does not close the resumed identity"
         )
@@ -1611,7 +2136,7 @@ def run_resumed_target_branch(
         or identity.get("target_label") != target_label
     ):
         completed_tree.close()
-        planned_holder.close()
+        checkpoint_seal.close()
         raise TasteGlobalGCESmokeError(
             "T8 branch terminal training identity changed"
         )
@@ -1637,7 +2162,7 @@ def run_resumed_target_branch(
         or summary["valid_native_rule_count"] < config.top_k_native
     ):
         completed_tree.close()
-        planned_holder.close()
+        checkpoint_seal.close()
         raise TasteGlobalGCESmokeError(
             "T8 branch result does not preserve the frozen multiclass contract"
         )
@@ -1686,8 +2211,9 @@ def run_resumed_target_branch(
         "calibration_loaded": False,
         "test_loaded": False,
         "rf_oracle_used": False,
+        **checkpoint_seal.evidence,
     }
-    planned_holder.close()
+    checkpoint_seal.close()
     completed_tree.revalidate()
     branch.revalidate()
     return result, evidence, completed_tree
@@ -2403,6 +2929,20 @@ def validate_science_summary(science: Mapping[str, Any]) -> None:
             "calibration_loaded",
             "test_loaded",
             "rf_oracle_used",
+            "checkpoint_seal_schema_version",
+            "checkpoint_seal_pass",
+            "checkpoint_writer_unwound",
+            "checkpoint_durable_flush",
+            "checkpoint_sealed_directory",
+            "checkpoint_sealed_inventory_sha256",
+            "checkpoint_resume_copy_inventory_sha256",
+            "checkpoint_no_follow_identity_verified",
+            "checkpoint_independent_reopen_verified",
+            "checkpoint_callback_ctime_settled",
+            "checkpoint_callback_ctime_ns",
+            "checkpoint_sealed_ctime_ns",
+            "heartbeat_callback_ctime_ns",
+            "heartbeat_sealed_ctime_ns",
         }
         if (
             type(branch) is not dict
@@ -2448,6 +2988,35 @@ def validate_science_summary(science: Mapping[str, Any]) -> None:
             or branch.get("calibration_loaded") is not False
             or branch.get("rf_oracle_used") is not False
             or branch.get("test_loaded") is not False
+            or branch.get("checkpoint_seal_schema_version")
+            != CHECKPOINT_SEAL_SCHEMA
+            or branch.get("checkpoint_seal_pass") is not True
+            or branch.get("checkpoint_writer_unwound") is not True
+            or branch.get("checkpoint_durable_flush") is not True
+            or branch.get("checkpoint_sealed_directory")
+            != _SEALED_CHECKPOINT_DIRECTORY
+            or not _is_sha256(
+                branch.get("checkpoint_sealed_inventory_sha256")
+            )
+            or branch.get("checkpoint_sealed_inventory_sha256")
+            != branch.get("checkpoint_resume_copy_inventory_sha256")
+            or branch.get("checkpoint_no_follow_identity_verified") is not True
+            or branch.get("checkpoint_independent_reopen_verified") is not True
+            or type(branch.get("checkpoint_callback_ctime_settled")) is not bool
+            or any(
+                type(branch.get(field)) is not int
+                or branch[field] < 0
+                for field in (
+                    "checkpoint_callback_ctime_ns",
+                    "checkpoint_sealed_ctime_ns",
+                    "heartbeat_callback_ctime_ns",
+                    "heartbeat_sealed_ctime_ns",
+                )
+            )
+            or branch["checkpoint_sealed_ctime_ns"]
+            < branch["checkpoint_callback_ctime_ns"]
+            or branch["heartbeat_sealed_ctime_ns"]
+            < branch["heartbeat_callback_ctime_ns"]
         ):
             raise TasteGlobalGCESmokeError(f"T8 target-{target} resume proof changed")
     merge = science.get("rule_merge")

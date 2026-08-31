@@ -2814,3 +2814,17 @@ Mutagenicity roadmaps.
   focused tests; keep the paired Slurm diagnostic synchronized.
 - [ ] Launch a fresh UUID attempt from the reviewed immutable commit; never
   resume or publish the failed attempt root.
+
+## 2026-08-31: T8 post-callback sealed checkpoint successor
+
+- [x] Replace callback-time retention with a dataset-specific post-unwind seal;
+  keep the prior callback payload only as provisional writer evidence.
+- [x] Publish one persistent epoch-zero sealed directory through a unique
+  same-parent temporary, full retained-tree fsync, and atomic rename.
+- [x] Reopen with `O_NOFOLLOW`, require exact inode/SHA evidence, create one
+  single-link byte-identical resume copy, and independently reopen it before
+  official loader adoption.
+- [x] Preserve strict rejection of post-callback byte/physical drift and cover
+  the delayed-ctime production failure shape in focused tests.
+- [ ] Launch a fresh UUID attempt from the immutable successor commit; do not
+  resume either preserved failed attempt.

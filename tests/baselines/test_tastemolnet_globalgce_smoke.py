@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -192,7 +193,12 @@ class _FakeGenerator:
                 }
             )
             raise AssertionError("planned callback must interrupt")
-        assert expected_resume_checkpoint == self.planned_checkpoint
+        # T8 adopts a post-callback sealed copy.  It must preserve the exact
+        # checkpoint bytes while receiving a fresh single-link inode.
+        observed_resume_checkpoint = self._file_evidence(checkpoint_path)
+        assert expected_resume_checkpoint == observed_resume_checkpoint
+        assert expected_resume_checkpoint["sha256"] == self.planned_checkpoint["sha256"]
+        self.planned_checkpoint = observed_resume_checkpoint
         on_resume_checkpoint(
             {
                 "checkpoint_schema_version": "globalgce_epoch_checkpoint_v2",
@@ -746,6 +752,101 @@ def test_retained_planned_checkpoint_rejects_same_byte_leaf_swap(
     finally:
         if holder is not None:
             holder.close()
+        branch.close()
+        state.close()
+
+
+def _write_planned_checkpoint_fixture(
+    branch: t8._HeldBranchDirectory,
+) -> tuple[Path, Path, dict, dict]:
+    checkpoint_root = branch.path / "globalgce_training_checkpoints"
+    checkpoint_root.mkdir()
+    gspan_root = checkpoint_root / "gspan" / "support-2"
+    gspan_root.mkdir(parents=True)
+    (gspan_root / "checkpoint.json").write_text('{"stage":"complete"}\n')
+    checkpoint = checkpoint_root / "training_checkpoint.pt"
+    heartbeat = checkpoint_root / "training_heartbeat.json"
+    checkpoint.write_bytes(b"durable-epoch-zero")
+    heartbeat.write_bytes(b'{"next_epoch":1,"stage":"training"}\n')
+    return (
+        checkpoint,
+        heartbeat,
+        _FakeGenerator._file_evidence(checkpoint),
+        _FakeGenerator._file_evidence(heartbeat),
+    )
+
+
+def test_post_callback_checkpoint_seal_adopts_only_after_writer_unwinds(
+    tmp_path: Path,
+) -> None:
+    state = FreshOutputDirectory.create(tmp_path / "state")
+    branch = t8._HeldBranchDirectory.create(state, target_label=0)
+    seal = None
+    try:
+        checkpoint, heartbeat, callback_checkpoint, callback_heartbeat = (
+            _write_planned_checkpoint_fixture(branch)
+        )
+        # Model the AutoFS trace: bytes/mode/mtime/inode are unchanged, while
+        # final ctime becomes visible only after the callback stack unwinds.
+        checkpoint.chmod(0o600)
+        checkpoint.chmod(stat.S_IMODE(callback_checkpoint["mode"]))
+        heartbeat.chmod(0o600)
+        heartbeat.chmod(stat.S_IMODE(callback_heartbeat["mode"]))
+
+        seal = t8._PostCallbackCheckpointSeal.create(
+            branch,
+            callback_checkpoint=callback_checkpoint,
+            callback_heartbeat=callback_heartbeat,
+        )
+
+        seal.revalidate()
+        assert seal.evidence["checkpoint_seal_pass"] is True
+        assert seal.evidence["checkpoint_writer_unwound"] is True
+        assert seal.evidence["checkpoint_durable_flush"] is True
+        assert seal.evidence["checkpoint_callback_ctime_settled"] is True
+        assert seal.evidence["checkpoint_sealed_inventory_sha256"] == (
+            seal.evidence["checkpoint_resume_copy_inventory_sha256"]
+        )
+        sealed_checkpoint = (
+            branch.path
+            / "sealed-planned-checkpoint"
+            / "training_checkpoint.pt"
+        )
+        resume_checkpoint = (
+            branch.path
+            / "globalgce_training_checkpoints"
+            / "training_checkpoint.pt"
+        )
+        assert sealed_checkpoint.read_bytes() == resume_checkpoint.read_bytes()
+        assert sealed_checkpoint.stat().st_ino != resume_checkpoint.stat().st_ino
+        assert not any(".seal-" in name or ".resume-" in name for name in os.listdir(branch.path))
+    finally:
+        if seal is not None:
+            seal.close()
+        branch.close()
+        state.close()
+
+
+def test_post_callback_checkpoint_seal_rejects_byte_drift(
+    tmp_path: Path,
+) -> None:
+    state = FreshOutputDirectory.create(tmp_path / "state")
+    branch = t8._HeldBranchDirectory.create(state, target_label=0)
+    try:
+        checkpoint, _heartbeat, callback_checkpoint, callback_heartbeat = (
+            _write_planned_checkpoint_fixture(branch)
+        )
+        checkpoint.write_bytes(b"changed-epoch-zero")
+        with pytest.raises(
+            t8.TasteGlobalGCESmokeError,
+            match="bytes or physical identity changed after callback unwind",
+        ):
+            t8._PostCallbackCheckpointSeal.create(
+                branch,
+                callback_checkpoint=callback_checkpoint,
+                callback_heartbeat=callback_heartbeat,
+            )
+    finally:
         branch.close()
         state.close()
 

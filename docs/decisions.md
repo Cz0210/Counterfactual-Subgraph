@@ -13712,3 +13712,44 @@ training checkpoints into scratch, or relax checkpoint hashes.
 ### Status
 
 Accepted
+
+---
+
+## [2026-08-31] Seal T8 epoch checkpoints only after callback unwind
+
+### Motivation
+
+The pre-callback ctime barrier did not close the AutoFS writer lifecycle.  A
+second fresh T8 run produced the same valid epoch-zero checkpoint and failed at
+the same post-callback comparison: the file content, size, inode, and mtime were
+stable, while final filesystem metadata became visible only after the callback
+exception unwound through the official training stack.  Reusing either failed
+attempt or weakening the checkpoint hash would make resume evidence ambiguous.
+
+### Decision
+
+Treat the callback event as provisional writer evidence.  After the official
+generator has fully unwound, move its mutable checkpoint directory through a
+unique same-parent seal name, require a bounded quiet period in which every
+field except monotone ctime remains exact, fsync the retained tree, and publish
+the persistent `sealed-planned-checkpoint` directory atomically.  Reopen that
+directory with `O_NOFOLLOW`, retain its full inode/SHA inventory, and make a
+fresh single-link resume copy whose content inventory must equal the seal.
+Atomically publish that copy at the official checkpoint pathname, verify it
+through a separate reopen, and only then allow the official resume loader to
+consume it.  Keep the sealed epoch-zero tree unchanged through terminal branch
+capture.
+
+### Consequences
+
+- Callback-time metadata is never treated as final filesystem authority.
+- The checkpoint and heartbeat SHA-256 values must remain byte-identical across
+  mutable output, persistent seal, resume copy, and official loader adoption.
+- A post-callback byte, mode, owner, link-count, size, mtime, device, or inode
+  change fails closed; only the observed monotone ctime settlement is recorded.
+- T8 scientific configuration, target branches, frozen GINE, split isolation,
+  and official GlobalGCE semantics are unchanged.
+
+### Status
+
+Accepted
