@@ -1122,7 +1122,7 @@ def test_formal_t6_entrypoints_freeze_real_stable_loop_and_no_test_access() -> N
     assert '--updates "${TASTEMOLNET_T6_UPDATES:-5}"' in wrapper
     assert '--downstream-policy "$DOWNSTREAM_POLICY"' in wrapper
     assert '--base-policy "$BASE_POLICY"' in wrapper
-    assert "--input-manifest \"$TASTEMOLNET_T5_OUTPUT/output_hashes.json\"" in wrapper
+    assert "--input-manifest \"$TASTEMOLNET_T5_OUTPUT/verification.json\"" in wrapper
     assert "--required-output-file downstream_policy_binding.json" in wrapper
     assert "--required-output-file adapter_model.safetensors" in wrapper
     assert "adapter_model.safetensors|adapter_model.bin" not in wrapper

@@ -80,10 +80,18 @@ the exact frozen checkpoint and oracle evidence used by production Taste runs.
 
 Expose one dataset-specific managed-v2 binding entrypoint from the existing T5
 release module and make T6 consume that retained authority directly. The held
-binding remains exact to the real `HeldT2Receipt`, `HeldPublishedT3`, and
+binding remains exact to the real seven-file `HeldT2Receipt`, `HeldPublishedT3`, and
 `hold_t4_managed_final` contracts, preserves the same checkpoint payload reads,
 and keeps the wrapper frozen to physical GPU0. No generic controller or new
 cross-dataset abstraction is introduced.
+
+The current-campaign T2 receipt is not the historical five-file downstream
+receipt and has no `manifest.json`. T6 therefore binds its `gate.json`, source
+evidence, complete receipt inventory, source model, feature-schema file, and
+split-manifest file through `HeldT2Receipt`; silently substituting the legacy
+`hold_t2_gine_pass_adoption` schema is rejected. The managed T5 adoption is
+likewise registered through its published `verification.json`, because that
+adoption truthfully has no legacy `output_hashes.json`.
 
 ### Consequences
 

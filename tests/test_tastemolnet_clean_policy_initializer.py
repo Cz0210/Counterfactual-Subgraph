@@ -1420,3 +1420,91 @@ def test_frozen_oracle_feature_schema_uses_semantic_digest_not_file_sha(
         authority.oracle_authority.revalidate().feature_schema_sha256
         == fixture["feature_schema_semantic_sha"]
     )
+
+
+def test_t6_managed_t2_binding_consumes_real_seven_file_receipt(
+    tmp_path: Path,
+) -> None:
+    from src.utils.tastemolnet_t2_adoption_v2 import PASS_MARKER
+
+    root = tmp_path / "4495ac87-1396-43f3-bb68-1ee0b1053d09"
+    root.mkdir()
+    artifacts = {
+        "model.pt": "1" * 64,
+        "feature_schema.json": "2" * 64,
+        "split_manifest.json": "3" * 64,
+    }
+    source = {
+        "receipt_id": root.name,
+        "artifact_root": str(tmp_path / "formal-t2"),
+        "artifact_hashes": artifacts,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "rf_oracle_used": False,
+    }
+    source["source_evidence_sha256"] = t5._canonical_sha256(source)  # noqa: SLF001
+    documents: dict[str, bytes] = {
+        "PASS": (PASS_MARKER + "\n").encode("utf-8"),
+        "artifact_hashes.json": b"{}\n",
+        "input_hashes.json": b"{}\n",
+        "sha256s.txt": b"receipt inventory\n",
+        "source_evidence.json": (
+            json.dumps(source, sort_keys=True) + "\n"
+        ).encode("utf-8"),
+        "gate.json": (
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "state": "ADOPTED_SCIENTIFIC_PASS",
+                    "stage": "T2_GINE",
+                    "receipt_id": root.name,
+                    "marker": PASS_MARKER,
+                    "artifact_root": source["artifact_root"],
+                    "model_sha256": artifacts["model.pt"],
+                    "source_evidence_sha256": source["source_evidence_sha256"],
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8"),
+        "verification.json": (
+            json.dumps(
+                {
+                    "verification_result": "PASS",
+                    "source_evidence_sha256": source["source_evidence_sha256"],
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8"),
+    }
+
+    class HeldFile:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+            self.sha256 = hashlib.sha256(data).hexdigest()
+
+        def bytes(self) -> bytes:
+            return self._data
+
+    class Receipt:
+        def __init__(self) -> None:
+            self.root = root
+            self.files = {name: HeldFile(data) for name, data in documents.items()}
+
+        def verify(self) -> None:
+            assert set(self.files) == t5._MANAGED_T2_RECEIPT_FILES  # noqa: SLF001
+
+    binding = t5._current_managed_t2_binding(Receipt())  # noqa: SLF001
+    assert binding["schema_version"] == t5._MANAGED_T2_BINDING_SCHEMA  # noqa: SLF001
+    assert binding["model_sha256"] == artifacts["model.pt"]
+    assert binding["feature_schema_file_sha256"] == artifacts["feature_schema.json"]
+    assert binding["split_manifest_file_sha256"] == artifacts["split_manifest.json"]
+    assert t5._validate_t2_adoption_binding(  # noqa: SLF001
+        binding, label="managed T2 test"
+    ) == binding
+    drifted = {**binding, "model_sha256": "4" * 64}
+    with pytest.raises(t5.TasteCleanPolicyReleaseDisabled, match="real managed-v2"):
+        t5._validate_t2_adoption_binding(  # noqa: SLF001
+            drifted, label="managed T2 test"
+        )

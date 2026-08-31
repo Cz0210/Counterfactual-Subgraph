@@ -53,7 +53,7 @@ for required in \
   "$TASTEMOLNET_T3_CHECKPOINT/model.pt" \
   "$TASTEMOLNET_T3_CHECKPOINT/sha256sums.txt" \
   "$TASTEMOLNET_T5_OUTPUT/gate.json" \
-  "$TASTEMOLNET_T5_OUTPUT/output_hashes.json" \
+  "$TASTEMOLNET_T5_OUTPUT/verification.json" \
   "$TASTEMOLNET_T5_OUTPUT/PASS" \
   "$TASTEMOLNET_TRAIN_CSV"; do
   autodl_require_file "$required"
@@ -106,7 +106,7 @@ exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
   --gpu-hard-limit 4 \
   --config-file "$PROJECT_ROOT/configs/hpc.yaml" \
   --config-file "$DOWNSTREAM_POLICY" \
-  --input-manifest "$TASTEMOLNET_T5_OUTPUT/output_hashes.json" \
+  --input-manifest "$TASTEMOLNET_T5_OUTPUT/verification.json" \
   --expected-output "$TASTEMOLNET_T6_OUTPUT" \
   --required-output-file manifest.json \
   --required-output-file state.json \

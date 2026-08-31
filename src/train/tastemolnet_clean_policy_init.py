@@ -753,6 +753,36 @@ _T4_CHECKPOINT_PAYLOAD_FILES = (
     "last_checkpoint.json", "checkpoint_reload.json",
 )
 
+_MANAGED_T2_BINDING_SCHEMA = "tastemolnet_t6_t2_receipt_binding_v2"
+_MANAGED_T2_RECEIPT_FILES = frozenset(
+    {
+        "PASS",
+        "artifact_hashes.json",
+        "gate.json",
+        "input_hashes.json",
+        "sha256s.txt",
+        "source_evidence.json",
+        "verification.json",
+    }
+)
+_MANAGED_T2_BINDING_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "root",
+        "receipt_id",
+        "gate_sha256",
+        "source_evidence_file_sha256",
+        "source_evidence_sha256",
+        "receipt_inventory_sha256",
+        "file_sha256",
+        "source_artifact_hashes",
+        "model_sha256",
+        "feature_schema_file_sha256",
+        "split_manifest_file_sha256",
+    }
+)
+
 
 def _load_taste_gnn_stage_api() -> tuple[Any, Any, Any]:
     try:
@@ -766,8 +796,151 @@ def _load_taste_gnn_stage_api() -> tuple[Any, Any, Any]:
     return HeldPublishedT3, hold_t4_managed_final, hold_taste_checkpoint_bundle
 
 
+def _load_taste_managed_t2_api() -> tuple[Any, str]:
+    try:
+        from src.eval.tastemolnet_t3_calibration_v2 import HeldT2Receipt
+        from src.utils.tastemolnet_t2_adoption_v2 import PASS_MARKER
+    except ImportError as exc:
+        raise TasteCleanPolicyReleaseDisabled(
+            "reviewed managed-v2 Taste T2 held API is not installed"
+        ) from exc
+    return HeldT2Receipt, PASS_MARKER
+
+
+def _current_managed_t2_binding(receipt: Any) -> dict[str, Any]:
+    """Revalidate the real seven-file managed-v2 T2 receipt for T6."""
+
+    _held_t2_type, pass_marker = _load_taste_managed_t2_api()
+    receipt.verify()
+    files = {
+        name: item.sha256 for name, item in sorted(receipt.files.items())
+    }
+    if set(files) != _MANAGED_T2_RECEIPT_FILES or any(
+        not _HEX_RE.fullmatch(str(digest)) for digest in files.values()
+    ):
+        raise TasteCleanPolicyReleaseDisabled(
+            "Taste T6 managed T2 receipt inventory changed"
+        )
+    try:
+        gate = json.loads(receipt.files["gate.json"].bytes().decode("utf-8"))
+        source = json.loads(
+            receipt.files["source_evidence.json"].bytes().decode("utf-8")
+        )
+        verification = json.loads(
+            receipt.files["verification.json"].bytes().decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TasteCleanPolicyReleaseDisabled(
+            "Taste T6 managed T2 receipt JSON is malformed"
+        ) from exc
+    if any(type(value) is not dict for value in (gate, source, verification)):
+        raise TasteCleanPolicyReleaseDisabled(
+            "Taste T6 managed T2 receipt documents must be JSON objects"
+        )
+    source_sha = source.get("source_evidence_sha256")
+    source_without_hash = dict(source)
+    source_without_hash.pop("source_evidence_sha256", None)
+    artifacts = source.get("artifact_hashes")
+    required_artifacts = {
+        "model.pt",
+        "feature_schema.json",
+        "split_manifest.json",
+    }
+    if (
+        type(artifacts) is not dict
+        or not required_artifacts.issubset(artifacts)
+        or any(
+            type(name) is not str
+            or Path(name).name != name
+            or not _HEX_RE.fullmatch(str(digest))
+            for name, digest in artifacts.items()
+        )
+    ):
+        raise TasteCleanPolicyReleaseDisabled(
+            "Taste T6 managed T2 source artifact hashes changed"
+        )
+    root = Path(receipt.root)
+    if (
+        receipt.files["PASS"].bytes()
+        != (pass_marker + "\n").encode("utf-8")
+        or gate.get("status") != "PASS"
+        or gate.get("state") != "ADOPTED_SCIENTIFIC_PASS"
+        or gate.get("stage") != "T2_GINE"
+        or gate.get("receipt_id") != root.name
+        or gate.get("marker") != pass_marker
+        or gate.get("source_evidence_sha256") != source_sha
+        or gate.get("model_sha256") != artifacts["model.pt"]
+        or gate.get("artifact_root") != source.get("artifact_root")
+        or source.get("receipt_id") != root.name
+        or source.get("calibration_loaded") is not False
+        or source.get("test_loaded") is not False
+        or source.get("rf_oracle_used") is not False
+        or source_sha != _canonical_sha256(source_without_hash)
+        or verification.get("verification_result") != "PASS"
+        or verification.get("source_evidence_sha256") != source_sha
+    ):
+        raise TasteCleanPolicyReleaseDisabled(
+            "Taste T6 managed T2 receipt cross-binding changed"
+        )
+    binding = {
+        "schema_version": _MANAGED_T2_BINDING_SCHEMA,
+        "status": "PASS",
+        "root": str(root),
+        "receipt_id": root.name,
+        "gate_sha256": files["gate.json"],
+        "source_evidence_file_sha256": files["source_evidence.json"],
+        "source_evidence_sha256": source_sha,
+        "receipt_inventory_sha256": _canonical_sha256(files),
+        "file_sha256": files,
+        "source_artifact_hashes": json.loads(json.dumps(artifacts)),
+        "model_sha256": artifacts["model.pt"],
+        "feature_schema_file_sha256": artifacts["feature_schema.json"],
+        "split_manifest_file_sha256": artifacts["split_manifest.json"],
+    }
+    receipt.verify()
+    return binding
+
+
 def _validate_t2_adoption_binding(value: Any, *, label: str) -> dict[str, Any]:
     binding = _mapping(value, label=label)
+    if binding.get("schema_version") == _MANAGED_T2_BINDING_SCHEMA:
+        _exact_keys(binding, set(_MANAGED_T2_BINDING_KEYS), label=label)
+        root = _absolute(binding.get("root"), label=f"{label}.root", must_exist=True)
+        files = _mapping(binding.get("file_sha256"), label=f"{label}.file_sha256")
+        artifacts = _mapping(
+            binding.get("source_artifact_hashes"),
+            label=f"{label}.source_artifact_hashes",
+        )
+        if (
+            binding.get("status") != "PASS"
+            or binding.get("receipt_id") != root.name
+            or set(files) != _MANAGED_T2_RECEIPT_FILES
+            or any(not _HEX_RE.fullmatch(str(item)) for item in files.values())
+            or binding.get("receipt_inventory_sha256") != _canonical_sha256(files)
+            or any(
+                not _HEX_RE.fullmatch(str(binding.get(key)))
+                for key in (
+                    "gate_sha256",
+                    "source_evidence_file_sha256",
+                    "source_evidence_sha256",
+                    "model_sha256",
+                    "feature_schema_file_sha256",
+                    "split_manifest_file_sha256",
+                )
+            )
+            or binding.get("gate_sha256") != files.get("gate.json")
+            or binding.get("source_evidence_file_sha256")
+            != files.get("source_evidence.json")
+            or binding.get("model_sha256") != artifacts.get("model.pt")
+            or binding.get("feature_schema_file_sha256")
+            != artifacts.get("feature_schema.json")
+            or binding.get("split_manifest_file_sha256")
+            != artifacts.get("split_manifest.json")
+        ):
+            raise TasteCleanPolicyReleaseDisabled(
+                f"{label} is not the real managed-v2 T2 receipt"
+            )
+        return json.loads(json.dumps(binding))
     _exact_keys(binding, set(DOWNSTREAM_BINDING_KEYS), label=label)
     if (
         binding.get("schema_version") != DOWNSTREAM_BINDING_SCHEMA
@@ -845,6 +1018,18 @@ def _validate_t3_t4_documents(
         )
     temperature_payload = checkpoint.read_frozen_gine_payload("temperature_scaling.json")
     temperature_file_sha256 = _sha256_bytes(temperature_payload)
+    managed_t2 = t2_binding.get("schema_version") == _MANAGED_T2_BINDING_SCHEMA
+    split_manifest_file_sha256: str | None = None
+    if managed_t2:
+        split_manifest_payload = checkpoint.read_frozen_gine_payload(
+            "split_manifest.json"
+        )
+        split_manifest_file_sha256 = _sha256_bytes(split_manifest_payload)
+    t2_receipt_sha256 = (
+        t2_binding["receipt_inventory_sha256"]
+        if managed_t2
+        else t2_binding["receipt_sha256"]
+    )
     expected_checkpoint_evidence = {
         "stage": "T3_GINE_CALIBRATED",
         "gate_sha256": expected.t3_gate_sha256,
@@ -855,7 +1040,7 @@ def _validate_t3_t4_documents(
         "checkpoint_stat_inventory_sha256": expected.checkpoint_stat_inventory_sha256,
         "checkpoint_sha256s_sha256": expected.checkpoint_sha256s_sha256,
         "t2_adoption_gate_sha256": t2_binding["gate_sha256"],
-        "t2_adoption_receipt_sha256": t2_binding["receipt_sha256"],
+        "t2_adoption_receipt_sha256": t2_receipt_sha256,
         "t2_adoption_binding_sha256": _canonical_sha256(t2_binding),
     }
     if checkpoint_evidence != expected_checkpoint_evidence:
@@ -910,6 +1095,16 @@ def _validate_t3_t4_documents(
         raise TasteCleanPolicyReleaseDisabled(
             "held checkpoint feature schema semantic digest differs from frozen oracle"
         )
+    if managed_t2 and (
+        t2_binding.get("model_sha256") != expected.checkpoint_id
+        or t2_binding.get("feature_schema_file_sha256")
+        != feature_schema_file_sha256
+        or t2_binding.get("split_manifest_file_sha256")
+        != split_manifest_file_sha256
+    ):
+        raise TasteCleanPolicyReleaseDisabled(
+            "managed-v2 T2 model/feature/split differs from held T3 checkpoint"
+        )
     if temperature_file_sha256 != expected.temperature_calibration_sha256:
         raise TasteCleanPolicyReleaseDisabled(
             "held checkpoint payload differs from frozen oracle: temperature_scaling.json"
@@ -938,9 +1133,12 @@ class HeldTasteFrozenOracleAuthority:
     evidence: TasteFrozenOracleIdentity
 
     def revalidate(self) -> TasteFrozenOracleIdentity:
-        if self.t2_adoption.revalidate() != dict(
-            self.evidence.t2_adoption_binding
-        ):
+        expected_t2 = dict(self.evidence.t2_adoption_binding)
+        if expected_t2.get("schema_version") == _MANAGED_T2_BINDING_SCHEMA:
+            current_t2 = _current_managed_t2_binding(self.t2_adoption)
+        else:
+            current_t2 = self.t2_adoption.revalidate()
+        if current_t2 != expected_t2:
             raise TasteCleanPolicyReleaseDisabled(
                 "held fresh T2 adoption authority changed"
             )
@@ -1015,6 +1213,15 @@ def _hold_frozen_oracle_authority(payload: Mapping[str, Any]) -> HeldTasteFrozen
     checkpoint: Any | None = None
     t2_adoption: Any | None = None
     try:
+        t2_binding = dict(expected.t2_adoption_binding)
+        managed_t2 = (
+            t2_binding.get("schema_version") == _MANAGED_T2_BINDING_SCHEMA
+        )
+        t2_receipt_sha256 = (
+            t2_binding["receipt_inventory_sha256"]
+            if managed_t2
+            else t2_binding["receipt_sha256"]
+        )
         t4 = hold_t4(expected.t4_output_root)
         checkpoint = hold_checkpoint(
             expected.checkpoint_dir,
@@ -1028,23 +1235,28 @@ def _hold_frozen_oracle_authority(payload: Mapping[str, Any]) -> HeldTasteFrozen
                 "checkpoint_stat_inventory_sha256": expected.checkpoint_stat_inventory_sha256,
                 "checkpoint_sha256s_sha256": expected.checkpoint_sha256s_sha256,
                 "t2_adoption_gate_sha256": expected.t2_adoption_binding["gate_sha256"],
-                "t2_adoption_receipt_sha256": expected.t2_adoption_binding["receipt_sha256"],
+                "t2_adoption_receipt_sha256": t2_receipt_sha256,
                 "t2_adoption_binding_sha256": _canonical_sha256(expected.t2_adoption_binding),
             },
         )
         evidence = _validate_t3_t4_documents(
             expected=expected, t3=t3, t4=t4, checkpoint=checkpoint
         )
-        t2_binding = dict(expected.t2_adoption_binding)
-        t2_adoption = hold_t2_gine_pass_adoption(
-            t2_binding["adoption_root"],
-            expected_gate_sha256=t2_binding["gate_sha256"],
-            expected_receipt_sha256=t2_binding["receipt_sha256"],
-            expected_source_evidence_sha256=t2_binding[
-                "source_evidence_sha256"
-            ],
-        )
-        if t2_adoption.revalidate() != t2_binding:
+        if managed_t2:
+            held_t2_type, _pass_marker = _load_taste_managed_t2_api()
+            t2_adoption = held_t2_type(t2_binding["root"])
+            current_t2 = _current_managed_t2_binding(t2_adoption)
+        else:
+            t2_adoption = hold_t2_gine_pass_adoption(
+                t2_binding["adoption_root"],
+                expected_gate_sha256=t2_binding["gate_sha256"],
+                expected_receipt_sha256=t2_binding["receipt_sha256"],
+                expected_source_evidence_sha256=t2_binding[
+                    "source_evidence_sha256"
+                ],
+            )
+            current_t2 = t2_adoption.revalidate()
+        if current_t2 != t2_binding:
             raise TasteCleanPolicyReleaseDisabled(
                 "fresh T2 adoption differs from T3/T4 binding"
             )

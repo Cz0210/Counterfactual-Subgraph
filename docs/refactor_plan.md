@@ -20,6 +20,9 @@
 - [x] Replace the stale legacy held-stage reopen path with the real managed-v2
   `HeldT2Receipt`, `HeldPublishedT3`, and `hold_t4_managed_final` binding, and
   keep the AutoDL wrapper pinned to GPU0.
+- [x] Bind the current seven-file T2 receipt and managed T5 verification
+  directly; do not require the absent legacy `manifest.json` or
+  `output_hashes.json` shapes.
 - [x] Deterministically materialize matching zero-step policy/reference LoRAs
   in memory and require five real optimizer steps, policy change, frozen
   reference, reloadable checkpoints, and real candidates.

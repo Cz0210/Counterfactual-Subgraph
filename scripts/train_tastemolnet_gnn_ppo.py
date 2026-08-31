@@ -70,6 +70,7 @@ T6_RELEASE_CONFIG_PATH = (
 )
 T6_RELEASE_SCHEMA = "tastemolnet_t6_execution_release_v1"
 T6_EXTERNAL_AUTHORITY_SCHEMA = "tastemolnet_t6_external_execution_authority_v1"
+T6_MANAGED_T2_BINDING_SCHEMA = "tastemolnet_t6_t2_receipt_binding_v2"
 T6_RELEASE_CONFIG_KEYS = frozenset(
     {
         "schema_version",
@@ -1131,12 +1132,29 @@ def _build_taste_managed_binding_v2(
     t4_science = frozen_oracle.get("t4_science")
     if type(t4_science) is not dict:
         raise ValueError("Taste T6 frozen oracle lacks T4 scientific evidence")
+    if t2_binding.get("schema_version") == T6_MANAGED_T2_BINDING_SCHEMA:
+        t2_receipt_sha = t2_binding.get("receipt_inventory_sha256")
+        t2_model_sha = t2_binding.get("model_sha256")
+        if (
+            t2_binding.get("feature_schema_file_sha256")
+            != hashlib.sha256(checkpoint_payloads["feature_schema.json"]).hexdigest()
+            or t2_binding.get("split_manifest_file_sha256")
+            != hashlib.sha256(checkpoint_payloads["split_manifest.json"]).hexdigest()
+        ):
+            raise ValueError(
+                "Taste T6 managed T2 feature/split payload binding drifted"
+            )
+    else:
+        t2_receipt_sha = t2_binding.get("receipt_sha256")
+        t2_model_sha = t2_binding.get("formal_bundle_model_sha256")
+    if not _is_sha256(t2_receipt_sha) or not _is_sha256(t2_model_sha):
+        raise ValueError("Taste T6 T2 receipt/model digest is malformed")
     binding = TasteManagedEvidenceBindingV2(
         dataset="tastemolnet",
         num_classes=3,
         source_label=1,
-        t2_receipt_sha=str(t2_binding["receipt_sha256"]),
-        t2_model_sha=str(t2_binding["formal_bundle_model_sha256"]),
+        t2_receipt_sha=str(t2_receipt_sha),
+        t2_model_sha=str(t2_model_sha),
         t2_feature_schema_sha=str(feature_schema["schema_sha256"]),
         t2_dataset_sha=str(train_manifest["dataset_fingerprint"]),
         t2_split_sha=hashlib.sha256(checkpoint_payloads["split_manifest.json"]).hexdigest(),
