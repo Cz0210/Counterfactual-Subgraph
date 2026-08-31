@@ -431,6 +431,21 @@ def _is_sha256(value: Any) -> bool:
     )
 
 
+def _t2_runtime_receipt_fields(binding: Mapping[str, Any]) -> tuple[Path, str]:
+    """Select the held T2 root and receipt digest without mixing schemas."""
+
+    if binding.get("schema_version") == T6_MANAGED_T2_BINDING_SCHEMA:
+        root_value = binding.get("root")
+        receipt_sha256 = binding.get("receipt_inventory_sha256")
+    else:
+        root_value = binding.get("adoption_root")
+        receipt_sha256 = binding.get("receipt_sha256")
+    root = _normalized_absolute(root_value, label="T2 adoption receipt root")
+    if not _is_sha256(receipt_sha256):
+        raise ValueError("Taste T6 T2 adoption receipt digest is malformed")
+    return root, str(receipt_sha256)
+
+
 def _git_output(*args: str) -> str:
     dot_git = REPO_ROOT / ".git"
     info = os.lstat(dot_git)
@@ -1485,8 +1500,11 @@ def run(args: Any) -> int:
         )
         checkpoint_authority.revalidate()
         train_authority.revalidate()
+        t2_receipt_root, t2_receipt_sha256 = _t2_runtime_receipt_fields(
+            frozen["t2_adoption_binding"]
+        )
         input_paths = [
-            Path(frozen["t2_adoption_binding"]["adoption_root"]),
+            t2_receipt_root,
             checkpoint,
             train_csv,
             Path(t5_evidence["output_root"]),
@@ -1821,7 +1839,7 @@ def run(args: Any) -> int:
             oracle_provenance=oracle,
             policy_initializer_hash=t5_evidence["policy_initializer_hash"],
             t2_adoption_gate_sha256=t2_binding["gate_sha256"],
-            t2_adoption_receipt_sha256=t2_binding["receipt_sha256"],
+            t2_adoption_receipt_sha256=t2_receipt_sha256,
             t2_adoption_binding_sha256=t2_binding_sha256,
             t3_gate_sha256=frozen["t3_gate_sha256"],
             t4_gate_sha256=frozen["t4_gate_sha256"],
@@ -1835,7 +1853,7 @@ def run(args: Any) -> int:
             "schema_version": "tastemolnet_ours_ppo_input_hashes_v1",
             "t2_adoption_binding": t2_binding,
             "t2_adoption_gate_sha256": t2_binding["gate_sha256"],
-            "t2_adoption_receipt_sha256": t2_binding["receipt_sha256"],
+            "t2_adoption_receipt_sha256": t2_receipt_sha256,
             "t2_adoption_binding_sha256": t2_binding_sha256,
             "t3_gate_sha256": frozen["t3_gate_sha256"],
             "t4_gate_sha256": frozen["t4_gate_sha256"],

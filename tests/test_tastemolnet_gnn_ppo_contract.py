@@ -28,6 +28,20 @@ from src.utils.tastemolnet_gine_pass_adoption_v1 import (
 )
 
 
+def test_t6_runtime_receipt_fields_support_real_managed_t2(tmp_path: Path) -> None:
+    managed_root = (tmp_path / "managed-t2").resolve()
+    managed_root.mkdir()
+    root, digest = runner._t2_runtime_receipt_fields(  # noqa: SLF001
+        {
+            "schema_version": runner.T6_MANAGED_T2_BINDING_SCHEMA,
+            "root": str(managed_root),
+            "receipt_inventory_sha256": "a" * 64,
+        }
+    )
+    assert root == managed_root
+    assert digest == "a" * 64
+
+
 def _row(destination: int) -> dict[str, object]:
     after = [0.90, 0.05, 0.05] if destination == 0 else [0.05, 0.05, 0.90]
     return {
