@@ -378,6 +378,41 @@ Accepted
 
 ---
 
+## [2026-09-01] Bind recovered ComRecGC step-zero node IDs to the recorded frozen source
+
+### Motivation
+
+The completed AIDS exact result reached deterministic chemistry replay, but a
+candidate whose global official hash had a content-equivalent representative
+from another parent failed before chemistry with `Raw action lineage diverges
+at step 0`.  The predecessor chain and frozen source tensors already agreed;
+only the synthetic stable-node-ID prefix still came from the payload
+representative's parent metadata.
+
+### Decision
+
+When compact lineage recovery has selected the recorded parent and proved its
+frozen source graph exactly equal to the recovered root in the official
+untyped graph space, derive step-zero node IDs from that frozen source.  Keep
+the recorded predecessor, action indices, graph tensors, candidate ordering,
+and all downstream scientific inputs unchanged.  Retain the payload root as
+the fallback only when no exact frozen source is authoritative.
+
+### Consequences
+
+- Cross-parent content convergence no longer creates a false lineage-ID
+  mismatch at chemistry step zero.
+- No action, molecular graph, DBSCAN result, selector, split, or metric is
+  changed.
+- A regression test binds both source and target IDs to the recorded frozen
+  parent when the payload representative carries different parent metadata.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-09-01] Bind T12 threshold reuse to official source content, not checkout path
 
 ### Motivation

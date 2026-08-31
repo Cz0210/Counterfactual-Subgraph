@@ -1611,7 +1611,14 @@ def iter_candidate_lineage_from_selected_trace(
             )
         )
         enriched_path: list[dict[str, Any]] = []
-        node_ids = trace_node_ids(root_graph) if root_graph is not None else []
+        # The global official hash may retain a content-equivalent graph whose
+        # parent metadata belongs to a later walk.  Once the predecessor chain
+        # has selected its recorded parent and proved the corresponding frozen
+        # source byte-equivalent, its node IDs are the only lineage authority.
+        # Using the payload representative here would prefix step zero with a
+        # different parent even though the graph tensors are exact.
+        node_id_root = frozen_source if frozen_source_exact else root_graph
+        node_ids = trace_node_ids(node_id_root) if node_id_root is not None else []
         for path_index, event in enumerate(path):
             enriched = dict(event)
             source_node_ids = list(node_ids)

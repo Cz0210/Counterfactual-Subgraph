@@ -3357,3 +3357,14 @@ Mutagenicity roadmaps.
 - [x] Add positive empty-package and negative wrong-hash regression tests.
 - [ ] Launch only a fresh T8 UUID/root from the reviewed immutable successor;
   never resume or adopt the failed attempt.
+
+## 2026-09-01: AIDS compact-lineage parent-ID closure
+
+- [x] Use the exact frozen source as the step-zero stable-node-ID authority
+  after compact recovery proves tensor equality for the recorded parent.
+- [x] Preserve global-first predecessor selection, action indices, candidate
+  order, exact science artifacts, and all chemistry/numeric semantics.
+- [x] Add a cross-parent representative regression assertion for source and
+  target node IDs.
+- [ ] Launch one fresh read-only AIDS postprocess root; do not resume or modify
+  the chemistry-failed v6 root.

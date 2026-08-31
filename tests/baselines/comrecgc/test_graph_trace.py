@@ -1001,6 +1001,8 @@ def test_recover_lineage_uses_recorded_parent_not_frozen_representative_metadata
     assert lineage[0]["action_lineage_resolved"] is True
     assert lineage[0]["parent_id"] == "parent-1"
     assert lineage[0]["actions"][0]["move_index"] == event["move_index"]
+    assert lineage[0]["actions"][0]["source_node_ids"] == ["source:0", "source:1"]
+    assert lineage[0]["actions"][0]["target_node_ids"] == ["source:0", "source:1"]
     assert audit["selected_event_source_parent_mismatch_count"] == 0
     assert audit["selected_event_target_parent_mismatch_count"] == 1
     assert audit["predecessor_selected_parent_mismatch_count"] == 0
