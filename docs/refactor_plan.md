@@ -39,6 +39,27 @@
 - [ ] Do not treat either authority as a paper cell; T12 remains blocked on
   its independently documented cross-process VRRW issue.
 
+## 2026-09-01: Recover Taste T14 from unbounded transition retention
+
+- [x] Preserve the failed 3,778-parent root and establish that it has no
+  complete 2,500-step checkpoint or Python semantic traceback.
+- [x] Identify T14's missing full-runtime compact transition cache and
+  authoritative graph backing store; retain the cgroup OOM counter as
+  supporting, not PID-specific, evidence.
+- [x] Reuse exact action replay with a five-entry expanded LRU and the existing
+  SQLite graph store without changing cohort, walk, classifier, identity,
+  candidate capacity, sample size, 20k/25k budgets, or ten-rule gate.
+- [x] Persist compact transition, hot graph, bridge, RNG, and SQLite state in
+  atomic 2,500-step checkpoints and make the AutoDL wrapper genuinely
+  resume-capable.
+- [x] Permit an explicit physical GPU index (`0..3`, default GPU1) while
+      retaining stable-idle, UUID, and lock validation for GPU2/3 scheduling.
+- [x] Release cohort-selection-only objects before generation and emit bounded
+  RSS/cache progress every 100 completed steps.
+- [ ] Deploy from one fresh immutable AutoDL checkout and launch a fresh root.
+  The checkpoint-free failed root cannot be resumed; use resume mode only
+  after a new attempt publishes `checkpoints/LATEST`.
+
 ## 2026-09-01: TasteMolNet T12 cross-process VRRW blocker
 
 - [x] Audit the complete T7 checkpoint payload: official mutable maps/lists,

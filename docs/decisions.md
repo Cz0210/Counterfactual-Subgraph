@@ -1,5 +1,63 @@
 # Decisions Log
 
+## [2026-09-01] Bound Taste T14 transition memory without changing the walk
+
+### Motivation
+
+The first fresh T14 attempt froze the authorized 3,778-parent train cohort but
+disappeared before its first 2,500-step checkpoint after about five hours.  It
+wrote no Python traceback or semantic failure.  The host cgroup reports OOM
+kills and a historical high-water mark equal to its 480-GiB limit; that counter
+is cumulative, so it is supporting rather than PID-specific evidence.  The
+code audit found a deterministic defect regardless: unlike the established
+full ComRecGC runtime, T14 retained every expanded PyG neighbour graph in every
+transition and had no authoritative backing store for graph-map eviction.
+
+### Decision
+
+Use the existing exact full-walk state substrate in T14:
+
+- retain transition hashes, exact enumerated actions, importance values and
+  embeddings in `CompactMoveScopedTransitionMap`, with at most five expanded
+  transition entries and deterministic action replay after LRU eviction;
+- retain the official hot graph-map semantics while placing evicted graph
+  payloads in the existing authoritative SQLite store;
+- checkpoint the hot official state, compact transitions, bridge records,
+  graph-state counters, complete CPU/CUDA RNG and an atomic SQLite snapshot at
+  every existing 2,500-step boundary; and
+- expose explicit fresh/resume launcher modes.  Resume requires a complete
+  checkpoint and cannot adopt the checkpoint-free failed root.
+
+Release the temporary all-Sweet cohort-selection adapter and graphs before the
+full walk, and write RSS/cache diagnostics every 100 completed steps.  These
+are lifetime and observability changes only.  The frozen cohort, official edit
+enumeration and ordering, GINE scores, canonical attributed-graph identity,
+lineage, `M=20,000`, one `25,000` fallback, candidate capacity 50,000, sample
+size 10,000, and minimum ten valid unique rules are unchanged.
+
+### Consequences
+
+- Raw neighbour `Data` objects are bounded by a five-entry expanded LRU rather
+  than growing with every visited transition; no model call, random draw,
+  neighbour enumeration, candidate ordering or scientific parameter is added
+  or removed.
+- The old `c87c0a7a-...` root remains immutable and cannot resume because it
+  has no complete checkpoint.  Production must start in a fresh root; after
+  the first 2,500-step closure, the same immutable execution commit may resume
+  that root with `TASTEMOLNET_T14_RESUME=1`.
+- `TASTEMOLNET_T14_GPU_INDEX=0..3` selects an explicitly scheduled physical
+  GPU (default `1`); UUID discovery and the existing exclusive GPU lock remain
+  mandatory, so this scheduling option does not change science semantics.
+- Checkpoint validation now includes the compact transition state and SQLite
+  snapshot.  Calibration and test remain unopened during generation.
+
+### Status
+
+Implemented and locally focused-tested; requires immutable AutoDL deployment
+and a fresh production attempt.
+
+---
+
 ## [2026-09-01] Authorize strict multi-component AIDS source no-op identity
 
 ### Motivation

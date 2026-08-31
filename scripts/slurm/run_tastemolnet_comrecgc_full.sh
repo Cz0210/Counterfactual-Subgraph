@@ -24,3 +24,6 @@ exit 64
 # python scripts/run_tastemolnet_comrecgc_full.py --config configs/hpc.yaml \
 #   --output-dir "$TASTEMOLNET_T14_OUTPUT" --run-id "$TASTEMOLNET_T14_RUN_ID" \
 #   --gpu-uuid "$TASTEMOLNET_GPU_UUID" --set inference.fallback_to_heuristic=false
+# Add --resume only after the fresh route has atomically published
+# "$TASTEMOLNET_T14_OUTPUT/checkpoints/LATEST"; the AutoDL wrapper exposes this
+# as TASTEMOLNET_T14_RESUME=1.

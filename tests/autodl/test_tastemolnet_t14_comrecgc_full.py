@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -11,13 +13,21 @@ import pytest
 from src.baselines.tastemolnet_comrecgc_full import (
     M_FALLBACK_MAX,
     M_MAX,
+    CHECKPOINT_PROVENANCE_SCHEMA,
     GENERATION_PASS_MARKER,
+    RUNTIME_STATE_SCHEMA,
+    TRANSITION_EXPANDED_CAPACITY,
     TasteComRecGCFullBridge,
     TasteComRecGCFullError,
     build_full_train_correct_source_cohort,
+    _bounded_t14_runtime,
     fallback_checkpoint_targets,
     resource_cap_decision,
     validate_t14_full_output,
+)
+from src.baselines.comrecgc.generation_checkpoint import (
+    save_generation_checkpoint,
+    scientific_command_sha256,
 )
 
 
@@ -101,6 +111,48 @@ def test_full_bridge_rejects_candidate_lineage_outside_frozen_train_cohort() -> 
         bridge.call([graph], {})
 
 
+def test_t14_installs_existing_bounded_full_runtime_without_parameter_change(
+    tmp_path: Path,
+) -> None:
+    class _Bridge:
+        @contextmanager
+        def installed(self, module: object, *, neighbor_wrapper: object):
+            original = module.neighbor_graph_access
+            module.neighbor_graph_access = neighbor_wrapper(original)
+            try:
+                yield
+            finally:
+                module.neighbor_graph_access = original
+
+    def _move(*_args: object, **_kwargs: object) -> tuple[None, bool, None, None, None]:
+        return None, False, None, None, None
+
+    module = SimpleNamespace(
+        graph_map={},
+        graph_index_map={},
+        counterfactual_candidates=[],
+        covering_graphs=set(),
+        transitions={},
+        move_to_next_graph=_move,
+        neighbor_graph_access=lambda graph, _action: graph,
+    )
+    with _bounded_t14_runtime(
+        module=module,
+        bridge=_Bridge(),
+        graph_store_path=tmp_path / "graph-state.sqlite3",
+        seed=7,
+        expanded_capacity=TRANSITION_EXPANDED_CAPACITY,
+    ) as handles:
+        assert type(handles.transition_map).__name__ == "CompactMoveScopedTransitionMap"
+        assert type(handles.live_graph_state).__name__ == "LiveGraphState"
+        assert handles.transition_map.audit()["scientific_parameters_changed"] is False
+        assert handles.transition_map.audit()["expanded_capacity"] == 5
+        module.move_to_next_graph(graphs_hash=[], start_graphs_hash=[])
+        assert handles.transition_map.move_count == 1
+        assert handles.live_graph_state.move_count == 1
+    assert module.transitions == {}
+
+
 def test_independent_terminal_verifier_reopens_bounded_train_only_closure(
     tmp_path: Path,
 ) -> None:
@@ -119,9 +171,70 @@ def test_independent_terminal_verifier_reopens_bounded_train_only_closure(
     resource = {"state": "STOP_AND_POSTPROCESS", "m_effective": M_MAX}
     (root / "valid_unique.json").write_text(json.dumps(valid))
     (root / "resource_cap_receipt.json").write_text(json.dumps(resource))
-    checkpoint = checkpoint_root / f"checkpoint-{M_MAX:06d}.pt"
-    checkpoint.write_bytes(b"checkpoint")
-    checkpoint.with_suffix(".json").write_text("{}")
+    provenance = {
+        "schema_version": CHECKPOINT_PROVENANCE_SCHEMA,
+        "dataset": "tastemolnet",
+        "method": "comrecgc",
+        "stage": "T14_COMRECGC_FULL",
+        "train_csv_sha256": "a" * 64,
+        "checkpoint_id": "b" * 64,
+        "cohort_jsonl_sha256": _sha(cohort),
+        "parameters_sha256": "c" * 64,
+        "official_authority_sha256": "d" * 64,
+        "execution_commit": "e" * 40,
+        "runtime_state_schema": RUNTIME_STATE_SCHEMA,
+        "transition_cache_policy": "compact_transition_action_replay_lru_v1",
+        "graph_state_policy": "authoritative_backing_live_graph_resolution_v2",
+        "scientific_command_sha256": "",
+        "total_steps": str(M_FALLBACK_MAX),
+    }
+    argv = ("tastemolnet_t14_comrecgc_full_v1", "fixture=true")
+    command_sha = scientific_command_sha256(argv)
+    provenance["scientific_command_sha256"] = command_sha
+    database = tmp_path / "source.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE graphs (id INTEGER PRIMARY KEY)")
+    connection.commit()
+    validation = save_generation_checkpoint(
+        checkpoint_root,
+        completed_step=M_MAX,
+        step_complete=True,
+        algorithm_state={"schema_version": RUNTIME_STATE_SCHEMA},
+        trace_state={"enabled": False},
+        sqlite_source=connection,
+        provenance_fingerprints=provenance,
+        scientific_argv=argv,
+        command_sha256=command_sha,
+        total_steps=M_FALLBACK_MAX,
+    )
+    connection.close()
+    (checkpoint_root / f"checkpoint-{M_MAX:06d}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "tastemolnet_t14_checkpoint_v2",
+                "checkpoint_dir": str(validation.checkpoint_dir),
+                "checkpoint_digest": validation.checkpoint_digest,
+                "checkpoint_step": M_MAX,
+                "next_step": M_MAX + 1,
+                "checkpoint_persisted_in_output": True,
+                "bounded_transition_state": True,
+                "authoritative_graph_store_snapshot": True,
+                "written_at": "fixture",
+            }
+        )
+    )
+    checkpoint_identity = {
+        "schema_version": CHECKPOINT_PROVENANCE_SCHEMA,
+        "status": "FROZEN",
+        "provenance": provenance,
+        "scientific_argv": list(argv),
+        "command_sha256": command_sha,
+        "total_steps": M_FALLBACK_MAX,
+        "checkpoint_interval": 2500,
+        "transition_expanded_capacity": TRANSITION_EXPANDED_CAPACITY,
+        "raw_neighbor_graphs_retained_unbounded": False,
+    }
+    (root / "checkpoint_identity.json").write_text(json.dumps(checkpoint_identity))
     (root / "progress.json").write_text(
         json.dumps({"status": "PASS", "completed_step": M_MAX})
     )
@@ -143,6 +256,18 @@ def test_independent_terminal_verifier_reopens_bounded_train_only_closure(
         "cohort_jsonl_sha256": _sha(cohort),
         "resource_cap": resource,
         "valid_unique": valid,
+        "bounded_runtime": {
+            "transition_cache": {
+                "patch": "compact_transition_action_replay_lru_v1",
+                "scientific_parameters_changed": False,
+            },
+            "live_graph_state": {"unresolved_lookups": 0},
+            "checkpoint_schema": RUNTIME_STATE_SCHEMA,
+            "checkpoint_identity_sha256": _sha(
+                (root / "checkpoint_identity.json").read_bytes()
+            ),
+            "raw_neighbor_graphs_retained_unbounded": False,
+        },
     }
     (root / "generation_manifest.json").write_text(json.dumps(manifest))
     (root / "GENERATION_PASS").write_text(f"{GENERATION_PASS_MARKER}\n")
@@ -159,14 +284,18 @@ def test_independent_terminal_verifier_reopens_bounded_train_only_closure(
         validate_t14_full_output(root)
 
 
-def test_t14_launchers_keep_gpu1_budget_and_slurm_contract() -> None:
+def test_t14_launchers_keep_explicit_gpu_budget_and_slurm_contract() -> None:
     autodl = (PROJECT_ROOT / "scripts/autodl/run_tastemolnet_t14_comrecgc_full.sh").read_text()
     slurm = (PROJECT_ROOT / "scripts/slurm/run_tastemolnet_comrecgc_full.sh").read_text()
     for token in (
-        "--gpu-index 1",
+        'TASTEMOLNET_T14_GPU_INDEX="${TASTEMOLNET_T14_GPU_INDEX:-1}"',
+        '--gpu-index "$TASTEMOLNET_T14_GPU_INDEX"',
         "TASTEMOLNET_T14_OUTPUT",
+        "TASTEMOLNET_T14_GPU_INDEX",
         "RUN_GNN_ABLATION",
         "inference.fallback_to_heuristic=false",
+        "TASTEMOLNET_T14_RESUME",
+        "--resume",
     ):
         assert token in autodl
     for token in (

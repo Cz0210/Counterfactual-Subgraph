@@ -7,14 +7,19 @@ opening validation, calibration, or test payloads during generation.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import gc
 import hashlib
 import json
 import os
 from pathlib import Path
+import resource
 import stat
-from typing import Any, Mapping, Sequence
+import sys
+import tempfile
+from typing import Any, Iterator, Mapping, Sequence
 
 from src.baselines.tastemolnet_comrecgc_smoke import (
     SOURCE_LABEL,
@@ -22,11 +27,8 @@ from src.baselines.tastemolnet_comrecgc_smoke import (
     TasteComRecGCSmokeError,
     _common_recourse_summary,
     _identity_graph_sha256,
-    _restore_reload_checkpoint,
     _scalar_native_int,
     _seed_all,
-    _torch_load_handle,
-    _write_reload_checkpoint,
     canonical_attributed_graph,
 )
 from src.baselines.tastemolnet_gcf_smoke import (
@@ -47,6 +49,10 @@ M_FALLBACK_MAX = 25_000
 MIN_VALID_UNIQUE_RULES = 10
 CHECK_INTERVAL = 2_500
 GENERATION_PASS_MARKER = "[TASTE_T14_COMRECGC_FULL_GENERATION_PASS]"
+RUNTIME_STATE_SCHEMA = "tastemolnet_t14_bounded_runtime_v1"
+CHECKPOINT_PROVENANCE_SCHEMA = "tastemolnet_t14_checkpoint_provenance_v1"
+TRANSITION_EXPANDED_CAPACITY = 5
+PROGRESS_INTERVAL = 100
 
 
 class TasteComRecGCFullError(TasteComRecGCSmokeError):
@@ -366,8 +372,215 @@ def fallback_checkpoint_targets(completed_step: int) -> tuple[int, ...]:
     )
 
 
-def _checkpoint_receipt_path(path: Path) -> Path:
-    return path.with_suffix(".json")
+@dataclass(frozen=True, slots=True)
+class _BoundedRuntimeHandles:
+    live_graph_state: Any
+    transition_map: Any
+
+
+def _process_peak_rss_bytes() -> int:
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return value if sys.platform == "darwin" else value * 1024
+
+
+def _process_rss_bytes() -> int | None:
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+
+def _checkpoint_identity(
+    *,
+    authority: Mapping[str, Any],
+    cohort_manifest: Mapping[str, Any],
+    parameters: TasteComRecGCFullParameters,
+) -> tuple[dict[str, str], tuple[str, ...], str]:
+    """Build output/run-ID-independent science identity for exact resume."""
+
+    from src.baselines.comrecgc.generation_checkpoint import scientific_command_sha256
+
+    checkpoint = authority.get("checkpoint")
+    official = authority.get("official")
+    execution = authority.get("execution")
+    train = authority.get("train")
+    if not all(type(value) is dict for value in (checkpoint, official, execution, train)):
+        raise TasteComRecGCFullError("Taste T14 checkpoint authority is incomplete")
+    scientific_argv = (
+        "tastemolnet_t14_comrecgc_full_v1",
+        f"train_sha256={train.get('sha256')}",
+        f"checkpoint_id={checkpoint.get('checkpoint_id')}",
+        f"cohort_sha256={cohort_manifest.get('cohort_jsonl_sha256')}",
+        f"parameters_sha256={_sha256_bytes(_canonical_bytes(asdict(parameters)))}",
+        f"official_sha256={_sha256_bytes(_canonical_bytes(official))}",
+        f"execution_commit={execution.get('commit')}",
+    )
+    command_sha256 = scientific_command_sha256(scientific_argv)
+    provenance = {
+        "schema_version": CHECKPOINT_PROVENANCE_SCHEMA,
+        "dataset": DATASET,
+        "method": METHOD,
+        "stage": STAGE,
+        "train_csv_sha256": str(train.get("sha256")),
+        "checkpoint_id": str(checkpoint.get("checkpoint_id")),
+        "cohort_jsonl_sha256": str(cohort_manifest.get("cohort_jsonl_sha256")),
+        "parameters_sha256": _sha256_bytes(_canonical_bytes(asdict(parameters))),
+        "official_authority_sha256": _sha256_bytes(_canonical_bytes(official)),
+        "execution_commit": str(execution.get("commit")),
+        "runtime_state_schema": RUNTIME_STATE_SCHEMA,
+        "transition_cache_policy": "compact_transition_action_replay_lru_v1",
+        "graph_state_policy": "authoritative_backing_live_graph_resolution_v2",
+        "scientific_command_sha256": command_sha256,
+        "total_steps": str(M_FALLBACK_MAX),
+    }
+    if any(not value or value == "None" for value in provenance.values()):
+        raise TasteComRecGCFullError("Taste T14 checkpoint identity is incomplete")
+    return provenance, scientific_argv, command_sha256
+
+
+@contextmanager
+def _bounded_t14_runtime(
+    *,
+    module: Any,
+    bridge: TasteComRecGCMulticlassBridge,
+    graph_store_path: Path,
+    seed: int,
+    expanded_capacity: int,
+) -> Iterator[_BoundedRuntimeHandles]:
+    """Install the already-reviewed exact full-walk bounded state substrate."""
+
+    from src.baselines.comrecgc.live_graph_state import LiveGraphState
+    from src.baselines.comrecgc.runtime import lineage_neighbor_wrapper
+    from src.baselines.comrecgc.transition_cache import CompactMoveScopedTransitionMap
+    from src.baselines.gcfexplainer_mutagenicity_adapter import (
+        graph_lineage_neighbor_wrapper,
+    )
+
+    if module.transitions:
+        raise TasteComRecGCFullError(
+            "Taste T14 bounded transition cache must be installed before generation"
+        )
+    original_transitions = module.transitions
+    original_move = module.move_to_next_graph
+    original_neighbor = module.neighbor_graph_access
+    live = LiveGraphState(
+        module,
+        module.graph_map,
+        store_path=graph_store_path,
+        seed=seed,
+    )
+    module.graph_map = live.graph_map
+    module.comrecgc_live_graph_state = live
+    rebuild_with_gcf_lineage = graph_lineage_neighbor_wrapper(original_neighbor)
+    rebuild_with_both_lineages = lineage_neighbor_wrapper(rebuild_with_gcf_lineage)
+    transitions = CompactMoveScopedTransitionMap(
+        module,
+        module.transitions,
+        seed=seed,
+        expanded_capacity=expanded_capacity,
+        rebuild_target=lambda graph, action: rebuild_with_both_lineages(graph, action),
+    )
+    module.transitions = transitions
+    module.move_to_next_graph = live.wrap_move(transitions.wrap_move(original_move))
+
+    def neighbor_wrapper(original: Any) -> Any:
+        return lineage_neighbor_wrapper(
+            graph_lineage_neighbor_wrapper(original),
+            transition_cache=transitions,
+        )
+
+    completed_normally = False
+    try:
+        with bridge.installed(module, neighbor_wrapper=neighbor_wrapper):
+            yield _BoundedRuntimeHandles(
+                live_graph_state=live,
+                transition_map=transitions,
+            )
+            completed_normally = True
+    finally:
+        module.move_to_next_graph = original_move
+        module.graph_map = dict(live.graph_map)
+        module.transitions = {}
+        if hasattr(module, "comrecgc_live_graph_state"):
+            delattr(module, "comrecgc_live_graph_state")
+        try:
+            live.close()
+        finally:
+            if not completed_normally:
+                # Keep teardown bounded after a science exception.  The latest
+                # atomically published checkpoint remains the resume authority.
+                module.graph_map = dict(live.graph_map)
+            module.transitions = original_transitions
+
+
+def _checkpoint_algorithm_state(
+    *,
+    module: Any,
+    bridge: TasteComRecGCMulticlassBridge,
+    loop_state: Any,
+    handles: _BoundedRuntimeHandles,
+) -> dict[str, Any]:
+    from src.baselines.comrecgc.generation_loop import snapshot_official_state
+
+    transition_state = handles.transition_map.export_checkpoint_state()
+    live_state = handles.live_graph_state.export_checkpoint_state()
+    required_hashes = {
+        *loop_state.start_graph_hashes,
+        *loop_state.current_graph_hashes,
+        *module.graph_index_map.keys(),
+        *module.covering_graphs,
+        *(row.get("graph_hash") for row in module.counterfactual_candidates),
+        *(row["source_hash"] for row in transition_state["entries"]),
+    }
+    missing = [
+        value
+        for value in required_hashes
+        if value is not None and not handles.live_graph_state.contains(value)
+    ]
+    if missing:
+        raise TasteComRecGCFullError(
+            "Taste T14 checkpoint graph closure is incomplete: "
+            f"missing_count={len(missing)} first={missing[0]!r}"
+        )
+    return {
+        "schema_version": RUNTIME_STATE_SCHEMA,
+        "loop_state": loop_state.to_checkpoint_state(),
+        "official_state": snapshot_official_state(module),
+        "transition_state": transition_state,
+        "live_graph_state": live_state,
+        "bridge_state": bridge.checkpoint_state(),
+    }
+
+
+def _restore_checkpoint_state(
+    *,
+    module: Any,
+    bridge: TasteComRecGCMulticlassBridge,
+    loaded: Any,
+    handles: _BoundedRuntimeHandles,
+) -> Any:
+    from src.baselines.comrecgc.generation_checkpoint import restore_rng_state
+    from src.baselines.comrecgc.generation_loop import GenerationLoopState
+
+    state = loaded.algorithm_state
+    if state.get("schema_version") != RUNTIME_STATE_SCHEMA:
+        raise TasteComRecGCFullError("Taste T14 runtime checkpoint schema changed")
+    handles.transition_map.restore_checkpoint_state(state["transition_state"])
+    handles.live_graph_state.restore_checkpoint_state(state["live_graph_state"])
+    bridge.restore_checkpoint_state(state["bridge_state"])
+    loop_state = GenerationLoopState.from_checkpoint_state(state["loop_state"])
+    if (
+        handles.transition_map.move_count != loop_state.completed_step
+        or handles.live_graph_state.move_count != loop_state.completed_step
+        or loop_state.completed_step != loaded.completed_step
+    ):
+        raise TasteComRecGCFullError("Taste T14 restored move counters changed")
+    # RNG restoration is deliberately the final mutation before next_step.
+    restore_rng_state(loaded.rng_state)
+    return loop_state
 
 
 def _write_checkpoint(
@@ -376,77 +589,92 @@ def _write_checkpoint(
     bridge: TasteComRecGCMulticlassBridge,
     loop_state: Any,
     parameters: TasteComRecGCFullParameters,
-    path: Path,
+    checkpoint_root: Path,
+    handles: _BoundedRuntimeHandles,
+    provenance: Mapping[str, str],
+    scientific_argv: Sequence[str],
+    command_sha256: str,
 ) -> dict[str, Any]:
-    step_parameters = replace(parameters, checkpoint_step=int(loop_state.completed_step))
+    from src.baselines.comrecgc.generation_checkpoint import (
+        save_generation_checkpoint,
+    )
+
+    completed = int(loop_state.completed_step)
+    step_parameters = replace(parameters, checkpoint_step=completed)
     step_parameters.validate()
-    loaded = _write_reload_checkpoint(
-        module=module,
-        bridge=bridge,
-        loop_state=loop_state,
-        parameters=step_parameters,  # structural protocol is shared with T9
-        path=path,
+    validation = save_generation_checkpoint(
+        checkpoint_root,
+        completed_step=completed,
+        step_complete=True,
+        algorithm_state=_checkpoint_algorithm_state(
+            module=module,
+            bridge=bridge,
+            loop_state=loop_state,
+            handles=handles,
+        ),
+        trace_state={"enabled": False, "policy": "generation_trace_disabled"},
+        sqlite_source=handles.live_graph_state.store.checkpoint_connection,
+        provenance_fingerprints=provenance,
+        scientific_argv=scientific_argv,
+        command_sha256=command_sha256,
+        total_steps=M_FALLBACK_MAX,
     )
     evidence = {
-        **dict(loaded["evidence"]),
-        "schema_version": "tastemolnet_t14_checkpoint_v1",
-        "checkpoint_path": str(path),
+        "schema_version": "tastemolnet_t14_checkpoint_v2",
+        "checkpoint_dir": str(validation.checkpoint_dir),
+        "checkpoint_digest": validation.checkpoint_digest,
+        "checkpoint_step": completed,
+        "next_step": completed + 1,
         "checkpoint_persisted_in_output": True,
+        "bounded_transition_state": True,
+        "authoritative_graph_store_snapshot": True,
         "written_at": _utc_now(),
     }
-    _atomic_json(_checkpoint_receipt_path(path), evidence)
-    return {"payload": loaded["payload"], "evidence": evidence}
+    _atomic_json(checkpoint_root / f"checkpoint-{completed:06d}.json", evidence)
+    return evidence
 
 
 def _load_latest_checkpoint(
     checkpoint_root: Path,
     *,
     parameters: TasteComRecGCFullParameters,
-) -> dict[str, Any] | None:
-    candidates = sorted(checkpoint_root.glob("checkpoint-*.pt"))
-    if not candidates:
+    provenance: Mapping[str, str],
+    scientific_argv: Sequence[str],
+    command_sha256: str,
+) -> Any | None:
+    from src.baselines.comrecgc.generation_checkpoint import load_generation_checkpoint
+
+    if not (checkpoint_root / "LATEST").is_file():
         return None
-    path = candidates[-1]
-    info = path.lstat()
+    loaded = load_generation_checkpoint(
+        checkpoint_root,
+        expected_provenance=provenance,
+        expected_scientific_argv=scientific_argv,
+        expected_command_sha256=command_sha256,
+        expected_total_steps=M_FALLBACK_MAX,
+    )
+    completed = loaded.completed_step
     if (
-        not stat.S_ISREG(info.st_mode)
-        or stat.S_ISLNK(info.st_mode)
-        or info.st_nlink != 1
-        or stat.S_IMODE(info.st_mode) != 0o600
-        or info.st_size <= 0
-    ):
-        raise TasteComRecGCFullError("Taste T14 checkpoint is not a private file")
-    receipt_path = _checkpoint_receipt_path(path)
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    if (
-        type(receipt) is not dict
-        or receipt.get("schema_version") != "tastemolnet_t14_checkpoint_v1"
-        or receipt.get("checkpoint_path") != str(path)
-        or receipt.get("checkpoint_sha256") != _sha256_file(path)
-        or receipt.get("checkpoint_persisted_in_output") is not True
-    ):
-        raise TasteComRecGCFullError("Taste T14 checkpoint receipt changed")
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        with os.fdopen(os.dup(descriptor), "rb") as handle:
-            payload = _torch_load_handle(handle)
-        if os.fstat(descriptor) != info:
-            raise TasteComRecGCFullError("Taste T14 checkpoint identity changed")
-    finally:
-        os.close(descriptor)
-    completed = payload.get("completed_step") if type(payload) is dict else None
-    if (
-        type(payload) is not dict
-        or payload.get("schema_version") != "tastemolnet_comrecgc_smoke_checkpoint_v1"
-        or type(completed) is not int
-        or completed % CHECK_INTERVAL != 0
+        completed % CHECK_INTERVAL != 0
         or not CHECK_INTERVAL <= completed <= M_FALLBACK_MAX
-        or payload.get("total_steps") != M_FALLBACK_MAX
-        or payload.get("parameters")
-        != asdict(replace(parameters, checkpoint_step=completed))
+        or loaded.algorithm_state.get("schema_version") != RUNTIME_STATE_SCHEMA
     ):
         raise TasteComRecGCFullError("Taste T14 checkpoint payload changed")
-    return {"payload": payload, "evidence": receipt}
+    return loaded
+
+
+def _prepare_runtime_store(root: Path, loaded: Any | None) -> Path:
+    from src.baselines.comrecgc.generation_checkpoint import restore_sqlite_snapshot
+
+    runtime_root = root / "runtime_graph_state"
+    runtime_root.mkdir(mode=0o700, exist_ok=True)
+    invocation = Path(
+        tempfile.mkdtemp(prefix=f"active-{os.getpid()}-", dir=runtime_root)
+    )
+    path = invocation / "authoritative_graph_store.sqlite3"
+    if loaded is not None:
+        restore_sqlite_snapshot(loaded.sqlite_snapshot_path, path)
+    return path
 
 
 def _progress(
@@ -456,7 +684,23 @@ def _progress(
     completed_step: int,
     cohort_count: int,
     valid_unique_rule_count: int | None = None,
+    runtime_handles: _BoundedRuntimeHandles | None = None,
 ) -> None:
+    runtime = None
+    if runtime_handles is not None:
+        transition = runtime_handles.transition_map.audit()
+        runtime = {
+            "rss_bytes": _process_rss_bytes(),
+            "peak_rss_bytes": _process_peak_rss_bytes(),
+            "hot_graph_count": len(runtime_handles.live_graph_state.graph_map),
+            "backing_graph_count": runtime_handles.live_graph_state.store.count(),
+            "transition_entry_count": transition["transition_entry_count"],
+            "transition_numeric_bytes": transition["compact_numeric_bytes"],
+            "expanded_transition_entry_count": transition[
+                "expanded_entry_count"
+            ],
+            "expanded_transition_capacity": transition["expanded_capacity"],
+        }
     _atomic_json(
         output_root / "progress.json",
         {
@@ -468,6 +712,7 @@ def _progress(
             "m_fallback_max": M_FALLBACK_MAX,
             "cohort_count": cohort_count,
             "valid_unique_rule_count": valid_unique_rule_count,
+            "bounded_runtime": runtime,
             "pid": os.getpid(),
             "updated_at": _utc_now(),
         },
@@ -550,11 +795,13 @@ def run_t14_full(
 ) -> dict[str, Any]:
     """Run or resume the train-only native full generation and postprocessing."""
 
-    from src.baselines.comrecgc.generation_loop import run_generation_loop
-    from src.baselines.comrecgc.runtime import lineage_neighbor_wrapper, reset_official_state
+    from src.baselines.comrecgc.generation_loop import (
+        restore_official_state,
+        run_generation_loop,
+    )
+    from src.baselines.comrecgc.runtime import reset_official_state
     from src.baselines.gcfexplainer_mutagenicity_adapter import (
         GraphRecordDataset,
-        graph_lineage_neighbor_wrapper,
     )
 
     root = Path(output_root)
@@ -646,7 +893,47 @@ def run_t14_full(
     parameters = TasteComRecGCFullParameters(
         source_pool=len(selected_rows), source_count=len(selected_rows)
     ).validate()
+    provenance, scientific_argv, command_sha256 = _checkpoint_identity(
+        authority=authority,
+        cohort_manifest=cohort_manifest,
+        parameters=parameters,
+    )
+    checkpoint_identity = {
+        "schema_version": CHECKPOINT_PROVENANCE_SCHEMA,
+        "status": "FROZEN",
+        "provenance": provenance,
+        "scientific_argv": list(scientific_argv),
+        "command_sha256": command_sha256,
+        "total_steps": M_FALLBACK_MAX,
+        "checkpoint_interval": CHECK_INTERVAL,
+        "transition_expanded_capacity": TRANSITION_EXPANDED_CAPACITY,
+        "raw_neighbor_graphs_retained_unbounded": False,
+    }
+    checkpoint_identity_path = root / "checkpoint_identity.json"
+    if checkpoint_identity_path.exists():
+        if json.loads(checkpoint_identity_path.read_text(encoding="utf-8")) != (
+            checkpoint_identity
+        ):
+            raise TasteComRecGCFullError(
+                "Taste T14 checkpoint identity changed on resume"
+            )
+    else:
+        _atomic_json(checkpoint_identity_path, checkpoint_identity)
     _progress(root, phase="COHORT_FROZEN", completed_step=0, cohort_count=len(cohort))
+
+    # The cohort-selection adapter and all-Sweet graph materialization are no
+    # longer needed.  Keeping them alive throughout the 20k walk duplicates a
+    # complete GINE/source-graph working set for no scientific purpose.
+    del cohort_adapter, graphs_all, encoded_all, predictions
+    del source_probabilities, graph_hashes, true_sweet
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
     modules = inputs.official.modules
     module = modules["comrecgc"]
@@ -675,9 +962,6 @@ def run_t14_full(
         cohort_count=len(source_graphs),
     )
 
-    def combined_lineage(original: Any) -> Any:
-        return lineage_neighbor_wrapper(graph_lineage_neighbor_wrapper(original))
-
     importance_args = {
         "schema_version": "tastemolnet_comrecgc_gine_distance_v1",
         "classifier": "frozen_calibrated_three_class_gine",
@@ -685,16 +969,57 @@ def run_t14_full(
         "num_classes": 3,
         "source_label": SOURCE_LABEL,
     }
-    latest = _load_latest_checkpoint(checkpoint_root, parameters=parameters)
-    with bridge.installed(module, neighbor_wrapper=combined_lineage):
+    latest = _load_latest_checkpoint(
+        checkpoint_root,
+        parameters=parameters,
+        provenance=provenance,
+        scientific_argv=scientific_argv,
+        command_sha256=command_sha256,
+    )
+    if resume and latest is None:
+        raise TasteComRecGCFullError(
+            "Taste T14 resume requested without a complete 2,500-step checkpoint"
+        )
+    if not resume and latest is not None:
+        raise TasteComRecGCFullError(
+            "Taste T14 fresh run unexpectedly found a checkpoint"
+        )
+    if latest is not None:
+        runtime_state = latest.algorithm_state
+        if runtime_state.get("schema_version") != RUNTIME_STATE_SCHEMA:
+            raise TasteComRecGCFullError("Taste T14 checkpoint runtime changed")
+        restore_official_state(module, runtime_state["official_state"])
+    graph_store_path = _prepare_runtime_store(root, latest)
+    with _bounded_t14_runtime(
+        module=module,
+        bridge=bridge,
+        graph_store_path=graph_store_path,
+        seed=parameters.seed,
+        expanded_capacity=TRANSITION_EXPANDED_CAPACITY,
+    ) as runtime_handles:
         state = None
         if latest is not None:
-            state = _restore_reload_checkpoint(
-                module=module, bridge=bridge, loaded=latest
+            state = _restore_checkpoint_state(
+                module=module,
+                bridge=bridge,
+                loaded=latest,
+                handles=runtime_handles,
             )
         else:
             _seed_all(parameters.seed)
         completed = int(state.completed_step) if state is not None else 0
+
+        def progress_callback(loop_state: Any) -> None:
+            step = int(loop_state.completed_step)
+            if step % PROGRESS_INTERVAL == 0:
+                _progress(
+                    root,
+                    phase="GENERATION",
+                    completed_step=step,
+                    cohort_count=len(cohort),
+                    runtime_handles=runtime_handles,
+                )
+
         for target in range(
             ((completed // CHECK_INTERVAL) + 1) * CHECK_INTERVAL,
             M_MAX + 1,
@@ -708,14 +1033,18 @@ def run_t14_full(
                 max_steps=target,
                 heads=parameters.heads,
                 initial_state=state,
+                on_step_complete=progress_callback,
             )
-            checkpoint_path = checkpoint_root / f"checkpoint-{target:06d}.pt"
             _write_checkpoint(
                 module=module,
                 bridge=bridge,
                 loop_state=state,
                 parameters=parameters,
-                path=checkpoint_path,
+                checkpoint_root=checkpoint_root,
+                handles=runtime_handles,
+                provenance=provenance,
+                scientific_argv=scientific_argv,
+                command_sha256=command_sha256,
             )
             valid = count_train_side_valid_unique(bridge)
             _progress(
@@ -724,6 +1053,7 @@ def run_t14_full(
                 completed_step=target,
                 cohort_count=len(cohort),
                 valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
+                runtime_handles=runtime_handles,
             )
         if state is None:
             raise TasteComRecGCFullError("Taste T14 generation produced no state")
@@ -763,13 +1093,18 @@ def run_t14_full(
                     max_steps=target,
                     heads=parameters.heads,
                     initial_state=state,
+                    on_step_complete=progress_callback,
                 )
                 _write_checkpoint(
                     module=module,
                     bridge=bridge,
                     loop_state=state,
                     parameters=parameters,
-                    path=checkpoint_root / f"checkpoint-{target:06d}.pt",
+                    checkpoint_root=checkpoint_root,
+                    handles=runtime_handles,
+                    provenance=provenance,
+                    scientific_argv=scientific_argv,
+                    command_sha256=command_sha256,
                 )
                 _progress(
                     root,
@@ -777,6 +1112,7 @@ def run_t14_full(
                     completed_step=target,
                     cohort_count=len(cohort),
                     valid_unique_rule_count=None,
+                    runtime_handles=runtime_handles,
                 )
             valid = count_train_side_valid_unique(bridge)
             decision = resource_cap_decision(
@@ -792,6 +1128,7 @@ def run_t14_full(
                 completed_step=int(decision["m_effective"]),
                 cohort_count=len(cohort),
                 valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
+                runtime_handles=runtime_handles,
             )
             raise TasteComRecGCFullError(
                 "SCIENTIFIC_FAILED_INSUFFICIENT_VALID_RULES"
@@ -802,6 +1139,7 @@ def run_t14_full(
             completed_step=int(decision["m_effective"]),
             cohort_count=len(cohort),
             valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
+            runtime_handles=runtime_handles,
         )
         common = _common_recourse_summary(
             modules=modules,
@@ -812,6 +1150,8 @@ def run_t14_full(
             parameters=parameters,
         )
         bridge_evidence = bridge.report()
+        transition_evidence = runtime_handles.transition_map.audit()
+        graph_state_evidence = runtime_handles.live_graph_state.runtime_diagnostics()
     inputs.revalidate()
     final = {
         "schema_version": "tastemolnet_t14_comrecgc_full_v1",
@@ -827,6 +1167,16 @@ def run_t14_full(
         "resource_cap": decision,
         "bridge": bridge_evidence,
         "common_recourse": common,
+        "bounded_runtime": {
+            "transition_cache": transition_evidence,
+            "live_graph_state": graph_state_evidence,
+            "checkpoint_schema": RUNTIME_STATE_SCHEMA,
+            "checkpoint_identity_sha256": _sha256_file(
+                checkpoint_identity_path
+            ),
+            "raw_neighbor_graphs_retained_unbounded": False,
+            "process_peak_rss_bytes": _process_peak_rss_bytes(),
+        },
         "same_frozen_three_class_gine": True,
         "rf_oracle_used": False,
         "train_loaded": True,
@@ -877,6 +1227,7 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         "progress.json",
         "resource_cap_receipt.json",
         "valid_unique.json",
+        "checkpoint_identity.json",
     }
     if not root.is_dir() or not required.issubset(
         {path.name for path in root.iterdir()}
@@ -895,9 +1246,45 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
     resource = json.loads((root / "resource_cap_receipt.json").read_text("utf-8"))
     valid = json.loads((root / "valid_unique.json").read_text("utf-8"))
     progress = json.loads((root / "progress.json").read_text("utf-8"))
+    checkpoint_identity = json.loads(
+        (root / "checkpoint_identity.json").read_text("utf-8")
+    )
     cohort_bytes = (root / "cohort.jsonl").read_bytes()
     effective = resource.get("m_effective") if type(resource) is dict else None
-    latest = root / "checkpoints" / f"checkpoint-{effective:06d}.pt" if type(effective) is int else root
+    latest = (
+        root / "checkpoints" / f"step-{effective:012d}"
+        if type(effective) is int
+        else root
+    )
+    receipt_path = (
+        root / "checkpoints" / f"checkpoint-{effective:06d}.json"
+        if type(effective) is int
+        else root
+    )
+    checkpoint_validation = None
+    checkpoint_receipt = None
+    if (
+        type(checkpoint_identity) is dict
+        and type(checkpoint_identity.get("provenance")) is dict
+        and type(checkpoint_identity.get("scientific_argv")) is list
+        and type(checkpoint_identity.get("command_sha256")) is str
+        and latest.is_dir()
+        and receipt_path.is_file()
+    ):
+        from src.baselines.comrecgc.generation_checkpoint import (
+            validate_generation_checkpoint,
+        )
+
+        checkpoint_validation = validate_generation_checkpoint(
+            latest,
+            expected_provenance=checkpoint_identity["provenance"],
+            expected_scientific_argv=checkpoint_identity["scientific_argv"],
+            expected_command_sha256=checkpoint_identity["command_sha256"],
+            expected_total_steps=M_FALLBACK_MAX,
+            expected_completed_step=effective,
+        )
+        checkpoint_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    bounded_runtime = manifest.get("bounded_runtime") if type(manifest) is dict else None
     if (
         type(manifest) is not dict
         or manifest.get("schema_version") != "tastemolnet_t14_comrecgc_full_v1"
@@ -917,6 +1304,18 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         or manifest.get("cohort_jsonl_sha256") != _sha256_bytes(cohort_bytes)
         or manifest.get("resource_cap") != resource
         or manifest.get("valid_unique") != valid
+        or type(bounded_runtime) is not dict
+        or bounded_runtime.get("checkpoint_schema") != RUNTIME_STATE_SCHEMA
+        or bounded_runtime.get("raw_neighbor_graphs_retained_unbounded") is not False
+        or bounded_runtime.get("checkpoint_identity_sha256")
+        != _sha256_file(root / "checkpoint_identity.json")
+        or type(bounded_runtime.get("transition_cache")) is not dict
+        or bounded_runtime["transition_cache"].get("patch")
+        != "compact_transition_action_replay_lru_v1"
+        or bounded_runtime["transition_cache"].get("scientific_parameters_changed")
+        is not False
+        or type(bounded_runtime.get("live_graph_state")) is not dict
+        or bounded_runtime["live_graph_state"].get("unresolved_lookups") != 0
         or type(cohort_manifest) is not dict
         or cohort_manifest.get("status") != "PASS"
         or cohort_manifest.get("policy") != COHORT_POLICY
@@ -926,8 +1325,21 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         or valid.get("valid_unique_rule_count", 0) < MIN_VALID_UNIQUE_RULES
         or progress.get("status") != "PASS"
         or progress.get("completed_step") != effective
-        or not latest.is_file()
-        or _checkpoint_receipt_path(latest).is_file() is not True
+        or checkpoint_identity.get("schema_version")
+        != CHECKPOINT_PROVENANCE_SCHEMA
+        or checkpoint_identity.get("raw_neighbor_graphs_retained_unbounded") is not False
+        or checkpoint_identity.get("transition_expanded_capacity")
+        != TRANSITION_EXPANDED_CAPACITY
+        or checkpoint_validation is None
+        or checkpoint_validation.completed_step != effective
+        or type(checkpoint_receipt) is not dict
+        or checkpoint_receipt.get("schema_version")
+        != "tastemolnet_t14_checkpoint_v2"
+        or checkpoint_receipt.get("checkpoint_dir") != str(latest)
+        or checkpoint_receipt.get("checkpoint_digest")
+        != checkpoint_validation.checkpoint_digest
+        or checkpoint_receipt.get("bounded_transition_state") is not True
+        or checkpoint_receipt.get("authoritative_graph_store_snapshot") is not True
     ):
         raise TasteComRecGCFullError("Taste T14 terminal science closure changed")
     inventory = {
