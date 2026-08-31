@@ -2842,3 +2842,15 @@ Mutagenicity roadmaps.
   and paired static-refusal Slurm parity.
 - [ ] Launch one fresh UUID output from the immutable reviewed commit; generation
   must not open validation, calibration, or test.
+
+## 2026-08-31: Fixed eight-stage fast-16of16-v2 heartbeat
+
+- [x] Bind exactly AIDS postprocess, Mut exact, BACE ComRecGC, BACE GlobalGCE,
+  and Taste T6/T7/T8/T14 in one immutable spec.
+- [x] Validate exact live PID generation/command tokens and pinned progress or
+  terminal paths without fuzzy discovery.
+- [x] Keep science launch, process signaling, matrix publication, and GNN
+  ablation outside the observer.
+- [x] Add status, AutoDL launch, static-refusal Slurm parity, and focused tests.
+- [ ] Deploy a fresh spec containing the refreshed live PID generations and
+  start its 60-second heartbeat after the concrete stages are launched.

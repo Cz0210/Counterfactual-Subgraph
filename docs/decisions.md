@@ -119,6 +119,37 @@ during generation and the resource decision.
 
 Accepted
 
+---
+
+## [2026-08-31] Restrict fast-16of16-v2 to eight concrete stage observations
+
+### Motivation
+
+The old deadline heartbeat is stale and the Taste controller exited, while the
+remaining science already has dataset-specific launchers and exact process
+identities.  A new scheduler platform would add no scientific capability.
+
+### Decision
+
+Fast-v2 accepts exactly AIDS postprocess, Mut exact, BACE ComRecGC, BACE
+GlobalGCE, and Taste T6/T7/T8/T14 bindings.  It validates exact PID generation
+and command tokens when present, observes only caller-pinned progress and
+terminal files, and writes a 60-second heartbeat.  It cannot launch or signal
+science, publish the matrix, change a root, or enable GNN ablation.
+
+### Consequences
+
+- Existing and independently launched science remains owned by its dataset
+  runner; fast-v2 supplies one restartable status authority.
+- Missing future PIDs remain visibly `QUEUED` rather than being inferred from
+  fuzzy process matching.
+- Stage launch and any graceful stop remain separate, explicitly authorized
+  actions.
+
+### Status
+
+Accepted
+
 ## [2026-08-31] Losslessly adopt the fixed-budget NeuroSED PASS for T7
 
 ### Motivation
