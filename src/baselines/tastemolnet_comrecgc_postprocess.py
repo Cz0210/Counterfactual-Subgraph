@@ -477,9 +477,18 @@ def materialize_generation_candidates(
             raise TasteComRecGCPostprocessError(
                 "T14 common recourse is not one connected full graph"
             )
-        canonical = Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
-        if not canonical:
+        roundtrip = Chem.MolToSmiles(
+            molecule,
+            canonical=True,
+            isomericSmiles=False,
+            allHsExplicit=True,
+        )
+        if not roundtrip:
             raise TasteComRecGCPostprocessError("T14 candidate canonicalization failed")
+        # The checkpoint string was itself produced by the native attributed-
+        # graph canonicalizer.  Keep those exact bytes as the GINE/MolCLR input
+        # instead of letting a second serializer alter explicit-H spelling.
+        canonical = str(record["canonical_graph"])
         seen.add(graph_hash)
         candidates.append(
             {
@@ -491,6 +500,7 @@ def materialize_generation_candidates(
                 "generation_rank": expected_rank,
                 "cluster_id": int(source["cluster_id"]),
                 "canonical_smiles": canonical,
+                "rdkit_roundtrip_smiles": roundtrip,
                 "destination_label": int(source["destination_label"]),
                 "score": float(source["score"]),
                 "frequency": int(source["frequency"]),

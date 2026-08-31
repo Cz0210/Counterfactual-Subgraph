@@ -172,6 +172,8 @@ class _FakeProvider:
 def test_materializes_only_official_checkpointed_common_recourses() -> None:
     pytest.importorskip("rdkit")
     generation, bridge = _generation_payload()
+    first_hash = _sha(1)
+    bridge["records"][first_hash]["canonical_graph"] = "[CH3][CH3]"
     rows = materialize_generation_candidates(
         generation_manifest=generation, bridge_state=bridge
     )
@@ -180,6 +182,8 @@ def test_materializes_only_official_checkpointed_common_recourses() -> None:
     assert {row["destination_label"] for row in rows} == {0, 2}
     assert all(row["source_split"] == "train" for row in rows)
     assert all(row["lineage_count"] == 1 for row in rows)
+    assert rows[0]["canonical_smiles"] == "[CH3][CH3]"
+    assert rows[0]["rdkit_roundtrip_smiles"] == "[CH3][CH3]"
 
 
 def test_materialization_rejects_fewer_than_ten() -> None:
