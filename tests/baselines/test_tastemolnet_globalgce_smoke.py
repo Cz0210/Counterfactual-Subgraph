@@ -5,7 +5,6 @@ import inspect
 import json
 import os
 from pathlib import Path
-import stat
 from types import SimpleNamespace
 
 import pytest
@@ -783,15 +782,19 @@ def test_post_callback_checkpoint_seal_adopts_only_after_writer_unwinds(
     branch = t8._HeldBranchDirectory.create(state, target_label=0)
     seal = None
     try:
-        checkpoint, heartbeat, callback_checkpoint, callback_heartbeat = (
+        _checkpoint, _heartbeat, callback_checkpoint, callback_heartbeat = (
             _write_planned_checkpoint_fixture(branch)
         )
         # Model the AutoFS trace: bytes/mode/mtime/inode are unchanged, while
         # final ctime becomes visible only after the callback stack unwinds.
-        checkpoint.chmod(0o600)
-        checkpoint.chmod(stat.S_IMODE(callback_checkpoint["mode"]))
-        heartbeat.chmod(0o600)
-        heartbeat.chmod(stat.S_IMODE(callback_heartbeat["mode"]))
+        callback_checkpoint = {
+            **callback_checkpoint,
+            "ctime_ns": max(0, callback_checkpoint["ctime_ns"] - 1),
+        }
+        callback_heartbeat = {
+            **callback_heartbeat,
+            "ctime_ns": max(0, callback_heartbeat["ctime_ns"] - 1),
+        }
 
         seal = t8._PostCallbackCheckpointSeal.create(
             branch,
