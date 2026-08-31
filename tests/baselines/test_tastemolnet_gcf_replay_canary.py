@@ -200,6 +200,17 @@ def test_threshold_loader_reopens_real_selector_contract(tmp_path: Path) -> None
     assert authority["test_payload_loaded"] is False
 
 
+def test_threshold_loader_allows_content_pinned_clean_worktree_relocation(
+    tmp_path: Path,
+) -> None:
+    path, expected = _threshold_fixture(tmp_path)
+    relocated = tmp_path / "relocated-official"
+    relocated.mkdir()
+    expected["expected_official_root"] = relocated
+    authority, _ = load_threshold_authority(path, **expected)
+    assert authority["neurosed_distance_threshold"] == 0.04
+
+
 def test_threshold_loader_rejects_test_selection(tmp_path: Path) -> None:
     path, expected = _threshold_fixture(tmp_path)
     payload = json.loads(path.read_text(encoding="utf-8"))

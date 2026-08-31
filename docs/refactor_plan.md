@@ -24,6 +24,8 @@
 - [x] Consume and rehash the real calibration-only T7 NeuroSED threshold
   selector authority, receipt, input authority and file inventory; reject a
   scalar/default replacement.
+- [x] Permit the selector's clean execution checkout to relocate only when the
+  reopened integrated official-source inventory digest is identical.
 - [ ] Run and adopt the exact A800 replay gate before production.
 - [ ] Before 20k, replace bounded-canary all-history Python record retention
   with a compact deterministic live-registry plus reopenable history hash

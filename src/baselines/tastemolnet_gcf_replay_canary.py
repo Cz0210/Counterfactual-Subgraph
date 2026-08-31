@@ -395,6 +395,16 @@ def load_threshold_authority(
     pair_digest = _require_sha256(
         raw.get("pair_inventory_sha256"), field="threshold pair inventory SHA"
     )
+    # The selector was published from an older clean execution worktree.  Its
+    # absolute checkout path is not a scientific identity: the held source
+    # inventory immediately below is.  Reopen both roots to reject aliases or
+    # missing inputs, but permit a clean-worktree relocation when the pinned
+    # official inventory digest is unchanged.
+    _absolute(
+        input_authority.get("official_gcf_root"),
+        field="threshold official GCF root",
+    )
+    _absolute(expected_official_root, field="expected official GCF root")
     if (
         set(input_authority) != _THRESHOLD_INPUT_KEYS
         or input_authority.get("schema_version") != THRESHOLD_INPUT_SCHEMA
@@ -449,11 +459,6 @@ def load_threshold_authority(
         )
         or _absolute(input_authority.get("t3_root"), field="threshold T3 root")
         != _absolute(expected_t3_root, field="expected T3 root")
-        or _absolute(
-            input_authority.get("official_gcf_root"),
-            field="threshold official GCF root",
-        )
-        != _absolute(expected_official_root, field="expected official GCF root")
     ):
         raise TasteGCFFullResumeError("T12 threshold input authority changed")
     for field in (

@@ -1,5 +1,32 @@
 # Decisions Log
 
+## [2026-09-01] Bind T12 threshold reuse to official source content, not checkout path
+
+### Motivation
+
+The calibration-only threshold selector was published from the clean
+`ef89a09` execution worktree.  The T12 replay implementation lives in a later
+clean worktree whose integrated official GCF directory has the same pinned
+inventory.  Requiring those two absolute checkout paths to be identical made
+the real A800 canary impossible: the old path failed the current integrated-
+source hold, while the current path failed the selector's path comparison.
+
+### Decision
+
+Reopen both physical roots, but allow clean-worktree relocation when the
+selector's official-source inventory SHA-256 exactly equals the inventory
+derived from the currently held integrated source.  Model hashes, selector
+receipt, calibration pair inventory, method semantics, threshold value, split
+isolation, and every official source file digest remain mandatory.
+
+### Consequences
+
+This removes a non-scientific filesystem-path dependency only.  It does not
+permit source drift, a hand-written threshold, test selection, symlinks, or a
+missing old authority root.
+
+---
+
 ## [2026-09-01] Bound Taste T14 transition memory without changing the walk
 
 ### Motivation
