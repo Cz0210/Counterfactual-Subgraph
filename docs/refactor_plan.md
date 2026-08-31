@@ -29,6 +29,20 @@
 - [ ] Deploy the committed appender and enqueue one invocation after each real
   T11--T14 final PASS, always chaining from the latest authority root.
 
+## 2026-09-01: Read-only BACE GlobalGCE affine-edge terminal recovery
+
+- [x] Share the pinned official affine-score `argmax`/one-hot materializer
+  between live generation and read-only terminal recovery.
+- [x] Keep the native rule validator unchanged and bind the completed 100-epoch
+  resume, exact-top-k, source, official checkout and frozen-GINE identities.
+- [x] Reuse the existing candidate task ID and downstream
+  calibration/selection/test/freeze task graph without retraining.
+- [x] Support the authorized 10--20 GlobalGCE effective-rule range and explicit
+  no-copy plateau semantics in frozen standardization.
+- [x] Add the dataset-specific CLI, Slurm wrapper and focused regressions.
+- [ ] Deploy to AutoDL, rematerialize the retained 80-rule checkpoint into a
+  fresh root, and continue only if independent validation finds `R >= 10`.
+
 
 ## 2026-09-01: Route AIDS chemistry through its frozen untyped candidate space
 

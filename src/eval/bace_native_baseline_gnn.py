@@ -76,6 +76,12 @@ BACE_OURS_B12_THRESHOLD_CONFIG_SHA256 = (
 )
 
 
+def _minimum_candidate_count(method_id: str) -> int:
+    """Return the preregistered resource-capped minimum for one baseline."""
+
+    return 10 if method_id in {"comrecgc", "globalgce"} else 20
+
+
 def _manifest_value(manifest: Mapping[str, Any], field: str) -> Any:
     """Read one lineage field from the shard or its explicit inputs block."""
 
@@ -367,7 +373,7 @@ def _load_candidates(
             raise ValueError("Frozen selector and selected_top20 ordering differ")
     if str(manifest.get("method_id")) != spec.method_id:
         raise ValueError("Baseline predecessor belongs to a different method")
-    minimum_candidates = 10 if spec.method_id == "comrecgc" else 20
+    minimum_candidates = _minimum_candidate_count(spec.method_id)
     if len(candidates) < minimum_candidates:
         raise ValueError(
             "Native BACE baseline evaluation requires at least "
@@ -1307,7 +1313,7 @@ def run_native_baseline_selector(
     if "" in calibration_candidate_ids:
         raise ValueError("Calibration matrix contains an empty candidate ID")
     effective_k = min(20, len(calibration_candidate_ids))
-    minimum_k = 10 if method_id == "comrecgc" else 20
+    minimum_k = _minimum_candidate_count(method_id)
     if effective_k < minimum_k:
         raise ValueError(
             f"Native selector has {effective_k} candidates, below minimum {minimum_k}"
@@ -1455,11 +1461,14 @@ def freeze_native_baseline_final(
     theta_star = float(thresholds["theta_star"])
     prefix_metrics = []
     for k in range(1, 21):
-        best = np.min(matrix[:, :k], axis=1)
+        effective_prefix_k = min(k, len(ids))
+        best = np.min(matrix[:, :effective_prefix_k], axis=1)
         finite = best[np.isfinite(best)]
         prefix_metrics.append(
             {
                 "K": k,
+                "effective_rule_count": effective_prefix_k,
+                "plateau_after_effective_k": k > len(ids),
                 "SuppCov": float(np.mean(np.isfinite(best))),
                 "CCRCov": float(np.mean(best <= theta_star)),
                 "avg_cost": float(np.mean(finite)) if finite.size else None,

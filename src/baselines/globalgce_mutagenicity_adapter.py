@@ -3029,6 +3029,74 @@ def _validate_frozen_gine_native_rule_row(row: dict[str, Any]) -> dict[str, Any]
     return row
 
 
+def materialize_frozen_gine_native_rule_rows(
+    *,
+    rules: Mapping[str, Any],
+    atom_symbols: Sequence[str],
+    bond_names: Sequence[str],
+    oracle_checkpoint_hash: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Hard-decode and validate one saved frozen-GINE rule tensor bundle.
+
+    The saved ``edge_attrs_reconst`` values at pinned GlobalGCE commit
+    ``157e65c`` are unbounded affine class scores.  This is the shared
+    materialization boundary for both the live trainer and read-only recovery:
+    it applies the official row-wise ``argmax`` categorical decode, stores a
+    one-hot bond label, and then reopens every row through
+    :class:`GlobalGCENativeRule`.  Callers therefore cannot recover a failed
+    catalog by merely relaxing the native ``[0, 1]`` validator.
+    """
+
+    required_rule_tensors = (
+        "feat",
+        "adj",
+        "edge_attr",
+        "features_reconst",
+        "adj_reconst",
+        "edge_attrs_reconst",
+    )
+    missing_rule_tensors = [
+        name for name in required_rule_tensors if rules.get(name) is None
+    ]
+    if missing_rule_tensors:
+        raise RuntimeError(
+            "Frozen-GINE GlobalGCE rule checkpoint is incomplete: "
+            f"{missing_rule_tensors}"
+        )
+    rule_count = int(rules["feat"].shape[0])
+    if any(
+        int(rules[name].shape[0]) != rule_count
+        for name in required_rule_tensors
+    ):
+        raise RuntimeError("GlobalGCE frozen rule tensor counts differ")
+
+    rule_rows: list[dict[str, Any]] = []
+    rejected_rule_rows: list[dict[str, Any]] = []
+    for rule_index in range(rule_count):
+        candidate_id = f"native-index-{rule_index}"
+        try:
+            row = _frozen_gine_native_rule_row(
+                rules=rules,
+                rule_index=rule_index,
+                atom_symbols=atom_symbols,
+                bond_names=bond_names,
+                oracle_checkpoint_hash=oracle_checkpoint_hash,
+            )
+            candidate_id = str(row["candidate_id"])
+            row = _validate_frozen_gine_native_rule_row(row)
+        except Exception as exc:
+            rejected_rule_rows.append(
+                {
+                    "native_rule_index": rule_index,
+                    "candidate_id": candidate_id,
+                    "reason": f"{type(exc).__name__}:{exc}",
+                }
+            )
+            continue
+        rule_rows.append(row)
+    return rule_rows, rejected_rule_rows
+
+
 def _augmented_rows_by_source_parent(
     augmented_dataset: Any,
     source_expansion_order: Sequence[int],
@@ -4235,49 +4303,15 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "fresh_exact_top_k" if gspan_exact_top_k_pruning else "fresh_exhaustive"
             )
         if use_frozen_gine:
-            required_rule_tensors = (
-                "feat",
-                "adj",
-                "edge_attr",
-                "features_reconst",
-                "adj_reconst",
-                "edge_attrs_reconst",
-            )
-            missing_rule_tensors = [
-                name for name in required_rule_tensors if rules.get(name) is None
-            ]
-            if missing_rule_tensors:
-                raise RuntimeError(
-                    "Frozen-GINE GlobalGCE rule checkpoint is incomplete: "
-                    f"{missing_rule_tensors}"
+            rule_rows, rejected_rule_rows = (
+                materialize_frozen_gine_native_rule_rows(
+                    rules=rules,
+                    atom_symbols=source_dataset.atom_symbols,
+                    bond_names=source_dataset.bond_names,
+                    oracle_checkpoint_hash=bridge.checkpoint_id,
                 )
-            rule_count = int(rules["feat"].shape[0])
-            if any(int(rules[name].shape[0]) != rule_count for name in required_rule_tensors):
-                raise RuntimeError("GlobalGCE frozen rule tensor counts differ")
-            rule_rows: list[dict[str, Any]] = []
-            rejected_rule_rows: list[dict[str, Any]] = []
-            for rule_index in range(rule_count):
-                candidate_id = f"native-index-{rule_index}"
-                try:
-                    row = _frozen_gine_native_rule_row(
-                        rules=rules,
-                        rule_index=rule_index,
-                        atom_symbols=source_dataset.atom_symbols,
-                        bond_names=source_dataset.bond_names,
-                        oracle_checkpoint_hash=bridge.checkpoint_id,
-                    )
-                    candidate_id = str(row["candidate_id"])
-                    row = _validate_frozen_gine_native_rule_row(row)
-                except Exception as exc:
-                    rejected_rule_rows.append(
-                        {
-                            "native_rule_index": rule_index,
-                            "candidate_id": candidate_id,
-                            "reason": f"{type(exc).__name__}:{exc}",
-                        }
-                    )
-                    continue
-                rule_rows.append(row)
+            )
+            rule_count = len(rule_rows) + len(rejected_rule_rows)
             _write_jsonl(output_dir / "native_rule_catalog.jsonl", rule_rows)
             _write_jsonl(
                 output_dir / "native_rule_rejections.jsonl", rejected_rule_rows
@@ -5694,6 +5728,7 @@ __all__ = [
     "GlobalGCEGraphDecodeResult",
     "GlobalGCEMutagenicityCodecError",
     "NativeGenerationResult",
+    "OFFICIAL_AFFINE_EDGE_HARD_DECODE",
     "OFFICIAL_MUTAGENICITY_EDGE_LABEL_TO_BOND",
     "OFFICIAL_MUTAGENICITY_NODE_LABEL_TO_SYMBOL",
     "OfficialGlobalGCEMutagenicityGenerator",
@@ -5707,6 +5742,7 @@ __all__ = [
     "globalgce_tensors_to_graph_record",
     "load_strict_train_parents",
     "log_globalgce_phase_memory",
+    "materialize_frozen_gine_native_rule_rows",
     "probe_source_graph_codec",
     "require_source_codec_gate",
     "stable_candidate_id",

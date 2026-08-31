@@ -711,7 +711,9 @@ def _compute_metrics(
 ) -> dict[str, Any]:
     rows = _jsonl(inputs.pair_matrix_path)
     ordered = [str(value) for value in inputs.selection_manifest.get("ordered_rule_ids", [])]
-    minimum_rules = 10 if inputs.method_slug == "comrecgc" else MAX_K
+    minimum_rules = (
+        10 if inputs.method_slug in {"comrecgc", "globalgce"} else MAX_K
+    )
     if (
         not minimum_rules <= len(ordered) <= MAX_K
         or len(set(ordered)) != len(ordered)
@@ -852,9 +854,9 @@ def _compute_metrics(
                 }
             )
 
-    # The authorized resource-capped ComRecGC route may finish with R in
-    # [10, 20].  Figure 3 remains defined through K=20 by holding the complete
-    # R-rule prefix constant; no rule is copied or fabricated.
+    # The authorized resource-capped ComRecGC and GlobalGCE routes may finish
+    # with R in [10, 20].  Figure 3 remains defined through K=20 by holding the
+    # complete R-rule prefix constant; no rule is copied or fabricated.
     for k in range(len(ordered) + 1, MAX_K + 1):
         plateau = dict(prefix[-1])
         plateau["k"] = k

@@ -31,6 +31,43 @@ adapter only with the already-defined standardized terminal contract.
 
 ---
 
+## [2026-09-01] Recover the completed BACE GlobalGCE affine-edge terminal without retraining
+
+### Motivation
+
+The frozen-GINE GlobalGCE run completed all 100 epochs and exact top-k mining,
+but its old worktree rejected all 80 learned rules because it treated the
+pinned official decoder's unbounded affine bond-class scores as probabilities.
+The current audited adapter already defines the official hard boundary as
+row-wise categorical `argmax` followed by one-hot typed bond attributes.
+
+### Decision
+
+Reopen the failed train-only terminal and `globalgce_rules.pt` read-only, bind
+the completed heartbeat/resume/exact-top-k, source, official checkout and GINE
+hashes, and rematerialize each rule through the shared official hard decoder
+and the unchanged `GlobalGCENativeRule` validator. Publish only to a fresh
+candidate root. Require at least ten semantic-unique valid rules, select no more
+than twenty, never duplicate a rule, and plateau Figure 3 for `k > R` when
+`10 <= R < 20`. Reuse the existing calibration, selector, held-out test,
+freeze and standardization tasks; do not rerun training or expose test bytes to
+recovery.
+
+### Consequences
+
+- The numeric rule validator remains strict; only the missing typed edge bridge
+  is repaired.
+- Source artifacts are hash-snapshotted before and after recovery and cannot be
+  mutated or held open for writing.
+- A real BACE GlobalGCE cell is still contingent on recovered `R >= 10` and the
+  unchanged downstream calibration/test/final verification chain.
+
+### Status
+
+Implemented with focused local tests; AutoDL materialization is pending.
+
+---
+
 ## [2026-09-01] Separate T14 train generation from paper-cell evaluation
 
 ### Motivation
