@@ -17,6 +17,7 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
+echo "graph_identity=canonical_parent_free_attributed_graph_sha256_v1"
 
 echo "TASTE_T7_WRAPPER_AUTODL_ONLY: use scripts/autodl/run_tastemolnet_gcf_smoke_v2.sh" >&2
 exit 64

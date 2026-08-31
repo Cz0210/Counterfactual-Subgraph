@@ -272,9 +272,11 @@ evidence, pathname cleanup was delegated to the temporary runtime, no unlink
 was attempted by the T7 security boundary, and no checkpoint payload was
 persisted to worker evidence. The eventual verified root contains no SMILES, molecule
 ID, native graph tensor, source CSV row, checkpoint payload, or reconstructable
-dataset artifact. Opaque SHA-256 graph/embedding identities and aggregate counts are
-retained for smoke integrity only. `data_redistribution_allowed` remains
-false.
+dataset artifact. The walk registry retains only the canonical parent-free
+attributed-graph SHA-256; an embedding SHA-256 is transient checkpoint evidence
+used only to prove official graph/embedding call order and is never a graph
+identity. Aggregate counts are retained for smoke integrity only.
+`data_redistribution_allowed` remains false.
 
 ## CLI parity
 
