@@ -48,6 +48,8 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "route=read_only_exact_adoption_then_chemistry_wnode_freeze_matrix"
+echo "exact_contract=sklearn_float64_multi_component_eps0.02_min_samples3"
+echo "matrix_publication=verified_same_parent_atomic_noreplace"
 echo "common_root=$MUT_EXACT_COMMON_ROOT"
 echo "trace_parity=$MUT_TRACE_PARITY"
 
@@ -77,4 +79,5 @@ python scripts/autodl/run_mut_comrecgc_exact_postprocess_v1.py \
   --prior-matrix-root "$PRIOR_MATRIX_ROOT" \
   --matrix-output-root "$MUT_MATRIX_OUTPUT_ROOT" \
   --output-root "$MUT_POSTPROCESS_OUTPUT_ROOT" \
+  --proc-root /proc \
   "${resume_args[@]}"

@@ -3008,6 +3008,23 @@ Mutagenicity roadmaps.
 - [x] Synchronize its fail-closed expected payload and raw SHA authority.
 - [x] Re-run the complete downstream-policy test module, including mutation and
   exact-path rejection cases.
+
+## 2026-08-31: Mut exact postprocess fail-closed publication hardening
+
+- [x] Pin the completed common-recourse parameters and the full production
+  sklearn-float64 multi-component DBSCAN identity, including exact worker,
+  metric, epsilon, minimum-sample, and no-approximation contracts.
+- [x] Replace the compatibility parity reader with the canonical Mut trace
+  parity gate and bind it to the adopted physical generation root.
+- [x] Reject every source/output or output/output containment relationship and
+  freeze the normalized path-isolation result into resume evidence.
+- [x] Require the exact controller PASS schema and prove its manager and child
+  PIDs absent before downstream work.
+- [x] Stage and verify the complete matrix successor before an atomic
+  no-replace directory publish; strictly reopen all prior rows, source
+  inventory, append fields, and writer evidence after interruption.
+- [ ] Supply the external `mut_trace_on_off_parity_v1` PASS authority, then run
+  one fresh postprocess root; no remote launch is part of this code change.
 - [ ] Retrigger T6 with a fresh UUID/root from the immutable successor commit;
   never adopt the pre-model policy-gate failure.
 

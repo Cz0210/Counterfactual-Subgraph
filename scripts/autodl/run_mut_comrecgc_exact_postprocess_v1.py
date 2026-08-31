@@ -32,6 +32,15 @@ def _absolute(value: str) -> Path:
     return path.resolve(strict=False)
 
 
+def _absolute_output(value: str) -> Path:
+    """Keep the requested final component visible for the no-symlink gate."""
+
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError(f"absolute path required: {value}")
+    return path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
@@ -49,8 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--common-root", type=_absolute, required=True)
     parser.add_argument("--trace-parity", type=_absolute, required=True)
     parser.add_argument("--prior-matrix-root", type=_absolute, required=True)
-    parser.add_argument("--matrix-output-root", type=_absolute, required=True)
-    parser.add_argument("--output-root", type=_absolute, required=True)
+    parser.add_argument("--matrix-output-root", type=_absolute_output, required=True)
+    parser.add_argument("--output-root", type=_absolute_output, required=True)
     parser.add_argument("--proc-root", type=_absolute, default=Path("/proc"))
     parser.add_argument("--resume", action="store_true")
     return parser

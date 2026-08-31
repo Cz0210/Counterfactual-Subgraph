@@ -34,6 +34,48 @@ Accepted
 
 ---
 
+## [2026-08-31] Harden Mut exact adoption and matrix publication fail-closed
+
+### Motivation
+
+The first read-only Mut exact continuation hash-closed its source artifacts but
+did not pin the complete production DBSCAN/scientific parameter identity.  It
+also accepted a compatibility parity reader, allowed source/output containment,
+and exposed matrix files one at a time at the final pathname.  A crash could
+therefore leave an ambiguous partial successor, while resume checked only a
+small subset of the append receipt.
+
+### Decision
+
+Require the exact common-recourse parameters, 100 selected rows, and the full
+sklearn-1.7.2 float64 multi-component DBSCAN contract (`eps=0.02`,
+`min_samples=3`, brute Euclidean, four workers, no approximation or failure
+cap).  Validate the terminal controller schema and require both recorded PIDs
+absent.  Use the canonical Mut trace-on/off parity gate and bind its traced root
+to the adopted generation.
+
+Reject containment among either output and every frozen source authority, and
+between the two outputs.  Publish the matrix successor only after complete
+same-parent staging and verification, using an atomic no-replace directory
+rename.  Resume must revalidate all non-target rows, the target and Mut/Ours
+shared identity, both prior hashes, standardized inventory, writer evidence,
+execution identity, and every non-recomputation/non-imputation flag.
+
+### Consequences
+
+- No pair, DBSCAN, or common-recourse stage is added or rerun.
+- Exact production semantics and held-out-test boundaries are unchanged.
+- A pre-publication crash leaves no final matrix path; a post-publication crash
+  can adopt only a fully equivalent closed successor.
+- The remaining external blocker is still a canonical
+  `mut_trace_on_off_parity_v1` PASS receipt for the frozen generation.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Close the reviewed T6 GPU0 policy authority after relocation
 
 ### Motivation

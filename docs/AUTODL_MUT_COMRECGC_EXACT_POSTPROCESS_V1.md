@@ -21,6 +21,29 @@ The ordered stages are:
 The continuation uses deletion-based `strict_flip` semantics.  It does not
 reinterpret a selected fragment as a concept that predicts the original label.
 
+## Exact adoption closure
+
+Adoption is fail-closed on the production scientific identity.  In addition to
+the receipt and artifact SHA-256 closure, the runner requires all of the
+following without aliases or tolerances:
+
+- common-recourse parameters `theta=0.1`, `delta=0.02`,
+  `recourse_size=100`, `cf_size=100000`, `cluster_size=3`, and `seed=0`;
+- exactly 100 rows in `selected_common_recourses.json`;
+- DBSCAN `eps=0.02`, `min_samples=3`, Euclidean brute-neighbor search,
+  sklearn float64 label semantics (including self-neighbor behavior), and
+  sklearn `1.7.2`;
+- `sklearn_float64_exact_multi_component_v1`, four exact workers, no
+  single-component assumption, no failure-cap use, no approximation, and the
+  frozen minimum-adjacent-core-label border assignment;
+- a hash-valid terminal controller state for stage
+  `MUT_EXACT_MULTICOMPONENT_FAST16`, with matching worker PID, exit code zero,
+  empty failures, and both controller and worker absent from procfs.
+
+The canonical trace parity validator is used directly.  Its
+`traced_source_root` must be the same physical generation root adopted by the
+exact result; a valid receipt for another generation is rejected.
+
 ## Current scientific blocker
 
 The completed exact root and its adoption receipt are sufficient for the
@@ -83,6 +106,12 @@ markers and quiescent child process groups, and archives an incomplete
 non-checkpointed downstream stage before retry.  It never resumes or rewrites
 the adopted exact root.
 
+The postprocess root and matrix successor must be absolute, non-symlink,
+mutually disjoint paths.  Neither may equal, contain, or be contained by the
+generation, exact, parity, controller, upstream, dataset, teacher, MolCLR,
+threshold, or prior-matrix authorities.  The normalized isolation result is
+part of the resume contract.
+
 ## Matrix publication
 
 Matrix publication accepts only a closed prior authority whose
@@ -91,6 +120,14 @@ row supplies the frozen dataset/split/oracle/MolCLR/distance/threshold identity.
 The successor must add exactly one passing cell.  Every non-target row must be
 byte-for-byte equal as structured JSON, the standardized source must have no
 live writer, and the published authority must pass an independent reopen.
+
+Publication is crash-recoverable: all registry files and the append receipt are
+first written and verified in a unique same-parent staging directory.  Only a
+no-replace atomic directory rename may expose the final matrix path.  An
+interruption before that rename leaves the final path absent; an interruption
+after it is adopted only after revalidating the prior hashes, all non-target
+rows, the target/shared identity, source inventory, writer audit, append flags,
+and complete combined-audit closure.
 
 If the current matrix has a non-target transient row that cannot be reproduced
 from its frozen passing-cell roots, the strict append fails.  Provide a closed
