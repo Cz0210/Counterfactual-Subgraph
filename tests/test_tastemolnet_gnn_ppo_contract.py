@@ -1071,7 +1071,7 @@ def test_reported_output_filter_removes_descriptor_paths_from_logs() -> None:
     assert "/private/reviewed/t6-output/candidate_pool.jsonl" in rendered
 
 
-def test_formal_t6_entrypoints_freeze_real_gpu1_stable_loop_and_no_test_access() -> None:
+def test_formal_t6_entrypoints_freeze_real_stable_loop_and_no_test_access() -> None:
     project = Path(__file__).parents[1]
     trainer = (project / "scripts/train_tastemolnet_gnn_ppo.py").read_text(
         encoding="utf-8"
@@ -1104,10 +1104,16 @@ def test_formal_t6_entrypoints_freeze_real_gpu1_stable_loop_and_no_test_access()
     assert 'dataset="tastemolnet"' in trainer
     assert "num_classes=3" in trainer
     assert "source_label=1" in trainer
-    assert "TASTE_T6_WRAPPER_RELEASED=0" in wrapper
-    assert "TASTE_T6_WRAPPER_NOT_RELEASED" in wrapper
-    assert wrapper.index("TASTE_T6_WRAPPER_NOT_RELEASED") < wrapper.index("GPU_JSON=")
-    assert "--gpu-index 1" in wrapper
+    release = json.loads(runner.T6_RELEASE_CONFIG_PATH.read_text(encoding="utf-8"))
+    if release["release_enabled"] is False:
+        assert "TASTE_T6_WRAPPER_RELEASED=0" in wrapper
+        assert "TASTE_T6_WRAPPER_NOT_RELEASED" in wrapper
+        assert wrapper.index("TASTE_T6_WRAPPER_NOT_RELEASED") < wrapper.index("GPU_JSON=")
+    else:
+        assert release["release_enabled"] is True
+        assert "TASTE_T6_WRAPPER_RELEASED=1" in wrapper
+        assert "--gpu-index 0" in wrapper
+        assert "physical GPU0" in wrapper
     assert "--gpu-lock-mode exclusive" in wrapper
     assert '--updates "${TASTEMOLNET_T6_UPDATES:-5}"' in wrapper
     assert '--downstream-policy "$DOWNSTREAM_POLICY"' in wrapper
@@ -1291,20 +1297,26 @@ def test_t6_output_rejects_input_ancestor_or_descendant_before_creation(
         runner._fresh_output(parent, inputs=[parent / "future-input"])
 
 
-def test_t6_execution_is_release_disabled_until_all_runtime_hashes_are_pinned() -> None:
+def test_t6_execution_release_is_either_disabled_or_fully_pinned() -> None:
     release = json.loads(runner.T6_RELEASE_CONFIG_PATH.read_text(encoding="utf-8"))
-    assert release["release_enabled"] is False
-    assert release["release_state"] == (
-        "RELEASE_DISABLED_PENDING_INTEGRATION_COMMIT_AND_EXTERNAL_AUTHORITY"
-    )
-    assert all(
-        value is None
+    assert release["gpu_index"] == 0
+    pinned = {
+        key: value
         for key, value in release.items()
-        if key
-        not in {"schema_version", "release_enabled", "release_state", "gpu_index"}
-    )
-    with pytest.raises(RuntimeError, match="TASTE_T6_EXECUTION_NOT_RELEASED"):
-        runner._assert_execution_released()
+        if key not in {"schema_version", "release_enabled", "release_state", "gpu_index"}
+    }
+    if release["release_enabled"] is False:
+        assert release["release_state"] == (
+            "RELEASE_DISABLED_PENDING_INTEGRATION_COMMIT_AND_EXTERNAL_AUTHORITY"
+        )
+        assert all(value is None for value in pinned.values())
+        with pytest.raises(RuntimeError, match="TASTE_T6_EXECUTION_NOT_RELEASED"):
+            runner._assert_execution_released()
+    else:
+        assert release["release_enabled"] is True
+        assert release["release_state"] == "RELEASED_BY_EXTERNAL_EXECUTION_AUTHORITY"
+        assert all(value is not None for value in pinned.values())
+        assert runner._assert_execution_released() == release
 
 
 def test_t6_main_rejects_release_before_config_or_run(
@@ -1323,6 +1335,13 @@ def test_t6_main_rejects_release_before_config_or_run(
         lambda *_args, **_kwargs: calls.append("config"),
     )
     monkeypatch.setattr(runner, "run", lambda _args: calls.append("run"))
+    monkeypatch.setattr(
+        runner,
+        "_assert_execution_released",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("TASTE_T6_EXECUTION_NOT_RELEASED")
+        ),
+    )
     with pytest.raises(RuntimeError, match="TASTE_T6_EXECUTION_NOT_RELEASED"):
         runner.main([])
     assert calls == []
