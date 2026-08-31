@@ -36,7 +36,7 @@ DOWNSTREAM_POLICY_VERSION = 1
 BASE_POLICY_FILE_SHA256 = "b370ed9655f0a566b3615fc321c547945dd73fcee27d637110b801a766e1ca1b"
 BASE_POLICY_CANONICAL_SHA256 = "422e50a0d613c47dd451d9386c7dc4707a079087ebe62b3d72e6a6784dd1da3d"
 # Filled after the tracked JSON is finalized. Loading fails closed on drift.
-DOWNSTREAM_POLICY_FILE_SHA256 = "ac284f64b58646953e803d9f933cdae9a6fd163ebfdbd0816e89da5b9c9ae3ed"
+DOWNSTREAM_POLICY_FILE_SHA256 = "29bc6779af9b1d60784d76643f11a9d32213e04412818ce36ac4400ab2af46da"
 EXECUTION_SOURCE_ROOT = Path(__file__).resolve(strict=True).parents[2]
 TRACKED_DOWNSTREAM_POLICY_PATH = (
     EXECUTION_SOURCE_ROOT
@@ -175,7 +175,7 @@ def _expected_payload() -> dict[str, Any]:
                     "minimum_optimizer_steps": 5,
                     "mode": "train_only_frozen_gine_reward_ppo_smoke",
                     "num_classes": 3,
-                    "physical_gpu_index": 1,
+                    "physical_gpu_index": 0,
                     "rf_oracle_used": False,
                     "run": 1,
                     "source_label": 1,

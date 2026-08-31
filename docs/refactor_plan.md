@@ -2965,3 +2965,12 @@ Mutagenicity roadmaps.
   writable source descriptors in focused tests.
 - [ ] Launch a fresh AIDS postprocess root from the immutable reviewed commit;
   never reuse either failed postprocess root.
+
+## 2026-08-31: T6 reviewed GPU0 policy authority closure
+
+- [x] Preserve the already-reviewed T6 GPU0 policy JSON unchanged.
+- [x] Synchronize its fail-closed expected payload and raw SHA authority.
+- [x] Re-run the complete downstream-policy test module, including mutation and
+  exact-path rejection cases.
+- [ ] Retrigger T6 with a fresh UUID/root from the immutable successor commit;
+  never adopt the pre-model policy-gate failure.

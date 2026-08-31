@@ -1,5 +1,35 @@
 # Decisions Log
 
+## [2026-08-31] Close the reviewed T6 GPU0 policy authority after relocation
+
+### Motivation
+
+The reviewed downstream policy was changed from physical GPU1 to GPU0 for the
+authorized T6 release, but its fail-closed in-code expected value and raw-file
+SHA remained pinned to the pre-relocation bytes.  The real T6 child therefore
+exited before loading any model or creating its output root.
+
+### Decision
+
+Bind the loader to the already-reviewed tracked JSON exactly as committed:
+T6 physical GPU index zero and raw SHA-256
+`29bc6779af9b1d60784d76643f11a9d32213e04412818ce36ac4400ab2af46da`.
+Do not alter the JSON, any model, split, reward, optimizer, or GPU UUID release
+authority.  Retain exact-path, raw-hash, canonical-payload, and base-policy
+verification.
+
+### Consequences
+
+- T6 can pass its pre-science policy gate on the authorized GPU0 route.
+- Any byte or semantic drift from the tracked policy still fails closed.
+- The failed attempt remains non-adoptable; a retry must use a fresh UUID/root.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Bind omitted AIDS freeze-only RNG evidence to its recovery receipt
 
 ### Motivation
