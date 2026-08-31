@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from src.baselines.tastemolnet_comrecgc_full import (
     M_FALLBACK_MAX,
     M_MAX,
     GENERATION_PASS_MARKER,
+    TasteComRecGCFullBridge,
     TasteComRecGCFullError,
     build_full_train_correct_source_cohort,
     fallback_checkpoint_targets,
@@ -86,6 +88,17 @@ def test_resource_cap_uses_20k_then_one_25k_fallback() -> None:
     assert fallback_checkpoint_targets(22_500) == (25_000,)
     with pytest.raises(TasteComRecGCFullError, match="cursor"):
         fallback_checkpoint_targets(17_500)
+
+
+def test_full_bridge_rejects_candidate_lineage_outside_frozen_train_cohort() -> None:
+    bridge = TasteComRecGCFullBridge(
+        cohort_count=3,
+        adapter=object(),
+        feature_atomic_numbers=(1, 6, 7),
+    )
+    graph = SimpleNamespace(comrecgc_source_index=3)
+    with pytest.raises(TasteComRecGCFullError, match="escapes the train cohort"):
+        bridge.call([graph], {})
 
 
 def test_independent_terminal_verifier_reopens_bounded_train_only_closure(

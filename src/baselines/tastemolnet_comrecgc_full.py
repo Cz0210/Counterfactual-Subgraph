@@ -23,6 +23,7 @@ from src.baselines.tastemolnet_comrecgc_smoke import (
     _common_recourse_summary,
     _identity_graph_sha256,
     _restore_reload_checkpoint,
+    _scalar_native_int,
     _seed_all,
     _torch_load_handle,
     _write_reload_checkpoint,
@@ -50,6 +51,33 @@ GENERATION_PASS_MARKER = "[TASTE_T14_COMRECGC_FULL_GENERATION_PASS]"
 
 class TasteComRecGCFullError(TasteComRecGCSmokeError):
     """The fixed T14 scientific contract was violated."""
+
+
+class TasteComRecGCFullBridge(TasteComRecGCMulticlassBridge):
+    """Bind every scored candidate lineage to one frozen train parent."""
+
+    def __init__(self, *, cohort_count: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        if type(cohort_count) is not int or cohort_count <= 0:
+            raise TasteComRecGCFullError("Taste T14 cohort count is invalid")
+        self.cohort_count = cohort_count
+
+    def call(
+        self,
+        graphs: Sequence[Any],
+        importance_args: Mapping[str, Any],
+    ) -> tuple[Any, Any]:
+        for graph in graphs:
+            source_index = _scalar_native_int(
+                getattr(graph, "comrecgc_source_index", None),
+                field="graph.comrecgc_source_index",
+                minimum=0,
+            )
+            if source_index >= self.cohort_count:
+                raise TasteComRecGCFullError(
+                    "Taste T14 candidate lineage escapes the train cohort"
+                )
+        return super().call(graphs, importance_args)
 
 
 @dataclass(frozen=True, slots=True)
@@ -641,9 +669,10 @@ def run_t14_full(
     module.input_graphs_covered = torch.zeros(
         parameters.source_count, dtype=torch.float32
     )
-    bridge = TasteComRecGCMulticlassBridge(
+    bridge = TasteComRecGCFullBridge(
         adapter=adapter,
         feature_atomic_numbers=loaded_train.schema.feature_atomic_numbers,
+        cohort_count=len(source_graphs),
     )
 
     def combined_lineage(original: Any) -> Any:
@@ -932,6 +961,7 @@ __all__ = [
     "GENERATION_PASS_MARKER",
     "STAGE",
     "TasteComRecGCFullError",
+    "TasteComRecGCFullBridge",
     "TasteComRecGCFullParameters",
     "VALID_UNIQUE_POLICY",
     "build_full_train_correct_source_cohort",
