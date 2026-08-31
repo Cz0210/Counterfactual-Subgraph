@@ -1,5 +1,36 @@
 # Decisions Log
 
+## [2026-08-31] Adopt completed AIDS exact DBSCAN read-only for postprocessing
+
+### Motivation
+
+AIDS has completed all 91,916,686 exact rows. Recomputing DBSCAN or its pair
+store would waste the dominant runtime and create an unnecessary second
+science identity; only streamed summary and standardized evaluation remain.
+
+### Decision
+
+Add one AIDS-only adoption interface. It reopens the typed controller-bound
+exact terminal and requires exact vector/hash/contract/component closure,
+all-core, zero-noise, and sklearn-float64 evidence. A fresh root writes only a
+small adoption manifest and the existing streamed summary, chemistry, WNode,
+Figure 3/4, Table 2, gate, and freeze outputs. It cannot create a fresh DBSCAN
+tree, regenerate the pair store, use CUDA, exceed eight CPU workers, or refresh
+the matrix before scientific PASS.
+
+### Consequences
+
+- Any source identity drift fails without fallback recomputation.
+- Same-root resume retains the existing frozen stage/checkpoint contract.
+- Local implementation and tests are not an AIDS cell PASS or deployment;
+  AutoDL launch waits for normal operator ownership of the execution checkout.
+
+### Status
+
+Accepted for implementation; not deployed.
+
+---
+
 ## [2026-08-31] Adopt the managed T5 generic base directly for Taste T6
 
 ### Background

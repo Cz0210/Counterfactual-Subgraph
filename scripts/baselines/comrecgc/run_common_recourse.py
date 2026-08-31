@@ -89,6 +89,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--external-dbscan-source-manifest",
+        help=(
+            "Completed AIDS exact-component DBSCAN manifest to reopen by "
+            "validated read-only reference; requires its exact-stage receipt."
+        ),
+    )
+    parser.add_argument(
+        "--external-dbscan-source-receipt",
+        help="Exact-stage PASS receipt binding the adopted DBSCAN manifest.",
+    )
+    parser.add_argument(
         "--external-vector-cache-root",
         help="Local-XFS root for the reconstructible contiguous vector cache.",
     )
@@ -152,6 +163,8 @@ def main() -> int:
             args.external_pair_store_source_owner_root
         ),
         external_close_pair_view_manifest=args.external_close_pair_view_manifest,
+        external_dbscan_source_manifest=args.external_dbscan_source_manifest,
+        external_dbscan_source_receipt=args.external_dbscan_source_receipt,
         external_vector_cache_root=args.external_vector_cache_root,
         external_vector_cache_lock=args.external_vector_cache_lock,
         external_vector_cache_route_lock=args.external_vector_cache_route_lock,

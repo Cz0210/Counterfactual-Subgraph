@@ -6,6 +6,7 @@ import csv
 import gc
 import math
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -57,6 +58,14 @@ from .project_dataset import (
     load_mutagenicity_generation_bundle,
 )
 from .upstream import imported_upstream
+
+
+AIDS_EXACT_RECOVERY_RECEIPT_SCHEMA = (
+    "aids_comrecgc_exact_component_recovery_stage_v1"
+)
+AIDS_EXACT_DBSCAN_ADOPTION_SCHEMA = (
+    "aids_comrecgc_exact_dbscan_read_only_adoption_v1"
+)
 
 
 def _torch_stack() -> tuple[Any, Any]:
@@ -245,6 +254,132 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]], fields: Sequence[s
         writer.writerows(rows)
 
 
+def _adopt_completed_aids_dbscan_read_only(
+    *,
+    source_manifest_path: str | Path,
+    exact_receipt_path: str | Path,
+    expected_vectors_path: Path,
+    expected_vectors_sha256: str,
+    contract: ExternalDBSCANContract,
+    adoption_root: Path,
+    output_root: Path,
+) -> tuple[Any, Path, str]:
+    """Reopen one completed AIDS exact DBSCAN without writing its source tree."""
+
+    source_logical = Path(source_manifest_path).expanduser()
+    receipt_logical = Path(exact_receipt_path).expanduser()
+    if source_logical.is_symlink() or receipt_logical.is_symlink():
+        raise ExternalMemoryDBSCANError(
+            "AIDS exact DBSCAN adoption authorities may not be symlinks"
+        )
+    source = source_logical.resolve(strict=True)
+    receipt_path = receipt_logical.resolve(strict=True)
+    for authority in (source, receipt_path):
+        try:
+            authority.relative_to(output_root)
+        except ValueError:
+            pass
+        else:
+            raise ExternalMemoryDBSCANError(
+                "AIDS exact DBSCAN source must be outside the fresh output root"
+            )
+    receipt = json_load(receipt_path)
+    source_sha256 = sha256_file(source)
+    if (
+        receipt.get("schema_version") != AIDS_EXACT_RECOVERY_RECEIPT_SCHEMA
+        or receipt.get("status") != "PASS"
+        or receipt.get("run_complete") is not True
+        or receipt.get("recovery_only") is not True
+        or receipt.get("ordinary_pass_dependency_eligible") is not False
+        or receipt.get("dbscan_partition_proven") is not True
+        or receipt.get("dbscan_manifest_path") != str(source)
+        or receipt.get("dbscan_manifest_sha256") != source_sha256
+    ):
+        raise ExternalMemoryDBSCANError(
+            "AIDS exact recovery receipt does not authorize terminal DBSCAN adoption"
+        )
+    source_manifest = json_load(source)
+    identity = source_manifest.get("scientific_identity")
+    if (
+        source_manifest.get("run_complete") is not True
+        or source_manifest.get("clustering_path")
+        != ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY
+        or source_manifest.get("approximation_used") is not False
+        or source_manifest.get("sklearn_dbscan_label_semantics_preserved") is not True
+        or not isinstance(identity, Mapping)
+        or identity.get("vectors_path") != str(expected_vectors_path)
+        or identity.get("vectors_sha256") != expected_vectors_sha256
+        or identity.get("contract") != asdict(contract)
+    ):
+        raise ExternalMemoryDBSCANError(
+            "AIDS exact DBSCAN scientific identity differs from the adopted pair store"
+        )
+    # A terminal call is read-only: the DBSCAN implementation validates the full
+    # source-vector hash/stat identity and every exact component artifact, then
+    # returns before creating a lock, checkpoint, or output file.
+    result = fit_external_memory_dbscan(
+        vectors_path=expected_vectors_path,
+        work_dir=source.parent,
+        contract=contract,
+        expected_vectors_sha256=expected_vectors_sha256,
+        resume=True,
+    )
+    if (
+        result.manifest_path != source
+        or result.manifest_sha256 != source_sha256
+        or result.num_samples != int(source_manifest.get("num_samples", -1))
+        or result.core_count != result.num_samples
+        or result.noise_count != 0
+    ):
+        raise ExternalMemoryDBSCANError(
+            "AIDS exact DBSCAN terminal reopen changed its result identity"
+        )
+    adoption_manifest_path = adoption_root / "run_manifest.json"
+    existing = (
+        json_load(adoption_manifest_path)
+        if adoption_manifest_path.exists()
+        else None
+    )
+    adopted_at = (
+        existing.get("adopted_at")
+        if isinstance(existing, Mapping)
+        else datetime.now(timezone.utc).isoformat()
+    )
+    payload = {
+        "schema_version": AIDS_EXACT_DBSCAN_ADOPTION_SCHEMA,
+        "status": "PASS",
+        "run_complete": True,
+        "dataset": "aids",
+        "source_access": "read_only",
+        "source_mutated": False,
+        "dbscan_recomputed": False,
+        "pair_store_recomputed": False,
+        "sklearn_float64_semantics_preserved": True,
+        "source_manifest_path": str(source),
+        "source_manifest_sha256": source_sha256,
+        "exact_recovery_receipt_path": str(receipt_path),
+        "exact_recovery_receipt_sha256": sha256_file(receipt_path),
+        "source_vectors_path": str(expected_vectors_path),
+        "source_vectors_sha256": expected_vectors_sha256,
+        "clustering_path": source_manifest["clustering_path"],
+        "cluster_count": result.cluster_count,
+        "noise_count": result.noise_count,
+        "core_count": result.core_count,
+        "num_samples": result.num_samples,
+        "num_features": result.num_features,
+        "contract": asdict(contract),
+        "adopted_at": adopted_at,
+    }
+    if existing is not None:
+        if existing != payload:
+            raise ExternalMemoryDBSCANError(
+                "AIDS exact DBSCAN adoption manifest changed during resume"
+            )
+    else:
+        write_json(adoption_manifest_path, payload)
+    return result, adoption_manifest_path, sha256_file(adoption_manifest_path)
+
+
 def run_common_recourse(
     *,
     upstream_root: str | Path,
@@ -274,6 +409,8 @@ def run_common_recourse(
     external_pair_store_source_checkpoint: str | Path | None = None,
     external_pair_store_source_owner_root: str | Path | None = None,
     external_close_pair_view_manifest: str | Path | None = None,
+    external_dbscan_source_manifest: str | Path | None = None,
+    external_dbscan_source_receipt: str | Path | None = None,
     external_vector_cache_root: str | Path | None = None,
     external_vector_cache_lock: str | Path | None = None,
     external_vector_cache_route_lock: str | Path | None = None,
@@ -339,6 +476,27 @@ def run_common_recourse(
     source_requested = (
         external_pair_store_source_manifest is not None or chunk_source_requested
     )
+    dbscan_adoption_values = (
+        external_dbscan_source_manifest,
+        external_dbscan_source_receipt,
+    )
+    if any(value is not None for value in dbscan_adoption_values) and not all(
+        value is not None for value in dbscan_adoption_values
+    ):
+        raise ValueError(
+            "AIDS exact DBSCAN source manifest and receipt are required together"
+        )
+    dbscan_source_requested = external_dbscan_source_manifest is not None
+    if dbscan_source_requested and (
+        dataset != "aids"
+        or engine != "external_memory_exact_v1"
+        or not source_requested
+        or external_close_pair_view_manifest is None
+    ):
+        raise ValueError(
+            "terminal DBSCAN adoption is released only for the AIDS exact "
+            "pair-store plus close-view route"
+        )
     if source_requested and external_pair_store_source_owner_root is None:
         raise ValueError("external pair-store source requires its old owner root")
     if not source_requested and external_pair_store_source_owner_root is not None:
@@ -751,32 +909,56 @@ def run_common_recourse(
                 pair_manifest_path = pair_result.manifest_path
                 pair_manifest_sha256 = pair_result.manifest_sha256
             distance_pair_count = len(candidate_graphs) * len(bundle.graphs)
-            if pair_row_count:
-                dbscan_result = fit_external_memory_dbscan(
-                    vectors_path=recourse_vectors_path,
-                    work_dir=root / "external_memory/dbscan",
-                    contract=ExternalDBSCANContract(
-                        eps=float(parameters.delta),
-                        min_samples=int(parameters.cluster_size),
-                        query_block_size=int(external_query_block_size),
-                        checkpoint_interval_blocks=int(
-                            external_checkpoint_interval_blocks
-                        ),
-                        max_rss_bytes=int(external_max_rss_bytes),
-                        expected_sklearn_version=expected_sklearn_version,
-                        shortcut_mode=str(external_dbscan_shortcut_mode),
-                        shortcut_seed_count=int(external_shortcut_seed_count),
-                        shortcut_failure_cap=int(external_shortcut_failure_cap),
-                        shortcut_query_block_size=int(
-                            external_shortcut_query_block_size
-                        ),
-                        exact_fallback_max_samples=int(
-                            external_exact_fallback_max_samples
-                        ),
-                    ),
-                    expected_vectors_sha256=recourse_vectors_sha256,
-                    resume=resume,
+            dbscan_adoption_manifest = None
+            dbscan_adoption_manifest_sha256 = None
+            if dbscan_source_requested and not pair_row_count:
+                raise ExternalMemoryDBSCANError(
+                    "AIDS exact DBSCAN adoption cannot bind an empty close-pair view"
                 )
+            if pair_row_count:
+                dbscan_contract = ExternalDBSCANContract(
+                    eps=float(parameters.delta),
+                    min_samples=int(parameters.cluster_size),
+                    query_block_size=int(external_query_block_size),
+                    checkpoint_interval_blocks=int(
+                        external_checkpoint_interval_blocks
+                    ),
+                    max_rss_bytes=int(external_max_rss_bytes),
+                    expected_sklearn_version=expected_sklearn_version,
+                    shortcut_mode=str(external_dbscan_shortcut_mode),
+                    shortcut_seed_count=int(external_shortcut_seed_count),
+                    shortcut_failure_cap=int(external_shortcut_failure_cap),
+                    shortcut_query_block_size=int(
+                        external_shortcut_query_block_size
+                    ),
+                    exact_fallback_max_samples=int(
+                        external_exact_fallback_max_samples
+                    ),
+                )
+                if dbscan_source_requested:
+                    (
+                        dbscan_result,
+                        dbscan_adoption_manifest,
+                        dbscan_adoption_manifest_sha256,
+                    ) = _adopt_completed_aids_dbscan_read_only(
+                        source_manifest_path=external_dbscan_source_manifest,  # type: ignore[arg-type]
+                        exact_receipt_path=external_dbscan_source_receipt,  # type: ignore[arg-type]
+                        expected_vectors_path=recourse_vectors_path,
+                        expected_vectors_sha256=recourse_vectors_sha256,
+                        contract=dbscan_contract,
+                        adoption_root=(
+                            root / "external_memory/dbscan_adoption"
+                        ),
+                        output_root=root,
+                    )
+                else:
+                    dbscan_result = fit_external_memory_dbscan(
+                        vectors_path=recourse_vectors_path,
+                        work_dir=root / "external_memory/dbscan",
+                        contract=dbscan_contract,
+                        expected_vectors_sha256=recourse_vectors_sha256,
+                        resume=resume,
+                    )
                 cluster_labels = np.load(
                     dbscan_result.labels_path, mmap_mode="r", allow_pickle=False
                 )
@@ -1005,6 +1187,17 @@ def run_common_recourse(
                 "recourse_vectors_sha256": recourse_vectors_sha256,
                 "dbscan_manifest": dbscan_manifest,
                 "dbscan_manifest_sha256": dbscan_manifest_sha256,
+                "dbscan_adopted_read_only": dbscan_source_requested,
+                "dbscan_adoption_manifest": (
+                    None
+                    if not dbscan_source_requested
+                    else str(dbscan_adoption_manifest)
+                ),
+                "dbscan_adoption_manifest_sha256": (
+                    None
+                    if not dbscan_source_requested
+                    else dbscan_adoption_manifest_sha256
+                ),
                 "one_cluster_summary_manifest": one_cluster_summary_manifest,
                 "one_cluster_summary_manifest_sha256": (
                     one_cluster_summary_manifest_sha256
@@ -1217,9 +1410,14 @@ def run_common_recourse(
                 external_artifacts["pair_store_manifest_sha256"]
             )
         if external_artifacts.get("dbscan_manifest") is not None:
-            closure_files["external_memory/dbscan/run_manifest.json"] = str(
-                external_artifacts["dbscan_manifest_sha256"]
-            )
+            if external_artifacts.get("dbscan_adopted_read_only") is True:
+                closure_files[
+                    "external_memory/dbscan_adoption/run_manifest.json"
+                ] = str(external_artifacts["dbscan_adoption_manifest_sha256"])
+            else:
+                closure_files["external_memory/dbscan/run_manifest.json"] = str(
+                    external_artifacts["dbscan_manifest_sha256"]
+                )
         if external_artifacts.get("one_cluster_summary_manifest") is not None:
             closure_files[
                 "external_memory/one_cluster_summary/run_manifest.json"

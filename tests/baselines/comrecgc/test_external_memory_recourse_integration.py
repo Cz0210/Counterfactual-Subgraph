@@ -311,6 +311,163 @@ def test_full_runner_component_recovery_streams_multi_cluster_downstream(
         terminal=json.loads(terminal_path.read_text()),
     )
 
+    # The completed component DBSCAN can be consumed by a fresh postprocess
+    # root without creating another DBSCAN directory or changing source bytes.
+    source_pair_manifest = (
+        external_root / "external_memory/pair_store/run_manifest.json"
+    )
+    source_pair = json.loads(source_pair_manifest.read_text(encoding="utf-8"))
+    pair_rows = int(source_pair["row_count"])
+    distances = tmp_path / "postprocess-normalized-distances.npy"
+    np.save(distances, np.full(pair_rows, 0.01, dtype=np.float32))
+    pair_semantics = tmp_path / "postprocess-pair-semantics.json"
+    pair_semantics.write_text(json.dumps({"fixture": "all-close"}))
+    close_contract = ThetaClosePairContract(
+        theta=parameters.theta,
+        parent_count=3,
+        candidate_count=len(candidate_embeddings),
+        distance_checkpoint_sha256=sha256_file(distance),
+        embedding_checkpoint_sha256=sha256_file(distance),
+        scale_contract=SCALE_CONTRACT,
+        normalized_distance_contract=NORMALIZED_DISTANCE_CONTRACT,
+    )
+    close_root = tmp_path / "postprocess-close-view"
+    with pytest.raises(ExternalMemoryDBSCANError, match="ALL_PAIRS_CLOSE"):
+        materialize_theta_close_pair_view(
+            physical_vectors_path=source_pair["vectors_path"],
+            normalized_distances_path=distances,
+            output_dir=close_root,
+            contract=close_contract,
+            pair_semantics_contract_path=pair_semantics,
+            block_size=2,
+        )
+    close_identity = json.loads(
+        (close_root / "checkpoint.json").read_text(encoding="utf-8")
+    )["scientific_identity"]
+    close_certificate = tmp_path / "postprocess-all-close-certificate.json"
+    close_certificate.write_text(
+        json.dumps(
+            {
+                "schema_version": ALL_PAIRS_CLOSE_CERTIFICATE_SCHEMA,
+                "status": "PASS",
+                "all_pairs_close_proven": True,
+                "full_distance_scan_complete": True,
+                "official_sample_comparison_pass": True,
+                "normalization_audit_pass": True,
+                "physical_store_rows": pair_rows,
+                "count_distance_le_theta": pair_rows,
+                "count_distance_gt_theta": 0,
+                "count_distance_eq_theta": 0,
+                "theta": parameters.theta,
+                "filter_operator": FILTER_OPERATOR,
+                "pair_orientation": PAIR_ORIENTATION,
+                "pair_order": PAIR_ORDER,
+                "physical_vectors_sha256": close_identity[
+                    "physical_vectors_sha256"
+                ],
+                "normalized_distances_sha256": close_identity[
+                    "normalized_distances_sha256"
+                ],
+                "distance_checkpoint_sha256": sha256_file(distance),
+                "embedding_checkpoint_sha256": sha256_file(distance),
+                "scale_contract": SCALE_CONTRACT,
+                "normalized_distance_contract": NORMALIZED_DISTANCE_CONTRACT,
+                "approximation_used": False,
+            }
+        )
+    )
+    close_view = materialize_theta_close_pair_view(
+        physical_vectors_path=source_pair["vectors_path"],
+        normalized_distances_path=distances,
+        output_dir=close_root,
+        contract=close_contract,
+        pair_semantics_contract_path=pair_semantics,
+        all_pairs_close_certificate_path=close_certificate,
+        block_size=2,
+        resume=True,
+    )
+    dbscan_path = Path(
+        external["external_memory_artifacts"]["dbscan_manifest"]
+    )
+    dbscan_sha_before = sha256_file(dbscan_path)
+    exact_receipt = tmp_path / "exact-recovery-receipt.json"
+    exact_receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": recourse.AIDS_EXACT_RECOVERY_RECEIPT_SCHEMA,
+                "status": "PASS",
+                "run_complete": True,
+                "recovery_only": True,
+                "ordinary_pass_dependency_eligible": False,
+                "dbscan_partition_proven": True,
+                "dbscan_manifest_path": str(dbscan_path),
+                "dbscan_manifest_sha256": dbscan_sha_before,
+            }
+        )
+    )
+    fake_proc = tmp_path / "postprocess-proc"
+    fake_proc.mkdir()
+    real_adopt = external_recourse.adopt_external_pair_store_read_only
+    real_validate = external_recourse.validate_adopted_pair_store_read_only
+    monkeypatch.setattr(
+        recourse,
+        "adopt_external_pair_store_read_only",
+        lambda **kwargs: real_adopt(**kwargs, proc_root=fake_proc),
+    )
+    monkeypatch.setattr(
+        continuation,
+        "validate_adopted_pair_store_read_only",
+        lambda path: real_validate(path, proc_root=fake_proc),
+    )
+    source_dbscan = json.loads(dbscan_path.read_text(encoding="utf-8"))
+    source_contract = source_dbscan["scientific_identity"]["contract"]
+    postprocess_root = tmp_path / "fresh-postprocess"
+    postprocess = recourse.run_common_recourse(
+        **common,
+        output_dir=postprocess_root,
+        engine="external_memory_exact_v1",
+        external_max_rss_bytes=int(source_contract["max_rss_bytes"]),
+        external_query_block_size=int(source_contract["query_block_size"]),
+        external_checkpoint_interval_blocks=int(
+            source_contract["checkpoint_interval_blocks"]
+        ),
+        external_dbscan_shortcut_mode=str(source_contract["shortcut_mode"]),
+        external_shortcut_seed_count=int(source_contract["shortcut_seed_count"]),
+        external_shortcut_failure_cap=int(source_contract["shortcut_failure_cap"]),
+        external_shortcut_query_block_size=int(
+            source_contract["shortcut_query_block_size"]
+        ),
+        external_exact_fallback_max_samples=int(
+            source_contract["exact_fallback_max_samples"]
+        ),
+        external_summary_block_size=2,
+        external_pair_store_source_manifest=source_pair_manifest,
+        external_pair_store_source_owner_root=source_pair_manifest.parent,
+        external_close_pair_view_manifest=close_view.manifest_path,
+        external_dbscan_source_manifest=dbscan_path,
+        external_dbscan_source_receipt=exact_receipt,
+        expected_sklearn_version=str(source_contract["expected_sklearn_version"]),
+        resume=True,
+    )
+    assert sha256_file(dbscan_path) == dbscan_sha_before
+    assert not (postprocess_root / "external_memory/dbscan").exists()
+    adoption_path = (
+        postprocess_root
+        / "external_memory/dbscan_adoption/run_manifest.json"
+    )
+    assert adoption_path.is_file()
+    assert postprocess["external_memory_artifacts"][
+        "dbscan_adopted_read_only"
+    ] is True
+    assert json.loads(
+        (postprocess_root / "selected_common_recourses.json").read_text()
+    ) == json.loads((external_root / "selected_common_recourses.json").read_text())
+    postprocess_terminal_path = postprocess_root / "_RUN_COMPLETE.json"
+    continuation._validate_common_recourse_completion(
+        marker=postprocess_terminal_path,
+        terminal=json.loads(postprocess_terminal_path.read_text()),
+    )
+
 
 def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -44,8 +44,10 @@ from src.baselines.comrecgc.external_memory_dbscan import (  # noqa: E402
     ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ALL_CORE_ONE_COMPONENT_SHORTCUT,
     SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT,
+    ExternalDBSCANContract,
     _validate_component_recovery_closure,
     _validate_shortcut_proof_closure,
+    fit_external_memory_dbscan,
 )
 from src.baselines.comrecgc.external_component_summary import (  # noqa: E402
     validate_proven_all_core_component_summary,
@@ -90,6 +92,12 @@ _CRITICAL_SOURCE_MANIFESTS = (
 _STARTUP_BARRIER_BINDING_SCHEMA = "comrecgc_continuation_exec_startup_binding_v1"
 _STARTUP_BARRIER_MAX_GENERATIONS = 32
 _PARTIAL_STAGE_ARCHIVE_MAX_BYTES = 1024**3
+_AIDS_EXACT_RECOVERY_RECEIPT_SCHEMA = (
+    "aids_comrecgc_exact_component_recovery_stage_v1"
+)
+_AIDS_EXACT_DBSCAN_ADOPTION_SCHEMA = (
+    "aids_comrecgc_exact_dbscan_read_only_adoption_v1"
+)
 
 
 class _StageTerminationRequested(RuntimeError):
@@ -127,6 +135,8 @@ class ContinuationInputs:
     external_pair_store_source_checkpoint: Path | None = None
     external_pair_store_source_owner_root: Path | None = None
     external_close_pair_view_manifest: Path | None = None
+    external_dbscan_source_manifest: Path | None = None
+    external_dbscan_source_receipt: Path | None = None
     external_vector_cache_root: Path | None = None
     external_vector_cache_lock: Path | None = None
     external_vector_cache_route_lock: Path | None = None
@@ -663,6 +673,15 @@ def build_stage_commands(
                     str(inputs.external_vector_cache_proc_root),
                 ]
             )
+        if inputs.external_dbscan_source_manifest is not None:
+            common_argv.extend(
+                [
+                    "--external-dbscan-source-manifest",
+                    str(inputs.external_dbscan_source_manifest),
+                    "--external-dbscan-source-receipt",
+                    str(inputs.external_dbscan_source_receipt),
+                ]
+            )
     if inputs.common_recourse_resume:
         common_argv.append("--resume")
     chemistry_argv = [
@@ -1179,6 +1198,14 @@ def _resume_contract(
         scientific_files["external_close_pair_view_manifest"] = (
             inputs.external_close_pair_view_manifest
         )
+    if inputs.external_dbscan_source_manifest is not None:
+        scientific_files["external_dbscan_source_manifest"] = (
+            inputs.external_dbscan_source_manifest
+        )
+    if inputs.external_dbscan_source_receipt is not None:
+        scientific_files["external_dbscan_source_receipt"] = (
+            inputs.external_dbscan_source_receipt
+        )
     scientific_input_files = {
         key: {
             "path": str(path.resolve(strict=True)),
@@ -1237,6 +1264,16 @@ def _resume_contract(
             None
             if inputs.external_close_pair_view_manifest is None
             else str(inputs.external_close_pair_view_manifest.resolve(strict=True))
+        ),
+        "external_dbscan_source_manifest": (
+            None
+            if inputs.external_dbscan_source_manifest is None
+            else str(inputs.external_dbscan_source_manifest.resolve(strict=True))
+        ),
+        "external_dbscan_source_receipt": (
+            None
+            if inputs.external_dbscan_source_receipt is None
+            else str(inputs.external_dbscan_source_receipt.resolve(strict=True))
         ),
         "external_vector_cache_root": (
             None
@@ -1550,15 +1587,71 @@ def _validate_common_recourse_completion(
         if int(manifest.get("theta_eligible_pair_count", -1)) != 0:
             raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_MISSING")
         return
-    dbscan_manifest_path = _require_file(
-        root / "external_memory/dbscan/run_manifest.json"
-    )
-    if (
-        str(dbscan_manifest_raw) != str(dbscan_manifest_path)
-        or str(external.get("dbscan_manifest_sha256"))
-        != sha256_file(dbscan_manifest_path)
-    ):
-        raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_BINDING_MISMATCH")
+    adopted_dbscan = external.get("dbscan_adopted_read_only") is True
+    if adopted_dbscan:
+        relative = "external_memory/dbscan_adoption/run_manifest.json"
+        if relative not in closure:
+            raise ValueError("RESUME_COMMON_DBSCAN_ADOPTION_CLOSURE_MISSING")
+        adoption_path = _require_file(root / relative)
+        adoption = _load_object(adoption_path)
+        source_manifest_path = _require_file(
+            Path(str(adoption.get("source_manifest_path") or ""))
+        )
+        receipt_path = _require_file(
+            Path(str(adoption.get("exact_recovery_receipt_path") or ""))
+        )
+        receipt = _load_object(receipt_path)
+        if (
+            str(external.get("dbscan_adoption_manifest"))
+            != str(adoption_path)
+            or str(external.get("dbscan_adoption_manifest_sha256"))
+            != sha256_file(adoption_path)
+            or adoption.get("schema_version")
+            != _AIDS_EXACT_DBSCAN_ADOPTION_SCHEMA
+            or adoption.get("status") != "PASS"
+            or adoption.get("run_complete") is not True
+            or adoption.get("dataset") != "aids"
+            or adoption.get("source_access") != "read_only"
+            or adoption.get("source_mutated") is not False
+            or adoption.get("dbscan_recomputed") is not False
+            or adoption.get("pair_store_recomputed") is not False
+            or adoption.get("sklearn_float64_semantics_preserved") is not True
+            or adoption.get("source_manifest_sha256")
+            != sha256_file(source_manifest_path)
+            or adoption.get("exact_recovery_receipt_sha256")
+            != sha256_file(receipt_path)
+            or receipt.get("schema_version")
+            != _AIDS_EXACT_RECOVERY_RECEIPT_SCHEMA
+            or receipt.get("status") != "PASS"
+            or receipt.get("run_complete") is not True
+            or receipt.get("recovery_only") is not True
+            or receipt.get("ordinary_pass_dependency_eligible") is not False
+            or receipt.get("dbscan_partition_proven") is not True
+            or receipt.get("dbscan_manifest_path") != str(source_manifest_path)
+            or receipt.get("dbscan_manifest_sha256")
+            != sha256_file(source_manifest_path)
+            or str(dbscan_manifest_raw) != str(source_manifest_path)
+            or str(external.get("dbscan_manifest_sha256"))
+            != sha256_file(source_manifest_path)
+            or (root / "external_memory/dbscan").exists()
+        ):
+            raise ValueError("RESUME_COMMON_DBSCAN_ADOPTION_BINDING_MISMATCH")
+        dbscan_manifest_path = source_manifest_path
+    else:
+        if (
+            external.get("dbscan_adoption_manifest") is not None
+            or external.get("dbscan_adoption_manifest_sha256") is not None
+        ):
+            raise ValueError("RESUME_COMMON_UNEXPECTED_DBSCAN_ADOPTION")
+        dbscan_manifest_path = _require_file(
+            root / "external_memory/dbscan/run_manifest.json"
+        )
+        if (
+            str(dbscan_manifest_raw) != str(dbscan_manifest_path)
+            or str(external.get("dbscan_manifest_sha256"))
+            != sha256_file(dbscan_manifest_path)
+        ):
+            raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_BINDING_MISMATCH")
     dbscan_manifest = _load_object(dbscan_manifest_path)
     if dbscan_manifest.get("run_complete") is not True:
         raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_INCOMPLETE")
@@ -1570,6 +1663,36 @@ def _validate_common_recourse_completion(
         dbscan_manifest.get("clustering_path")
         == ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY
     )
+    if adopted_dbscan:
+        identity = dbscan_manifest.get("scientific_identity")
+        if (
+            not component_recovery
+            or not isinstance(identity, Mapping)
+            or identity.get("vectors_path") != str(physical_vectors_path)
+            or identity.get("vectors_sha256") != physical_vectors_sha256
+            or adoption.get("source_vectors_path") != str(physical_vectors_path)
+            or adoption.get("source_vectors_sha256") != physical_vectors_sha256
+            or adoption.get("contract") != identity.get("contract")
+        ):
+            raise ValueError("RESUME_COMMON_DBSCAN_ADOPTION_SCIENTIFIC_MISMATCH")
+        try:
+            reopened = fit_external_memory_dbscan(
+                vectors_path=physical_vectors_path,
+                work_dir=dbscan_manifest_path.parent,
+                contract=ExternalDBSCANContract(**identity["contract"]),
+                expected_vectors_sha256=physical_vectors_sha256,
+                resume=True,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "RESUME_COMMON_DBSCAN_ADOPTION_REOPEN_MISMATCH"
+            ) from exc
+        if (
+            reopened.manifest_path != dbscan_manifest_path
+            or reopened.manifest_sha256
+            != external.get("dbscan_manifest_sha256")
+        ):
+            raise ValueError("RESUME_COMMON_DBSCAN_ADOPTION_RESULT_MISMATCH")
     required_dbscan_artifacts = [
         ("core_mask_path", "core_mask_sha256"),
         ("labels_path", "labels_sha256"),
@@ -2217,6 +2340,27 @@ def _validate_route_inputs(inputs: ContinuationInputs) -> None:
         )
         if not route_matches:
             raise ValueError("PAIR_STORE_ADOPTION_ROUTE_CONTRACT_MISMATCH")
+    dbscan_values = (
+        inputs.external_dbscan_source_manifest,
+        inputs.external_dbscan_source_receipt,
+    )
+    if any(value is not None for value in dbscan_values) and not all(
+        value is not None for value in dbscan_values
+    ):
+        raise ValueError("AIDS_EXACT_DBSCAN_ADOPTION_BINDING_INCOMPLETE")
+    if inputs.external_dbscan_source_manifest is not None and not (
+        inputs.dataset == "aids"
+        and inputs.device == "cpu"
+        and inputs.common_recourse_engine == "external_memory_exact_v1"
+        and inputs.external_pair_store_source_manifest is not None
+        and inputs.external_pair_store_source_checkpoint is None
+        and inputs.external_pair_store_source_owner_root is not None
+        and inputs.external_close_pair_view_manifest is not None
+        and inputs.external_dbscan_shortcut_mode
+        == ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+        and inputs.common_recourse_resume is True
+    ):
+        raise ValueError("AIDS_EXACT_DBSCAN_ADOPTION_ROUTE_CONTRACT_MISMATCH")
 
 
 def bootstrap_external_common_recovery_continuation(
@@ -2574,6 +2718,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--external-pair-store-source-checkpoint", type=_absolute)
     parser.add_argument("--external-pair-store-source-owner-root", type=_absolute)
     parser.add_argument("--external-close-pair-view-manifest", type=_absolute)
+    parser.add_argument("--external-dbscan-source-manifest", type=_absolute)
+    parser.add_argument("--external-dbscan-source-receipt", type=_absolute)
     parser.add_argument("--external-vector-cache-root", type=_absolute)
     parser.add_argument("--external-vector-cache-lock", type=_absolute)
     parser.add_argument("--external-vector-cache-route-lock", type=_absolute)
@@ -2640,6 +2786,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         external_close_pair_view_manifest=(
             _require_file(args.external_close_pair_view_manifest)
             if args.external_close_pair_view_manifest
+            else None
+        ),
+        external_dbscan_source_manifest=(
+            _require_file(args.external_dbscan_source_manifest)
+            if args.external_dbscan_source_manifest
+            else None
+        ),
+        external_dbscan_source_receipt=(
+            _require_file(args.external_dbscan_source_receipt)
+            if args.external_dbscan_source_receipt
             else None
         ),
         external_vector_cache_root=args.external_vector_cache_root,

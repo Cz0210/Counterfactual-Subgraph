@@ -91,6 +91,10 @@ See:
   recovery from the c766 disconnected-anchor evidence into an exact
   multi-component partition and streaming downstream; release pins remain
   mandatory and the failed source is never treated as an ordinary PASS)
+- `docs/AUTODL_AIDS_COMRECGC_EXACT_POSTPROCESS_V1.md` (fresh CPU-only,
+  read-only adoption of the completed AIDS exact DBSCAN into streamed summary,
+  WNode evaluation, paper CSVs, and standardized freeze; no DBSCAN/pair-store
+  regeneration)
 - `docs/AUTODL_TASTEMOLNET_T6_OURS_PPO.md` (typed release contract for the real
   bounded three-class TasteMolNet Ours PPO smoke, direct managed-T5 clean-base
   adoption, and its separate strict terminal verifier)

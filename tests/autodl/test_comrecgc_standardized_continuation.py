@@ -290,6 +290,8 @@ def test_commands_use_native_comrecgc_and_frozen_rf_contract(tmp_path: Path) -> 
         inputs.teacher_path
     )
     assert evaluation[evaluation.index("--theta-star") + 1] == "0.050000000000000003"
+    assert evaluation.count("--device") == 1
+    assert evaluation[evaluation.index("--device") + 1] == inputs.device
     assert gate[gate.index("--expected-teacher-sha256") + 1] == "e" * 64
 
 

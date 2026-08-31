@@ -1,5 +1,16 @@
 # Refactor Plan
 
+## 2026-08-31: Postprocess the completed AIDS exact partition read-only
+
+- [x] Bind the controller exact receipt, DBSCAN/vector/contract identity, and
+  exact component closure without writing or recomputing the source.
+- [x] Reuse the existing streamed summary, chemistry, WNode, paper CSV, gate,
+  and standardized-freeze stages in a fresh output root.
+- [x] Add CPU-eight-worker enforcement, heartbeat, CLI/Slurm parity, and
+  focused read-only adoption/resume tests.
+- [ ] Deploy only after normal AutoDL checkout ownership is restored; never
+  restart the completed exact root.
+
 ## 2026-08-31: release the dataset-specific Taste T6 PPO smoke
 
 - [x] Consume the independently verified managed T5 generic-base adoption
