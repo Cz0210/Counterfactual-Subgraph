@@ -52,38 +52,120 @@ def _tree_sha(path: Path) -> str:
     )
 
 
-class _FakeHeldStage:
+class _FakeHeldPublishedT3:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
         self.descriptor = os.open(self.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         self.directory = SimpleNamespace(descriptor=self.descriptor)
         self.snapshot = _tree_snapshot(self.root)
+        self.binding = self._binding()
+
+    def _binding(self) -> dict[str, object]:
+        if self.descriptor < 0 or _tree_snapshot(self.root) != self.snapshot:
+            raise RuntimeError("fake held T3 changed")
         gate = json.loads((self.root / "gate.json").read_text(encoding="utf-8"))
-        self.evidence = {
-            "stage": gate["stage"],
-            "gate_sha256": hashlib.sha256((self.root / "gate.json").read_bytes()).hexdigest(),
-            "root_inventory_sha256": _tree_sha(self.root),
+        if gate.get("status") != "PASS":
+            raise t5.TasteCleanPolicyReleaseDisabled("T3 gate drifted")
+        reference = json.loads(
+            (self.root / "oracle_reference.json").read_text(encoding="utf-8")
+        )
+        verification_sha256 = hashlib.sha256(
+            (self.root / "verification.json").read_bytes()
+        ).hexdigest()
+        return {
+            "schema_version": "tastemolnet_t4_t3_binding_v2",
+            "t3_root": str(self.root),
+            "t3_gate_sha256": hashlib.sha256(
+                (self.root / "gate.json").read_bytes()
+            ).hexdigest(),
+            "t3_verification_sha256": verification_sha256,
+            "t3_root_inventory_sha256": _tree_sha(self.root),
             "checkpoint_dir": gate["checkpoint_dir"],
             "checkpoint_id": gate["checkpoint_id"],
-            "checkpoint_inventory_sha256": gate["checkpoint_inventory_sha256"],
-            "checkpoint_stat_inventory_sha256": gate["checkpoint_stat_inventory_sha256"],
-            "checkpoint_sha256s_sha256": gate["checkpoint_sha256s_sha256"],
-            "t2_adoption_gate_sha256": gate["t2_adoption_binding"]["gate_sha256"],
-            "t2_adoption_receipt_sha256": gate["t2_adoption_binding"]["receipt_sha256"],
-            "t2_adoption_binding_sha256": t5._canonical_sha256(  # noqa: SLF001
-                gate["t2_adoption_binding"]
-            ),
+            "model_sha256": reference["model_sha256"],
+            "temperature_scaling_sha256": reference["temperature_scaling_sha256"],
+            "feature_schema_sha256": reference["feature_schema_sha256"],
+            "source_t2_gate_sha256": gate["t2_adoption_binding"]["gate_sha256"],
+            "source_t2_evidence_sha256": gate["t2_adoption_binding"][
+                "source_evidence_sha256"
+            ],
+            "temperature_refit_performed": True,
+            "selection_split": "validation",
+            "calibration_payload_loaded": False,
+            "test_payload_loaded": False,
+            "rf_oracle_used": False,
         }
 
-    def revalidate(self) -> dict[str, str]:
-        if self.descriptor < 0 or _tree_snapshot(self.root) != self.snapshot:
-            raise RuntimeError("fake held stage changed")
-        return dict(self.evidence)
+    def verify(self) -> None:
+        current = self._binding()
+        if current != self.binding:
+            raise t5.TasteCleanPolicyReleaseDisabled("managed-v2 T3 binding drifted")
 
     def close(self) -> None:
         if self.descriptor >= 0:
             os.close(self.descriptor)
             self.descriptor = -1
+
+
+class _FakeHeldT4Final:
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self.snapshot = _tree_snapshot(self.root)
+        self.evidence = self._evidence()
+
+    def _evidence(self) -> dict[str, object]:
+        if _tree_snapshot(self.root) != self.snapshot:
+            raise RuntimeError("fake held T4 changed")
+        gate = json.loads((self.root / "gate.json").read_text(encoding="utf-8"))
+        if gate.get("status") != "PASS":
+            raise t5.TasteCleanPolicyReleaseDisabled("T4 gate drifted")
+        provenance = json.loads(
+            (self.root / "oracle_provenance.json").read_text(encoding="utf-8")
+        )
+        t3_root = self.root.parent / "t3"
+        return {
+            "schema_version": "tastemolnet_t9_t4_managed_binding_v1",
+            "status": "PASS",
+            "root": str(self.root),
+            "root_inventory_sha256": _tree_sha(self.root),
+            "gate_sha256": hashlib.sha256(
+                (self.root / "gate.json").read_bytes()
+            ).hexdigest(),
+            "verification_sha256": hashlib.sha256(
+                (self.root / "verification.json").read_bytes()
+            ).hexdigest(),
+            "science": {
+                "t3_gate_sha256": hashlib.sha256(
+                    (t3_root / "gate.json").read_bytes()
+                ).hexdigest(),
+                "t3_verification_sha256": hashlib.sha256(
+                    (t3_root / "verification.json").read_bytes()
+                ).hexdigest(),
+                "checkpoint_id": provenance["checkpoint_id"],
+                "temperature_scaling_sha256": provenance[
+                    "temperature_scaling_sha256"
+                ],
+                "feature_schema_sha256": provenance["feature_schema_sha256"],
+                "adaptive_calibration_search": True,
+                "strict_flip_gate_pass": True,
+                "strict_flip_count": 38,
+                "distinct_flipped_parent_count": 17,
+                "train_payload_loaded": False,
+                "validation_payload_loaded": False,
+                "test_payload_loaded": False,
+                "rf_oracle_used": False,
+                "per_example_output_written": False,
+            },
+        }
+
+    def revalidate(self) -> dict[str, object]:
+        current = self._evidence()
+        if current != self.evidence:
+            raise t5.TasteCleanPolicyReleaseDisabled("managed-v2 T4 binding drifted")
+        return json.loads(json.dumps(current))
+
+    def close(self) -> None:
+        pass
 
 
 class _FakeHeldCheckpoint:
@@ -120,8 +202,11 @@ class _FakeHeldT2Adoption:
 
 
 def _patch_gnn_api(monkeypatch: pytest.MonkeyPatch) -> None:
-    def hold_stage(root: str | Path) -> _FakeHeldStage:
-        return _FakeHeldStage(Path(root))
+    def hold_t3(root: str | Path) -> _FakeHeldPublishedT3:
+        return _FakeHeldPublishedT3(Path(root))
+
+    def hold_t4(root: str | Path) -> _FakeHeldT4Final:
+        return _FakeHeldT4Final(Path(root))
 
     def hold_checkpoint(
         path: str | Path, *, expected_stage_evidence: dict[str, str]
@@ -145,7 +230,11 @@ def _patch_gnn_api(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         return held
 
-    monkeypatch.setattr(t5, "_load_taste_gnn_stage_api", lambda: (hold_stage, hold_checkpoint))
+    monkeypatch.setattr(
+        t5,
+        "_load_taste_gnn_stage_api",
+        lambda: (hold_t3, hold_t4, hold_checkpoint),
+    )
     monkeypatch.setattr(t5, "hold_t2_gine_pass_adoption", hold_t2)
 
 
@@ -439,10 +528,22 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
         "checkpoint_sha256s_sha256": sha_inventory_sha,
         "downstream_policy_sha256": downstream_policy_sha,
         "existing_fit_adopted": True,
-        "temperature_refit_performed": False,
+        "temperature_refit_performed": True,
         "test_loaded": False,
     }
     t3_hash = _json(t3 / "gate.json", t3_gate)
+    _json(
+        t3 / "verification.json",
+        {
+            "schema_version": "managed_execution_v2_verification_v1",
+            "status": "PASS",
+            "independent_verifier": True,
+            "verification": {
+                "stage": "T3_GINE_CALIBRATED",
+                "status": "PASS",
+            },
+        },
+    )
     _json(
         t3 / "oracle_reference.json",
         {
@@ -487,6 +588,18 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
         "t2_adoption_binding": t2_binding,
     }
     t4_hash = _json(t4 / "gate.json", t4_gate)
+    _json(
+        t4 / "verification.json",
+        {
+            "schema_version": "managed_execution_v2_verification_v1",
+            "status": "PASS",
+            "independent_verifier": True,
+            "verification": {
+                "stage": "T4_ORACLE_SMOKE",
+                "status": "PASS",
+            },
+        },
+    )
     _json(
         t4 / "oracle_provenance.json",
         {

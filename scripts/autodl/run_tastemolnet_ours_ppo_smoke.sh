@@ -34,6 +34,7 @@ AVAILABLE_KB="$(df -Pk "$AUTODL_RUNTIME_ROOT" | awk 'NR == 2 {print $4}')"
   || { echo "T6 storage gate is not ready; no science was started" >&2; exit 75; }
 
 : "${TASTEMOLNET_T2_BUNDLE:?TASTEMOLNET_T2_BUNDLE is required}"
+: "${TASTEMOLNET_T3_CHECKPOINT:?TASTEMOLNET_T3_CHECKPOINT is required}"
 : "${TASTEMOLNET_T5_OUTPUT:?TASTEMOLNET_T5_OUTPUT is required}"
 : "${TASTEMOLNET_T6_OUTPUT:?TASTEMOLNET_T6_OUTPUT is required and must be fresh}"
 : "${TASTEMOLNET_TRAIN_CSV:?TASTEMOLNET_TRAIN_CSV is required}"
@@ -49,6 +50,8 @@ for required in \
   "$BASE_POLICY" \
   "$DOWNSTREAM_POLICY" \
   "$TASTEMOLNET_T2_BUNDLE/sha256sums.txt" \
+  "$TASTEMOLNET_T3_CHECKPOINT/model.pt" \
+  "$TASTEMOLNET_T3_CHECKPOINT/sha256sums.txt" \
   "$TASTEMOLNET_T5_OUTPUT/gate.json" \
   "$TASTEMOLNET_T5_OUTPUT/output_hashes.json" \
   "$TASTEMOLNET_T5_OUTPUT/PASS" \
@@ -126,7 +129,7 @@ exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
     --model-path "$CHEMLLM_MODEL_PATH" \
     --dataset-path "$TASTEMOLNET_TRAIN_CSV" \
     --output-dir "$TASTEMOLNET_T6_OUTPUT" \
-    --gnn-checkpoint "$TASTEMOLNET_T2_BUNDLE" \
+    --gnn-checkpoint "$TASTEMOLNET_T3_CHECKPOINT" \
     --t5-output "$TASTEMOLNET_T5_OUTPUT" \
     --downstream-policy "$DOWNSTREAM_POLICY" \
     --base-policy "$BASE_POLICY" \

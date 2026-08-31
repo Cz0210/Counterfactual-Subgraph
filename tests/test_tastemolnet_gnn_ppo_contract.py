@@ -1090,6 +1090,8 @@ def test_formal_t6_entrypoints_freeze_real_stable_loop_and_no_test_access() -> N
     assert "BatchedGNNPPORewardAdapter.from_payloads(" in trainer
     assert "BatchedGNNPPORewardAdapter.from_checkpoint(" not in trainer
     assert "hold_taste_managed_evidence_binding_v2(" in trainer
+    assert "managed_evidence_binding_v2" in trainer
+    assert "_build_taste_managed_binding_v2(" in trainer
     assert "read_frozen_gine_payload(name)" in trainer
     assert "hold_readonly_file(train_csv" in trainer
     assert "FreshOutputDirectory" in trainer
@@ -1113,7 +1115,9 @@ def test_formal_t6_entrypoints_freeze_real_stable_loop_and_no_test_access() -> N
         assert release["release_enabled"] is True
         assert "TASTE_T6_WRAPPER_RELEASED=1" in wrapper
         assert "--gpu-index 0" in wrapper
-        assert "physical GPU0" in wrapper
+    assert "TASTEMOLNET_T3_CHECKPOINT" in wrapper
+    assert '--gnn-checkpoint "$TASTEMOLNET_T3_CHECKPOINT"' in wrapper
+    assert "physical GPU0" in wrapper
     assert "--gpu-lock-mode exclusive" in wrapper
     assert '--updates "${TASTEMOLNET_T6_UPDATES:-5}"' in wrapper
     assert '--downstream-policy "$DOWNSTREAM_POLICY"' in wrapper

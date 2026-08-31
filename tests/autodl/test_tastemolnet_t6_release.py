@@ -115,9 +115,152 @@ def test_zero_step_materializer_uses_same_seed_and_frozen_reference(
     assert reference.eval_called is True
 
 
+def _binding_payloads() -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, bytes]]:
+    split_manifest = {
+        "schema_version": "molecular_gnn_split_manifest_v1",
+        "dataset": "tastemolnet",
+        "roles": {
+            "train": "model_fitting",
+            "validation": "checkpoint_selection_and_temperature_calibration",
+            "calibration": "reserved_for_threshold_and_selector_only",
+            "test": "frozen_model_final_quality_evaluation",
+        },
+        "files": {
+            "train": {"path": "/private/train.csv", "sha256": "1" * 64},
+            "validation": {"path": "/private/validation.csv", "sha256": "2" * 64},
+            "calibration": {"path": "/private/calibration.csv", "sha256": "3" * 64},
+            "test": {"path": "/private/test.csv", "sha256": "4" * 64},
+        },
+        "train_manifest": {
+            "schema_version": "molecular_graph_dataset_v1",
+            "num_records": 3,
+            "num_classes": 3,
+            "label_counts": {"0": 1, "1": 1, "2": 1},
+            "split_counts": {"train": 3},
+            "source_path": "/private/train.csv",
+            "source_sha256": "1" * 64,
+            "dataset_fingerprint": "5" * 64,
+            "feature_schema_sha256": "6" * 64,
+        },
+        "validation_manifest": {"schema_version": "molecular_graph_dataset_v1"},
+        "calibration_loaded_for_training": False,
+        "test_loaded_for_training": False,
+        "test_evaluated_during_training": False,
+        "test_used_for_checkpoint_selection": False,
+    }
+    frozen = {
+        "checkpoint_id": "a" * 64,
+        "t3_verification_sha256": "b" * 64,
+        "t4_verification_sha256": "c" * 64,
+        "t2_adoption_binding": {
+            "receipt_sha256": "d" * 64,
+            "gate_sha256": "e" * 64,
+            "formal_bundle_model_sha256": "a" * 64,
+        },
+        "t4_science": {
+            "checkpoint_id": "a" * 64,
+            "feature_schema_sha256": "6" * 64,
+            "train_payload_loaded": False,
+            "validation_payload_loaded": False,
+            "test_payload_loaded": False,
+            "strict_flip_count": 38,
+            "distinct_flipped_parent_count": 17,
+        },
+    }
+    t5 = {
+        "source_model_inventory_sha256": "f" * 64,
+        "source_adapter_present": False,
+    }
+    managed_t5 = {"verification_sha256": "9" * 64}
+    payloads = {
+        "split_manifest.json": (json.dumps(split_manifest) + "\n").encode("utf-8"),
+        "feature_schema.json": (
+            json.dumps({"schema_sha256": "6" * 64}) + "\n"
+        ).encode("utf-8"),
+        "temperature_scaling.json": (
+            json.dumps(
+                {
+                    "status": "fit",
+                    "temperature": 1.9724769811,
+                    "selection_split": "validation",
+                    "test_used_for_fit": False,
+                }
+            )
+            + "\n"
+        ).encode("utf-8"),
+    }
+    return frozen, t5, managed_t5, payloads
+
+
+def test_managed_v2_binding_normalizes_real_t2_t3_t4_t5_shapes() -> None:
+    frozen, t5, managed_t5, payloads = _binding_payloads()
+    binding = runner._build_taste_managed_binding_v2(
+        frozen_oracle=frozen,
+        t5_evidence=t5,
+        managed_t5_evidence=managed_t5,
+        checkpoint_payloads=payloads,
+    )
+    assert binding.evidence() == {
+        "dataset": "tastemolnet",
+        "num_classes": 3,
+        "source_label": 1,
+        "t2_receipt_sha": "d" * 64,
+        "t2_model_sha": "a" * 64,
+        "t2_feature_schema_sha": "6" * 64,
+        "t2_dataset_sha": "5" * 64,
+        "t2_split_sha": runner.hashlib.sha256(payloads["split_manifest.json"]).hexdigest(),
+        "t3_receipt_sha": "b" * 64,
+        "t3_predecessor_t2_sha": "e" * 64,
+        "t3_calibrated_model_sha": "a" * 64,
+        "t3_temperature": 1.9724769811,
+        "t3_feature_schema_sha": "6" * 64,
+        "t3_validation_split_sha": "2" * 64,
+        "t3_test_loaded": False,
+        "t4_receipt_sha": "c" * 64,
+        "t4_predecessor_t3_sha": "b" * 64,
+        "t4_calibration_split_sha": "3" * 64,
+        "t4_gine_sha": "a" * 64,
+        "t4_test_loaded": False,
+        "t4_strict_flip_count": 38,
+        "t4_flipped_parent_count": 17,
+        "t5_receipt_sha": "9" * 64,
+        "t5_clean_base_sha": "f" * 64,
+        "t5_train_only": True,
+        "t5_validation_loaded": False,
+        "t5_calibration_loaded": False,
+        "t5_test_loaded": False,
+    }
+
+
+def test_managed_v2_binding_reports_field_level_drift() -> None:
+    frozen, t5, managed_t5, payloads = _binding_payloads()
+    frozen = {
+        **frozen,
+        "t4_science": {
+            **frozen["t4_science"],
+            "feature_schema_sha256": "0" * 64,
+        },
+    }
+    with pytest.raises(ValueError, match="t4_feature_schema_sha"):
+        runner._build_taste_managed_binding_v2(
+            frozen_oracle=frozen,
+            t5_evidence=t5,
+            managed_t5_evidence=managed_t5,
+            checkpoint_payloads=payloads,
+        )
+
+
 def test_t6_source_adopts_managed_t5_and_keeps_frozen_oracle_binding() -> None:
     source = Path(runner.__file__).read_text(encoding="utf-8")
     assert "hold_verified_managed_final" in source
     assert "ADOPTED_CLEAN_GENERIC_BASE" in source
     assert "T6_RUNTIME_IN_MEMORY_ZERO_STEP_LORA" in source
     assert "frozen_oracle_identity" in source
+    assert "TasteManagedEvidenceBindingV2" in source
+    assert "_build_taste_managed_binding_v2(" in source
+    wrapper = (
+        Path(runner.__file__).parents[1]
+        / "scripts/autodl/run_tastemolnet_ours_ppo_smoke.sh"
+    ).read_text(encoding="utf-8")
+    assert "TASTEMOLNET_T3_CHECKPOINT" in wrapper
+    assert '--gnn-checkpoint "$TASTEMOLNET_T3_CHECKPOINT"' in wrapper

@@ -754,32 +754,16 @@ _T4_CHECKPOINT_PAYLOAD_FILES = (
 )
 
 
-def _load_taste_gnn_stage_api() -> tuple[Any, Any]:
+def _load_taste_gnn_stage_api() -> tuple[Any, Any, Any]:
     try:
-        from src.eval.tastemolnet_gnn_stages import (
-            hold_taste_checkpoint_bundle,
-            hold_taste_stage_output,
-        )
+        from src.eval.tastemolnet_gnn_stages import hold_taste_checkpoint_bundle
+        from src.eval.tastemolnet_t4_oracle_smoke_v2 import HeldPublishedT3
+        from src.utils.tastemolnet_t9_managed_v2 import hold_t4_managed_final
     except ImportError as exc:
         raise TasteCleanPolicyReleaseDisabled(
-            "reviewed b809 Taste T3/T4 held API is not installed"
+            "reviewed managed-v2 Taste T3/T4 held API is not installed"
         ) from exc
-    return hold_taste_stage_output, hold_taste_checkpoint_bundle
-
-
-def _held_stage_descriptor(held: Any) -> int:
-    directory = getattr(held, "directory", None)
-    descriptor = getattr(directory, "descriptor", None)
-    if type(descriptor) is not int or descriptor < 0:
-        raise TasteCleanPolicyReleaseDisabled("Taste T3/T4 held descriptor is unavailable")
-    return descriptor
-
-
-def _held_stage_json(held: Any, name: str, *, label: str) -> dict[str, Any]:
-    payload, _data = _read_json_at(
-        _held_stage_descriptor(held), name, label=label, require_private=False
-    )
-    return payload
+    return HeldPublishedT3, hold_t4_managed_final, hold_taste_checkpoint_bundle
 
 
 def _validate_t2_adoption_binding(value: Any, *, label: str) -> dict[str, Any]:
@@ -831,232 +815,103 @@ def _validate_t2_adoption_binding(value: Any, *, label: str) -> dict[str, Any]:
 
 def _validate_t3_t4_documents(
     *,
+    expected: TasteFrozenOracleIdentity,
     t3: Any,
     t4: Any,
     checkpoint: Any,
 ) -> TasteFrozenOracleIdentity:
-    t3_evidence = dict(t3.revalidate())
-    t4_evidence = dict(t4.revalidate())
-    expected_evidence_keys = {
-        "stage", "gate_sha256", "root_inventory_sha256", "checkpoint_dir",
-        "checkpoint_id", "checkpoint_inventory_sha256",
-        "checkpoint_stat_inventory_sha256", "checkpoint_sha256s_sha256",
-        "t2_adoption_gate_sha256", "t2_adoption_receipt_sha256",
-        "t2_adoption_binding_sha256",
-    }
-    _exact_keys(t3_evidence, expected_evidence_keys, label="held T3 evidence")
-    _exact_keys(t4_evidence, expected_evidence_keys, label="held T4 evidence")
-    if t3_evidence["stage"] != "T3_GINE_CALIBRATED" or t4_evidence["stage"] != "T4_ORACLE_SMOKE":
-        raise TasteCleanPolicyReleaseDisabled("held Taste stages are not exact T3/T4")
-    common = (
-        "checkpoint_dir", "checkpoint_id", "checkpoint_inventory_sha256",
-        "checkpoint_stat_inventory_sha256", "checkpoint_sha256s_sha256",
-    )
-    if any(t3_evidence[key] != t4_evidence[key] for key in common):
-        raise TasteCleanPolicyReleaseDisabled("T3/T4 do not bind the same frozen GINE")
-    checkpoint_evidence = dict(checkpoint.revalidate())
-    if checkpoint_evidence != t3_evidence or any(
-        checkpoint_evidence[key] != t4_evidence[key] for key in common
-    ):
-        raise TasteCleanPolicyReleaseDisabled("checkpoint authority differs from T3/T4")
-
-    t3_gate = _held_stage_json(t3, "gate.json", label="held T3 gate")
-    t4_gate = _held_stage_json(t4, "gate.json", label="held T4 gate")
-    t3_reference = _held_stage_json(
-        t3, "oracle_reference.json", label="held T3 oracle reference"
-    )
-    t4_provenance = _held_stage_json(
-        t4, "oracle_provenance.json", label="held T4 oracle provenance"
-    )
-    _exact_keys(t3_gate, _T3_GATE_KEYS, label="typed T3 gate")
-    _exact_keys(t4_gate, _T4_GATE_KEYS, label="typed T4 gate")
-    _exact_keys(t3_reference, _T3_REFERENCE_KEYS, label="typed T3 oracle reference")
-    _exact_keys(t4_provenance, _T4_PROVENANCE_KEYS, label="typed T4 oracle provenance")
+    frozen = expected.evidence()
+    if frozen.get("dataset") != DATASET or frozen.get("num_classes") != 3 or frozen.get("source_label") != 1:
+        raise TasteCleanPolicyReleaseDisabled("frozen Taste oracle identity changed")
     t2_binding = _validate_t2_adoption_binding(
-        t3_gate.get("t2_adoption_binding"), label="T3 T2 adoption binding"
+        frozen.get("t2_adoption_binding"), label="Taste T6 T2 adoption binding"
     )
-    for label, value in (
-        ("T4 gate", t4_gate.get("t2_adoption_binding")),
-        ("T3 oracle reference", t3_reference.get("t2_adoption_binding")),
-        ("T4 oracle provenance", t4_provenance.get("t2_adoption_binding")),
-    ):
-        if _validate_t2_adoption_binding(value, label=label) != t2_binding:
-            raise TasteCleanPolicyReleaseDisabled(
-                "T3/T4 do not retain one fresh T2 adoption binding"
-            )
-    t2_binding_sha256 = _canonical_sha256(t2_binding)
-    expected_t2_stage_evidence = {
+    t3.verify()
+    t3_binding = dict(t3.binding)
+    t4_evidence = dict(t4.revalidate())
+    t4_science = _mapping(t4_evidence.get("science"), label="held T4 scientific evidence")
+    checkpoint_evidence = dict(checkpoint.revalidate())
+    expected_checkpoint_evidence = {
+        "stage": "T3_GINE_CALIBRATED",
+        "gate_sha256": expected.t3_gate_sha256,
+        "root_inventory_sha256": expected.t3_root_inventory_sha256,
+        "checkpoint_dir": str(expected.checkpoint_dir),
+        "checkpoint_id": expected.checkpoint_id,
+        "checkpoint_inventory_sha256": expected.checkpoint_inventory_sha256,
+        "checkpoint_stat_inventory_sha256": expected.checkpoint_stat_inventory_sha256,
+        "checkpoint_sha256s_sha256": expected.checkpoint_sha256s_sha256,
         "t2_adoption_gate_sha256": t2_binding["gate_sha256"],
         "t2_adoption_receipt_sha256": t2_binding["receipt_sha256"],
-        "t2_adoption_binding_sha256": t2_binding_sha256,
+        "t2_adoption_binding_sha256": _canonical_sha256(t2_binding),
     }
-    for label, evidence in (("T3", t3_evidence), ("T4", t4_evidence)):
-        if any(
-            evidence.get(key) != expected
-            for key, expected in expected_t2_stage_evidence.items()
-        ):
+    if checkpoint_evidence != expected_checkpoint_evidence:
+        raise TasteCleanPolicyReleaseDisabled("checkpoint authority differs from frozen T3 identity")
+    if (
+        t3_binding.get("t3_root") != str(expected.t3_output_root)
+        or t3_binding.get("t3_gate_sha256") != expected.t3_gate_sha256
+        or t3_binding.get("t3_root_inventory_sha256") != expected.t3_root_inventory_sha256
+        or t3_binding.get("checkpoint_dir") != str(expected.checkpoint_dir)
+        or t3_binding.get("checkpoint_id") != expected.checkpoint_id
+        or t3_binding.get("model_sha256") != expected.checkpoint_sha256
+        or t3_binding.get("temperature_scaling_sha256") != expected.temperature_calibration_sha256
+        or t3_binding.get("feature_schema_sha256") != expected.feature_schema_sha256
+        or t3_binding.get("source_t2_gate_sha256") != t2_binding["gate_sha256"]
+        or t3_binding.get("source_t2_evidence_sha256") != t2_binding["source_evidence_sha256"]
+        or t3_binding.get("selection_split") != "validation"
+        or t3_binding.get("temperature_refit_performed") is not True
+        or t3_binding.get("calibration_payload_loaded") is not False
+        or t3_binding.get("test_payload_loaded") is not False
+        or t3_binding.get("rf_oracle_used") is not False
+    ):
+        raise TasteCleanPolicyReleaseDisabled("managed-v2 T3 binding drifted")
+    if (
+        t4_science.get("checkpoint_id") != expected.checkpoint_id
+        or t4_science.get("temperature_scaling_sha256")
+        != expected.temperature_calibration_sha256
+        or t4_science.get("feature_schema_sha256")
+        != expected.feature_schema_sha256
+    ):
+        raise TasteCleanPolicyReleaseDisabled(
+            "T3/T4 model/feature/temperature differs"
+        )
+    if (
+        t4_evidence.get("root") != str(expected.t4_output_root)
+        or t4_evidence.get("root_inventory_sha256") != expected.t4_root_inventory_sha256
+        or t4_evidence.get("gate_sha256") != expected.t4_gate_sha256
+        or t4_science.get("t3_gate_sha256") != expected.t3_gate_sha256
+        or t4_science.get("t3_verification_sha256") != t3_binding.get("t3_verification_sha256")
+        or t4_science.get("adaptive_calibration_search") is not True
+        or t4_science.get("strict_flip_gate_pass") is not True
+        or type(t4_science.get("strict_flip_count")) is not int
+        or type(t4_science.get("distinct_flipped_parent_count")) is not int
+        or t4_science.get("train_payload_loaded") is not False
+        or t4_science.get("validation_payload_loaded") is not False
+        or t4_science.get("test_payload_loaded") is not False
+        or t4_science.get("rf_oracle_used") is not False
+        or t4_science.get("per_example_output_written") is not False
+    ):
+        raise TasteCleanPolicyReleaseDisabled("managed-v2 T4 binding drifted")
+    for name, expected_sha in (
+        ("feature_schema.json", expected.feature_schema_sha256),
+        ("temperature_scaling.json", expected.temperature_calibration_sha256),
+    ):
+        if _sha256_bytes(checkpoint.read_frozen_gine_payload(name)) != expected_sha:
             raise TasteCleanPolicyReleaseDisabled(
-                f"{label} held evidence differs from its T2 adoption binding"
+                f"held checkpoint payload differs from frozen oracle: {name}"
             )
-    if (
-        t3_gate.get("schema_version") != "tastemolnet_main_stage_gate_v1"
-        or t3_gate.get("stage") != "T3_GINE_CALIBRATED"
-        or t3_gate.get("status") != "PASS"
-        or t3_gate.get("marker") != "TASTE_GINE_CALIBRATION_PASS"
-        or t3_gate.get("depends_on") != [ADOPTION_MARKER]
-        or t3_gate.get("t2_science_bundle_verified") is not True
-        or t3_gate.get("existing_fit_adopted") is not True
-        or t3_gate.get("temperature_refit_performed") is not False
-        or t3_gate.get("test_loaded") is not False
-    ):
-        raise TasteCleanPolicyReleaseDisabled("typed T3 gate semantics changed")
-    if (
-        t4_gate.get("schema_version") != "tastemolnet_main_stage_gate_v1"
-        or t4_gate.get("stage") != "T4_ORACLE_SMOKE"
-        or t4_gate.get("status") != "PASS"
-        or t4_gate.get("marker") != "TASTE_MULTICLASS_ORACLE_PASS"
-        or t4_gate.get("depends_on") != ["T3_GINE_CALIBRATED"]
-        or t4_gate.get("t3_gate_sha256") != t3_evidence["gate_sha256"]
-        or type(t4_gate.get("selected_count")) is not int
-        or t4_gate.get("selected_count", 0) <= 0
-        or t4_gate.get("calibration_payload_loaded") is not True
-        or t4_gate.get("test_loaded") is not False
-        or t4_gate.get("per_example_predictions_written") is not False
-    ):
-        raise TasteCleanPolicyReleaseDisabled("typed T4 gate semantics changed")
-    for gate, evidence, label in (
-        (t3_gate, t3_evidence, "T3"), (t4_gate, t4_evidence, "T4")
-    ):
-        if any(gate.get(key) != evidence[key] for key in common):
-            raise TasteCleanPolicyReleaseDisabled(f"{label} gate/evidence GINE binding changed")
-    if t3_gate.get("downstream_policy_sha256") != t4_gate.get("downstream_policy_sha256"):
-        raise TasteCleanPolicyReleaseDisabled("T3/T4 downstream policy differs")
-    downstream_policy_sha = _hex(
-        t3_gate.get("downstream_policy_sha256"), label="downstream_policy_sha256"
-    )
-
-    semantic_expected = {
-        "dataset": DATASET,
-        "selected_inference_asset": "model.pt",
-        "last_checkpoint_terminal_only": True,
-        "num_classes": 3,
-        "source_label": 1,
-        "rf_oracle_used": False,
-    }
-    for key, value in semantic_expected.items():
-        if type(t3_reference.get(key)) is not type(value) or t3_reference.get(key) != value:
-            raise TasteCleanPolicyReleaseDisabled(f"T3 oracle reference changed: {key}")
-    t4_expected = {
-        "dataset": DATASET,
-        "checkpoint_payload_files_opened": list(_T4_CHECKPOINT_PAYLOAD_FILES),
-        "selected_inference_asset": "model.pt",
-        "checkpoint_csv_payload_opened": False,
-        "physical_gpu_index": 1,
-        "visible_device": "cuda:0",
-        "cuda_visible_devices": "1",
-        "checkpoint_load_count": 1,
-        "rf_oracle_used": False,
-        "test_loaded": False,
-    }
-    for key, value in t4_expected.items():
-        if type(t4_provenance.get(key)) is not type(value) or t4_provenance.get(key) != value:
-            raise TasteCleanPolicyReleaseDisabled(f"T4 oracle provenance changed: {key}")
-    for key in common:
-        if t4_provenance.get(key) != t4_evidence[key]:
-            raise TasteCleanPolicyReleaseDisabled(f"T4 provenance differs from gate: {key}")
-    for key in ("checkpoint_id",):
-        if t3_reference.get(key) != t3_evidence[key]:
-            raise TasteCleanPolicyReleaseDisabled(f"T3 reference differs from gate: {key}")
-    model_sha = _hex(t3_reference.get("model_sha256"), label="T3 model_sha256")
-    _hex(t3_reference.get("last_sha256"), label="T3 last_sha256")
-    config_sha = _hex(t3_reference.get("config_sha256"), label="T3 config_sha256")
-    feature_sha = _hex(
-        t3_reference.get("feature_schema_sha256"), label="T3 feature_schema_sha256"
-    )
-    label_map_sha = _hex(
-        t3_reference.get("label_map_sha256"), label="T3 label_map_sha256"
-    )
-    temperature_sha = _hex(
-        t3_reference.get("temperature_scaling_sha256"),
-        label="T3 temperature_scaling_sha256",
-    )
-    if (
-        model_sha != t3_evidence["checkpoint_id"]
-        or t2_binding.get("formal_bundle_root") != t3_evidence["checkpoint_dir"]
-        or t2_binding.get("formal_bundle_model_sha256") != model_sha
-        or t2_binding.get("formal_bundle_sha256s_sha256")
-        != t3_evidence["checkpoint_sha256s_sha256"]
-        or t4_provenance.get("model_sha256") != model_sha
-        or t4_provenance.get("config_sha256") != config_sha
-        or t4_provenance.get("feature_schema_sha256") != feature_sha
-        or t4_provenance.get("temperature_scaling_sha256") != temperature_sha
-        or t4_gate.get("physical_gpu_index") != t4_provenance.get("physical_gpu_index")
-        or t4_gate.get("gpu_uuid") != t4_provenance.get("gpu_uuid")
-        or t4_gate.get("visible_device") != t4_provenance.get("visible_device")
-        or t4_gate.get("cuda_visible_devices")
-        != t4_provenance.get("cuda_visible_devices")
-    ):
-        raise TasteCleanPolicyReleaseDisabled("T3/T4 model/feature/temperature differs")
-    t4_gpu_uuid = t4_provenance.get("gpu_uuid")
-    if not isinstance(t4_gpu_uuid, str) or _GPU_UUID_RE.fullmatch(t4_gpu_uuid) is None:
-        raise TasteCleanPolicyReleaseDisabled("T4 frozen-oracle GPU UUID is malformed")
-    # The held checkpoint API already proves checkpoint_id == SHA256(model.pt)
-    # without requiring T5 to allocate another full model byte copy.  Reopen
-    # the small semantic leaves descriptor-relatively here as the final
-    # bidirectional config/feature/label/temperature binding.
-    for name, expected in (
-        ("config.yaml", config_sha),
-        ("feature_schema.json", feature_sha),
-        ("label_map.json", label_map_sha),
-        ("temperature_scaling.json", temperature_sha),
-    ):
-        data = checkpoint.read_frozen_gine_payload(name)
-        if _sha256_bytes(data) != expected:
+    label_map_payload = checkpoint.read_frozen_gine_payload("label_map.json")
+    if label_map_payload != _json_bytes(LABEL_MAP):
+        try:
+            label_map = json.loads(label_map_payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise TasteCleanPolicyReleaseDisabled(
-                f"held checkpoint payload differs from T3/T4: {name}"
+                "held checkpoint label map is malformed"
+            ) from exc
+        if label_map != LABEL_MAP:
+            raise TasteCleanPolicyReleaseDisabled(
+                "held checkpoint label map differs from three-class Taste semantics"
             )
-        if name == "label_map.json":
-            try:
-                label_map = json.loads(data.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise TasteCleanPolicyReleaseDisabled(
-                    "held checkpoint label map is malformed"
-                ) from exc
-            if label_map != LABEL_MAP:
-                raise TasteCleanPolicyReleaseDisabled(
-                    "held checkpoint label map differs from three-class Taste semantics"
-                )
-    return TasteFrozenOracleIdentity(
-        checkpoint_dir=_absolute(
-            t3_evidence["checkpoint_dir"], label="checkpoint_dir", must_exist=True
-        ),
-        checkpoint_id=_hex(t3_evidence["checkpoint_id"], label="checkpoint_id"),
-        checkpoint_sha256=model_sha,
-        checkpoint_inventory_sha256=_hex(
-            t3_evidence["checkpoint_inventory_sha256"], label="checkpoint_inventory_sha256"
-        ),
-        checkpoint_stat_inventory_sha256=_hex(
-            t3_evidence["checkpoint_stat_inventory_sha256"],
-            label="checkpoint_stat_inventory_sha256",
-        ),
-        checkpoint_sha256s_sha256=_hex(
-            t3_evidence["checkpoint_sha256s_sha256"], label="checkpoint_sha256s_sha256"
-        ),
-        feature_schema_sha256=feature_sha,
-        temperature_calibration_sha256=temperature_sha,
-        downstream_policy_sha256=downstream_policy_sha,
-        t2_adoption_binding=t2_binding,
-        t3_output_root=_absolute(t3.root, label="t3_output_root", must_exist=True),
-        t3_gate_sha256=_hex(t3_evidence["gate_sha256"], label="t3_gate_sha256"),
-        t3_root_inventory_sha256=_hex(
-            t3_evidence["root_inventory_sha256"], label="t3_root_inventory_sha256"
-        ),
-        t4_output_root=_absolute(t4.root, label="t4_output_root", must_exist=True),
-        t4_gate_sha256=_hex(t4_evidence["gate_sha256"], label="t4_gate_sha256"),
-        t4_root_inventory_sha256=_hex(
-            t4_evidence["root_inventory_sha256"], label="t4_root_inventory_sha256"
-        ),
-    )
+    return expected
 
 
 @dataclass(slots=True)
@@ -1075,7 +930,10 @@ class HeldTasteFrozenOracleAuthority:
                 "held fresh T2 adoption authority changed"
             )
         current = _validate_t3_t4_documents(
-            t3=self.t3, t4=self.t4, checkpoint=self.checkpoint
+            expected=self.evidence,
+            t3=self.t3,
+            t4=self.t4,
+            checkpoint=self.checkpoint,
         )
         if current.evidence() != self.evidence.evidence():
             raise TasteCleanPolicyReleaseDisabled("held T3/T4 frozen oracle changed")
@@ -1096,21 +954,73 @@ class HeldTasteFrozenOracleAuthority:
 
 
 def _hold_frozen_oracle_authority(payload: Mapping[str, Any]) -> HeldTasteFrozenOracleAuthority:
-    hold_stage, hold_checkpoint = _load_taste_gnn_stage_api()
-    t3_root = _absolute(payload.get("t3_output_root"), label="t3_output_root", must_exist=True)
-    t4_root = _absolute(payload.get("t4_output_root"), label="t4_output_root", must_exist=True)
-    t3 = hold_stage(t3_root)
+    hold_t3, hold_t4, hold_checkpoint = _load_taste_gnn_stage_api()
+    expected = TasteFrozenOracleIdentity(
+        checkpoint_dir=_absolute(payload.get("checkpoint_dir"), label="checkpoint_dir", must_exist=True),
+        checkpoint_id=_hex(payload.get("checkpoint_id"), label="checkpoint_id"),
+        checkpoint_sha256=_hex(payload.get("checkpoint_sha256"), label="checkpoint_sha256"),
+        checkpoint_inventory_sha256=_hex(
+            payload.get("checkpoint_inventory_sha256"),
+            label="checkpoint_inventory_sha256",
+        ),
+        checkpoint_stat_inventory_sha256=_hex(
+            payload.get("checkpoint_stat_inventory_sha256"),
+            label="checkpoint_stat_inventory_sha256",
+        ),
+        checkpoint_sha256s_sha256=_hex(
+            payload.get("checkpoint_sha256s_sha256"),
+            label="checkpoint_sha256s_sha256",
+        ),
+        feature_schema_sha256=_hex(
+            payload.get("feature_schema_sha256"), label="feature_schema_sha256"
+        ),
+        temperature_calibration_sha256=_hex(
+            payload.get("temperature_calibration_sha256"),
+            label="temperature_calibration_sha256",
+        ),
+        downstream_policy_sha256=_hex(
+            payload.get("downstream_policy_sha256"), label="downstream_policy_sha256"
+        ),
+        t2_adoption_binding=_validate_t2_adoption_binding(
+            payload.get("t2_adoption_binding"), label="frozen T2 adoption binding"
+        ),
+        t3_output_root=_absolute(payload.get("t3_output_root"), label="t3_output_root", must_exist=True),
+        t3_gate_sha256=_hex(payload.get("t3_gate_sha256"), label="t3_gate_sha256"),
+        t3_root_inventory_sha256=_hex(
+            payload.get("t3_root_inventory_sha256"), label="t3_root_inventory_sha256"
+        ),
+        t4_output_root=_absolute(payload.get("t4_output_root"), label="t4_output_root", must_exist=True),
+        t4_gate_sha256=_hex(payload.get("t4_gate_sha256"), label="t4_gate_sha256"),
+        t4_root_inventory_sha256=_hex(
+            payload.get("t4_root_inventory_sha256"), label="t4_root_inventory_sha256"
+        ),
+    )
+    t3 = hold_t3(expected.t3_output_root)
     t4: Any | None = None
     checkpoint: Any | None = None
     t2_adoption: Any | None = None
     try:
-        t4 = hold_stage(t4_root)
-        t3_evidence = dict(t3.revalidate())
+        t4 = hold_t4(expected.t4_output_root)
         checkpoint = hold_checkpoint(
-            t3_evidence["checkpoint_dir"], expected_stage_evidence=t3_evidence
+            expected.checkpoint_dir,
+            expected_stage_evidence={
+                "stage": "T3_GINE_CALIBRATED",
+                "gate_sha256": expected.t3_gate_sha256,
+                "root_inventory_sha256": expected.t3_root_inventory_sha256,
+                "checkpoint_dir": str(expected.checkpoint_dir),
+                "checkpoint_id": expected.checkpoint_id,
+                "checkpoint_inventory_sha256": expected.checkpoint_inventory_sha256,
+                "checkpoint_stat_inventory_sha256": expected.checkpoint_stat_inventory_sha256,
+                "checkpoint_sha256s_sha256": expected.checkpoint_sha256s_sha256,
+                "t2_adoption_gate_sha256": expected.t2_adoption_binding["gate_sha256"],
+                "t2_adoption_receipt_sha256": expected.t2_adoption_binding["receipt_sha256"],
+                "t2_adoption_binding_sha256": _canonical_sha256(expected.t2_adoption_binding),
+            },
         )
-        evidence = _validate_t3_t4_documents(t3=t3, t4=t4, checkpoint=checkpoint)
-        t2_binding = dict(evidence.t2_adoption_binding)
+        evidence = _validate_t3_t4_documents(
+            expected=expected, t3=t3, t4=t4, checkpoint=checkpoint
+        )
+        t2_binding = dict(expected.t2_adoption_binding)
         t2_adoption = hold_t2_gine_pass_adoption(
             t2_binding["adoption_root"],
             expected_gate_sha256=t2_binding["gate_sha256"],
@@ -1123,7 +1033,7 @@ def _hold_frozen_oracle_authority(payload: Mapping[str, Any]) -> HeldTasteFrozen
             raise TasteCleanPolicyReleaseDisabled(
                 "fresh T2 adoption differs from T3/T4 binding"
             )
-        expected = {
+        expected_payload = {
             "dataset": DATASET,
             "backbone": "gine",
             "num_classes": 3,
@@ -1140,7 +1050,7 @@ def _hold_frozen_oracle_authority(payload: Mapping[str, Any]) -> HeldTasteFrozen
                 }
             },
         }
-        if dict(payload) != expected:
+        if dict(payload) != expected_payload:
             raise TasteCleanPolicyReleaseDisabled(
                 "release authority does not exactly and bidirectionally bind T3/T4"
             )

@@ -1048,6 +1048,212 @@ def _hold_t6_clean_base(root: Path) -> _HeldT6CleanBase:
         raise
 
 
+@dataclass(slots=True)
+class TasteManagedEvidenceBindingV2:
+    dataset: str
+    num_classes: int
+    source_label: int
+    t2_receipt_sha: str
+    t2_model_sha: str
+    t2_feature_schema_sha: str
+    t2_dataset_sha: str
+    t2_split_sha: str
+    t3_receipt_sha: str
+    t3_predecessor_t2_sha: str
+    t3_calibrated_model_sha: str
+    t3_temperature: float
+    t3_feature_schema_sha: str
+    t3_validation_split_sha: str
+    t3_test_loaded: bool
+    t4_receipt_sha: str
+    t4_predecessor_t3_sha: str
+    t4_calibration_split_sha: str
+    t4_gine_sha: str
+    t4_test_loaded: bool
+    t4_strict_flip_count: int
+    t4_flipped_parent_count: int
+    t5_receipt_sha: str
+    t5_clean_base_sha: str
+    t5_train_only: bool
+    t5_validation_loaded: bool
+    t5_calibration_loaded: bool
+    t5_test_loaded: bool
+
+    def evidence(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _binding_drift_message(
+    title: str,
+    *,
+    observed: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> str:
+    parts = []
+    for field, expected_value in expected.items():
+        observed_value = observed.get(field)
+        if observed_value != expected_value:
+            parts.append(
+                f"{field}: expected={expected_value!r} observed={observed_value!r}"
+            )
+    return f"{title}: " + "; ".join(parts)
+
+
+def _build_taste_managed_binding_v2(
+    *,
+    frozen_oracle: Mapping[str, Any],
+    t5_evidence: Mapping[str, Any],
+    managed_t5_evidence: Mapping[str, Any],
+    checkpoint_payloads: Mapping[str, bytes],
+) -> TasteManagedEvidenceBindingV2:
+    t2_binding = frozen_oracle.get("t2_adoption_binding")
+    if type(t2_binding) is not dict:
+        raise ValueError("Taste T6 frozen oracle lacks T2 adoption binding")
+    split_manifest = _json_from_bytes(
+        checkpoint_payloads["split_manifest.json"], label="split manifest"
+    )
+    files = split_manifest.get("files")
+    train_manifest = split_manifest.get("train_manifest")
+    if type(files) is not dict or type(train_manifest) is not dict:
+        raise ValueError("Taste T6 split manifest cannot build a managed-v2 binding")
+    validation = files.get("validation")
+    calibration = files.get("calibration")
+    if type(validation) is not dict or type(calibration) is not dict:
+        raise ValueError("Taste T6 validation/calibration split authority is malformed")
+    feature_schema = _json_from_bytes(
+        checkpoint_payloads["feature_schema.json"], label="feature schema"
+    )
+    temperature = _json_from_bytes(
+        checkpoint_payloads["temperature_scaling.json"], label="temperature scaling"
+    )
+    t3_verification_sha = frozen_oracle.get("t3_verification_sha256")
+    t4_science = frozen_oracle.get("t4_science")
+    if type(t4_science) is not dict:
+        raise ValueError("Taste T6 frozen oracle lacks T4 scientific evidence")
+    binding = TasteManagedEvidenceBindingV2(
+        dataset="tastemolnet",
+        num_classes=3,
+        source_label=1,
+        t2_receipt_sha=str(t2_binding["receipt_sha256"]),
+        t2_model_sha=str(t2_binding["formal_bundle_model_sha256"]),
+        t2_feature_schema_sha=str(feature_schema["schema_sha256"]),
+        t2_dataset_sha=str(train_manifest["dataset_fingerprint"]),
+        t2_split_sha=hashlib.sha256(checkpoint_payloads["split_manifest.json"]).hexdigest(),
+        t3_receipt_sha=str(t3_verification_sha),
+        t3_predecessor_t2_sha=str(t2_binding["gate_sha256"]),
+        t3_calibrated_model_sha=str(frozen_oracle["checkpoint_id"]),
+        t3_temperature=float(temperature["temperature"]),
+        t3_feature_schema_sha=str(feature_schema["schema_sha256"]),
+        t3_validation_split_sha=str(validation["sha256"]),
+        t3_test_loaded=False,
+        t4_receipt_sha=str(frozen_oracle["t4_verification_sha256"]),
+        t4_predecessor_t3_sha=str(t3_verification_sha),
+        t4_calibration_split_sha=str(calibration["sha256"]),
+        t4_gine_sha=str(t4_science["checkpoint_id"]),
+        t4_test_loaded=False,
+        t4_strict_flip_count=int(t4_science["strict_flip_count"]),
+        t4_flipped_parent_count=int(t4_science["distinct_flipped_parent_count"]),
+        t5_receipt_sha=str(managed_t5_evidence["verification_sha256"]),
+        t5_clean_base_sha=str(t5_evidence["source_model_inventory_sha256"]),
+        t5_train_only=True,
+        t5_validation_loaded=False,
+        t5_calibration_loaded=False,
+        t5_test_loaded=False,
+    )
+    checks = [
+        (
+            "Taste T6 T2/T3 model predecessor drifted",
+            {
+                "t2_model_sha": binding.t2_model_sha,
+                "t3_calibrated_model_sha": binding.t3_calibrated_model_sha,
+                "t3_predecessor_t2_sha": binding.t3_predecessor_t2_sha,
+            },
+            {
+                "t2_model_sha": str(frozen_oracle["checkpoint_id"]),
+                "t3_calibrated_model_sha": str(frozen_oracle["checkpoint_id"]),
+                "t3_predecessor_t2_sha": str(t2_binding["gate_sha256"]),
+            },
+        ),
+        (
+            "Taste T6 T2/T3/T4 feature schema drifted",
+            {
+                "t2_feature_schema_sha": binding.t2_feature_schema_sha,
+                "t3_feature_schema_sha": binding.t3_feature_schema_sha,
+                "t4_feature_schema_sha": t4_science.get("feature_schema_sha256"),
+            },
+            {
+                "t2_feature_schema_sha": str(feature_schema["schema_sha256"]),
+                "t3_feature_schema_sha": str(feature_schema["schema_sha256"]),
+                "t4_feature_schema_sha": str(feature_schema["schema_sha256"]),
+            },
+        ),
+        (
+            "Taste T6 T3/T4 calibrated GINE drifted",
+            {
+                "t3_calibrated_model_sha": binding.t3_calibrated_model_sha,
+                "t4_gine_sha": binding.t4_gine_sha,
+                "t4_predecessor_t3_sha": binding.t4_predecessor_t3_sha,
+            },
+            {
+                "t3_calibrated_model_sha": str(frozen_oracle["checkpoint_id"]),
+                "t4_gine_sha": str(frozen_oracle["checkpoint_id"]),
+                "t4_predecessor_t3_sha": str(t3_verification_sha),
+            },
+        ),
+        (
+            "Taste T6 T3 held-out contract drifted",
+            {
+                "t3_temperature": binding.t3_temperature,
+                "t3_validation_split_sha": binding.t3_validation_split_sha,
+                "t3_test_loaded": binding.t3_test_loaded,
+            },
+            {
+                "t3_temperature": float(temperature["temperature"]),
+                "t3_validation_split_sha": str(validation["sha256"]),
+                "t3_test_loaded": False,
+            },
+        ),
+        (
+            "Taste T6 T4 calibration-only contract drifted",
+            {
+                "t4_calibration_split_sha": binding.t4_calibration_split_sha,
+                "t4_test_loaded": binding.t4_test_loaded,
+                "t4_train_payload_loaded": t4_science.get("train_payload_loaded"),
+                "t4_validation_payload_loaded": t4_science.get("validation_payload_loaded"),
+                "t4_test_payload_loaded": t4_science.get("test_payload_loaded"),
+            },
+            {
+                "t4_calibration_split_sha": str(calibration["sha256"]),
+                "t4_test_loaded": False,
+                "t4_train_payload_loaded": False,
+                "t4_validation_payload_loaded": False,
+                "t4_test_payload_loaded": False,
+            },
+        ),
+        (
+            "Taste T6 T5 clean-base isolation drifted",
+            {
+                "t5_train_only": binding.t5_train_only,
+                "t5_validation_loaded": binding.t5_validation_loaded,
+                "t5_calibration_loaded": binding.t5_calibration_loaded,
+                "t5_test_loaded": binding.t5_test_loaded,
+                "t5_source_adapter_present": t5_evidence.get("source_adapter_present"),
+            },
+            {
+                "t5_train_only": True,
+                "t5_validation_loaded": False,
+                "t5_calibration_loaded": False,
+                "t5_test_loaded": False,
+                "t5_source_adapter_present": False,
+            },
+        ),
+    ]
+    for title, observed, expected in checks:
+        if observed != expected:
+            raise ValueError(_binding_drift_message(title, observed=observed, expected=expected))
+    return binding
+
+
 def _build_zero_step_lora_model(
     deps: Mapping[str, Any],
     *,
@@ -1221,6 +1427,18 @@ def run(args: Any) -> int:
             name: checkpoint_authority.read_frozen_gine_payload(name)
             for name in checkpoint_payload_names
         }
+        binding_frozen_oracle = {
+            **dict(frozen),
+            "t3_verification_sha256": managed_oracle.t3.binding["t3_verification_sha256"],
+            "t4_verification_sha256": managed_oracle.t4.revalidate()["verification_sha256"],
+            "t4_science": managed_oracle.t4.revalidate()["science"],
+        }
+        managed_binding_v2 = _build_taste_managed_binding_v2(
+            frozen_oracle=binding_frozen_oracle,
+            t5_evidence=t5_evidence,
+            managed_t5_evidence=t5_load.managed_evidence,
+            checkpoint_payloads=checkpoint_payloads,
+        )
         checkpoint_evidence = checkpoint_authority.revalidate()
         (
             train_contract,
@@ -1373,6 +1591,7 @@ def run(args: Any) -> int:
         t5_evidence = {
             **t5_evidence,
             "frozen_oracle_identity": dict(frozen),
+            "managed_evidence_binding_v2": managed_binding_v2.evidence(),
             "policy_initializer_hash": policy_initializer_hash,
             "reference_policy_hash": reference_policy_hash,
             "adapter_parameter_sha256": initial_policy_adapter,
@@ -1494,6 +1713,7 @@ def run(args: Any) -> int:
             "checkpoint_id": train_contract["checkpoint_id"],
             "dataset_path": str(train_csv),
             "train_contract": train_contract,
+            "managed_evidence_binding_v2": managed_binding_v2.evidence(),
             "parent_selection": parent_selection,
             "stable_config": asdict(stable_config),
             "num_classes": 3,
