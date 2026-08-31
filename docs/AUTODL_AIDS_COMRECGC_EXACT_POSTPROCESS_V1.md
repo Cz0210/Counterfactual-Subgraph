@@ -28,6 +28,13 @@ component closure, all-core/no-noise state, and sklearn-float64 semantics.
 - CUDA is hidden and postprocessing is capped at eight CPU workers.
 - Resume is permitted only for the same root and frozen continuation contract.
   PASS requires the common-recourse closure and every downstream stage.
+- Historical `authoritative_backing_freeze_only_v3` lineage summaries may omit
+  the redundant `rng_calls_added` field. Such an omission is accepted only
+  when the sibling v4 safe-recovery receipt, its hash-bound terminal, completed
+  walk/no-RNG reason, lineage/selected-trace hashes, and frozen-payload v7
+  no-drift closure all reopen exactly. Generic missing RNG evidence remains a
+  hard failure, and the adopted evidence is reported explicitly in chemistry
+  and preregistration manifests.
 
 ## AutoDL command
 
@@ -57,4 +64,3 @@ claim a matrix cell itself.
 The paired Slurm entrypoint is
 `scripts/slurm/run_aids_comrecgc_exact_postprocess_v1.sh`. It follows the
 repository A800 allocation baseline but hides CUDA, so the science is CPU-only.
-

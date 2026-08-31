@@ -106,9 +106,24 @@ def validate_chemistry_trace_evidence(
     marker_payload = _load(marker)
     candidate_count = int(payload.get("candidate_count", -1))
     resolved_count = int(payload.get("candidate_lineage_resolved_count", -2))
+    rng_evidence: dict[str, Any] | None = None
+    if int(payload.get("rng_calls_added", -1)) == 0:
+        rng_evidence = {
+            "trace_rng_evidence_kind": "trace_summary_explicit_zero",
+            "rng_calls_added": 0,
+        }
+    elif "rng_calls_added" not in payload:
+        rng_evidence = _validate_freeze_only_no_rng_compatibility(
+            source=source,
+            payload=payload,
+            marker_payload=marker_payload,
+            candidate_count=candidate_count,
+            resolved_count=resolved_count,
+            dataset=dataset,
+        )
     valid = bool(
         payload.get("trace_only") is True
-        and int(payload.get("rng_calls_added", -1)) == 0
+        and rng_evidence is not None
         and candidate_count >= 0
         and resolved_count == candidate_count
         and marker_payload.get("trace_complete") is True
@@ -123,6 +138,143 @@ def validate_chemistry_trace_evidence(
         "candidate_count": candidate_count,
         "trace_complete_marker_path": str(marker),
         "trace_complete_marker_sha256": sha256_file(marker),
+        **rng_evidence,
+    }
+
+
+def _validate_freeze_only_no_rng_compatibility(
+    *,
+    source: Path,
+    payload: Mapping[str, Any],
+    marker_payload: Mapping[str, Any],
+    candidate_count: int,
+    resolved_count: int,
+    dataset: str,
+) -> dict[str, Any] | None:
+    """Reopen the exact completed-walk proof emitted before RNG was explicit.
+
+    The v3 freeze-only producer proved that the random walk had completed and
+    that recovery performed no proposal or RNG call, but omitted the redundant
+    ``rng_calls_added`` field from ``trace_summary.json``.  Do not generalize
+    that omission: only the hash-closed v4 recovery receipt and its exact v3
+    trace schema may supply the missing zero.
+    """
+
+    trace_root = source.parent
+    generation_root = trace_root.parent
+    lineage_path = trace_root / "candidate_action_lineage.json"
+    selected_trace_path = trace_root / "selected_action_trace_manifest.json"
+    recovery_path = generation_root / "freeze_only_recovery.json"
+    terminal_path = generation_root / "_RUN_COMPLETE.json"
+    run_manifest_path = generation_root / "run_manifest.json"
+    required_paths = (
+        lineage_path,
+        selected_trace_path,
+        recovery_path,
+        terminal_path,
+        run_manifest_path,
+    )
+    if dataset != "aids" or trace_root.name != "trace" or any(
+        not path.is_file() or path.is_symlink() for path in required_paths
+    ):
+        return None
+
+    try:
+        lineage = _load(lineage_path)
+        recovery = _load(recovery_path)
+        terminal = _load(terminal_path)
+        run_manifest = _load(run_manifest_path)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    closure = payload.get("frozen_payload_closure")
+    recovery_checks = recovery.get("checks")
+    lineage_audit = payload.get("lineage_recovery_audit")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (closure, recovery_checks, lineage_audit)
+    ):
+        return None
+
+    expected_reason = (
+        "Random walk is complete; freeze-only performs no proposal or RNG call."
+    )
+    counterfactuals_sha256 = recovery.get("counterfactuals_sha256")
+    compatible = bool(
+        payload.get("trace_schema_version") == 1
+        and payload.get("trace_only") is True
+        and payload.get("algorithm_rerun") is False
+        and payload.get("lineage_recovery_policy")
+        == "authoritative_backing_freeze_only_v3"
+        and payload.get("candidate_lineage_format")
+        == "selected_trace_predecessor_index"
+        and Path(str(payload.get("candidate_lineage_path") or "")).resolve()
+        == lineage_path.resolve()
+        and Path(str(payload.get("selected_trace_path") or "")).resolve()
+        == selected_trace_path.resolve()
+        and marker_payload.get("trace_complete") is True
+        and marker_payload.get("freeze_only_recovery") is True
+        and marker_payload.get("candidate_lineage_sha256")
+        == sha256_file(lineage_path)
+        and marker_payload.get("selected_trace_manifest_sha256")
+        == sha256_file(selected_trace_path)
+        and lineage.get("schema_version") == 2
+        and lineage.get("format") == "selected_trace_predecessor_index"
+        and int(lineage.get("candidate_count", -1)) == candidate_count
+        and int(lineage.get("candidate_lineage_resolved_count", -2))
+        == resolved_count
+        and closure.get("schema_version") == "comrecgc_frozen_payload_closure_v7"
+        and closure.get("closure_complete") is True
+        and closure.get("scientific_parameters_changed") is False
+        and closure.get("candidate_order_changed") is False
+        and closure.get("candidate_payload_changed") is False
+        and closure.get("post_write_reload_verified") is True
+        and closure.get("original_trace_hash_roundtrip_verified") is True
+        and int(closure.get("sha_mismatch_count", -1)) == 0
+        and int(closure.get("unresolved_hash_count", -1)) == 0
+        and recovery.get("schema_version")
+        == "comrecgc_completed_generation_freeze_audit_v4"
+        and recovery.get("FREEZE_ONLY_RECOVERY_SAFE") is True
+        and recovery.get("recovery_completed") is True
+        and recovery.get("algorithm_rerun") is False
+        and recovery.get("random_walk_complete") is True
+        and recovery.get("rng_state_required_for_freeze_only") is False
+        and recovery.get("rng_state_reason") == expected_reason
+        and bool(recovery_checks)
+        and all(value is True for value in recovery_checks.values())
+        and int(recovery.get("candidate_count", -1)) == candidate_count
+        and int(recovery.get("candidate_lineage_resolved_count", -2))
+        == resolved_count
+        and recovery.get("output_dir") == str(generation_root.resolve())
+        and isinstance(counterfactuals_sha256, str)
+        and len(counterfactuals_sha256) == 64
+        and terminal.get("run_complete") is True
+        and terminal.get("freeze_only_recovery") is True
+        and terminal.get("recovery_manifest_sha256") == sha256_file(recovery_path)
+        and terminal.get("counterfactuals_sha256") == counterfactuals_sha256
+        and run_manifest.get("run_complete") is True
+        and run_manifest.get("freeze_only_recovery") is True
+        and run_manifest.get("algorithm_rerun") is False
+        and int(run_manifest.get("counterfactual_candidate_count", -1))
+        == candidate_count
+        and run_manifest.get("counterfactuals_sha256") == counterfactuals_sha256
+        and run_manifest.get("trace_summary") == payload
+        and int(lineage_audit.get("legacy_inference_invocation_count", -1)) == 0
+        and int(lineage_audit.get("legacy_missing_action_count", -1)) == 0
+        and int(lineage_audit.get("missing_action_fallback_count", -1)) == 0
+        and int(lineage_audit.get("recorded_action_replay_failed_count", -1)) == 0
+        and int(lineage_audit.get("recorded_action_replay_mismatch_count", -1))
+        == 0
+    )
+    if not compatible:
+        return None
+    return {
+        "trace_rng_evidence_kind": "completed_walk_freeze_only_v3_v4_receipt",
+        "rng_calls_added": 0,
+        "freeze_only_recovery_path": str(recovery_path),
+        "freeze_only_recovery_sha256": sha256_file(recovery_path),
+        "freeze_only_terminal_path": str(terminal_path),
+        "freeze_only_terminal_sha256": sha256_file(terminal_path),
     }
 
 
@@ -156,6 +308,22 @@ def write_mutagenicity_chem_repair_preregistration(
             "trace_parity_required": trace_evidence["trace_parity_required"],
             "trace_parity_passed": trace_evidence["trace_parity_passed"],
             "trace_integrity_passed": trace_evidence["trace_integrity_passed"],
+            "trace_rng_evidence_kind": trace_evidence.get(
+                "trace_rng_evidence_kind"
+            ),
+            "rng_calls_added": trace_evidence.get("rng_calls_added"),
+            "freeze_only_recovery_path": trace_evidence.get(
+                "freeze_only_recovery_path"
+            ),
+            "freeze_only_recovery_sha256": trace_evidence.get(
+                "freeze_only_recovery_sha256"
+            ),
+            "freeze_only_terminal_path": trace_evidence.get(
+                "freeze_only_terminal_path"
+            ),
+            "freeze_only_terminal_sha256": trace_evidence.get(
+                "freeze_only_terminal_sha256"
+            ),
             "source_attributes": "preserve",
             "retained_atom_attributes": "preserve",
             "retained_bond_attributes": "preserve",

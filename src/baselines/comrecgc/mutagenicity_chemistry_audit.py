@@ -879,6 +879,20 @@ def run_mutagenicity_chemistry_audit(
         "trace_integrity": bool(trace_evidence["trace_integrity_passed"]),
         "trace_evidence_kind": trace_evidence["trace_evidence_kind"],
         "trace_parity_required": bool(trace_evidence["trace_parity_required"]),
+        "trace_rng_evidence_kind": trace_evidence.get("trace_rng_evidence_kind"),
+        "rng_calls_added": trace_evidence.get("rng_calls_added"),
+        "freeze_only_recovery_path": trace_evidence.get(
+            "freeze_only_recovery_path"
+        ),
+        "freeze_only_recovery_sha256": trace_evidence.get(
+            "freeze_only_recovery_sha256"
+        ),
+        "freeze_only_terminal_path": trace_evidence.get(
+            "freeze_only_terminal_path"
+        ),
+        "freeze_only_terminal_sha256": trace_evidence.get(
+            "freeze_only_terminal_sha256"
+        ),
         "trace_lineage_format": lineage_format,
         "trace_lineage_streamed": lineage_format == "selected_trace_predecessor_index",
         "max_candidate_lineages_materialized": (

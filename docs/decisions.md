@@ -1,5 +1,48 @@
 # Decisions Log
 
+## [2026-08-31] Bind omitted AIDS freeze-only RNG evidence to its recovery receipt
+
+### Motivation
+
+The completed AIDS exact postprocess successfully adopted all 91,916,686
+distance pairs and produced the one-cluster, zero-noise common-recourse result.
+Its chemistry stage then failed before candidate replay because the historical
+freeze-only lineage summary omitted `rng_calls_added`. The producer's sibling
+v4 recovery audit already proves that the 50,000-step walk was complete and
+that freeze-only reconstruction performed no proposal or RNG call, but the
+chemistry validator previously recognized only the redundant summary field.
+
+### Decision
+
+Keep explicit `rng_calls_added=0` as the normal contract and add it to future
+freeze-only summaries. For the preserved omission, permit one dataset-scoped
+compatibility path only when the exact
+`authoritative_backing_freeze_only_v3` summary reopens all of the following:
+the v4 `FREEZE_ONLY_RECOVERY_SAFE` receipt and its PASS terminal hash, completed
+walk/no-RNG reason, all-true recovery checks, candidate/resolved counts,
+lineage and selected-trace marker hashes, frozen-payload v7 no-drift closure,
+zero replay/fallback errors, and the matching completed run manifest. Record
+the recovery and terminal hashes in chemistry and preregistration outputs so
+the compatibility is never silent.
+
+Do not accept a generic missing field, synthesize or modify the historical
+trace summary, rerun generation, rerun DBSCAN, or reinterpret trace integrity
+as trace-on/off parity.
+
+### Consequences
+
+- The existing immutable AIDS lineage and completed exact common-recourse
+  artifacts are sufficient for a fresh downstream-only postprocess attempt.
+- Any missing, mutated, symlinked, unhashed, incomplete, or non-freeze-only
+  evidence still fails closed.
+- Future freeze-only artifacts satisfy the ordinary explicit-zero path.
+
+### Status
+
+Accepted for the minimal AIDS postprocess compatibility repair.
+
+---
+
 ## [2026-08-31] Add the executable TasteMolNet T13 native GlobalGCE full route
 
 ### Motivation

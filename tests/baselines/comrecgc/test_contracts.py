@@ -18,6 +18,7 @@ from src.baselines.comrecgc.contracts import (
     ContractError,
     UPSTREAM_COMMIT,
     ordered_ids_sha256,
+    sha256_file,
     write_json,
 )
 from src.baselines.comrecgc.project_dataset import project_label_to_internal
@@ -98,6 +99,196 @@ def test_aids_chemistry_accepts_complete_streamed_trace_without_claiming_parity(
     assert result["trace_integrity_passed"] is True
     assert result["trace_parity_required"] is False
     assert result["trace_parity_passed"] is False
+    assert result["trace_rng_evidence_kind"] == "trace_summary_explicit_zero"
+    assert result["rng_calls_added"] == 0
+
+
+def _write_freeze_only_trace_without_redundant_rng_field(tmp_path: Path) -> Path:
+    generation = tmp_path / "generation"
+    trace = generation / "trace"
+    trace.mkdir(parents=True)
+    lineage_path = trace / "candidate_action_lineage.json"
+    selected_path = trace / "selected_action_trace_manifest.json"
+    write_json(
+        lineage_path,
+        {
+            "schema_version": 2,
+            "format": "selected_trace_predecessor_index",
+            "candidate_count": 2,
+            "candidate_lineage_resolved_count": 2,
+        },
+    )
+    write_json(
+        selected_path,
+        {"schema_version": 1, "format": "chunked_jsonl", "row_count": 0},
+    )
+    lineage_audit = {
+        "legacy_inference_invocation_count": 0,
+        "legacy_missing_action_count": 0,
+        "missing_action_fallback_count": 0,
+        "recorded_action_replay_failed_count": 0,
+        "recorded_action_replay_mismatch_count": 0,
+    }
+    evidence = trace / "trace_summary.json"
+    summary = {
+        "trace_schema_version": 1,
+        "trace_only": True,
+        "algorithm_rerun": False,
+        "lineage_recovery_policy": "authoritative_backing_freeze_only_v3",
+        "candidate_lineage_format": "selected_trace_predecessor_index",
+        "candidate_count": 2,
+        "candidate_lineage_resolved_count": 2,
+        "candidate_lineage_path": str(lineage_path.resolve()),
+        "selected_trace_path": str(selected_path.resolve()),
+        "lineage_recovery_audit": lineage_audit,
+        "frozen_payload_closure": {
+            "schema_version": "comrecgc_frozen_payload_closure_v7",
+            "closure_complete": True,
+            "scientific_parameters_changed": False,
+            "candidate_order_changed": False,
+            "candidate_payload_changed": False,
+            "post_write_reload_verified": True,
+            "original_trace_hash_roundtrip_verified": True,
+            "sha_mismatch_count": 0,
+            "unresolved_hash_count": 0,
+        },
+    }
+    write_json(evidence, summary)
+    write_json(
+        trace / "_TRACE_COMPLETE.json",
+        {
+            "trace_complete": True,
+            "freeze_only_recovery": True,
+            "candidate_lineage_sha256": sha256_file(lineage_path),
+            "selected_trace_manifest_sha256": sha256_file(selected_path),
+        },
+    )
+    counterfactuals_sha256 = "a" * 64
+    write_json(
+        generation / "run_manifest.json",
+        {
+            "run_complete": True,
+            "freeze_only_recovery": True,
+            "algorithm_rerun": False,
+            "counterfactual_candidate_count": 2,
+            "counterfactuals_sha256": counterfactuals_sha256,
+            "trace_summary": summary,
+        },
+    )
+    recovery = {
+        "schema_version": "comrecgc_completed_generation_freeze_audit_v4",
+        "FREEZE_ONLY_RECOVERY_SAFE": True,
+        "recovery_completed": True,
+        "algorithm_rerun": False,
+        "random_walk_complete": True,
+        "rng_state_required_for_freeze_only": False,
+        "rng_state_reason": (
+            "Random walk is complete; freeze-only performs no proposal or RNG call."
+        ),
+        "checks": {"random_walk_complete": True, "closure_complete": True},
+        "candidate_count": 2,
+        "candidate_lineage_resolved_count": 2,
+        "output_dir": str(generation.resolve()),
+        "counterfactuals_sha256": counterfactuals_sha256,
+    }
+    recovery_path = generation / "freeze_only_recovery.json"
+    write_json(recovery_path, recovery)
+    write_json(
+        generation / "_RUN_COMPLETE.json",
+        {
+            "run_complete": True,
+            "freeze_only_recovery": True,
+            "counterfactuals_sha256": counterfactuals_sha256,
+            "recovery_manifest_sha256": sha256_file(recovery_path),
+        },
+    )
+    return evidence
+
+
+def test_aids_chemistry_accepts_hash_closed_freeze_only_rng_omission(
+    tmp_path: Path,
+) -> None:
+    evidence = _write_freeze_only_trace_without_redundant_rng_field(tmp_path)
+
+    result = validate_chemistry_trace_evidence(evidence, dataset="aids")
+
+    assert result["trace_integrity_passed"] is True
+    assert result["trace_parity_passed"] is False
+    assert result["rng_calls_added"] == 0
+    assert (
+        result["trace_rng_evidence_kind"]
+        == "completed_walk_freeze_only_v3_v4_receipt"
+    )
+    assert result["freeze_only_recovery_sha256"] == sha256_file(
+        tmp_path / "generation/freeze_only_recovery.json"
+    )
+
+
+def test_aids_chemistry_rejects_unscoped_missing_rng_field(tmp_path: Path) -> None:
+    evidence = tmp_path / "trace_summary.json"
+    write_json(
+        evidence,
+        {
+            "trace_only": True,
+            "candidate_count": 2,
+            "candidate_lineage_resolved_count": 2,
+        },
+    )
+    write_json(tmp_path / "_TRACE_COMPLETE.json", {"trace_complete": True})
+
+    with pytest.raises(ValueError, match="trace integrity"):
+        validate_chemistry_trace_evidence(evidence, dataset="aids")
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    (
+        "recovery_reason",
+        "recovery_check",
+        "terminal_recovery_hash",
+        "lineage_marker_hash",
+        "payload_closure",
+    ),
+)
+def test_aids_chemistry_freeze_only_rng_compatibility_fails_closed(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    evidence = _write_freeze_only_trace_without_redundant_rng_field(tmp_path)
+    generation = tmp_path / "generation"
+    recovery_path = generation / "freeze_only_recovery.json"
+    terminal_path = generation / "_RUN_COMPLETE.json"
+    marker_path = generation / "trace/_TRACE_COMPLETE.json"
+
+    if corruption in {"recovery_reason", "recovery_check"}:
+        recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
+        if corruption == "recovery_reason":
+            recovery["rng_state_reason"] = "assumed"
+        else:
+            recovery["checks"]["closure_complete"] = False
+        write_json(recovery_path, recovery)
+        terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+        terminal["recovery_manifest_sha256"] = sha256_file(recovery_path)
+        write_json(terminal_path, terminal)
+    elif corruption == "terminal_recovery_hash":
+        terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+        terminal["recovery_manifest_sha256"] = "0" * 64
+        write_json(terminal_path, terminal)
+    elif corruption == "lineage_marker_hash":
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        marker["candidate_lineage_sha256"] = "0" * 64
+        write_json(marker_path, marker)
+    else:
+        summary = json.loads(evidence.read_text(encoding="utf-8"))
+        summary["frozen_payload_closure"]["closure_complete"] = False
+        write_json(evidence, summary)
+        run_manifest_path = generation / "run_manifest.json"
+        run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
+        run_manifest["trace_summary"] = summary
+        write_json(run_manifest_path, run_manifest)
+
+    with pytest.raises(ValueError, match="trace integrity"):
+        validate_chemistry_trace_evidence(evidence, dataset="aids")
 
 
 def test_monotonicity_gate() -> None:

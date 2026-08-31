@@ -1,5 +1,20 @@
 # Refactor Plan
 
+## 2026-08-31: Reconcile AIDS freeze-only trace RNG evidence
+
+- [x] Reproduce the postprocess chemistry failure after the complete
+  91,916,686-pair DBSCAN adoption and isolate it to the absent redundant
+  `rng_calls_added` field.
+- [x] Accept that omission only for the exact hash-closed completed-walk
+  `authoritative_backing_freeze_only_v3` trace plus its safe v4 recovery
+  receipt, terminal, lineage, selected-trace, and frozen-payload closure.
+- [x] Emit `rng_calls_added=0` from future freeze-only recovery producers and
+  retain the source receipt identities in chemistry/preregistration outputs.
+- [x] Add positive and hostile focused regressions; ordinary missing RNG
+  evidence remains rejected.
+- [ ] Deploy from a new immutable checkout and resume downstream processing in
+  a fresh postprocess root. Never modify the failed root or rerun DBSCAN.
+
 ## 2026-08-31: TasteMolNet T11-T13 full-runner closure
 
 - [x] Add a real dataset-specific T13 GlobalGCE full runner over independent

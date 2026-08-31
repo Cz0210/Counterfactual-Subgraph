@@ -724,6 +724,7 @@ def recover_completed_generation_freeze(
     trace_summary = {
         "trace_schema_version": 1,
         "trace_only": True,
+        "rng_calls_added": 0,
         "candidate_count": lineage_count,
         "selected_transition_count": population_counts["selected_transition_count"],
         "candidate_lineage_resolved_count": lineage_resolved,

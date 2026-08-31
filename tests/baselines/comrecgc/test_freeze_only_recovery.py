@@ -498,6 +498,7 @@ def test_freeze_recovery_exposes_recorded_action_first_counters(
         json.loads((output / "run_manifest.json").read_text(encoding="utf-8")),
         recovery,
     ]
+    assert documents[1]["rng_calls_added"] == 0
     for document in documents:
         assert document["recorded_action_present_count"] == 1
         assert document["recorded_action_replay_ok_count"] == 1
