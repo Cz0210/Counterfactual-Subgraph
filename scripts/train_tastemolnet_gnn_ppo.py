@@ -723,7 +723,6 @@ def _checkpoint_and_train_contract(
         raise ValueError("Taste Ours selected GINE checkpoint identity changed")
     expected_files = {
         "checkpoint_sha256": "model.pt",
-        "feature_schema_sha256": "feature_schema.json",
         "temperature_calibration_sha256": "temperature_scaling.json",
     }
     for field, name in expected_files.items():
@@ -820,6 +819,8 @@ def _checkpoint_and_train_contract(
     feature_schema = _json_from_bytes(
         payloads["feature_schema.json"], label="feature schema"
     )
+    if frozen_oracle.get("feature_schema_sha256") != feature_schema.get("schema_sha256"):
+        raise ValueError("Taste Ours frozen feature schema semantic digest changed")
     if train_manifest["feature_schema_sha256"] != feature_schema.get("schema_sha256"):
         raise ValueError("Taste Ours train/GINE feature schema authority changed")
     temperature = _json_from_bytes(

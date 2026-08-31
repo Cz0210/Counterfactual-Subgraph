@@ -831,6 +831,20 @@ def _validate_t3_t4_documents(
     t4_evidence = dict(t4.revalidate())
     t4_science = _mapping(t4_evidence.get("science"), label="held T4 scientific evidence")
     checkpoint_evidence = dict(checkpoint.revalidate())
+    feature_schema_payload = checkpoint.read_frozen_gine_payload("feature_schema.json")
+    feature_schema_file_sha256 = _sha256_bytes(feature_schema_payload)
+    try:
+        feature_schema = json.loads(feature_schema_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TasteCleanPolicyReleaseDisabled(
+            "held checkpoint feature schema is malformed"
+        ) from exc
+    if type(feature_schema) is not dict:
+        raise TasteCleanPolicyReleaseDisabled(
+            "held checkpoint feature schema is malformed"
+        )
+    temperature_payload = checkpoint.read_frozen_gine_payload("temperature_scaling.json")
+    temperature_file_sha256 = _sha256_bytes(temperature_payload)
     expected_checkpoint_evidence = {
         "stage": "T3_GINE_CALIBRATED",
         "gate_sha256": expected.t3_gate_sha256,
@@ -855,6 +869,7 @@ def _validate_t3_t4_documents(
         or t3_binding.get("model_sha256") != expected.checkpoint_sha256
         or t3_binding.get("temperature_scaling_sha256") != expected.temperature_calibration_sha256
         or t3_binding.get("feature_schema_sha256") != expected.feature_schema_sha256
+        or t3_binding.get("feature_schema_file_sha256") != feature_schema_file_sha256
         or t3_binding.get("source_t2_gate_sha256") != t2_binding["gate_sha256"]
         or t3_binding.get("source_t2_evidence_sha256") != t2_binding["source_evidence_sha256"]
         or t3_binding.get("selection_split") != "validation"
@@ -891,14 +906,14 @@ def _validate_t3_t4_documents(
         or t4_science.get("per_example_output_written") is not False
     ):
         raise TasteCleanPolicyReleaseDisabled("managed-v2 T4 binding drifted")
-    for name, expected_sha in (
-        ("feature_schema.json", expected.feature_schema_sha256),
-        ("temperature_scaling.json", expected.temperature_calibration_sha256),
-    ):
-        if _sha256_bytes(checkpoint.read_frozen_gine_payload(name)) != expected_sha:
-            raise TasteCleanPolicyReleaseDisabled(
-                f"held checkpoint payload differs from frozen oracle: {name}"
-            )
+    if feature_schema.get("schema_sha256") != expected.feature_schema_sha256:
+        raise TasteCleanPolicyReleaseDisabled(
+            "held checkpoint feature schema semantic digest differs from frozen oracle"
+        )
+    if temperature_file_sha256 != expected.temperature_calibration_sha256:
+        raise TasteCleanPolicyReleaseDisabled(
+            "held checkpoint payload differs from frozen oracle: temperature_scaling.json"
+        )
     label_map_payload = checkpoint.read_frozen_gine_payload("label_map.json")
     if label_map_payload != _json_bytes(LABEL_MAP):
         try:

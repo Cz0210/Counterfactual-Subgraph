@@ -69,6 +69,9 @@ class _FakeHeldPublishedT3:
         reference = json.loads(
             (self.root / "oracle_reference.json").read_text(encoding="utf-8")
         )
+        feature_schema_file_sha256 = hashlib.sha256(
+            (Path(gate["checkpoint_dir"]) / "feature_schema.json").read_bytes()
+        ).hexdigest()
         verification_sha256 = hashlib.sha256(
             (self.root / "verification.json").read_bytes()
         ).hexdigest()
@@ -84,6 +87,7 @@ class _FakeHeldPublishedT3:
             "checkpoint_id": gate["checkpoint_id"],
             "model_sha256": reference["model_sha256"],
             "temperature_scaling_sha256": reference["temperature_scaling_sha256"],
+            "feature_schema_file_sha256": feature_schema_file_sha256,
             "feature_schema_sha256": reference["feature_schema_sha256"],
             "source_t2_gate_sha256": gate["t2_adoption_binding"]["gate_sha256"],
             "source_t2_evidence_sha256": gate["t2_adoption_binding"][
@@ -460,13 +464,22 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
     (checkpoint / "model.pt").write_bytes(b"frozen-three-class-gine")
     (checkpoint / "last.pt").write_bytes(b"terminal-three-class-gine")
     (checkpoint / "config.yaml").write_text("backbone: gine\n", encoding="utf-8")
-    _json(checkpoint / "feature_schema.json", {"schema_version": "taste-feature-v1"})
+    feature_schema_semantic_sha = "2" * 64
+    _json(
+        checkpoint / "feature_schema.json",
+        {
+            "schema_version": "taste-feature-v1",
+            "schema_sha256": feature_schema_semantic_sha,
+        },
+    )
     _json(checkpoint / "label_map.json", t5.LABEL_MAP)
     _json(checkpoint / "temperature_scaling.json", {"temperature": 1.25})
     model_sha = hashlib.sha256((checkpoint / "model.pt").read_bytes()).hexdigest()
     last_sha = hashlib.sha256((checkpoint / "last.pt").read_bytes()).hexdigest()
     config_sha = hashlib.sha256((checkpoint / "config.yaml").read_bytes()).hexdigest()
-    feature_sha = hashlib.sha256((checkpoint / "feature_schema.json").read_bytes()).hexdigest()
+    feature_file_sha = hashlib.sha256(
+        (checkpoint / "feature_schema.json").read_bytes()
+    ).hexdigest()
     label_map_sha = hashlib.sha256((checkpoint / "label_map.json").read_bytes()).hexdigest()
     temperature_sha = hashlib.sha256(
         (checkpoint / "temperature_scaling.json").read_bytes()
@@ -556,7 +569,7 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
             "last_sha256": last_sha,
             "temperature_scaling_sha256": temperature_sha,
             "config_sha256": config_sha,
-            "feature_schema_sha256": feature_sha,
+            "feature_schema_sha256": feature_schema_semantic_sha,
             "label_map_sha256": label_map_sha,
             "num_classes": 3,
             "source_label": 1,
@@ -616,7 +629,7 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
             "model_sha256": model_sha,
             "temperature_scaling_sha256": temperature_sha,
             "config_sha256": config_sha,
-            "feature_schema_sha256": feature_sha,
+            "feature_schema_sha256": feature_schema_semantic_sha,
             "physical_gpu_index": 1,
             "gpu_uuid": "GPU-22222222-2222-2222-2222-222222222222",
             "visible_device": "cuda:0",
@@ -682,7 +695,7 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
                 "checkpoint_inventory_sha256": inventory_sha,
                 "checkpoint_stat_inventory_sha256": stat_inventory_sha,
                 "checkpoint_sha256s_sha256": sha_inventory_sha,
-                "feature_schema_sha256": feature_sha,
+                "feature_schema_sha256": feature_schema_semantic_sha,
                 "temperature_calibration_sha256": temperature_sha,
                 "downstream_policy_sha256": downstream_policy_sha,
                 "t2_adoption_binding": t2_binding,
@@ -714,6 +727,8 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
         "t3": t3,
         "t4": t4,
         "checkpoint": checkpoint,
+        "feature_schema_file_sha": feature_file_sha,
+        "feature_schema_semantic_sha": feature_schema_semantic_sha,
     }
 
 
@@ -1384,3 +1399,24 @@ def test_cli_and_paired_wrappers_expose_only_zero_step_autodl_route() -> None:
 def test_t6_managed_v2_binding_exports_exact_frozen_identity_type() -> None:
     assert t5.TasteManagedEvidenceBindingV2 is t5.TasteFrozenOracleIdentity
     assert callable(t5.hold_taste_managed_evidence_binding_v2)
+
+
+def test_frozen_oracle_feature_schema_uses_semantic_digest_not_file_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _release_fixture(tmp_path)
+    assert fixture["feature_schema_file_sha"] != fixture["feature_schema_semantic_sha"]
+    _patch_gnn_api(monkeypatch)
+    monkeypatch.setattr(t5, "_git_identity", lambda _root: (fixture["commit"], fixture["tree"]))
+    authority = t5.load_release_authority(
+        fixture["authority"],
+        expected_sha256=fixture["authority_hash"],
+        policy_path=POLICY,
+        policy_receipt_path=fixture["receipt"],
+        source_model_path=fixture["model"],
+        project_root=REPOSITORY,
+    )
+    assert (
+        authority.oracle_authority.revalidate().feature_schema_sha256
+        == fixture["feature_schema_semantic_sha"]
+    )

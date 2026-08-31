@@ -1236,13 +1236,14 @@ def test_t6_checkpoint_contract_accepts_only_frozen_train_and_three_class_gine(
     )
     frozen = {
         "checkpoint_sha256": model_hash,
-        "feature_schema_sha256": runner.sha256_file(
-            checkpoint / "feature_schema.json"
-        ),
+        "feature_schema_sha256": "e" * 64,
         "temperature_calibration_sha256": runner.sha256_file(
             checkpoint / "temperature_scaling.json"
         ),
     }
+    assert frozen["feature_schema_sha256"] != runner.sha256_file(
+        checkpoint / "feature_schema.json"
+    )
     payloads = {
         name: (checkpoint / name).read_bytes()
         for name in (
