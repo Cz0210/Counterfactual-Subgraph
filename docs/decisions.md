@@ -75,6 +75,54 @@ Accepted
 
 ---
 
+## [2026-09-01] Give T7 the stable attributed-graph identity already used by T12
+
+### Motivation
+
+Fresh T7 attempt `32126b5d-e288-4a14-8f3d-9c6382b22f51` reached the official
+importance bridge and failed because two edited graphs shared one embedding
+hash while their graph semantics differed. The vendored VRRW identity is
+Python's process-local `hash(embedding.tobytes())`; invalid native graphs also
+deliberately share a zero GINE row. Embedding bytes therefore cannot be a graph
+identity even within one process.
+
+### Decision
+
+Apply only T12's already implemented stable-identity bridge to the bounded T7
+dataset boundary. For every ordered importance batch, compute the SHA-256 of
+the canonical parent-free attributed native graph and queue it beside the
+corresponding embedding SHA. Patch official `calculate_hash` during the walk
+so it consumes the structural identity in exact order and verifies the
+embedding SHA only as a call-order assertion. Persist the stable identity
+contract and counters through T7's existing eight-plus-eight checkpoint.
+
+Allow one structural identity to reuse a previously scored row only under the
+same T12 low-bit GINE envelope and exact discrete prediction, candidate,
+validity, failure, coverage, and canonical collision evidence. Different
+structural identities remain distinct even when their embedding bytes are
+identical. Do not use Python built-in hash, raw embedding identity, parent
+metadata, or lineage as the registry key.
+
+Official mutation enumeration, VRRW movement/restart/frequency behavior, the
+same calibrated three-class GINE, `1-p(Sweet)` importance, `argmax != Sweet`
+candidate predicate, generated-query-to-original-target NeuroSED, and
+full-graph semantics are unchanged.
+
+### Consequences
+
+- The failed attempt remains immutable and is not resumable under the new
+  checkpoint identity contract; rerun requires fresh UUID and output roots.
+- Equal embeddings from different edited graphs no longer alias their
+  counterfactual semantics.
+- A missing, extra, or reordered official hash request remains fail-closed.
+- This implementation performs no deployment or remote science launch.
+
+### Status
+
+Implemented with focused local tests; fresh AutoDL deployment/run pending.
+
+---
+
 ## [2026-09-01] Bound Taste T14 transition memory without changing the walk
 
 ### Motivation

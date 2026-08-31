@@ -14,6 +14,25 @@
 - [ ] Deploy the commit to AutoDL and launch one fresh recovery attempt. Do
   not resume or adopt attempt `4376be2b-42de-46d4-a3c6-ad291dd3f9f0`.
 
+## 2026-09-01: Recover T7 from the official embedding-hash collision
+## 2026-09-01: Recover T7 from the official embedding-hash collision
+
+- [x] Preserve the failed fresh attempt as evidence and isolate its terminal
+  error to the vendored `hash(embedding.tobytes())` registry key.
+- [x] Reuse T12's canonical parent-free attributed-graph SHA-256 only at T7's
+  dataset boundary; retain embedding SHA solely as an ordered call assertion.
+- [x] Keep official mutation/VRRW actions, the frozen three-class GINE,
+  generated-query-to-original-target NeuroSED coverage, and full-graph
+  candidate semantics unchanged.
+- [x] Persist the stable identity contract and hash-call counters through the
+  existing eight-step checkpoint/reload, and reject an unconsumed or reordered
+  graph/embedding queue.
+- [x] Add focused regressions for two different graphs with identical
+  embeddings, call-order drift, checkpoint restoration, and patch restoration.
+- [ ] Deploy the successor commit and run T7 under a new UUID/stage/final/run
+  root after GPU0 is free; never resume or adopt attempt
+  `32126b5d-e288-4a14-8f3d-9c6382b22f51`.
+
 ## 2026-09-01: TasteMolNet T12 deterministic restart substrate
 
 - [x] Record the explicit authorization to replace only T12's salted raw-

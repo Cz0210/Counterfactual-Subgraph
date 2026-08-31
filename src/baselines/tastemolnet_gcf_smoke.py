@@ -13,7 +13,7 @@ AutoDL-only RDKit/PyTorch/PyG stack.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import csv
@@ -30,6 +30,8 @@ import stat
 import tempfile
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 import uuid
+
+from src.baselines.tastemolnet_comrecgc_smoke import canonical_attributed_graph
 
 
 STAGE = "T7_GCF_SMOKE"
@@ -59,6 +61,9 @@ SMOKE_ALPHA = 1.0
 SMOKE_TELEPORT = 0.1
 SMOKE_SEED = 7
 SMOKE_GPU_INDEX = 0
+GRAPH_IDENTITY_CONTRACT = "canonical_parent_free_attributed_graph_sha256_v1"
+GINE_CANONICAL_REUSE_RTOL = 1e-5
+GINE_CANONICAL_REUSE_ATOL = 1e-7
 
 RELEASE_KEYS = frozenset(
     {
@@ -770,7 +775,15 @@ def taste_record_to_pyg(
 
 
 class TasteGCFImportanceBridge:
-    """Patch boundary between official VRRW and exact multiclass semantics."""
+    """Patch official VRRW onto stable attributed-graph identities.
+
+    The vendored implementation hashes raw embedding bytes with Python's
+    salted built-in hash. Different edited graphs can share an embedding
+    (invalid graphs use the same zero row), so that key can alias semantics.
+    As in T12, ``call`` queues canonical parent-free attributed-graph SHA-256
+    values in batch order. ``calculate_hash`` consumes the queue and uses the
+    embedding SHA only to assert the official call order.
+    """
 
     def __init__(
         self,
@@ -782,6 +795,7 @@ class TasteGCFImportanceBridge:
         original_graph_element_counts: Any,
         distance_threshold: float,
         parent_count: int,
+        feature_atomic_numbers: Sequence[Any],
     ) -> None:
         self.adapter = adapter
         self.vrrw = vrrw
@@ -795,12 +809,39 @@ class TasteGCFImportanceBridge:
             raise TasteGCFSmokeError(
                 "Taste NeuroSED distance threshold must be nonnegative"
             )
-        self.parent_count = parent_count
-        self.records: dict[Any, dict[str, Any]] = {}
+        self.parent_count = _native_int(
+            parent_count, field="Taste GCF parent count", minimum=1
+        )
+        self.feature_atomic_numbers = tuple(
+            _native_int(
+                value,
+                field="Taste GCF feature atomic number",
+                minimum=1,
+            )
+            for value in feature_atomic_numbers
+        )
+        if (
+            not self.feature_atomic_numbers
+            or len(set(self.feature_atomic_numbers))
+            != len(self.feature_atomic_numbers)
+        ):
+            raise TasteGCFSmokeError(
+                "Taste GCF feature atomic-number vocabulary must be unique"
+            )
+        self.records: dict[str, dict[str, Any]] = {}
+        self._pending_hashes: deque[tuple[str, str]] = deque()
         self.call_count = 0
         self.evaluated_graph_count = 0
+        self.calculate_hash_count = 0
         self.distance_call_count = 0
         self.distance_evaluated_graph_count = 0
+        self.canonical_row_reuse_count = 0
+
+    def _assert_idle(self) -> None:
+        if self._pending_hashes:
+            raise TasteGCFSmokeError(
+                "official GCF did not consume every queued structural identity"
+            )
 
     def call(
         self,
@@ -809,12 +850,22 @@ class TasteGCFImportanceBridge:
     ) -> tuple[Any, Any, Any]:
         import numpy as np
 
-        batch = self.adapter.score(graphs)
-        self.call_count += 1
-        self.evaluated_graph_count += len(graphs)
+        self._assert_idle()
+        values = list(graphs)
+        if not values:
+            raise TasteGCFSmokeError("Taste GCF received an empty graph batch")
+        batch = self.adapter.score(values)
+        probabilities = np.asarray(batch.probabilities)
+        embeddings = np.asarray(batch.graph_embeddings)
+        if probabilities.shape != (len(values), NUM_CLASSES):
+            raise TasteGCFSmokeError(
+                "Taste GCF GINE probabilities are not three-class"
+            )
+        if embeddings.ndim != 2 or embeddings.shape[0] != len(values):
+            raise TasteGCFSmokeError("Taste GCF GINE embeddings are unaligned")
         coverage = self.importance.neurosed_threshold_coverage_estimation(
             self.neurosed_model,
-            graphs,
+            values,
             self.original_graph_element_counts,
             self.distance_threshold,
         )
@@ -832,54 +883,153 @@ class TasteGCFImportanceBridge:
         coverage_ratios = (
             coverage.sum(dim=1) / float(self.parent_count)
         ).numpy()
-        importance_parts = np.stack(
-            [
-                np.asarray(batch.scores, dtype=float),
-                np.asarray(coverage_ratios, dtype=float),
-            ],
-            axis=1,
-        )
-        for index, embedding in enumerate(batch.graph_embeddings):
-            official_hash = self.vrrw.calculate_hash(embedding)
-            record = {
-                "graph_identity_sha256": _embedding_sha256(embedding),
-                "probabilities": [
-                    float(value) for value in batch.probabilities[index]
-                ],
-                "pred_candidate": int(batch.predictions[index]),
-                "score": float(batch.scores[index]),
-                "covered_parent_count": int(coverage[index].sum().item()),
-                "coverage_ratio": float(coverage_ratios[index]),
-                "candidate_condition": bool(batch.candidate_flags[index]),
-                "valid_fullgraph": bool(batch.valid_fullgraphs[index]),
-                "failure_reason": str(batch.failure_reasons[index]),
-            }
-            previous = self.records.get(official_hash)
-            if previous is not None and previous != record:
-                raise TasteGCFSmokeError(
-                    "official embedding hash collision changed semantics"
+        valid = tuple(batch.valid_fullgraphs)
+        failures = tuple(batch.failure_reasons)
+        if len(valid) != len(values) or len(failures) != len(values):
+            raise TasteGCFSmokeError("Taste GCF adapter evidence is unaligned")
+
+        canonical_parts: list[tuple[float, float]] = []
+        for index, graph in enumerate(values):
+            identity = canonical_attributed_graph(
+                graph,
+                feature_atomic_numbers=self.feature_atomic_numbers,
+            )
+            graph_hash = _sha256(
+                identity.graph_identity_sha256,
+                field="Taste GCF structural graph identity",
+            )
+            collision_payload = identity.collision_payload()
+            row = tuple(float(value) for value in probabilities[index].tolist())
+            score, prediction, candidate_condition = score_and_candidate(row)
+            if (
+                int(batch.predictions[index]) != prediction
+                or not math.isclose(
+                    float(batch.scores[index]),
+                    score,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
                 )
-            self.records[official_hash] = record
-        return importance_parts, batch.graph_embeddings, coverage
+                or bool(batch.candidate_flags[index]) is not candidate_condition
+            ):
+                raise TasteGCFSmokeError(
+                    "Taste GCF adapter multiclass semantics changed"
+                )
+            coverage_vector = tuple(
+                int(value) for value in coverage[index].tolist()
+            )
+            if (
+                len(coverage_vector) != self.parent_count
+                or any(value not in (0, 1) for value in coverage_vector)
+            ):
+                raise TasteGCFSmokeError(
+                    "Taste GCF NeuroSED coverage is not binary"
+                )
+            coverage_ratio = sum(coverage_vector) / float(self.parent_count)
+            raw_embedding = np.ascontiguousarray(embeddings[index])
+            if raw_embedding.ndim != 1 or raw_embedding.dtype.kind != "f":
+                raise TasteGCFSmokeError(
+                    "Taste GCF GINE embedding is not one float row"
+                )
+            observed = {
+                "graph_identity_sha256": graph_hash,
+                "collision_payload": collision_payload,
+                "probabilities": list(row),
+                "pred_candidate": prediction,
+                "score": score,
+                "covered_parent_count": sum(coverage_vector),
+                "coverage_vector": list(coverage_vector),
+                "coverage_ratio": coverage_ratio,
+                "candidate_condition": candidate_condition,
+                "valid_fullgraph": bool(valid[index]),
+                "failure_reason": str(failures[index]),
+                "canonical_embedding_dtype": raw_embedding.dtype.str,
+                "canonical_embedding_values": [
+                    float(value) for value in raw_embedding.tolist()
+                ],
+                "canonical_embedding_sha256": _embedding_sha256(raw_embedding),
+            }
+            previous = self.records.get(graph_hash)
+            if previous is None:
+                record = observed
+                self.records[graph_hash] = record
+            else:
+                previous_embedding = np.asarray(
+                    previous["canonical_embedding_values"],
+                    dtype=np.dtype(previous["canonical_embedding_dtype"]),
+                )
+                if (
+                    previous["collision_payload"] != collision_payload
+                    or previous["pred_candidate"] != prediction
+                    or previous["candidate_condition"] is not candidate_condition
+                    or previous["valid_fullgraph"] is not bool(valid[index])
+                    or previous["failure_reason"] != str(failures[index])
+                    or previous["coverage_vector"] != list(coverage_vector)
+                    or previous["canonical_embedding_dtype"]
+                    != raw_embedding.dtype.str
+                    or not np.allclose(
+                        np.asarray(previous["probabilities"], dtype=np.float64),
+                        np.asarray(row, dtype=np.float64),
+                        rtol=GINE_CANONICAL_REUSE_RTOL,
+                        atol=GINE_CANONICAL_REUSE_ATOL,
+                    )
+                    or not np.allclose(
+                        previous_embedding,
+                        raw_embedding,
+                        rtol=GINE_CANONICAL_REUSE_RTOL,
+                        atol=GINE_CANONICAL_REUSE_ATOL,
+                    )
+                ):
+                    raise TasteGCFSmokeError(
+                        "one T7 structural identity changed GINE/NeuroSED semantics"
+                    )
+                record = previous
+                self.canonical_row_reuse_count += 1
+            self._pending_hashes.append(
+                (graph_hash, _embedding_sha256(raw_embedding))
+            )
+            canonical_parts.append(
+                (float(record["score"]), float(record["coverage_ratio"]))
+            )
+        self.call_count += 1
+        self.evaluated_graph_count += len(values)
+        return np.asarray(canonical_parts, dtype=float), embeddings, coverage
+
+    def calculate_hash(self, graph_embedding: Any) -> str:
+        if not self._pending_hashes:
+            raise TasteGCFSmokeError(
+                "official GCF requested a hash without a scored graph"
+            )
+        graph_hash, expected_embedding_sha256 = self._pending_hashes.popleft()
+        if _embedding_sha256(graph_embedding) != expected_embedding_sha256:
+            raise TasteGCFSmokeError(
+                "official GCF graph/embedding call order changed"
+            )
+        self.calculate_hash_count += 1
+        return graph_hash
 
     def is_graph_counterfactual(self, graph_hash: Any) -> bool:
-        if graph_hash not in self.records:
+        if type(graph_hash) is not str or graph_hash not in self.records:
             raise TasteGCFSmokeError(
-                "official VRRW queried an unscored graph identity"
+                "official VRRW queried an unknown structural identity"
             )
         row = self.records[graph_hash]
         return bool(row["valid_fullgraph"] and row["candidate_condition"])
 
     @contextmanager
     def installed(self, importance: Any) -> Iterator[None]:
+        self._assert_idle()
         original_call = importance.call
+        original_hash = self.vrrw.calculate_hash
         original_predicate = self.vrrw.is_graph_counterfactual
         importance.call = self.call
+        self.vrrw.calculate_hash = self.calculate_hash
         self.vrrw.is_graph_counterfactual = self.is_graph_counterfactual
         try:
             yield
+            self._assert_idle()
         finally:
             importance.call = original_call
+            self.vrrw.calculate_hash = original_hash
             self.vrrw.is_graph_counterfactual = original_predicate
 
 
@@ -927,7 +1077,7 @@ _VRRW_PROGRESS_STATE_FIELDS = (
     "importance_args",
 )
 _VRRW_PROGRESS_CHECKPOINT_SCHEMA = (
-    "tastemolnet_t7_gcf_vrrw_progress_checkpoint_v1"
+    "tastemolnet_t7_gcf_vrrw_progress_checkpoint_v2"
 )
 _VRRW_PROGRESS_EVIDENCE_SCHEMA = (
     "tastemolnet_t7_gcf_vrrw_progress_resume_v1"
@@ -1582,6 +1732,7 @@ def _capture_progress_state(
     action_counts: Counter[str],
     current_graph_hash: Any,
 ) -> dict[str, Any]:
+    bridge._assert_idle()
     official = {
         field: getattr(vrrw, field) for field in _VRRW_PROGRESS_STATE_FIELDS
     }
@@ -1591,10 +1742,15 @@ def _capture_progress_state(
             "records": bridge.records,
             "call_count": bridge.call_count,
             "evaluated_graph_count": bridge.evaluated_graph_count,
+            "calculate_hash_count": bridge.calculate_hash_count,
             "distance_call_count": bridge.distance_call_count,
             "distance_evaluated_graph_count": (
                 bridge.distance_evaluated_graph_count
             ),
+            "canonical_row_reuse_count": bridge.canonical_row_reuse_count,
+            "graph_identity_contract": GRAPH_IDENTITY_CONTRACT,
+            "python_builtin_hash_used": False,
+            "embedding_identity_used": False,
         },
         "adapter": _capture_adapter_progress(adapter),
         "action_counts": dict(action_counts),
@@ -1614,6 +1770,7 @@ def _reset_progress_state(
 ) -> None:
     """Destroy every in-memory walk/bridge/scorer/RNG progress component."""
 
+    bridge._assert_idle()
     reset_official_vrrw(vrrw)
     vrrw.MAX_COUNTERFACTUAL_SIZE = 0
     vrrw.dataset_name = ""
@@ -1622,10 +1779,13 @@ def _reset_progress_state(
     vrrw.is_sample = False
     vrrw.importance_args = {}
     bridge.records = {}
+    bridge._pending_hashes.clear()
     bridge.call_count = 0
     bridge.evaluated_graph_count = 0
+    bridge.calculate_hash_count = 0
     bridge.distance_call_count = 0
     bridge.distance_evaluated_graph_count = 0
+    bridge.canonical_row_reuse_count = 0
     adapter.decode_failures = Counter()
     adapter.decode_success_count = 0
     adapter.empty_valid_batch_count = 0
@@ -1700,9 +1860,18 @@ def _validate_checkpoint_payload(payload: Mapping[str, Any]) -> None:
             "records",
             "call_count",
             "evaluated_graph_count",
+            "calculate_hash_count",
             "distance_call_count",
             "distance_evaluated_graph_count",
+            "canonical_row_reuse_count",
+            "graph_identity_contract",
+            "python_builtin_hash_used",
+            "embedding_identity_used",
         }
+        or progress["bridge"].get("graph_identity_contract")
+        != GRAPH_IDENTITY_CONTRACT
+        or progress["bridge"].get("python_builtin_hash_used") is not False
+        or progress["bridge"].get("embedding_identity_used") is not False
         or type(progress.get("adapter")) is not dict
         or set(progress["adapter"])
         != {
@@ -1737,18 +1906,25 @@ def _apply_progress_state(
 ) -> Any:
     """Restore an authenticated payload, then prove the live state matches it."""
 
+    bridge._assert_idle()
     _validate_checkpoint_payload(payload)
     progress = payload["progress"]
     for field in _VRRW_PROGRESS_STATE_FIELDS:
         setattr(vrrw, field, progress["official"][field])
     bridge_state = progress["bridge"]
     bridge.records = bridge_state["records"]
+    bridge._pending_hashes.clear()
     bridge.call_count = _native_int(
         bridge_state["call_count"], field="checkpoint bridge calls", minimum=0
     )
     bridge.evaluated_graph_count = _native_int(
         bridge_state["evaluated_graph_count"],
         field="checkpoint bridge graph count",
+        minimum=0,
+    )
+    bridge.calculate_hash_count = _native_int(
+        bridge_state["calculate_hash_count"],
+        field="checkpoint bridge hash calls",
         minimum=0,
     )
     bridge.distance_call_count = _native_int(
@@ -1759,6 +1935,11 @@ def _apply_progress_state(
     bridge.distance_evaluated_graph_count = _native_int(
         bridge_state["distance_evaluated_graph_count"],
         field="checkpoint bridge distance graph count",
+        minimum=0,
+    )
+    bridge.canonical_row_reuse_count = _native_int(
+        bridge_state["canonical_row_reuse_count"],
+        field="checkpoint bridge canonical row reuse count",
         minimum=0,
     )
     adapter_state = progress["adapter"]
@@ -2678,6 +2859,7 @@ def execute_native_vrrw_smoke(
         original_graph_element_counts=original_graph_element_counts,
         distance_threshold=neurosed_distance_threshold,
         parent_count=SMOKE_PARENT_COUNT,
+        feature_atomic_numbers=graph_schema.feature_atomic_numbers,
     )
     importance_args = {
         "schema_version": "tastemolnet_gcf_neurosed_importance_v1",

@@ -575,7 +575,24 @@ class _FakeImportance:
         )
 
 
-def test_importance_bridge_uses_official_neurosed_and_argmax_gate() -> None:
+def test_importance_bridge_uses_official_neurosed_and_argmax_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graphs = [SimpleNamespace(tag="a"), SimpleNamespace(tag="b")]
+
+    def canonical(graph: SimpleNamespace, **_kwargs: object) -> SimpleNamespace:
+        digest = ("a" if graph.tag == "a" else "b") * 64
+        payload = {
+            "canonical_graph": f"[{graph.tag}]",
+            "num_nodes": 1,
+            "num_edges": 0,
+        }
+        return SimpleNamespace(
+            graph_identity_sha256=digest,
+            collision_payload=lambda: payload,
+        )
+
+    monkeypatch.setattr(taste_gcf, "canonical_attributed_graph", canonical)
     vrrw = _FakeVRRW()
     bridge = TasteGCFImportanceBridge(
         adapter=_FakeAdapter(),
@@ -585,26 +602,134 @@ def test_importance_bridge_uses_official_neurosed_and_argmax_gate() -> None:
         original_graph_element_counts=torch.ones(8),
         distance_threshold=0.25,
         parent_count=8,
+        feature_atomic_numbers=(6, 7),
     )
-    parts, embeddings, coverage = bridge.call([object(), object()], {})
-    assert parts.tolist() == [[0.6, 0.5], [0.9, 1.0]]
-    assert embeddings.shape == (2, 2)
-    assert coverage.shape == (2, 8)
-    assert coverage[0].sum().item() == 4
-    assert coverage[1].sum().item() == 8
-    assert bridge.distance_call_count == 1
-    hashes = [vrrw.calculate_hash(row) for row in embeddings]
-    assert bridge.is_graph_counterfactual(hashes[0]) is False
-    assert bridge.is_graph_counterfactual(hashes[1]) is True
-
     importance = SimpleNamespace(call=lambda *_args: None)
     original_call = importance.call
+    original_hash = vrrw.calculate_hash
     original_predicate = vrrw.is_graph_counterfactual
     with bridge.installed(importance):
         assert importance.call == bridge.call
+        assert vrrw.calculate_hash == bridge.calculate_hash
         assert vrrw.is_graph_counterfactual == bridge.is_graph_counterfactual
+        parts, embeddings, coverage = importance.call(graphs, {})
+        hashes = [vrrw.calculate_hash(row) for row in embeddings]
+        assert hashes == ["a" * 64, "b" * 64]
+        assert parts.tolist() == [[0.6, 0.5], [0.9, 1.0]]
+        assert embeddings.shape == (2, 2)
+        assert coverage.shape == (2, 8)
+        assert coverage[0].sum().item() == 4
+        assert coverage[1].sum().item() == 8
+        assert bridge.is_graph_counterfactual(hashes[0]) is False
+        assert bridge.is_graph_counterfactual(hashes[1]) is True
+    assert bridge.distance_call_count == 1
+    assert bridge.calculate_hash_count == 2
     assert importance.call is original_call
+    assert vrrw.calculate_hash is original_hash
     assert vrrw.is_graph_counterfactual is original_predicate
+
+
+def test_importance_bridge_separates_same_embedding_different_graphs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graphs = [SimpleNamespace(tag="a"), SimpleNamespace(tag="b")]
+
+    def canonical(graph: SimpleNamespace, **_kwargs: object) -> SimpleNamespace:
+        digest = ("a" if graph.tag == "a" else "b") * 64
+        payload = {
+            "canonical_graph": f"[{graph.tag}]",
+            "num_nodes": 1,
+            "num_edges": 0,
+        }
+        return SimpleNamespace(
+            graph_identity_sha256=digest,
+            collision_payload=lambda: payload,
+        )
+
+    monkeypatch.setattr(taste_gcf, "canonical_attributed_graph", canonical)
+
+    class CollisionAdapter:
+        @staticmethod
+        def score(_graphs: object) -> NativeScoreBatch:
+            return NativeScoreBatch(
+                probabilities=np.asarray(
+                    [[0.0, 1.0, 0.0], [0.6, 0.1, 0.3]], dtype=float
+                ),
+                predictions=(1, 0),
+                scores=(0.0, 0.9),
+                candidate_flags=(False, True),
+                graph_embeddings=np.zeros((2, 2), dtype=np.float32),
+                valid_fullgraphs=(False, True),
+                failure_reasons=("invalid_fullgraph", ""),
+            )
+
+    vrrw = _FakeVRRW()
+    bridge = TasteGCFImportanceBridge(
+        adapter=CollisionAdapter(),
+        vrrw=vrrw,
+        importance=_FakeImportance(),
+        neurosed_model=object(),
+        original_graph_element_counts=torch.ones(8),
+        distance_threshold=0.25,
+        parent_count=8,
+        feature_atomic_numbers=(6, 7),
+    )
+    importance = SimpleNamespace(call=lambda *_args: None)
+    with bridge.installed(importance):
+        _parts, embeddings, _coverage = importance.call(graphs, {})
+        hashes = [vrrw.calculate_hash(row) for row in embeddings]
+        assert hashes == ["a" * 64, "b" * 64]
+        assert bridge.is_graph_counterfactual(hashes[0]) is False
+        assert bridge.is_graph_counterfactual(hashes[1]) is True
+    assert len(bridge.records) == 2
+    assert all(type(value) is str and len(value) == 64 for value in bridge.records)
+
+
+def test_importance_bridge_rejects_graph_embedding_call_order_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = SimpleNamespace(tag="a")
+    monkeypatch.setattr(
+        taste_gcf,
+        "canonical_attributed_graph",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            graph_identity_sha256="a" * 64,
+            collision_payload=lambda: {
+                "canonical_graph": "[a]",
+                "num_nodes": 1,
+                "num_edges": 0,
+            },
+        ),
+    )
+    vrrw = _FakeVRRW()
+    bridge = TasteGCFImportanceBridge(
+        adapter=_FakeAdapter(),
+        vrrw=vrrw,
+        importance=_FakeImportance(),
+        neurosed_model=object(),
+        original_graph_element_counts=torch.ones(8),
+        distance_threshold=0.25,
+        parent_count=8,
+        feature_atomic_numbers=(6, 7),
+    )
+    # Use a one-row adapter so the pending queue has one unambiguous row.
+    bridge.adapter = SimpleNamespace(
+        score=lambda _graphs: NativeScoreBatch(
+            probabilities=np.asarray([[0.3, 0.4, 0.3]], dtype=float),
+            predictions=(1,),
+            scores=(0.6,),
+            candidate_flags=(False,),
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=np.float32),
+            valid_fullgraphs=(True,),
+            failure_reasons=("",),
+        )
+    )
+    bridge.importance = SimpleNamespace(
+        neurosed_threshold_coverage_estimation=lambda *_args: torch.ones((1, 8))
+    )
+    _parts, _embeddings, _coverage = bridge.call([graph], {})
+    with pytest.raises(TasteGCFSmokeError, match="call order changed"):
+        bridge.calculate_hash(np.asarray([2.0, 1.0], dtype=np.float32))
 
 
 def test_real_official_restart_reads_scoped_global_and_restores_it(
@@ -902,9 +1027,13 @@ def _fake_progress_runtime() -> tuple[object, object, object, object]:
         },
         call_count=2,
         evaluated_graph_count=3,
+        calculate_hash_count=3,
         distance_call_count=2,
         distance_evaluated_graph_count=3,
+        canonical_row_reuse_count=0,
+        _pending_hashes=taste_gcf.deque(),
     )
+    bridge._assert_idle = lambda: None
     scorer = SimpleNamespace(
         cache_capacity=0,
         _cache={},
@@ -939,7 +1068,7 @@ def test_progress_restore_detects_live_restore_mismatch(
     )
     rng = taste_gcf._capture_rng_state(np=np, torch=torch)
     payload = {
-        "schema_version": "tastemolnet_t7_gcf_vrrw_progress_checkpoint_v1",
+        "schema_version": "tastemolnet_t7_gcf_vrrw_progress_checkpoint_v2",
         "stage": "T7_GCF_SMOKE",
         "checkpoint_uuid": _CHECKPOINT_UUID,
         "generation_token": "f" * 64,
@@ -983,9 +1112,13 @@ def test_real_split_runner_restores_prefix_rng_and_resume_cursor(
         records={},
         call_count=0,
         evaluated_graph_count=0,
+        calculate_hash_count=0,
         distance_call_count=0,
         distance_evaluated_graph_count=0,
+        canonical_row_reuse_count=0,
+        _pending_hashes=taste_gcf.deque(),
     )
+    bridge._assert_idle = lambda: None
     scorer = SimpleNamespace(
         cache_capacity=0,
         _cache={},
