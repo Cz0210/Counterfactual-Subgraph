@@ -2,8 +2,30 @@
 
 ## Status
 
-This revision is an implementation stage-freeze only. It is not an execution
-release and cannot start science:
+The fresh typed-release successor is executable, while the original static-v1
+route remains disabled for historical compatibility.
+
+The successor consists of:
+
+- `scripts/autodl/tastemolnet_t7_typed_release_v1.py`: CPU candidate writer,
+  independent source reopener, and validator for the exact prescribed
+  `TasteGCFReleasePinsV1` fields;
+- `scripts/autodl/tastemolnet_t7_managed_runner_v3.py`: worker and verifier
+  process boundary using the existing managed-v2 SEALED publisher;
+- `scripts/autodl/run_tastemolnet_gcf_smoke_v2.sh`: real physical-GPU0 UUID
+  lock wrapper. It validates the typed release before GPU discovery and holds
+  one lock through worker, SEALED handoff, verifier, and atomic publication.
+
+The release builder requires the real adopted NeuroSED root, real calibrated
+T3 root, integrated official GCF root, a previously frozen nonnegative
+NeuroSED distance threshold, and fresh candidate/release paths. The resulting
+pins contain exactly dataset/source/classes, official commits, NeuroSED
+model/config/pair hashes, T3 model/temperature hashes, canonical dataset and
+four split hashes, generated-to-original direction, and false NeuroSED
+calibration/test flags. The threshold remains separately hash-bound source
+authority; it is not an unrequested typed-pins field.
+
+The following statements now apply only to the legacy static-v1 route:
 
 - `configs/autodl/tastemolnet_t7_gcf_smoke_release_v1.json` has the native JSON
   Boolean `release_enabled=false` and every deployment/predecessor pin is
@@ -13,11 +35,9 @@ release and cannot start science:
 - the paired Slurm script is an unconditional AutoDL-only refusal;
 - environment variables and CLI paths are not release capabilities.
 
-A later reviewed one-parent release commit may change only the release JSON and
-the wrapper literal. It must additionally pin managed execution v2 PASS, the
-managed stage root, the one Taste NeuroSED generic managed final (root, PASS,
-gate, verification, checkpoint, feature schema, and checksum manifest), and the
-exact absent final path. The worker cannot choose or publish that final path.
+The successor does not mutate that JSON or wrapper. It derives typed authority
+directly from the adopted managed final and T3 publication; the worker still
+cannot choose or publish the final path.
 
 The official-semantics fixed-budget NeuroSED PASS is adopted without changing
 its scientific bytes by
@@ -146,6 +166,27 @@ candidate shortcut cannot pass.
 
 ## Input authority
 
+For the typed successor, the only runtime predecessor is the independently
+published typed-release root. Holding that root recursively reopens:
+
+1. the adopted managed NeuroSED terminal and its generic PASS/gate/
+   verification/inventory;
+2. its byte-identical fixed-budget `best.pt`, config, pair manifest, feature
+   schema, checksum manifest, direction trace, and T7 consumer document;
+3. the managed-v2 calibrated T3 root, exact GINE checkpoint and temperature;
+4. all four split files by SHA, while deserializing only train;
+5. the integrated official GCF retained-source inventory; and
+6. the clean immutable execution commit and tree.
+
+The runtime binding additionally retains the already-frozen NeuroSED distance
+threshold. The worker and verifier compare the native adapter checkpoint ID,
+NeuroSED model/PASS/gate/verification hashes, threshold, 3-class semantics, and
+generated-to-original direction against that binding.
+
+The legacy static-v1 implementation described below is retained for historical
+review only; the successor does not require its external-controller/T2/T4
+release document:
+
 Runtime opens inputs in this order and retains them through worker close, just
 before managed-v2 sealing:
 
@@ -186,7 +227,7 @@ as part of frozen-GINE inference.
 
 ## Managed output and no-redistribution boundary
 
-The worker never creates a terminal root. It creates one managed-v2 UUID
+The successor worker never creates a terminal root. It creates one managed-v2 UUID
 attempt and UUID staging directory. Its only control evidence is:
 
 ```text
@@ -194,6 +235,10 @@ raw_evidence.json
 worker_exit.json
 SEALED.json
 ```
+
+Its `artifacts/` directory contains only canonical aggregate
+`gcf_smoke.json` and `typed_release_binding.json`; it contains no model,
+checkpoint, SMILES, graph tensor, or split payload.
 
 `raw_evidence.json` contains aggregate-only input commitments, scientific
 summary, and opaque candidate trace; it contains no gate, terminal status, or
@@ -233,21 +278,43 @@ false.
 
 ## CLI parity
 
-The reviewed AutoDL wrapper will eventually invoke:
+Create the typed release using two separate CPU processes:
 
 ```bash
-python -B scripts/run_tastemolnet_gcf_smoke.py \
-  --config configs/hpc.yaml \
-  --stage T7_GCF_SMOKE \
-  --output-dir /absolute/fresh/private/t7-gcf-smoke \
-  --set inference.fallback_to_heuristic=false
+python -I -B scripts/autodl/tastemolnet_t7_typed_release_v1.py \
+  --config /absolute/checkout/configs/hpc.yaml build \
+  --managed-neurosed-root "$TASTEMOLNET_T7_MANAGED_NEUROSED_ROOT" \
+  --t3-root "$TASTEMOLNET_T3_OUTPUT_ROOT" \
+  --official-gcf-root /absolute/checkout/baselines/gcfexplainer_official \
+  --neurosed-distance-threshold "$TASTEMOLNET_T7_NEUROSED_DISTANCE_THRESHOLD" \
+  --candidate-root "$TASTEMOLNET_T7_RELEASE_CANDIDATE_ROOT"
+
+python -I -B scripts/autodl/tastemolnet_t7_typed_release_v1.py \
+  --config /absolute/checkout/configs/hpc.yaml verify \
+  --candidate-root "$TASTEMOLNET_T7_RELEASE_CANDIDATE_ROOT" \
+  --release-root "$TASTEMOLNET_T7_RELEASE_ROOT"
 ```
 
-The worker CLI prints only its SEALED receipt and never prints a success marker.
-`--validate-only` delegates to the generic managed-v2 verified-gate consumer
-and is read-only. The independent verifier owns terminal reporting. The Slurm
-file documents the same CLI but exits before it; TasteMolNet policy-v2 science
-is AutoDL-only.
+Then launch the real GPU0 wrapper with fresh stage/final paths:
+
+```bash
+RUN_TASTEMOLNET=1 \
+TASTE_RESEARCH_COMPUTE_ALLOWED=1 \
+TASTE_PAPER_RESULTS_ALLOWED=1 \
+TASTE_DATA_REDISTRIBUTION_ALLOWED=0 \
+RUN_GNN_ABLATION=0 \
+ALLOW_T7_TYPED_RELEASE_FROM_ADOPTED_NEUROSED=1 \
+TASTEMOLNET_T7_RELEASE_ROOT=/absolute/typed-release \
+TASTEMOLNET_T7_STAGE_ROOT=/absolute/fresh/stage \
+TASTEMOLNET_T7_OUTPUT=/absolute/fresh/final \
+TASTEMOLNET_T7_RUN_ID=taste-t7-$(uuidgen) \
+scripts/autodl/run_tastemolnet_gcf_smoke_v2.sh
+```
+
+The worker process prints only its SEALED receipt and never prints a success
+marker. The distinct verifier owns terminal reporting. Slurm parity remains an
+unconditional AutoDL-only refusal because the physical GPU0 inventory/UUID
+lock is an AutoDL runtime contract.
 
 The structured T7 method-verification marker is exactly
 `[TASTE_T7_GCF_SMOKE_PASS]` (including brackets). It is domain evidence inside

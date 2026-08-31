@@ -17,6 +17,24 @@
   persistent fixed-budget full VRRW loop; then implement T12 calibration/test
   and standardized export without retraining the adopted NeuroSED model.
 
+## 2026-08-31: release Taste T7 from adopted NeuroSED and managed T3
+
+- [x] Derive the exact prescribed `TasteGCFReleasePinsV1` fields from the
+  retained fixed-budget managed NeuroSED adoption and managed-v2 T3 split/GINE
+  authority without retraining or copying model bytes.
+- [x] Require a separate process to reopen every real file/hash and publish the
+  typed release marker into a fresh root.
+- [x] Connect the existing native full-graph VRRW science core to a fresh
+  managed-v2 worker/SEALED/independent-verifier path on physical GPU0.
+- [x] Recompute trace/destination semantics and bind the 16-step 8+8 resume,
+  T3 checkpoint, NeuroSED threshold/model/direction, three classes, and
+  train-only/no-RF/no-test contract in the verifier.
+- [x] Add a real GPU0 lock wrapper, AutoDL CLIs, Slurm parity, and focused
+  release/worker/verifier/tamper regressions while retaining the legacy refusal.
+- [ ] On AutoDL, supply the real adopted NeuroSED root, calibrated T3 root,
+  already-frozen NeuroSED distance threshold, fresh candidate/release/stage/
+  final roots, and run ID; code/tests alone are not a scientific PASS.
+
 ## 2026-08-31: Postprocess the completed AIDS exact partition read-only
 
 - [x] Bind the controller exact receipt, DBSCAN/vector/contract identity, and

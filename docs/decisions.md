@@ -42,6 +42,49 @@ truthfully released.
 
 Accepted
 
+---
+
+## [2026-08-31] Release Taste T7 from adopted NeuroSED and managed T3 pins
+
+### Motivation
+
+The fixed-budget NeuroSED source and its managed adoption already passed, and
+the calibrated three-class Taste GINE is already published by T3. Retraining
+NeuroSED or waiting for the legacy static T7 authority would change or block
+the authorized deadline route without adding scientific evidence.
+
+### Decision
+
+Add one dataset-specific `TasteGCFReleasePinsV1` successor. A CPU candidate
+writer derives the exact official-GCF/NeuroSED/T3/model/temperature/dataset and
+four-split hashes from retained real files. A separate invocation reopens all
+sources and alone publishes `[TASTE_T7_TYPED_RELEASE_PASS]`. The runtime then
+executes the existing native 16-step full-graph VRRW smoke on physical GPU0;
+its worker can publish only aggregate SEALED evidence, and a separate verifier
+reopens the typed release before atomically publishing the generic managed-v2
+final with the T7 domain marker.
+
+The NeuroSED distance threshold is retained as runtime source authority, not
+as an extra field in the prescribed typed-pins schema. No NeuroSED training,
+validation/calibration/test payload load, RF oracle, or generic controller
+framework is introduced.
+
+### Consequences
+
+- The legacy `run_tastemolnet_gcf_smoke.sh` remains disabled and historical;
+  production uses the fresh `run_tastemolnet_gcf_smoke_v2.sh` successor.
+- T7 fails closed if the adopted NeuroSED, T3 GINE, temperature, any split,
+  checkout, official source inventory, GPU0 UUID, or generated-to-original
+  direction changes.
+- Local code and tests do not constitute either T7 marker; deployment still
+  requires real AutoDL roots, the frozen distance threshold, and fresh paths.
+
+### Status
+
+Accepted and implemented locally; not deployed.
+
+---
+
 ## [2026-08-31] Adopt completed AIDS exact DBSCAN read-only for postprocessing
 
 ### Motivation
