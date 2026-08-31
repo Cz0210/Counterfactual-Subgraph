@@ -1,5 +1,50 @@
 # Decisions Log
 
+## [2026-08-31] Preserve frozen AIDS graph node order across canonical SMILES fallback
+
+### Motivation
+
+The fresh AIDS ComRecGC v4 postprocess completed all 91,916,686 exact
+common-recourse pairs, produced one DBSCAN cluster with zero noise, and then
+failed its source chemistry round trip before calibration or test access.  The
+codec paired the frozen graph one-hot rows with atom sidecars reparsed from the
+source CSV spelling.  Thirteen of 1,283 parents required the already-authorized
+unique canonical-SMILES fallback, and three of those equivalent spellings use a
+different RDKit atom enumeration.
+
+### Decision
+
+For AIDS only, construct node-indexed atom and bond sidecars from the frozen
+graph's own `smiles`, because that exact spelling generated its `x`,
+`edge_index`, atom symbols, and bond order.  Preserve the requested source CSV
+SMILES as provenance and independently require its canonical isomeric identity
+to equal the graph-native molecule.  Record whether matching was exact or a
+canonical fallback and name `frozen_graph_smiles` as the node-order authority.
+Reject an invalid native spelling or any identity mismatch before decoding.
+
+### Consequences
+
+- Canonically equivalent source spellings no longer corrupt node-indexed
+  sidecars merely by enumerating the same atoms in another order.
+- The source/no-op round-trip remains strict; this change does not skip a row,
+  reorder a graph, expand chemistry tolerance, or repair a non-equivalent
+  molecule.
+- Classifier, split, common-recourse, calibration, and held-out test semantics
+  are unchanged.  The failed v4 root remains immutable and requires a fresh
+  downstream-only postprocess attempt after deployment.
+- A read-only full-cohort preflight exposed a separate next gate: 236 of 1,283
+  frozen AIDS source graphs contain two to four disconnected components and
+  fail the unchanged `generated_disconnected_or_empty` no-op rule.  This fix
+  neither hides nor resolves that data-contract issue; salt handling,
+  source-cohort exclusion, or multi-component full-graph eligibility requires
+  an explicit scientific decision before another production attempt.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Compare T6 PEFT target modules by their native set semantics
 
 ### Motivation

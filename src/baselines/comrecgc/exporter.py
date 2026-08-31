@@ -116,12 +116,36 @@ def _aids_schema_and_record(graph: Any, atom_vocabulary: Sequence[str]) -> tuple
     from rdkit import Chem
     from src.baselines.gcfexplainer_mutagenicity_adapter import MutagenicityGraphSchema
 
-    source_smiles = str(getattr(graph, "comrecgc_source_smiles", ""))
+    requested_source_smiles = str(
+        getattr(graph, "comrecgc_source_smiles", "")
+    ).strip()
+    graph_native_smiles = str(getattr(graph, "smiles", "")).strip()
     source_id = str(getattr(graph, "comrecgc_parent_id", ""))
-    molecule = Chem.MolFromSmiles(source_smiles)
-    if molecule is None:
+    if not requested_source_smiles:
         raise ValueError("aids_source_smiles_parse_failed")
+    if not graph_native_smiles:
+        raise ValueError("aids_graph_native_smiles_parse_failed")
+    requested_molecule = Chem.MolFromSmiles(requested_source_smiles)
+    if requested_molecule is None:
+        raise ValueError("aids_source_smiles_parse_failed")
+    molecule = Chem.MolFromSmiles(graph_native_smiles)
+    if molecule is None:
+        raise ValueError("aids_graph_native_smiles_parse_failed")
+    Chem.SanitizeMol(requested_molecule)
     Chem.SanitizeMol(molecule)
+    requested_canonical = Chem.MolToSmiles(
+        requested_molecule, canonical=True, isomericSmiles=True
+    )
+    graph_native_canonical = Chem.MolToSmiles(
+        molecule, canonical=True, isomericSmiles=True
+    )
+    if requested_canonical != graph_native_canonical:
+        raise ValueError("aids_source_smiles_graph_identity_mismatch")
+    source_smiles_match_mode = (
+        "exact_smiles"
+        if requested_source_smiles == graph_native_smiles
+        else "canonical_isomeric_fallback"
+    )
     periodic = Chem.GetPeriodicTable()
     feature_atomic_numbers = tuple(
         int(periodic.GetAtomicNumber(str(symbol))) for symbol in atom_vocabulary
@@ -172,7 +196,11 @@ def _aids_schema_and_record(graph: Any, atom_vocabulary: Sequence[str]) -> tuple
     )
     return schema, {
         "molecule_id": source_id,
-        "canonical_smiles": Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True),
+        "canonical_smiles": graph_native_canonical,
+        "original_smiles": requested_source_smiles,
+        "graph_native_smiles": graph_native_smiles,
+        "source_smiles_match_mode": source_smiles_match_mode,
+        "node_order_authority": "frozen_graph_smiles",
         "num_nodes": int(graph.num_nodes),
         "num_edges": int(graph.edge_index.shape[1] // 2),
         "x": graph.x.detach().cpu().tolist(),

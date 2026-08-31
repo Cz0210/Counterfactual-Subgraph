@@ -1,5 +1,24 @@
 # Refactor Plan
 
+## 2026-08-31: Repair AIDS ComRecGC canonical-fallback node ordering
+
+- [x] Reopen the failed v4 chemistry evidence and isolate the failure from the
+  completed 91,916,686-pair common-recourse result.
+- [x] Audit every one of the 1,283 frozen source graphs: graph-native SMILES,
+  one-hot atom rows, atom sidecars, and edges agree; three of thirteen unique
+  canonical fallbacks use a different atom enumeration than the source CSV.
+- [x] Build node-indexed chemistry sidecars from the frozen graph-native SMILES
+  while separately requiring canonical isomeric identity with the requested
+  source SMILES.
+- [x] Add canonical-reordering and non-equivalent-source regression tests; do
+  not weaken source/no-op chemistry, split, classifier, or held-out gates.
+- [ ] Before any fresh downstream-only postprocess, resolve the separate
+  scientific data-contract blocker: 236/1,283 frozen AIDS parents are
+  multi-component salts/mixtures and therefore fail the unchanged connected
+  full-graph no-op gate. Do not silently strip, exclude, or admit them, and do
+  not modify the failed v4 root or rerun exact DBSCAN.
+
+
 ## 2026-08-31: T6 PEFT target-module reload semantics
 
 - [x] Reproduce the production reload failure and show that only ordering of

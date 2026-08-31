@@ -471,6 +471,8 @@ def _aids_source_and_noop_gate(
                 "edge_attr_alignment_exact": getattr(graph, "edge_attr", None) is None,
                 "node_lineage_exact": node_origin == expected_origin,
                 "canonical_molecule_equivalence": reconstructed == expected,
+                "source_smiles_match_mode": record["source_smiles_match_mode"],
+                "node_order_authority": record["node_order_authority"],
                 "roundtrip_ok": source_ok,
             }
         )
