@@ -98,6 +98,10 @@ See:
 - `docs/AUTODL_TASTEMOLNET_T6_OURS_PPO.md` (typed release contract for the real
   bounded three-class TasteMolNet Ours PPO smoke, direct managed-T5 clean-base
   adoption, and its separate strict terminal verifier)
+- `scripts/autodl/run_tastemolnet_ours_full.sh` (real T11 Ours continuation:
+  300 train-only PPO updates with 50-step resume checkpoints, deterministic
+  base/high-temperature train pools, calibration freeze, post-freeze held-out
+  test, standardized exports, and a distinct terminal verifier)
 - `docs/AUTODL_MANAGED_EXECUTION_V2.md` (UUID attempt/checkpoint identities,
   launcher+worker lineage, quarantine-without-signals, SEALED worker evidence,
   independent verification, and atomic directory publication without mutable
@@ -225,6 +229,16 @@ Its semantic state is `ADOPTED_CLEAN_GENERIC_BASE`, `optimizer_steps=0`, loaded
 Taste splits are `[]`, and it is not a matrix method cell. No model weight is
 copied into the receipt. See
 `docs/AUTODL_TASTEMOLNET_T5_CLEAN_BASE_ADOPTION_V2.md`.
+
+After T6 independently passes, T11 is executed through
+`scripts/autodl/run_tastemolnet_ours_full.sh`.  The wrapper requires explicit
+fresh `T11_PPO_OUTPUT_ROOT`, `T11_SCIENCE_ROOT`, and `T11_FINAL_ROOT` values,
+the frozen three-class GINE and train/calibration/test splits, the pinned
+MolCLR source/checkpoint/cache paths, and the existing shared Taste WNode
+threshold JSON.  It never invents the missing threshold.  To resume PPO, set a
+periodic `T11_PPO_RESUME_CHECKPOINT` and a new PPO output root; downstream
+science resumes automatically when its stage checkpoint exists.  Only the
+second verifier process can publish `[TASTE_OURS_PASS]`.
 
 After a formal Taste GINE bundle closes, T3 adopts its existing
 validation-fitted temperature without refitting or copying the checkpoint.

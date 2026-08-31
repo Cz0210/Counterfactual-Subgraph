@@ -151,6 +151,61 @@ Accepted
 
 ---
 
+## [2026-08-31] Release the dataset-specific TasteMolNet T11 Ours full route
+
+### Motivation
+
+The T6 route proves that the three-class frozen-GINE reward, decoded-chem PPO,
+policy update, frozen reference, and adapter reload work together, but it is
+intentionally bounded to 5--10 updates and 8--16 parents.  It cannot be renamed
+or wrapped as a paper cell: it has neither a full optimization schedule nor the
+base/high-temperature pool, calibration selector, held-out test, standardized
+exports, or restartable downstream evaluation required by T11.
+
+### Decision
+
+Reuse the already-audited stable decoded-chem PPO primitive for one additional
+300-update train-only Taste run, starting from the independently validated T6
+adapter and holding that T6 adapter fixed as the reference.  Save complete
+policy/optimizer/RNG/observer/candidate-history state every 50 updates and
+permit resume only into a fresh root with the exact T6, GINE, train CSV,
+parent-cohort, and optimizer/generation contract.
+
+Add a dataset-specific T11 downstream runner rather than a generic controller.
+Generate four candidates per frozen-GINE-predicted Sweet train parent at the
+preregistered base and high-temperature settings, with a deterministic
+per-parent RNG stream and per-parent restart chunks.  Canonicalize and dedupe
+fragments, evaluate their connected hard deletions on calibration with the
+same three-class GINE and MolCLR-Node-Wasserstein, greedily freeze 10--20
+ordered rules using calibration only, and open held-out test only after that
+freeze is fsynced.  Export Figure 3, Figure 4, Table 2 K=10, prefix, parent,
+destination, oracle, evaluation, and raw pair evidence.  The science process
+may publish only `SEALED`; a distinct invocation replays every metric and
+atomically publishes a fresh terminal root.
+
+The shared Taste WNode threshold remains an external frozen experiment input.
+The runner requires its existing calibration/frozen-protocol JSON and refuses
+missing, test-fitted, or hash-inconsistent values; it does not infer a threshold
+from any held-out output.
+
+### Consequences
+
+- T11 performs real full PPO and full candidate generation instead of adopting
+  T6 smoke candidates.
+- PPO and downstream parent chunks have usable, identity-bound restart paths.
+- Policy training and both generation modes remain train-only; calibration is
+  selector-only and test access is ordered after the durable freeze.
+- Final output is directly checked by the ordinary 4-by-4 registry contract.
+- AutoDL deployment still needs the real shared Taste threshold-contract path,
+  MolCLR paths/caches, frozen splits, and fresh PPO/science/final roots; local
+  code/tests are not a scientific PASS.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Add the executable TasteMolNet T13 native GlobalGCE full route
 
 ### Motivation

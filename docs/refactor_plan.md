@@ -26,6 +26,16 @@
   include the complete raw tree in the immutable terminal inventory.
 - [x] Apply `MIN_RULES=10` to the canonical two-branch merge, not separately
   to target 0 and target 2.
+- [x] Add a real T11 train-only 300-update PPO runner using the existing stable
+  loop, six usable periodic restart checkpoints, and independently validated
+  T6 lineage as the fixed initial/reference policy.
+- [x] Add T11 base/high-temperature train generation with deterministic
+  per-parent restart chunks, canonical fragment deduplication, calibration-only
+  prefix selection, post-freeze held-out test, standardized export, and a
+  separate terminal verifier publishing a fresh root.
+- [ ] On AutoDL, supply the existing four-method shared Taste WNode threshold
+  JSON plus frozen model/split/MolCLR/cache roots and launch fresh PPO/science/
+  final roots; code/tests alone are not a T11 scientific PASS.
 - [x] Add a real dataset-specific T13 GlobalGCE full runner over independent
   target-0 and target-2 official branches.
 - [x] Persist official epoch resume plus T13 stage and per-parent evaluation
@@ -34,9 +44,9 @@
   complete Figure 3/Figure 4/Table 2 registry artifact set.
 - [x] Add a separate terminal verifier invocation, paired Slurm wrapper,
   focused tests, and operator documentation.
-- [ ] Extend the T6 PPO implementation beyond its hard smoke bounds with a
-  full train-only optimization schedule and base/high-temperature generation;
-  then implement T11 without wrapping smoke evidence.
+- [x] Extend the audited T6 PPO lineage through a separate full train-only
+  schedule and base/high-temperature generation; T11 does not wrap or adopt
+  bounded smoke candidates as full evidence.
 - [ ] Extend native T7 from its fixed 16-step in-process smoke checkpoint to a
   persistent fixed-budget full VRRW loop; then implement T12 calibration/test
   and standardized export without retraining the adopted NeuroSED model.
