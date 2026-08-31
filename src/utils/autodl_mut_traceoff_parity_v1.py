@@ -6,7 +6,9 @@ reference before that payload may enter the standardized paper cell.  This
 module builds a persistent controller which:
 
 1. revalidates the exact immutable trace-on source;
-2. waits for an exact, SHA-pinned, memory-bounded AIDS repair terminal to pass;
+2. either preserves the historical v1 AIDS terminal dependency or, for the
+   explicitly authorized v2 controller, omits that artificial cross-dataset
+   edge entirely;
 3. runs one fresh, checkpointed, trace-disabled 50k replay on an exclusive
    GPU with the same data order, models, seed, and scientific parameters;
 4. compares the fresh reference to the immutable trace-on payload with
@@ -73,6 +75,9 @@ from src.utils.autodl_four_by_four_repair import (
 
 SPEC_SCHEMA = "mut_comrecgc_traceoff_parity_spec_v1"
 CONTROLLER_ID = "four_methods_four_datasets_mut_traceoff_parity_v1"
+SPEC_SCHEMA_V2 = "mut_comrecgc_traceoff_parity_spec_v2"
+CONTROLLER_ID_V2 = "four_methods_four_datasets_mut_traceoff_parity_v2_independent"
+INDEPENDENT_LAUNCH_AUTHORITY = "REMOVE_ARTIFICIAL_MUT_WAITS_FOR_AIDS_FINAL=1"
 SOURCE_NAMESPACE = "four_methods_four_datasets_continuation"
 
 TRACE_SOURCE_TASK_ID = "mut_trace_on_source_gate"
@@ -113,6 +118,7 @@ SOURCE_BATCH_SIZE = 128
 INSTRUMENTATION_EQUIVALENCE_STEPS = 500
 AIDS_MINIMUM_HEADROOM_BYTES = 400 * 1024**3
 AIDS_V4_MINIMUM_HEADROOM_BYTES = 128 * 1024**3
+MUT_FROZEN_MINIMUM_HEADROOM_BYTES = 440 * 1024**3
 
 INSTRUMENTATION_SOURCE_FILES = (
     "scripts/baselines/comrecgc/run_generation.py",
@@ -1865,10 +1871,34 @@ def _threshold_task(
 def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
     spec_path_value = _absolute(spec_path, label="Mut parity spec", kind="file")
     spec = _read_object(spec_path_value)
-    if spec.get("schema_version") != SPEC_SCHEMA:
-        raise RepairManifestError(f"Mut parity spec schema must be {SPEC_SCHEMA}")
-    if spec.get("controller_id") != CONTROLLER_ID:
-        raise RepairManifestError(f"controller_id must be {CONTROLLER_ID}")
+    spec_schema = str(spec.get("schema_version") or "")
+    controller_id = str(spec.get("controller_id") or "")
+    if spec_schema == SPEC_SCHEMA:
+        expected_controller_id = CONTROLLER_ID
+        independent_of_aids = False
+    elif spec_schema == SPEC_SCHEMA_V2:
+        expected_controller_id = CONTROLLER_ID_V2
+        independent_of_aids = True
+        if spec.get("remove_artificial_aids_wait") is not True:
+            raise RepairManifestError(
+                "v2 requires remove_artificial_aids_wait=true"
+            )
+        if spec.get("independent_launch_authority") != INDEPENDENT_LAUNCH_AUTHORITY:
+            raise RepairManifestError(
+                "v2 independent launch authority is absent or changed"
+            )
+        if "aids_dependency" in spec:
+            raise RepairManifestError(
+                "v2 must omit aids_dependency instead of ignoring it"
+            )
+    else:
+        raise RepairManifestError(
+            f"Mut parity spec schema must be {SPEC_SCHEMA} or {SPEC_SCHEMA_V2}"
+        )
+    if controller_id != expected_controller_id:
+        raise RepairManifestError(
+            f"controller_id must be {expected_controller_id} for {spec_schema}"
+        )
     if spec.get("paper_frozen") is not True or spec.get("run_tastemolnet") != 0:
         raise RepairManifestError("paper_frozen=true and run_tastemolnet=0 are mandatory")
     runtime_root = _absolute(spec.get("runtime_root"), label="runtime root", kind="dir")
@@ -1886,6 +1916,14 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         fresh_root.relative_to(expected_fresh_parent)
     except ValueError as exc:
         raise RepairManifestError("fresh output escapes the paper-matrix repairs namespace") from exc
+    if independent_of_aids:
+        expected_v2_root = (expected_fresh_parent / CONTROLLER_ID_V2).resolve(
+            strict=False
+        )
+        if fresh_root != expected_v2_root:
+            raise RepairManifestError(
+                f"v2 fresh output root must be exact: {expected_v2_root}"
+            )
     if fresh_root.exists() or fresh_root.is_symlink():
         raise FileExistsError(f"fresh output already exists: {fresh_root}")
     required_fix = str(spec.get("verify_comrecgc_checkout_safe_git_fix_commit") or "")
@@ -1988,6 +2026,10 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         raise RepairManifestError(
             "Mut replay requires the shared 400 GiB cgroup headroom contract"
         )
+    if independent_of_aids and min_free_bytes != MUT_FROZEN_MINIMUM_HEADROOM_BYTES:
+        raise RepairManifestError(
+            "v2 must preserve the frozen 440 GiB cgroup headroom setting"
+        )
 
     repair_v2 = _mapping(spec.get("repair_v2"), label="repair_v2")
     repair_v2_manifest = _absolute(
@@ -2037,68 +2079,90 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         kind="file",
     )
 
-    aids = _mapping(spec.get("aids_dependency"), label="aids_dependency")
-    aids_controller_id = str(aids.get("controller_id") or "")
-    aids_task_id = str(aids.get("task_id") or "")
-    aids_wrapper = str(aids.get("wrapper") or "")
-    aids_terminal_contract = str(aids.get("terminal_contract") or "")
-    if aids_terminal_contract != "comrecgc_standardized_v1":
-        raise RepairManifestError("AIDS dependency terminal contract is unsupported")
-    aids_manifest_sha256 = str(aids.get("expected_manifest_sha256") or "")
-    if HEX64.fullmatch(aids_manifest_sha256) is None:
-        raise RepairManifestError("AIDS dependency expected manifest SHA256 is malformed")
-    aids_min_free_bytes = int(aids.get("min_cgroup_free_bytes", 0))
-    if aids_min_free_bytes != AIDS_V4_MINIMUM_HEADROOM_BYTES:
-        raise RepairManifestError(
-            "AIDS-v4 dependency must freeze its reviewed 128 GiB headroom"
-        )
-    aids_manifest = _absolute(
-        aids.get("manifest"), label="AIDS dependency manifest", kind="file"
-    )
-    aids_root = _absolute(
-        aids.get("root"), label="AIDS dependency root", kind="dir"
-    )
-    aids_controller = _aids_manifest(
-        source_manifest=aids_manifest,
-        source_controller_root=aids_root,
-        control_root=control_root,
-        expected_controller_id=aids_controller_id,
-        expected_task_id=aids_task_id,
-        expected_wrapper=aids_wrapper,
-        expected_manifest_sha256=aids_manifest_sha256,
-        expected_highmem_lock=highmem_lock,
-        expected_flock_bin=flock_bin,
-        expected_cgroup_root=cgroup,
-        expected_min_free_bytes=aids_min_free_bytes,
-        expected_proc_root=proc_root,
-    )
+    aids_controller: Any | None = None
+    aids_controller_id = ""
+    aids_task_id = ""
+    aids_wrapper = ""
+    aids_terminal_contract = ""
+    aids_manifest_sha256 = ""
+    aids_min_free_bytes = 0
+    aids_manifest: Path | None = None
+    aids_root: Path | None = None
+    aids_output: Path | None = None
+    aids_gate: Path | None = None
+    aids_gate_sha256 = ""
     aids_pass_authority: dict[str, Any] | None = None
-    if aids_controller_id == AIDS_EXACT_ROUTE_V5_CONTROLLER_ID:
-        if aids_task_id != AIDS_EXACT_ROUTE_V5_TASK_ID or aids.get("expected_output") is not None:
+    if not independent_of_aids:
+        aids = _mapping(spec.get("aids_dependency"), label="aids_dependency")
+        aids_controller_id = str(aids.get("controller_id") or "")
+        aids_task_id = str(aids.get("task_id") or "")
+        aids_wrapper = str(aids.get("wrapper") or "")
+        aids_terminal_contract = str(aids.get("terminal_contract") or "")
+        if aids_terminal_contract != "comrecgc_standardized_v1":
             raise RepairManifestError(
-                "AIDS v5 dependency must resolve output solely from its task gate"
+                "AIDS dependency terminal contract is unsupported"
             )
-        aids_gate = _absolute(
-            aids.get("task_gate"), label="AIDS v5 dependency task gate", kind="file"
+        aids_manifest_sha256 = str(aids.get("expected_manifest_sha256") or "")
+        if HEX64.fullmatch(aids_manifest_sha256) is None:
+            raise RepairManifestError(
+                "AIDS dependency expected manifest SHA256 is malformed"
+            )
+        aids_min_free_bytes = int(aids.get("min_cgroup_free_bytes", 0))
+        if aids_min_free_bytes != AIDS_V4_MINIMUM_HEADROOM_BYTES:
+            raise RepairManifestError(
+                "AIDS-v4 dependency must freeze its reviewed 128 GiB headroom"
+            )
+        aids_manifest = _absolute(
+            aids.get("manifest"), label="AIDS dependency manifest", kind="file"
         )
-        aids_pass_authority = resolve_aids_passing_output(
+        aids_root = _absolute(
+            aids.get("root"), label="AIDS dependency root", kind="dir"
+        )
+        aids_controller = _aids_manifest(
             source_manifest=aids_manifest,
             source_controller_root=aids_root,
-            task_gate=aids_gate,
-            task_id=aids_task_id,
+            control_root=control_root,
+            expected_controller_id=aids_controller_id,
+            expected_task_id=aids_task_id,
+            expected_wrapper=aids_wrapper,
             expected_manifest_sha256=aids_manifest_sha256,
-            proc_root=proc_root,
+            expected_highmem_lock=highmem_lock,
+            expected_flock_bin=flock_bin,
+            expected_cgroup_root=cgroup,
+            expected_min_free_bytes=aids_min_free_bytes,
+            expected_proc_root=proc_root,
         )
-        aids_output = Path(aids_pass_authority["passing_output"])
-        aids_gate_sha256 = str(aids_pass_authority["task_gate_sha256"])
-    else:
-        aids_output = _absolute(
-            aids.get("expected_output"),
-            label="AIDS dependency expected output",
-            kind="fresh",
-        )
-        aids_gate = aids_root / "tasks" / aids_task_id / "gate.json"
-        aids_gate_sha256 = sha256_file(aids_gate) if aids_gate.is_file() else ""
+        if aids_controller_id == AIDS_EXACT_ROUTE_V5_CONTROLLER_ID:
+            if (
+                aids_task_id != AIDS_EXACT_ROUTE_V5_TASK_ID
+                or aids.get("expected_output") is not None
+            ):
+                raise RepairManifestError(
+                    "AIDS v5 dependency must resolve output solely from its task gate"
+                )
+            aids_gate = _absolute(
+                aids.get("task_gate"),
+                label="AIDS v5 dependency task gate",
+                kind="file",
+            )
+            aids_pass_authority = resolve_aids_passing_output(
+                source_manifest=aids_manifest,
+                source_controller_root=aids_root,
+                task_gate=aids_gate,
+                task_id=aids_task_id,
+                expected_manifest_sha256=aids_manifest_sha256,
+                proc_root=proc_root,
+            )
+            aids_output = Path(aids_pass_authority["passing_output"])
+            aids_gate_sha256 = str(aids_pass_authority["task_gate_sha256"])
+        else:
+            aids_output = _absolute(
+                aids.get("expected_output"),
+                label="AIDS dependency expected output",
+                kind="fresh",
+            )
+            aids_gate = aids_root / "tasks" / aids_task_id / "gate.json"
+            aids_gate_sha256 = sha256_file(aids_gate) if aids_gate.is_file() else ""
 
     science = _mapping(spec.get("standardization"), label="standardization")
     directories = ("molclr_root",)
@@ -2169,43 +2233,87 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             instrumentation_source_inventory_value["inventory_sha256"]
         ),
     }
-    aids_wait_command = [
-        "{python}",
-        "{project_root}/scripts/autodl/manage_mut_traceoff_parity_v1.py",
-        "--config",
-        "configs/hpc.yaml",
-        "wait-aids",
-        "--expected-controller-id",
-        aids_controller_id,
-        "--expected-task-id",
-        aids_task_id,
-        "--expected-wrapper",
-        aids_wrapper,
-        "--expected-manifest-sha256",
-        aids_manifest_sha256,
-        "--source-manifest",
-        str(aids_manifest),
-        "--source-controller-root",
-        str(aids_root),
-        "--control-root",
-        str(control_root),
-        "--expected-output-root",
-        str(aids_output),
-        "--proc-root",
-        str(proc_root),
-        "--poll-seconds",
-        "60",
-        "--output-dir",
-        "{task_output}",
+    aids_wait_tasks: list[dict[str, Any]] = []
+    equivalence_dependencies = [TRACE_SOURCE_TASK_ID]
+    traceoff_dependencies = [
+        TRACE_SOURCE_TASK_ID,
+        INSTRUMENTATION_EQUIVALENCE_TASK_ID,
     ]
-    if aids_pass_authority is not None:
-        action_index = aids_wait_command.index("wait-aids") + 1
-        aids_wait_command[action_index:action_index] = [
-            "--task-gate",
-            str(aids_gate),
-            "--expected-task-gate-sha256",
-            aids_gate_sha256,
+    if not independent_of_aids:
+        assert aids_manifest is not None
+        assert aids_root is not None
+        assert aids_output is not None
+        aids_wait_command = [
+            "{python}",
+            "{project_root}/scripts/autodl/manage_mut_traceoff_parity_v1.py",
+            "--config",
+            "configs/hpc.yaml",
+            "wait-aids",
+            "--expected-controller-id",
+            aids_controller_id,
+            "--expected-task-id",
+            aids_task_id,
+            "--expected-wrapper",
+            aids_wrapper,
+            "--expected-manifest-sha256",
+            aids_manifest_sha256,
+            "--source-manifest",
+            str(aids_manifest),
+            "--source-controller-root",
+            str(aids_root),
+            "--control-root",
+            str(control_root),
+            "--expected-output-root",
+            str(aids_output),
+            "--proc-root",
+            str(proc_root),
+            "--poll-seconds",
+            "60",
+            "--output-dir",
+            "{task_output}",
         ]
+        if aids_pass_authority is not None:
+            assert aids_gate is not None
+            action_index = aids_wait_command.index("wait-aids") + 1
+            aids_wait_command[action_index:action_index] = [
+                "--task-gate",
+                str(aids_gate),
+                "--expected-task-gate-sha256",
+                aids_gate_sha256,
+            ]
+        aids_wait_tasks.append(
+            {
+                "id": AIDS_WAIT_TASK_ID,
+                "dataset": "mutagenicity",
+                "stage": "MUT_WAIT_AIDS_COMRECGC_PASS",
+                "runner_dataset": "mut-wait-aids-comrecgc",
+                "runner_stage": "MUT_WAIT_AIDS_COMRECGC_PASS",
+                "depends_on": [],
+                "resource": "cpu",
+                "priority": 3,
+                "data_splits": [],
+                "manifest_only": True,
+                "command": aids_wait_command,
+                "input_manifest": (
+                    str(aids_gate)
+                    if aids_pass_authority is not None
+                    else str(aids_manifest)
+                ),
+                "config_files": [str(aids_root / "controller_manifest.json")],
+                "expected_output": str(
+                    fresh_root / "dependencies/aids-comrecgc/attempt-{attempt}"
+                ),
+                "required_output_files": ["aids_dependency.json", "PASS"],
+                "required_log_marker": "[MUT_AIDS_DEPENDENCY_PASS]",
+                "environment": {
+                    "PYTHONPATH": "{project_root}",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "RUN_TASTEMOLNET": "0",
+                },
+            }
+        )
+        equivalence_dependencies.append(AIDS_WAIT_TASK_ID)
+        traceoff_dependencies.insert(1, AIDS_WAIT_TASK_ID)
     tasks: list[dict[str, Any]] = [
         _source_gate_task(
             source_root=source_root,
@@ -2222,42 +2330,14 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             control_root=control_root,
             proc_root=proc_root,
         ),
-        {
-            "id": AIDS_WAIT_TASK_ID,
-            "dataset": "mutagenicity",
-            "stage": "MUT_WAIT_AIDS_COMRECGC_PASS",
-            "runner_dataset": "mut-wait-aids-comrecgc",
-            "runner_stage": "MUT_WAIT_AIDS_COMRECGC_PASS",
-            "depends_on": [],
-            "resource": "cpu",
-            "priority": 3,
-            "data_splits": [],
-            "manifest_only": True,
-            "command": aids_wait_command,
-            "input_manifest": (
-                str(aids_gate)
-                if aids_pass_authority is not None
-                else str(aids_manifest)
-            ),
-            "config_files": [str(aids_root / "controller_manifest.json")],
-            "expected_output": str(
-                fresh_root / "dependencies/aids-comrecgc/attempt-{attempt}"
-            ),
-            "required_output_files": ["aids_dependency.json", "PASS"],
-            "required_log_marker": "[MUT_AIDS_DEPENDENCY_PASS]",
-            "environment": {
-                "PYTHONPATH": "{project_root}",
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "RUN_TASTEMOLNET": "0",
-            },
-        },
+        *aids_wait_tasks,
         {
             "id": INSTRUMENTATION_EQUIVALENCE_TASK_ID,
             "dataset": "mutagenicity",
             "stage": "MUT_CHECKPOINT_INSTRUMENTATION_EQUIVALENCE",
             "runner_dataset": "mut-checkpoint-instrumentation-equivalence",
             "runner_stage": "MUT_CHECKPOINT_INSTRUMENTATION_EQUIVALENCE",
-            "depends_on": [TRACE_SOURCE_TASK_ID, AIDS_WAIT_TASK_ID],
+            "depends_on": equivalence_dependencies,
             "resource": "gpu",
             "gpu_lock_mode": "exclusive",
             "priority": 8,
@@ -2303,11 +2383,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "stage": "MUT_TRACEOFF_REFERENCE_50K",
             "runner_dataset": "mut-traceoff-reference",
             "runner_stage": "MUT_TRACEOFF_REFERENCE_50K",
-            "depends_on": [
-                TRACE_SOURCE_TASK_ID,
-                AIDS_WAIT_TASK_ID,
-                INSTRUMENTATION_EQUIVALENCE_TASK_ID,
-            ],
+            "depends_on": traceoff_dependencies,
             "resource": "gpu",
             "gpu_lock_mode": "exclusive",
             "priority": 10,
@@ -2479,7 +2555,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     ]
     payload: dict[str, Any] = {
         "schema_version": 1,
-        "controller_id": CONTROLLER_ID,
+        "controller_id": controller_id,
         "paper_frozen": True,
         "runtime": {
             "max_gpus": 4,
@@ -2500,7 +2576,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "max_cpu_load_fraction": 0.9,
         },
         "mut_traceoff_parity_contract": {
-            "schema_version": SPEC_SCHEMA,
+            "schema_version": spec_schema,
             "spec_path": str(spec_path_value),
             "spec_sha256": sha256_file(spec_path_value),
             "controller_project_root": str(project_root),
@@ -2552,26 +2628,44 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "generation_gpu_required": True,
             "generation_gpu_lock_mode": "exclusive",
             "standardization_gpu_required": False,
-            "waits_for_reviewed_aids_repair_pass": True,
+            "waits_for_reviewed_aids_repair_pass": not independent_of_aids,
+            **(
+                {
+                    "mut_independent_of_aids_final": True,
+                    "independent_launch_authority": INDEPENDENT_LAUNCH_AUTHORITY,
+                }
+                if independent_of_aids
+                else {}
+            ),
             "highmem_lock_path": str(highmem_lock),
             "source_evidence": source_evidence,
             "threshold_evidence": threshold_evidence,
             "common_recourse_evidence": common_evidence,
             "repair_v2_controller_evidence": repair_v2_controller_evidence,
-            "aids_controller_id": aids_controller.controller_id,
-            "aids_task_id": aids_task_id,
-            "aids_wrapper": aids_wrapper,
-            "aids_terminal_contract": aids_terminal_contract,
-            "aids_expected_manifest_sha256": aids_manifest_sha256,
-            "aids_manifest_sha256": aids_controller.sha256,
-            "aids_pass_authority": aids_pass_authority,
-            "aids_task_gate": (
-                str(aids_gate) if aids_pass_authority is not None else None
+            **(
+                {
+                    "aids_controller_id": aids_controller.controller_id,
+                    "aids_task_id": aids_task_id,
+                    "aids_wrapper": aids_wrapper,
+                    "aids_terminal_contract": aids_terminal_contract,
+                    "aids_expected_manifest_sha256": aids_manifest_sha256,
+                    "aids_manifest_sha256": aids_controller.sha256,
+                    "aids_pass_authority": aids_pass_authority,
+                    "aids_task_gate": (
+                        str(aids_gate)
+                        if aids_pass_authority is not None
+                        else None
+                    ),
+                    "aids_task_gate_sha256": (
+                        aids_gate_sha256
+                        if aids_pass_authority is not None
+                        else None
+                    ),
+                    "aids_min_cgroup_free_bytes": aids_min_free_bytes,
+                }
+                if aids_controller is not None
+                else {}
             ),
-            "aids_task_gate_sha256": (
-                aids_gate_sha256 if aids_pass_authority is not None else None
-            ),
-            "aids_min_cgroup_free_bytes": aids_min_free_bytes,
             "mut_min_cgroup_free_bytes": min_free_bytes,
             "fresh_output_root": str(fresh_root),
             "traceoff_output_root": str(generation_root),
@@ -2590,7 +2684,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     validation = validate_payload(payload)
     return payload, {
         "status": "PASS",
-        "controller_id": CONTROLLER_ID,
+        "controller_id": controller_id,
         "task_count": validation["task_count"],
         "fresh_output_root": str(fresh_root),
         "generation_resource": "exclusive_gpu",
@@ -2604,28 +2698,57 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         manifest_path = Path(directory) / "manifest.json"
         _atomic_json(manifest_path, payload)
         manifest = load_controller_manifest(manifest_path)
+    contract = _mapping(payload.get("mut_traceoff_parity_contract"), label="contract")
+    if manifest.controller_id == CONTROLLER_ID:
+        independent_of_aids = False
+        expected_schema = SPEC_SCHEMA
+    elif manifest.controller_id == CONTROLLER_ID_V2:
+        independent_of_aids = True
+        expected_schema = SPEC_SCHEMA_V2
+    else:
+        independent_of_aids = False
+        expected_schema = ""
     expected = {
         TRACE_SOURCE_TASK_ID,
         THRESHOLD_TASK_ID,
-        AIDS_WAIT_TASK_ID,
         INSTRUMENTATION_EQUIVALENCE_TASK_ID,
         TRACEOFF_TASK_ID,
         PARITY_TASK_ID,
         COMMON_TASK_ID,
         STANDARDIZE_TASK_ID,
     }
+    if not independent_of_aids:
+        expected.add(AIDS_WAIT_TASK_ID)
     failures: list[str] = []
     runtime = _mapping(payload.get("runtime"), label="runtime")
     if int(runtime.get("max_cpu_tasks", -1)) != 1:
         failures.append("max_cpu_tasks")
-    if manifest.controller_id != CONTROLLER_ID:
+    if not expected_schema or contract.get("schema_version") != expected_schema:
         failures.append("controller_id")
-    if {task.task_id for task in manifest.tasks} != expected or len(manifest.tasks) != 8:
+    if (
+        {task.task_id for task in manifest.tasks} != expected
+        or len(manifest.tasks) != len(expected)
+    ):
         failures.append("task_boundary")
     equivalence = manifest.by_id.get(INSTRUMENTATION_EQUIVALENCE_TASK_ID)
     traceoff = manifest.by_id.get(TRACEOFF_TASK_ID)
     parity = manifest.by_id.get(PARITY_TASK_ID)
+    common = manifest.by_id.get(COMMON_TASK_ID)
     standard = manifest.by_id.get(STANDARDIZE_TASK_ID)
+    expected_equivalence_dependencies = (
+        (TRACE_SOURCE_TASK_ID,)
+        if independent_of_aids
+        else (TRACE_SOURCE_TASK_ID, AIDS_WAIT_TASK_ID)
+    )
+    expected_traceoff_dependencies = (
+        (TRACE_SOURCE_TASK_ID, INSTRUMENTATION_EQUIVALENCE_TASK_ID)
+        if independent_of_aids
+        else (
+            TRACE_SOURCE_TASK_ID,
+            AIDS_WAIT_TASK_ID,
+            INSTRUMENTATION_EQUIVALENCE_TASK_ID,
+        )
+    )
     if (
         equivalence is None
         or equivalence.resource != "gpu"
@@ -2634,7 +2757,7 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         != "instrumentation-equivalence"
         or equivalence.environment.get("GPU_REQUIRED") != "1"
         or equivalence.data_splits != ("generation_source",)
-        or AIDS_WAIT_TASK_ID not in equivalence.depends_on
+        or equivalence.depends_on != expected_equivalence_dependencies
     ):
         failures.append("instrumentation_equivalence_task")
     if traceoff is None or traceoff.resource != "gpu" or traceoff.gpu_lock_mode != "exclusive":
@@ -2643,13 +2766,17 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("traceoff_stage")
     if traceoff is not None and "MUT_TRACE_OUTPUT" in traceoff.environment:
         failures.append("trace_output_present")
-    if (
-        traceoff is not None
-        and INSTRUMENTATION_EQUIVALENCE_TASK_ID not in traceoff.depends_on
-    ):
+    if traceoff is not None and traceoff.depends_on != expected_traceoff_dependencies:
         failures.append("traceoff_equivalence_dependency")
     if parity is None or parity.resource != "cpu" or parity.environment.get("DEVICE") != "cpu":
         failures.append("parity_resource")
+    if parity is not None and parity.depends_on != (
+        TRACE_SOURCE_TASK_ID,
+        TRACEOFF_TASK_ID,
+    ):
+        failures.append("parity_dependency")
+    if common is None or common.depends_on != (PARITY_TASK_ID,):
+        failures.append("common_dependency")
     if standard is None or standard.resource != "cpu":
         failures.append("standardization_resource")
     if standard is not None and (
@@ -2660,9 +2787,12 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         or not standard.read_only_test
     ):
         failures.append("standardization_contract")
-    if standard is not None and COMMON_TASK_ID not in standard.depends_on:
-        failures.append("common_dependency")
-    contract = _mapping(payload.get("mut_traceoff_parity_contract"), label="contract")
+    if standard is not None and standard.depends_on != (
+        THRESHOLD_TASK_ID,
+        PARITY_TASK_ID,
+        COMMON_TASK_ID,
+    ):
+        failures.append("standardization_dependency")
     contract_scientific_argv = tuple(
         str(value) for value in contract.get("traceoff_scientific_argv") or ()
     )
@@ -2688,16 +2818,45 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         or contract.get("reference_trace_enabled") is not False
         or contract.get("reference_self_comparison_forbidden") is not True
         or contract.get("trace_fields_stripped") is not False
-        or contract.get("waits_for_reviewed_aids_repair_pass") is not True
+        or int(contract.get("mut_min_cgroup_free_bytes", -1))
+        < AIDS_MINIMUM_HEADROOM_BYTES
+    ):
+        failures.append("scientific_contract")
+    if independent_of_aids:
+        forbidden_aids_fields = {
+            "aids_controller_id",
+            "aids_task_id",
+            "aids_wrapper",
+            "aids_terminal_contract",
+            "aids_expected_manifest_sha256",
+            "aids_manifest_sha256",
+            "aids_pass_authority",
+            "aids_task_gate",
+            "aids_task_gate_sha256",
+            "aids_min_cgroup_free_bytes",
+        }
+        if (
+            contract.get("waits_for_reviewed_aids_repair_pass") is not False
+            or contract.get("mut_independent_of_aids_final") is not True
+            or contract.get("independent_launch_authority")
+            != INDEPENDENT_LAUNCH_AUTHORITY
+            or int(contract.get("mut_min_cgroup_free_bytes", -1))
+            != MUT_FROZEN_MINIMUM_HEADROOM_BYTES
+            or forbidden_aids_fields.intersection(contract)
+            or AIDS_WAIT_TASK_ID in manifest.by_id
+        ):
+            failures.append("independent_aids_contract")
+    elif (
+        contract.get("waits_for_reviewed_aids_repair_pass") is not True
+        or contract.get("mut_independent_of_aids_final", False) is not False
+        or contract.get("independent_launch_authority") is not None
         or contract.get("aids_controller_id") == AIDS_CONTROLLER_ID
         or int(contract.get("aids_min_cgroup_free_bytes", -1))
         != AIDS_V4_MINIMUM_HEADROOM_BYTES
-        or int(contract.get("mut_min_cgroup_free_bytes", -1))
-        < AIDS_MINIMUM_HEADROOM_BYTES
         or contract.get("aids_expected_manifest_sha256")
         != contract.get("aids_manifest_sha256")
     ):
-        failures.append("scientific_contract")
+        failures.append("aids_dependency_contract")
     if failures:
         raise RepairManifestError(f"Mut trace-off controller is invalid: {failures}")
     return {
@@ -2716,8 +2875,9 @@ def build_manifest(*, spec_path: str | Path, output_path: str | Path) -> dict[st
     payload, summary = build_payload(spec_path=spec_path)
     spec = _read_object(spec_path)
     control_root = _absolute(spec.get("control_root"), label="control root", kind="dir")
+    controller_id = str(payload.get("controller_id") or "")
     expected = (
-        control_root / SOURCE_NAMESPACE / "manifests" / f"{CONTROLLER_ID}.json"
+        control_root / SOURCE_NAMESPACE / "manifests" / f"{controller_id}.json"
     ).resolve(strict=False)
     if destination != expected:
         raise RepairManifestError(f"manifest output must be exact: {expected}")
@@ -2735,11 +2895,14 @@ __all__ = [
     "AIDS_V4_MINIMUM_HEADROOM_BYTES",
     "AIDS_TASK_ID",
     "CONTROLLER_ID",
+    "CONTROLLER_ID_V2",
+    "INDEPENDENT_LAUNCH_AUTHORITY",
     "INSTRUMENTATION_EQUIVALENCE_STEPS",
     "INSTRUMENTATION_EQUIVALENCE_TASK_ID",
     "INSTRUMENTATION_PROJECT_COMMIT",
     "INSTRUMENTATION_SOURCE_INVENTORY_SHA256",
     "LEGACY_SOURCE_INVENTORY_SHA256",
+    "MUT_FROZEN_MINIMUM_HEADROOM_BYTES",
     "SOURCE_CANDIDATE_COUNT",
     "SOURCE_CONFIG_SHA256",
     "SOURCE_DATASET_SHA256",
@@ -2752,6 +2915,7 @@ __all__ = [
     "SOURCE_PROJECT_COMMIT",
     "SOURCE_STEPS",
     "SPEC_SCHEMA",
+    "SPEC_SCHEMA_V2",
     "assert_mut_trace_parity",
     "build_manifest",
     "build_payload",

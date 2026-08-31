@@ -17,10 +17,13 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "AutoDL-only continuation; do not submit this Slurm wrapper."
-# The built AutoDL manifest forwards wait-aids task-gate/SHA authority.  This
-# guard-only Slurm companion intentionally never reconstructs runtime flags.
+printf '%s\n' \
+  'v1 validation:' \
+  '  python scripts/autodl/manage_mut_traceoff_parity_v1.py --config configs/hpc.yaml' \
+  '  validate --spec configs/autodl/mut_traceoff_parity_v1.template.json' \
+  'independent v2 validation:' \
+  '  python scripts/autodl/manage_mut_traceoff_parity_v1.py --config configs/hpc.yaml' \
+  '  validate --spec configs/autodl/mut_traceoff_parity_v2_independent.template.json'
+# This guard-only Slurm companion intentionally never reconstructs runtime
+# flags for either the AIDS-dependent v1 or the independent v2 controller.
 exit 2
-
-python scripts/autodl/manage_mut_traceoff_parity_v1.py \
-  --config configs/hpc.yaml validate \
-  --spec configs/autodl/mut_traceoff_parity_v1.template.json

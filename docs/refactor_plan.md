@@ -54,6 +54,21 @@
   full-graph no-op gate. Do not silently strip, exclude, or admit them, and do
   not modify the failed v4 root or rerun exact DBSCAN.
 
+## 2026-09-01: Independent Mut trace-off parity v2
+
+- [x] Preserve the deployed AIDS-dependent v1 schema and controller identity.
+- [x] Add a fresh v2 identity that requires the explicit no-AIDS-wait
+  authorization and rejects an `aids_dependency` field.
+- [x] Emit exactly seven tasks, removing only the artificial wait task and its
+  two DAG edges.
+- [x] Retain the 7f/664 source inventories, 500-step behavioral-equivalence
+  gate, trace-disabled 50k replay, mirrored checkpoints, real parity, and
+  no-test generation contract.
+- [x] Add a fresh-root template, focused mutation tests, deployment notes, and
+  synchronize the guard-only Slurm CLI companion.
+- [ ] After an exclusive GPU and at least 440 GiB of cgroup headroom are both
+  available, build and launch from a clean immutable AutoDL worktree.  Do not
+  modify or reuse the v1 controller/root.
 
 ## 2026-08-31: T6 PEFT target-module reload semantics
 

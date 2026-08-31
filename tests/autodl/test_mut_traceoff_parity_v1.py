@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 import scripts.autodl.manage_mut_traceoff_parity_v1 as manage
 import scripts.autodl.run_mut_checkpoint_instrumentation_equivalence as equiv
+from scripts.autodl.run_four_gpu_recovery_controller import ControllerError
 from src.baselines.comrecgc.contracts import sha256_file, stable_json_sha256
 import src.utils.autodl_mut_traceoff_parity_v1 as mut
 from src.utils.autodl_four_by_four_repair import RepairManifestError
@@ -431,6 +433,29 @@ def _builder_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[tempfile.Temporar
     return temporary, spec
 
 
+def _independent_v2_spec(spec_path: Path) -> dict[str, object]:
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    runtime = Path(str(spec["runtime_root"]))
+    spec.update(
+        {
+            "schema_version": mut.SPEC_SCHEMA_V2,
+            "controller_id": mut.CONTROLLER_ID_V2,
+            "remove_artificial_aids_wait": True,
+            "independent_launch_authority": mut.INDEPENDENT_LAUNCH_AUTHORITY,
+            "fresh_output_root": str(
+                runtime
+                / "outputs/autodl/paper_matrix/four_methods_four_datasets_v1"
+                / "repairs"
+                / mut.CONTROLLER_ID_V2
+            ),
+            "min_cgroup_free_bytes": mut.MUT_FROZEN_MINIMUM_HEADROOM_BYTES,
+        }
+    )
+    spec.pop("aids_dependency")
+    _json(spec_path, spec)
+    return spec
+
+
 def test_builder_has_attempt_gates_exact_dependencies_and_cpu_boundaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -466,6 +491,168 @@ def test_builder_has_attempt_gates_exact_dependencies_and_cpu_boundaries(
         assert payload["mut_traceoff_parity_contract"][
             "aids_controller_id"
         ].endswith("repair_v4")
+    finally:
+        temporary.cleanup()
+
+
+def test_v1_validator_accepts_pre_v2_contract_without_new_mode_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temporary, spec_path = _builder_fixture(monkeypatch)
+    try:
+        payload, _summary = mut.build_payload(spec_path=spec_path)
+        contract = payload["mut_traceoff_parity_contract"]
+        assert "mut_independent_of_aids_final" not in contract
+        assert "independent_launch_authority" not in contract
+        result = mut.validate_payload(payload)
+        assert result["controller_id"] == mut.CONTROLLER_ID
+        assert result["task_count"] == 8
+    finally:
+        temporary.cleanup()
+
+
+def test_independent_v2_has_seven_tasks_and_preserves_real_parity_science(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temporary, spec_path = _builder_fixture(monkeypatch)
+    try:
+        _independent_v2_spec(spec_path)
+
+        def _unexpected_aids_lookup(**_kwargs: object) -> object:
+            pytest.fail("independent v2 must not inspect an AIDS controller")
+
+        monkeypatch.setattr(mut, "_aids_manifest", _unexpected_aids_lookup)
+        payload, summary = mut.build_payload(spec_path=spec_path)
+        result = mut.validate_payload(payload)
+        tasks = {task["id"]: task for task in payload["tasks"]}
+
+        assert summary["controller_id"] == mut.CONTROLLER_ID_V2
+        assert summary["task_count"] == result["task_count"] == 7
+        assert set(tasks) == {
+            mut.TRACE_SOURCE_TASK_ID,
+            mut.THRESHOLD_TASK_ID,
+            mut.INSTRUMENTATION_EQUIVALENCE_TASK_ID,
+            mut.TRACEOFF_TASK_ID,
+            mut.PARITY_TASK_ID,
+            mut.COMMON_TASK_ID,
+            mut.STANDARDIZE_TASK_ID,
+        }
+        assert mut.AIDS_WAIT_TASK_ID not in tasks
+        assert tasks[mut.INSTRUMENTATION_EQUIVALENCE_TASK_ID]["depends_on"] == [
+            mut.TRACE_SOURCE_TASK_ID
+        ]
+        assert tasks[mut.TRACEOFF_TASK_ID]["depends_on"] == [
+            mut.TRACE_SOURCE_TASK_ID,
+            mut.INSTRUMENTATION_EQUIVALENCE_TASK_ID,
+        ]
+
+        contract = payload["mut_traceoff_parity_contract"]
+        assert contract["schema_version"] == mut.SPEC_SCHEMA_V2
+        assert contract["waits_for_reviewed_aids_repair_pass"] is False
+        assert contract["mut_independent_of_aids_final"] is True
+        assert (
+            contract["independent_launch_authority"]
+            == mut.INDEPENDENT_LAUNCH_AUTHORITY
+        )
+        assert contract["source_algorithm_commit"] == mut.SOURCE_PROJECT_COMMIT
+        assert (
+            contract["execution_instrumentation_commit"]
+            == mut.INSTRUMENTATION_PROJECT_COMMIT
+        )
+        assert contract["instrumentation_equivalence_steps"] == 500
+        assert contract["source_parameters"] == mut.SOURCE_PARAMETERS
+        assert contract["source_trace_enabled"] is True
+        assert contract["reference_trace_enabled"] is False
+        assert contract["reference_self_comparison_forbidden"] is True
+        assert contract["trace_fields_stripped"] is False
+        assert "aids_controller_id" not in contract
+        assert "aids_manifest_sha256" not in contract
+        assert tasks[mut.TRACEOFF_TASK_ID]["environment"][
+            "MUT_EXPECTED_SCIENTIFIC_COMMAND_SHA256"
+        ] == contract["traceoff_scientific_command_sha256"]
+    finally:
+        temporary.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda spec: spec.pop("independent_launch_authority"),
+            "independent launch authority",
+        ),
+        (
+            lambda spec: spec.__setitem__("remove_artificial_aids_wait", False),
+            "remove_artificial_aids_wait=true",
+        ),
+        (
+            lambda spec: spec.__setitem__("aids_dependency", {"forbidden": True}),
+            "must omit aids_dependency",
+        ),
+        (
+            lambda spec: spec.__setitem__(
+                "min_cgroup_free_bytes", mut.AIDS_MINIMUM_HEADROOM_BYTES
+            ),
+            "frozen 440 GiB",
+        ),
+        (
+            lambda spec: spec.__setitem__(
+                "fresh_output_root",
+                str(Path(str(spec["fresh_output_root"])).with_name("another-root")),
+            ),
+            "fresh output root must be exact",
+        ),
+    ],
+)
+def test_independent_v2_rejects_missing_authority_or_latent_aids_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: Callable[[dict[str, object]], object],
+    message: str,
+) -> None:
+    temporary, spec_path = _builder_fixture(monkeypatch)
+    try:
+        spec = _independent_v2_spec(spec_path)
+        mutation(spec)
+        _json(spec_path, spec)
+        with pytest.raises(RepairManifestError, match=message):
+            mut.build_payload(spec_path=spec_path)
+    finally:
+        temporary.cleanup()
+
+
+def test_independent_v2_validator_rejects_reintroduced_aids_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temporary, spec_path = _builder_fixture(monkeypatch)
+    try:
+        _independent_v2_spec(spec_path)
+        payload, _summary = mut.build_payload(spec_path=spec_path)
+        tasks = {task["id"]: task for task in payload["tasks"]}
+        tasks[mut.INSTRUMENTATION_EQUIVALENCE_TASK_ID]["depends_on"].append(
+            mut.AIDS_WAIT_TASK_ID
+        )
+        with pytest.raises(ControllerError, match="Unknown task dependencies"):
+            mut.validate_payload(payload)
+    finally:
+        temporary.cleanup()
+
+
+def test_independent_v2_builds_only_at_new_controller_manifest_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temporary, spec_path = _builder_fixture(monkeypatch)
+    try:
+        spec = _independent_v2_spec(spec_path)
+        expected = (
+            Path(str(spec["control_root"]))
+            / mut.SOURCE_NAMESPACE
+            / "manifests"
+            / f"{mut.CONTROLLER_ID_V2}.json"
+        )
+        result = mut.build_manifest(spec_path=spec_path, output_path=expected)
+        assert result["controller_id"] == mut.CONTROLLER_ID_V2
+        assert Path(str(result["manifest"])) == expected.resolve()
+        assert expected.is_file()
     finally:
         temporary.cleanup()
 
@@ -677,6 +864,44 @@ def test_wrapper_template_and_slurm_are_fail_closed() -> None:
     assert template["instrumentation_equivalence"]["steps"] == 500
     assert template["aids_dependency"]["controller_id"].endswith("repair_v4")
     assert template["aids_dependency"]["expected_manifest_sha256"].startswith("__FILL")
+    independent = json.loads(
+        (
+            root
+            / "configs/autodl/mut_traceoff_parity_v2_independent.template.json"
+        ).read_text()
+    )
+    assert independent["schema_version"] == mut.SPEC_SCHEMA_V2
+    assert independent["controller_id"] == mut.CONTROLLER_ID_V2
+    assert independent["remove_artificial_aids_wait"] is True
+    assert (
+        independent["independent_launch_authority"]
+        == mut.INDEPENDENT_LAUNCH_AUTHORITY
+    )
+    assert "aids_dependency" not in independent
+    assert independent["replay"] == template["replay"]
+    assert independent["instrumentation_equivalence"] == template[
+        "instrumentation_equivalence"
+    ]
+    assert independent["min_cgroup_free_bytes"] == template[
+        "min_cgroup_free_bytes"
+    ]
+    assert (
+        independent["min_cgroup_free_bytes"]
+        == mut.MUT_FROZEN_MINIMUM_HEADROOM_BYTES
+    )
+    for key in (
+        "python",
+        "proc_root",
+        "cgroup_memory_root",
+        "highmem_lock_path",
+        "flock_bin",
+        "verify_comrecgc_checkout_safe_git_fix_commit",
+        "traced_source_root",
+        "repair_v2",
+        "repair_v1",
+        "standardization",
+    ):
+        assert independent[key] == template[key]
     for relative in (
         "scripts/slurm/manage_mut_traceoff_parity_v1.sh",
         "scripts/slurm/run_mut_comrecgc_parity_standardization.sh",
@@ -696,6 +921,8 @@ def test_wrapper_template_and_slurm_are_fail_closed() -> None:
             "do not submit",
         ):
             assert token in text
+    slurm = (root / "scripts/slurm/manage_mut_traceoff_parity_v1.sh").read_text()
+    assert "mut_traceoff_parity_v2_independent.template.json" in slurm
 
 
 def test_manage_cli_routes_threshold_and_future_aids_arguments(

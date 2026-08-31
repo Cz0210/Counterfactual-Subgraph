@@ -122,6 +122,47 @@ Accepted
 
 ---
 
+## [2026-09-01] Remove only the artificial AIDS edge from Mut trace-off parity v2
+
+### Motivation
+
+The deployed Mut trace-off parity v1 controller froze
+`mut_wait_aids_comrecgc_pass` into its manifest and task DAG.  That task has
+failed terminally even though the Mut 500-step instrumentation gate, 50k
+trace-disabled reference, and real trace parity are scientifically independent
+of the AIDS paper cell.  Editing the frozen v1 manifest or manufacturing an
+AIDS receipt would violate persistent-controller and parity provenance.
+
+### Decision
+
+Add an explicit v2 spec/controller identity with a fresh output root.  It
+requires the recorded authority
+`REMOVE_ARTIFICIAL_MUT_WAITS_FOR_AIDS_FINAL=1`, rejects any `aids_dependency`
+field, and emits exactly seven tasks.  Only the two dependency lists change:
+the instrumentation equivalence depends on the frozen trace-on source, and the
+50k reference depends on that source plus the equivalence PASS.
+
+The legacy algorithm worktree remains pinned to `7f7ed51`, the checkpointed
+execution worktree remains pinned to `66487c0`, the prefix remains 500 steps,
+and the reference remains a fresh seed-0, trace-disabled 50k exclusive-GPU
+run.  The same normalized real parity assertion is still mandatory before
+common-recourse adoption or held-out standardization.
+
+### Consequences
+
+- The existing v1 controller, manifest, task state, and output root remain
+  immutable and are never reused by v2.
+- The new builder cannot silently retain an AIDS dependency or accept copied,
+  self-compared, or synthetic parity evidence.
+- Deployment still requires a fresh immutable controller worktree, an
+  exclusive idle GPU, and the unchanged 440-GiB cgroup-free-memory setting.
+- This change builds and validates the route only; it does not launch AutoDL
+  science.
+
+### Status
+
+Accepted and implemented; AutoDL deployment pending resource preflight.
+
 ## [2026-08-31] Compare T6 PEFT target modules by their native set semantics
 
 ### Motivation
