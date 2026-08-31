@@ -3387,3 +3387,20 @@ Mutagenicity roadmaps.
   target node IDs.
 - [ ] Launch one fresh read-only AIDS postprocess root; do not resume or modify
   the chemistry-failed v6 root.
+
+## 2026-09-01: Mut parity-v2 terminal matrix closure
+
+- [x] Keep the legacy exact-postprocess Mut validator unchanged and add a
+  separate schema-dispatched validator for the independent parity-v2 terminal.
+- [x] Reopen the trace parity receipt and common-recourse adoption, bind both to
+  the fixed generation/common roots, and reject any receipt drift.
+- [x] Reopen the frozen generation manifest/stat/hash snapshots without
+  recomputing the 100,235-candidate payload hash, and require recorded plus live
+  writer quiescence.
+- [x] Reopen the pinned COMRECGC checkout and standardized RF/WNode freeze,
+  including calibration/test-order and scientific-input identities.
+- [x] Allow the shared fast16 publisher to consume the fixed outer
+  `attempt-0` root while continuing to register only its inner `standardized/`
+  directory as the Mutagenicity/ComRecGC cell.
+- [ ] Let the existing parity-v2 controller produce that fixed terminal; no
+  science or alternate exact receipt is synthesized by publication code.

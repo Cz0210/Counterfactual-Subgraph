@@ -449,6 +449,47 @@ Accepted
 
 ---
 
+## [2026-09-01] Accept the independent Mut parity-v2 standardization as a distinct strict matrix terminal
+
+### Background
+
+The live Mutagenicity v2 route proves trace-on/off parity, adopts the reviewed
+repair-v2 common recourses, and then runs chemistry, unified RF/WNode
+evaluation, full gate, and freeze in a fixed fresh `attempt-0` root.  It does
+not produce the older multi-component exact-adoption receipt.  Requiring that
+unrelated receipt would block a scientifically complete route; fabricating it
+would misstate provenance.
+
+### Decision
+
+Keep the existing exact-postprocess validator and add a separate
+schema-dispatched `MUT_PARITY_STANDARDIZATION_FINAL` validator to the non-Taste
+matrix appender.  The new validator reopens the canonical parity and common
+adoption receipts, the frozen generation source snapshots, the pinned
+COMRECGC checkout, the standardized RF/WNode freeze, and current writer
+quiescence.  It preserves the recorded single computation of the large source
+payload SHA and verifies subsequent stat/hash closure without hashing that
+payload again.  The outer parity root is terminal evidence; only its inner
+`standardized/` root becomes the registry cell, and publication still occurs
+through the serialized shared fast16 matrix pointer.
+
+### Consequences
+
+- The parity-v2 route can append Mutagenicity/ComRecGC without masquerading as
+  the incompatible exact-postprocess route.
+- Trace parity, common recourse, frozen generation, oracle, split, threshold,
+  calibration/test order, and candidate order remain fail-closed.
+- No generation, DBSCAN, common-recourse, chemistry, WNode, or test evaluation
+  is rerun by matrix publication.
+- The legacy exact terminal remains accepted under its original stronger
+  contract.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-09-01] Bind recovered ComRecGC step-zero node IDs to the recorded frozen source
 
 ### Motivation

@@ -663,6 +663,198 @@ def _mut_final_fixture(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def _mut_parity_final_fixture(tmp_path: Path) -> dict[str, object]:
+    fixture = _mut_final_fixture(tmp_path)
+    root = Path(fixture["root"])
+    standardized = Path(fixture["standardized"])
+    generation_root = root / "generation"
+    payload = generation_root / "counterfactuals.pt"
+
+    generation = {
+        "schema_version": 1,
+        "status": "PASS",
+        "dataset": "mutagenicity",
+        "generation_adopted": True,
+        "generation_mode": "adopted_read_only_cache",
+        "generation_rerun": False,
+        "source_generation_root": str(generation_root.resolve()),
+        "counterfactuals_path": str(payload.resolve()),
+        "counterfactuals_sha256_claimed": append_module.MUT_SOURCE_PAYLOAD_SHA256,
+        "counterfactuals_sha256_actual": append_module.MUT_SOURCE_PAYLOAD_SHA256,
+        "counterfactuals_sha256_verified": True,
+        "counterfactuals_sha256_computation_count": 1,
+        "counterfactual_candidate_count": append_module.MUT_SOURCE_CANDIDATE_COUNT,
+        "source_project_commit": append_module.SOURCE_PROJECT_COMMIT,
+        "upstream_commit": append_module.COMRECGC_UPSTREAM_COMMIT,
+        "serialization_rerun": False,
+        "lineage_resolution_rerun": False,
+        "source_integrity": {"fixture": True},
+    }
+    reopened_integrity = {
+        "schema_version": 1,
+        "status": "PASS",
+        "payload_sha256_recomputed": False,
+        "payload_stat_unchanged": True,
+        "critical_manifest_stat_and_hash_unchanged": True,
+        "critical_manifests": {"run_manifest.json": {"sha256": "1" * 64}},
+        "payload": {"resolved_path": str(payload.resolve())},
+        "live_writer_audit_before_snapshot": {"writers": []},
+        "live_writer_audit_after_snapshot": {"writers": []},
+        "verified_at": "fixture",
+    }
+    final_integrity = dict(reopened_integrity)
+
+    parity_path = root / "parity-gate/trace_parity.json"
+    _json(parity_path, {"status": "PASS"})
+    parity = {
+        "status": "PASS",
+        "traced_source_root": str(generation_root.resolve()),
+        "path": str(parity_path.resolve()),
+        "sha256": _sha(parity_path),
+    }
+    common_root = root / "exact-common"
+    common_path = root / "common-gate/common_recourse_adoption.json"
+    _json(common_path, {"status": "PASS"})
+    common = {
+        "status": "PASS",
+        "common_root": str(common_root.resolve()),
+        "path": str(common_path.resolve()),
+        "sha256": _sha(common_path),
+    }
+
+    upstream = root / "upstream"
+    upstream.mkdir()
+    required_files: dict[str, str] = {}
+    for name in append_module._COMRECGC_REQUIRED_SOURCE_FILES:
+        path = upstream / name
+        path.write_text(f"# {name}\n", encoding="utf-8")
+        required_files[name] = _sha(path)
+    _json(
+        root / "upstream_checkout_audit.json",
+        {
+            "root": str(upstream.resolve()),
+            "expected_commit": append_module.COMRECGC_UPSTREAM_COMMIT,
+            "actual_commit": append_module.COMRECGC_UPSTREAM_COMMIT,
+            "commit_match": True,
+            "required_files": required_files,
+            "vendor_manifest_present": False,
+            "vendor_manifest_match": None,
+            "import_pass": True,
+            "network_required": False,
+            "passed": True,
+        },
+    )
+    run = {
+        "schema_version": append_module._MUT_PARITY_RUN_SCHEMA,
+        "status": "PASS",
+        "dataset": "mutagenicity",
+        "method": "COMRECGC",
+        "oracle_backend": "rf",
+        "classifier_family": "random_forest",
+        "rf_oracle_used": True,
+        "cf_mode": "strict_flip",
+        "distance_line": "MolCLR-Node-Wasserstein",
+        "generation_adopted": True,
+        "generation_rerun": False,
+        "traceoff_reference_rerun": True,
+        "trace_parity_passed": True,
+        "trace_fields_stripped": False,
+        "common_recourse_adopted": True,
+        "common_recourse_rerun": False,
+        "chemistry_rerun": True,
+        "evaluation_rerun": True,
+        "source_generation_root": str(generation_root.resolve()),
+        "source_common_recourse_root": str(common_root.resolve()),
+        "trace_parity_path": str(parity_path.resolve()),
+        "trace_parity_sha256": _sha(parity_path),
+        "standardized_output_root": str(standardized.resolve()),
+        "project_commit": "a" * 40,
+        "source_payload_sha256": append_module.MUT_SOURCE_PAYLOAD_SHA256,
+        "standardized_run_manifest_sha256": _sha(standardized / "run_manifest.json"),
+        "freeze_manifest_sha256": _sha(standardized / "freeze_manifest.json"),
+        "teacher_sha256": _sha(tmp_path / "inputs/teacher.pkl"),
+        "calibration_loaded": False,
+        "test_loaded_only_in_unified_evaluation": True,
+        "completed_at": "fixture",
+    }
+    _json(root / "generation_adoption_manifest.json", generation)
+    _json(root / "common_recourse_adoption_manifest.json", common)
+    _json(root / "trace_parity_adoption_manifest.json", parity)
+    _json(root / "source_integrity_final.json", final_integrity)
+    _json(root / "run_manifest.json", run)
+    _json(root / "final_gate.json", run)
+    _json(root / "_RUN_COMPLETE.json", {**run, "run_complete": True})
+    (root / "PASS").write_bytes(b"PASS\n")
+    return {
+        "root": root,
+        "standardized": standardized,
+        "source_root": generation_root,
+        "parity": parity,
+        "common": common,
+        "reopened_integrity": reopened_integrity,
+    }
+
+
+def test_mut_parity_standardization_is_a_strict_terminal_without_exact_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _mut_parity_final_fixture(tmp_path)
+    monkeypatch.setattr(
+        append_module,
+        "validate_mut_parity_standardization",
+        lambda _path, *, source_root: fixture["parity"],
+    )
+    monkeypatch.setattr(
+        append_module,
+        "validate_mut_parity_common_adoption",
+        lambda _path, *, parity: fixture["common"],
+    )
+    monkeypatch.setattr(
+        append_module,
+        "verify_mut_adopted_generation_integrity",
+        lambda _generation: fixture["reopened_integrity"],
+    )
+    evidence = _validate_mut_terminal(
+        fixture["root"],
+        proc_root=tmp_path / "proc",
+        require_writer_audit=False,
+    )
+    assert evidence["terminal_kind"] == "MUT_PARITY_STANDARDIZATION_FINAL"
+    assert evidence["standardized"]["root"] == str(
+        Path(fixture["standardized"]).resolve()
+    )
+    assert "original_matrix_authority_root" not in evidence
+    assert evidence["source_integrity"]["source_payload_sha256_recomputed"] is False
+
+
+def test_mut_parity_terminal_rejects_frozen_source_snapshot_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _mut_parity_final_fixture(tmp_path)
+    monkeypatch.setattr(
+        append_module,
+        "validate_mut_parity_standardization",
+        lambda _path, *, source_root: fixture["parity"],
+    )
+    monkeypatch.setattr(
+        append_module,
+        "validate_mut_parity_common_adoption",
+        lambda _path, *, parity: fixture["common"],
+    )
+    def _drift(_generation: object) -> dict[str, object]:
+        raise ValueError("SOURCE_CLOSURE_CHANGED:adoption_manifest.json")
+
+    monkeypatch.setattr(
+        append_module, "verify_mut_adopted_generation_integrity", _drift
+    )
+    with pytest.raises(NonTasteMatrixAppendError, match="integrity reopen failed"):
+        _validate_mut_terminal(
+            fixture["root"],
+            proc_root=tmp_path / "proc",
+            require_writer_audit=False,
+        )
+
+
 def test_mut_accepts_only_full_exact_postprocess_and_reopens_old_append_as_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

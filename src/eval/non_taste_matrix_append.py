@@ -2,8 +2,8 @@
 
 This module is intentionally a small campaign-specific append operation.  It
 does not run science, standardize a result, or infer a terminal from a marker.
-Only the completed AIDS/ComRecGC recovery controller, the completed
-Mutagenicity/ComRecGC exact postprocess, and the two BACE frozen
+Only the completed AIDS/ComRecGC recovery controller, either explicit
+Mutagenicity/ComRecGC production terminal, and the two BACE frozen
 standardization contracts are accepted.
 """
 
@@ -25,7 +25,15 @@ from scripts.autodl.append_bace_gcf_matrix_authority import (
     _verify_authority,
 )
 from scripts.autodl.run_comrecgc_standardized_continuation import (
+    _verify_adopted_generation_integrity as verify_mut_adopted_generation_integrity,
     _validate_common_recourse_completion,
+)
+from scripts.autodl.run_mut_comrecgc_parity_standardization import (
+    _validate_common_adoption as validate_mut_parity_common_adoption,
+    _validate_parity as validate_mut_parity_standardization,
+)
+from src.baselines.comrecgc.contracts import (
+    UPSTREAM_COMMIT as COMRECGC_UPSTREAM_COMMIT,
 )
 from src.eval.am_legacy_standardization import scan_live_writers
 from src.eval.bace_frozen_cell_standardization import (
@@ -67,6 +75,7 @@ from src.utils.autodl_mut_comrecgc_exact_postprocess_v1 import (
     validate_exact_adoption as validate_mut_exact_adoption,
 )
 from src.utils.autodl_mut_traceoff_parity_v1 import (
+    SOURCE_PROJECT_COMMIT,
     _validate_parity_gate as validate_mut_trace_parity,
 )
 
@@ -93,6 +102,13 @@ _BACE_SHARED_FIELDS = (
     "threshold_config_hash",
 )
 _RF_SHARED_FIELDS = _BACE_SHARED_FIELDS
+_MUT_PARITY_RUN_SCHEMA = "mut_comrecgc_parity_standardization_v1"
+_COMRECGC_REQUIRED_SOURCE_FILES = (
+    "comrecgc.py",
+    "common_recourse.py",
+    "data.py",
+    "gnn.py",
+)
 
 
 class NonTasteMatrixAppendError(RuntimeError):
@@ -759,7 +775,276 @@ def _validate_aids_terminal(
     }
 
 
-def _validate_mut_terminal(
+def _validate_mut_parity_source_integrity(
+    generation: Mapping[str, Any],
+    final_integrity: Mapping[str, Any],
+    *,
+    source_root: Path,
+) -> dict[str, Any]:
+    _require_fields(
+        generation,
+        {
+            "schema_version": 1,
+            "status": "PASS",
+            "dataset": "mutagenicity",
+            "generation_adopted": True,
+            "generation_mode": "adopted_read_only_cache",
+            "generation_rerun": False,
+            "source_generation_root": str(source_root),
+            "counterfactuals_sha256_claimed": MUT_SOURCE_PAYLOAD_SHA256,
+            "counterfactuals_sha256_actual": MUT_SOURCE_PAYLOAD_SHA256,
+            "counterfactuals_sha256_verified": True,
+            "counterfactuals_sha256_computation_count": 1,
+            "counterfactual_candidate_count": MUT_SOURCE_CANDIDATE_COUNT,
+            "source_project_commit": SOURCE_PROJECT_COMMIT,
+            "upstream_commit": COMRECGC_UPSTREAM_COMMIT,
+            "serialization_rerun": False,
+            "lineage_resolution_rerun": False,
+        },
+        label="Mut parity generation adoption",
+    )
+    payload = _physical_file(
+        generation.get("counterfactuals_path", ""), label="Mut frozen counterfactuals"
+    )
+    try:
+        payload.relative_to(source_root)
+    except ValueError as exc:
+        raise NonTasteMatrixAppendError(
+            "Mut frozen counterfactuals escaped the generation root"
+        ) from exc
+    try:
+        reopened = verify_mut_adopted_generation_integrity(generation)
+    except Exception as exc:
+        raise NonTasteMatrixAppendError(
+            f"Mut frozen generation integrity reopen failed: {exc}"
+        ) from exc
+    stable_fields = (
+        "schema_version",
+        "status",
+        "payload_sha256_recomputed",
+        "payload_stat_unchanged",
+        "critical_manifest_stat_and_hash_unchanged",
+        "critical_manifests",
+        "payload",
+    )
+    changed = [
+        field
+        for field in stable_fields
+        if final_integrity.get(field) != reopened.get(field)
+    ]
+    if changed:
+        raise NonTasteMatrixAppendError(
+            "Mut final/source integrity receipt changed: " + ", ".join(changed)
+        )
+    return {
+        "source_generation_root": str(source_root),
+        "source_payload_path": str(payload),
+        "source_payload_sha256": MUT_SOURCE_PAYLOAD_SHA256,
+        "source_payload_sha256_recomputed": False,
+        "critical_manifests": dict(reopened["critical_manifests"]),
+        "payload_snapshot": dict(reopened["payload"]),
+        "final_integrity_sha256": None,
+        "writer_audit_before": dict(
+            reopened["live_writer_audit_before_snapshot"]
+        ),
+        "writer_audit_after": dict(reopened["live_writer_audit_after_snapshot"]),
+    }
+
+
+def _validate_mut_upstream_checkout(root: Path) -> dict[str, Any]:
+    audit_path = _physical_file(
+        root / "upstream_checkout_audit.json", label="Mut upstream checkout audit"
+    )
+    audit = _json(audit_path, label="Mut upstream checkout audit")
+    _require_fields(
+        audit,
+        {
+            "expected_commit": COMRECGC_UPSTREAM_COMMIT,
+            "actual_commit": COMRECGC_UPSTREAM_COMMIT,
+            "commit_match": True,
+            "import_pass": True,
+            "network_required": False,
+            "passed": True,
+        },
+        label="Mut upstream checkout audit",
+    )
+    upstream = _physical_directory(audit.get("root", ""), label="Mut upstream root")
+    files = audit.get("required_files")
+    if not isinstance(files, Mapping) or set(files) != set(_COMRECGC_REQUIRED_SOURCE_FILES):
+        raise NonTasteMatrixAppendError("Mut upstream source inventory changed")
+    for name in _COMRECGC_REQUIRED_SOURCE_FILES:
+        path = _physical_file(upstream / name, label=f"Mut upstream {name}")
+        if _sha(path) != _valid_sha(files.get(name), label=f"Mut upstream {name} hash"):
+            raise NonTasteMatrixAppendError(f"Mut upstream source drifted: {name}")
+    return {
+        "root": str(upstream),
+        "audit_sha256": _sha(audit_path),
+        "required_files": dict(files),
+    }
+
+
+def _validate_mut_parity_terminal(
+    root_like: str | Path,
+    *,
+    proc_root: str | Path,
+    require_writer_audit: bool,
+) -> dict[str, Any]:
+    """Reopen the independent parity-v2 chemistry/evaluation/freeze terminal."""
+
+    root = _physical_directory(root_like, label="Mut parity-standardization root")
+    if any((root / name).exists() for name in ("FAILED", "FAILED.json", "FAIL.json")):
+        raise NonTasteMatrixAppendError(
+            "Mut parity-standardization root contains a failure sentinel"
+        )
+    if _physical_file(root / "PASS", label="Mut parity PASS").read_bytes() != PASS_BYTES:
+        raise NonTasteMatrixAppendError("Mut parity-standardization PASS bytes changed")
+    payloads = {
+        name: _json(_physical_file(root / name, label=f"Mut {name}"), label=f"Mut {name}")
+        for name in (
+            "run_manifest.json",
+            "final_gate.json",
+            "_RUN_COMPLETE.json",
+            "generation_adoption_manifest.json",
+            "common_recourse_adoption_manifest.json",
+            "trace_parity_adoption_manifest.json",
+            "source_integrity_final.json",
+        )
+    }
+    run = payloads["run_manifest.json"]
+    final_gate = payloads["final_gate.json"]
+    complete = payloads["_RUN_COMPLETE.json"]
+    generation = payloads["generation_adoption_manifest.json"]
+    common_adoption = payloads["common_recourse_adoption_manifest.json"]
+    parity_adoption = payloads["trace_parity_adoption_manifest.json"]
+    source_integrity_final = payloads["source_integrity_final.json"]
+    if final_gate != run or complete != {**run, "run_complete": True}:
+        raise NonTasteMatrixAppendError("Mut parity outer terminal manifests diverged")
+    _require_fields(
+        run,
+        {
+            "schema_version": _MUT_PARITY_RUN_SCHEMA,
+            "status": "PASS",
+            "dataset": "mutagenicity",
+            "method": "COMRECGC",
+            "oracle_backend": "rf",
+            "classifier_family": "random_forest",
+            "rf_oracle_used": True,
+            "cf_mode": "strict_flip",
+            "distance_line": "MolCLR-Node-Wasserstein",
+            "generation_adopted": True,
+            "generation_rerun": False,
+            "traceoff_reference_rerun": True,
+            "trace_parity_passed": True,
+            "trace_fields_stripped": False,
+            "common_recourse_adopted": True,
+            "common_recourse_rerun": False,
+            "chemistry_rerun": True,
+            "evaluation_rerun": True,
+            "source_payload_sha256": MUT_SOURCE_PAYLOAD_SHA256,
+            "standardized_output_root": str(root / "standardized"),
+            "calibration_loaded": False,
+            "test_loaded_only_in_unified_evaluation": True,
+        },
+        label="Mut parity run terminal",
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", str(run.get("project_commit") or "")) is None:
+        raise NonTasteMatrixAppendError("Mut parity execution commit is invalid")
+
+    source_root = _physical_directory(
+        run.get("source_generation_root", ""), label="Mut parity frozen generation root"
+    )
+    if generation.get("source_generation_root") != str(source_root):
+        raise NonTasteMatrixAppendError("Mut parity generation root binding changed")
+    parity_path = _physical_file(
+        parity_adoption.get("path", ""), label="Mut parity source receipt"
+    )
+    try:
+        reopened_parity = validate_mut_parity_standardization(
+            parity_path, source_root=source_root
+        )
+    except Exception as exc:
+        raise NonTasteMatrixAppendError(f"Mut parity receipt reopen failed: {exc}") from exc
+    if (
+        parity_adoption != reopened_parity
+        or run.get("trace_parity_path") != str(parity_path)
+        or run.get("trace_parity_sha256") != _sha(parity_path)
+    ):
+        raise NonTasteMatrixAppendError("Mut parity receipt binding changed")
+    common_path = _physical_file(
+        common_adoption.get("path", ""), label="Mut common-adoption source receipt"
+    )
+    try:
+        reopened_common = validate_mut_parity_common_adoption(
+            common_path, parity=reopened_parity
+        )
+    except Exception as exc:
+        raise NonTasteMatrixAppendError(
+            f"Mut common-adoption receipt reopen failed: {exc}"
+        ) from exc
+    if common_adoption != reopened_common:
+        raise NonTasteMatrixAppendError("Mut common-adoption receipt changed")
+    common_root = _physical_directory(
+        reopened_common.get("common_root", ""), label="Mut adopted common-recourse root"
+    )
+    if run.get("source_common_recourse_root") != str(common_root):
+        raise NonTasteMatrixAppendError("Mut common-recourse root binding changed")
+
+    standardized = _validate_rf_standardized(
+        root, dataset="Mutagenicity", dataset_key="mutagenicity"
+    )
+    if (
+        run.get("standardized_run_manifest_sha256")
+        != standardized["run_manifest_sha256"]
+        or run.get("freeze_manifest_sha256") != standardized["freeze_manifest_sha256"]
+        or run.get("teacher_sha256") != standardized["identities"]["oracle_hash"]
+    ):
+        raise NonTasteMatrixAppendError("Mut parity outer/standardized identities changed")
+    source_integrity = _validate_mut_parity_source_integrity(
+        generation,
+        source_integrity_final,
+        source_root=source_root,
+    )
+    source_integrity["final_integrity_sha256"] = _sha(root / "source_integrity_final.json")
+    upstream = _validate_mut_upstream_checkout(root)
+    writer = _writer_audit(root, proc_root=proc_root, required=require_writer_audit)
+    common_writer = _writer_audit(
+        common_root, proc_root=proc_root, required=require_writer_audit
+    )
+    return {
+        "terminal_kind": "MUT_PARITY_STANDARDIZATION_FINAL",
+        "root": str(root),
+        "run_manifest_sha256": _sha(root / "run_manifest.json"),
+        "final_gate_sha256": _sha(root / "final_gate.json"),
+        "run_complete_sha256": _sha(root / "_RUN_COMPLETE.json"),
+        "standardized": standardized,
+        "trace_parity_sha256": _sha(parity_path),
+        "common_adoption_sha256": _sha(common_path),
+        "source_integrity": source_integrity,
+        "upstream_checkout": upstream,
+        "writer_audit": writer,
+        "common_writer_audit": common_writer,
+        "inventory": _critical_inventory(
+            root,
+            (
+                "PASS",
+                "run_manifest.json",
+                "final_gate.json",
+                "_RUN_COMPLETE.json",
+                "generation_adoption_manifest.json",
+                "common_recourse_adoption_manifest.json",
+                "trace_parity_adoption_manifest.json",
+                "source_integrity_final.json",
+                "upstream_checkout_audit.json",
+                "standardized/run_manifest.json",
+                "standardized/final_artifact_audit.json",
+                "standardized/freeze_manifest.json",
+                "standardized/_FINALIZED.json",
+            ),
+        ),
+    }
+
+
+def _validate_mut_exact_terminal(
     root_like: str | Path,
     *,
     proc_root: str | Path,
@@ -1040,6 +1325,37 @@ def _validate_mut_terminal(
             ),
         ),
     }
+
+
+def _validate_mut_terminal(
+    root_like: str | Path,
+    *,
+    proc_root: str | Path,
+    require_writer_audit: bool,
+) -> dict[str, Any]:
+    """Dispatch only between the two explicit Mut production terminals."""
+
+    root = _physical_directory(root_like, label="Mut terminal root")
+    run = _json(
+        _physical_file(root / "run_manifest.json", label="Mut run manifest"),
+        label="Mut run manifest",
+    )
+    schema = run.get("schema_version")
+    if schema == _MUT_PARITY_RUN_SCHEMA:
+        return _validate_mut_parity_terminal(
+            root,
+            proc_root=proc_root,
+            require_writer_audit=require_writer_audit,
+        )
+    if schema == MUT_RUN_SCHEMA:
+        return _validate_mut_exact_terminal(
+            root,
+            proc_root=proc_root,
+            require_writer_audit=require_writer_audit,
+        )
+    raise NonTasteMatrixAppendError(
+        f"Unsupported Mut terminal schema: {schema!r}"
+    )
 
 
 def _ordered_rows(rows: Mapping[tuple[str, str], Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:

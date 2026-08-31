@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # CPU-only publication; A800 directives preserve repository Slurm CLI parity.
+# Mut accepts either the legacy exact-postprocess terminal or the independent
+# parity-v2 standardization terminal; both are reopened fail-closed by the CLI.
 #SBATCH --job-name=append_non_taste_matrix
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
