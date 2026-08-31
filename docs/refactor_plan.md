@@ -1,5 +1,19 @@
 # Refactor Plan
 
+## 2026-09-01: Route AIDS chemistry through its frozen untyped candidate space
+
+- [x] Preserve the original typed AIDS source/no-op component, tensor,
+  lineage, serialization, and stable-hash closure.
+- [x] Use a sidecar-free clone only for AIDS official action replay/repair and
+  compare replay with `official_untyped_x_edge_index` SHA-256.
+- [x] Leave Mutagenicity/BACE routing and the strict generated-candidate
+  connectivity decoder unchanged.
+- [x] Add stale-sidecar and disconnected-candidate focused regressions and
+  expose explicit candidate/source graph-space diagnostics in the Slurm route.
+- [ ] Deploy the reviewed successor commit and launch a fresh postprocess root
+  against the existing controller-bound exact receipt.  Do not resume the
+  prior chemistry-failed root across the project-commit contract change.
+
 ## 2026-09-01: Bounded TasteMolNet T8 zero-candidate recovery
 
 - [x] Diagnose the fresh five-epoch failure as nonempty native generation with

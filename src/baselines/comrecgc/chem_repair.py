@@ -137,7 +137,9 @@ def apply_action_to_graph(
     torch = _torch()
     candidate = graph.clone()
     if getattr(candidate, "edge_attr", None) is not None:
-        raise ValueError("COMRECGC Mutagenicity repair expects the frozen untyped-edge graph space.")
+        raise ValueError(
+            "COMRECGC chemistry repair expects the frozen untyped-edge graph space."
+        )
     name = str(action[0])
     origins = _origins(graph)
     node_ids = trace_node_ids(graph)

@@ -21,9 +21,14 @@ export PYTHONPATH=$PWD
 : "${AIDS_POSTPROCESS_OUTPUT_ROOT:?set AIDS_POSTPROCESS_OUTPUT_ROOT}"
 : "${AIDS_POSTPROCESS_HEARTBEAT:?set AIDS_POSTPROCESS_HEARTBEAT}"
 : "${AIDS_POSTPROCESS_MAX_WORKERS:=8}"
+: "${AIDS_POSTPROCESS_RESUME:=0}"
 : "${ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1:?set ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1=1}"
 [[ "$ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1" == "1" ]] || {
   echo "ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1 must equal 1" >&2
+  exit 2
+}
+[[ "$AIDS_POSTPROCESS_RESUME" == "0" || "$AIDS_POSTPROCESS_RESUME" == "1" ]] || {
+  echo "AIDS_POSTPROCESS_RESUME must equal 0 or 1" >&2
   exit 2
 }
 export ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1
@@ -41,6 +46,14 @@ python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "route=cpu_only_exact_dbscan_adoption"
 echo "aids_multicomponent_source_noop_identity_v1=authorized"
+echo "aids_candidate_action_graph_space=official_untyped_x_edge_index"
+echo "aids_source_noop_graph_space=strict_typed_edge"
+echo "postprocess_resume=$AIDS_POSTPROCESS_RESUME"
+
+resume_args=()
+if [[ "$AIDS_POSTPROCESS_RESUME" == "1" ]]; then
+  resume_args+=(--resume)
+fi
 
 python scripts/autodl/run_aids_comrecgc_exact_postprocess_v1.py \
   --config configs/hpc.yaml \
@@ -49,4 +62,5 @@ python scripts/autodl/run_aids_comrecgc_exact_postprocess_v1.py \
   --exact-receipt "$AIDS_EXACT_RECEIPT" \
   --output-root "$AIDS_POSTPROCESS_OUTPUT_ROOT" \
   --heartbeat-path "$AIDS_POSTPROCESS_HEARTBEAT" \
-  --max-workers "$AIDS_POSTPROCESS_MAX_WORKERS"
+  --max-workers "$AIDS_POSTPROCESS_MAX_WORKERS" \
+  "${resume_args[@]}"

@@ -98,6 +98,56 @@ ordering and RNG; lowering sample size or candidate capacity is not allowed.
 Implemented and focused-tested locally; production deliberately remains
 fail-closed at the raw transition-state gate.
 
+---
+
+## [2026-09-01] Separate AIDS typed source identity from untyped candidate replay
+
+### Motivation
+
+The completed AIDS exact postprocess preserved the TU/HIV `edge_attr` sidecar
+for its strict source/no-op closure.  The downstream chemistry command then
+sent that typed source directly into the shared COMRECGC action replayer,
+whose pinned edit space explicitly rejects `edge_attr`.  The failure occurred
+before any candidate chemistry was evaluated.  It was a dataset routing bug:
+the completed AIDS generation and DBSCAN route already freezes candidate
+identity as `official_untyped_x_edge_index`, because upstream edits consume
+only `x` and `edge_index` and do not keep the bond-label sidecar synchronized.
+
+### Decision
+
+Keep the original typed AIDS graph for source/no-op reconstruction, component
+multiset, tensor, lineage, serialization, and stable-hash closure.  Only inside
+the AIDS candidate replay/repair loop, clone the source and generated graph,
+set the clone's `edge_attr` to `None`, and compare raw replay using the existing
+stable untyped graph SHA-256.  Mutagenicity and BACE retain their previous
+strict typed-edge route.  The generated full-graph decoder remains unchanged,
+so disconnected or empty generated candidates are still rejected even when
+the authorized multi-component source empty action is accepted as source-only
+identity evidence.
+
+The failed postprocess root cannot be resumed by a new code commit: its frozen
+continuation contract includes the prior project commit and stage argv hashes.
+Launch a fresh successor root against the same controller-bound exact receipt.
+That successor read-only adopts the proven exact DBSCAN result and recomputes
+only the common-recourse summary before chemistry; it does not rerun pair
+enumeration or DBSCAN.  `AIDS_POSTPROCESS_RESUME=1` remains available only for
+an interrupted root created by the identical commit and contract.
+
+### Consequences
+
+- Classifier, split, oracle, actions, epsilon, DBSCAN partition, source cohort,
+  and chemistry decoder semantics do not change.
+- The stale TU sidecar is ignored only where the official upstream method
+  already ignores it; typed source evidence is neither stripped nor weakened.
+- Audit manifests now state both graph spaces explicitly, and focused tests
+  cover stale-sidecar replay plus the unchanged connected-candidate gate.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-09-01] Bind T12 threshold reuse to official source content, not checkout path
 
 ### Motivation

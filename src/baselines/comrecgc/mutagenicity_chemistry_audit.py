@@ -29,6 +29,7 @@ from .graph_trace import (
     iter_candidate_lineage_from_selected_trace,
     iter_selected_trace,
     stable_graph_sha256,
+    stable_untyped_graph_sha256,
 )
 from .preregistration import (
     validate_chemistry_trace_evidence,
@@ -48,6 +49,30 @@ AIDS_MULTICOMPONENT_SOURCE_NOOP_ENV = (
 AIDS_MULTICOMPONENT_SOURCE_NOOP_POLICY = (
     "aids_multicomponent_source_noop_identity_v1"
 )
+AIDS_CANDIDATE_GRAPH_SPACE = "official_untyped_x_edge_index"
+
+
+def _candidate_replay_graph(graph: Any, *, dataset: str) -> Any:
+    """Return the graph view frozen for candidate action replay.
+
+    AIDS source/no-op chemistry remains typed and is audited separately.  Its
+    pinned COMRECGC generation, however, consumes only ``x`` and
+    ``edge_index``; upstream edits do not keep the TU ``edge_attr`` sidecar in
+    sync.  Drop that sidecar only for the AIDS candidate replay/repair view.
+    Other datasets retain the pre-existing strict typed-edge guard.
+    """
+
+    if dataset != "aids":
+        return graph
+    candidate = graph.clone()
+    candidate.edge_attr = None
+    return candidate
+
+
+def _candidate_graph_sha256(graph: Any, *, dataset: str) -> str:
+    if dataset == "aids":
+        return stable_untyped_graph_sha256(graph)
+    return stable_graph_sha256(graph)
 
 
 def _csv_bytes(rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> bytes:
@@ -935,25 +960,32 @@ def run_mutagenicity_chemistry_audit(
         source_record = source_records[parent_id]
         candidate_schema = schemas[parent_id]
         actions = list(trace.get("actions") or [])
-        raw_replay = replay_raw_actions(source_graph, actions)
-        replay_sha = stable_graph_sha256(raw_replay)
-        raw_sha = stable_graph_sha256(graph)
+        replay_source_graph = _candidate_replay_graph(
+            source_graph,
+            dataset=dataset,
+        )
+        candidate_graph = _candidate_replay_graph(graph, dataset=dataset)
+        raw_replay = replay_raw_actions(replay_source_graph, actions)
+        replay_sha = _candidate_graph_sha256(raw_replay, dataset=dataset)
+        raw_sha = _candidate_graph_sha256(candidate_graph, dataset=dataset)
         if replay_sha != raw_sha:
             raise ValueError(f"Candidate {index} exact action replay differs from official graph.")
         from src.baselines.gcfexplainer_mutagenicity_adapter import decode_generated_fullgraph
 
-        graph.gcf_node_origin = graph.comrecgc_node_origin
+        candidate_graph.gcf_node_origin = candidate_graph.comrecgc_node_origin
         raw_decoded = decode_generated_fullgraph(
-            graph, source_record=source_record, schema=candidate_schema
+            candidate_graph,
+            source_record=source_record,
+            schema=candidate_schema,
         )
         first = repair_candidate(
-            source_graph=source_graph,
+            source_graph=replay_source_graph,
             source_record=source_record,
             schema=candidate_schema,
             actions=actions,
         )
         second = repair_candidate(
-            source_graph=source_graph,
+            source_graph=replay_source_graph,
             source_record=source_record,
             schema=candidate_schema,
             actions=actions,
@@ -1197,6 +1229,10 @@ def run_mutagenicity_chemistry_audit(
         "method": REPAIR_METHOD,
         "repair_policy_version": REPAIR_POLICY_VERSION,
         "repair_policy_sha256": preregistration_sha,
+        "candidate_action_graph_space": (
+            AIDS_CANDIDATE_GRAPH_SPACE if dataset == "aids" else "strict_typed_edge"
+        ),
+        "source_noop_graph_space": "strict_typed_edge",
         "upstream_commit": UPSTREAM_COMMIT,
         "project_commit": _project_commit(project),
         "dataset_fingerprint": generation_manifest.get("dataset_audit", {}).get(

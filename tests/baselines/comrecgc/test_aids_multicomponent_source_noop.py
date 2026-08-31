@@ -5,11 +5,18 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.baselines.comrecgc.chem_repair import (
+    apply_action_to_graph,
+    replay_raw_actions,
+)
 from src.baselines.comrecgc.exporter import _aids_schema_and_record
 from src.baselines.comrecgc.mutagenicity_chemistry_audit import (
+    AIDS_CANDIDATE_GRAPH_SPACE,
     AIDS_MULTICOMPONENT_SOURCE_NOOP_ENV,
     AIDS_MULTICOMPONENT_SOURCE_NOOP_POLICY,
     _aids_source_noop_identity,
+    _candidate_graph_sha256,
+    _candidate_replay_graph,
 )
 from src.baselines.gcfexplainer_mutagenicity_adapter import (
     decode_generated_fullgraph,
@@ -247,6 +254,58 @@ def test_generated_decoder_remains_single_component_with_authorization(
 
     decoded = decode_generated_fullgraph(
         graph,
+        source_record=record,
+        schema=schema,
+    )
+
+    assert decoded.decode_ok is False
+    assert decoded.failure_reason == "generated_disconnected_or_empty"
+
+
+def test_aids_candidate_replay_drops_only_stale_edge_sidecar() -> None:
+    torch = pytest.importorskip("torch")
+    graph, _vocabulary = _aids_graph("CCO")
+    edge_count = int(graph.edge_index.shape[1])
+    graph.edge_attr = torch.arange(edge_count, dtype=torch.long).reshape(-1, 1)
+    source_ids = [f"fixture:source:{index}" for index in range(graph.num_nodes)]
+    graph.comrecgc_trace_node_ids = source_ids
+
+    replay_source = _candidate_replay_graph(graph, dataset="aids")
+    assert AIDS_CANDIDATE_GRAPH_SPACE == "official_untyped_x_edge_index"
+    assert graph.edge_attr is not None
+    assert replay_source.edge_attr is None
+
+    action = {
+        "action_resolution": "exact",
+        "action": ["ER", 0, 1],
+        "source_node_ids": source_ids,
+        "target_node_ids": source_ids,
+    }
+    official = apply_action_to_graph(
+        replay_source,
+        action["action"],
+        target_node_ids=source_ids,
+    )
+    # Mirror the pinned upstream failure mode: edge_index changed while the TU
+    # bond-label sidecar was left at its source length.
+    official.edge_attr = graph.edge_attr.clone()
+    replayed = replay_raw_actions(replay_source, [action])
+
+    assert _candidate_graph_sha256(
+        replayed,
+        dataset="aids",
+    ) == _candidate_graph_sha256(official, dataset="aids")
+    with pytest.raises(ValueError, match="frozen untyped-edge graph space"):
+        replay_raw_actions(graph, [action])
+
+
+def test_aids_candidate_view_does_not_relax_connected_generation_gate() -> None:
+    graph, vocabulary = _aids_graph("CC.O")
+    schema, record = _aids_schema_and_record(graph, vocabulary)
+    candidate = _candidate_replay_graph(graph, dataset="aids")
+
+    decoded = decode_generated_fullgraph(
+        candidate,
         source_record=record,
         schema=schema,
     )
