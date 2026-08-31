@@ -60,10 +60,15 @@
 - [x] Permit the selector's clean execution checkout to relocate only when the
   reopened integrated official-source inventory digest is identical.
 - [ ] Run and adopt the exact A800 replay gate before production.
-- [ ] Before 20k, replace bounded-canary all-history Python record retention
-  with a compact deterministic live-registry plus reopenable history hash
-  chain and prove RAM/checkpoint-size bounds; do not launch the current bridge
-  directly at 20k.
+- [x] Replace bounded-canary all-history Python record retention in production
+  mode with complete live-registry rows plus a fixed-record reopenable history
+  hash chain.  Bind official `sample_size=10000`, `k=100000`, derive the 20k
+  bridge RAM/checkpoint caps, and enforce the 10k/20k segment plan.
+- [ ] Replace the raw official GCF transition dictionary with a
+  dataset-specific external compact transition store plus bounded expanded
+  LRU.  At 3,778 parents its worst pinned transition coverage is ~3.02 TB
+  dense float32/~94.46 GB bit-packed, so production remains fail-closed even
+  though the bridge itself is bounded.  Do not lower sample size or k.
 - [ ] Add lossless native candidate persistence, calibration-only ordering,
   held-out test, standardized exports and the separate terminal verifier.
 - [ ] Pin the external shared WNode threshold authority for the full
@@ -128,11 +133,17 @@
   10k/20k budget and exact cursor, train cohort, calibrated three-class GINE,
   adopted NeuroSED, external typed threshold pin, official source, runtime/GPU
   identity, complete mutable walk state, and CPU/CUDA RNG.
-- [ ] Prove exact uninterrupted-versus-new-process continuation on the real GPU
+- [ ] Publish the gate-v2 receipt for the completed real `91b`
+  uninterrupted-versus-new-process continuation.  Both observations already
+  have dict-equal scientific state and the same exact canonical native-result
+  digest; their unequal raw `torch.save` hashes are retained and classified as
+  serialization representation evidence, not compared as scientific state.
+  The gate still fails closed for any canonical difference.
+- [x] Run uninterrupted-versus-new-process continuation on the real GPU
   route, including trace, transitions, frequencies/order, cursor, candidate
   graph bytes, generated-query-to-original-target coverage, and terminal
-  native result.  A seed-only replay or approximate/allclose comparison is not
-  sufficient.
+  native result.  Attempt `91b` completed this evidence with exact canonical
+  scientific equality; only publication of the gate-v2 receipt remains above.
 - [ ] Only after that proof, implement the dataset-specific T12 20k train-only
   generation, calibration-only ordering, post-freeze held-out test,
   standardized export, paired CLI/Slurm entrypoints, and separate terminal

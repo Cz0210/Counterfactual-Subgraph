@@ -1,5 +1,103 @@
 # Decisions Log
 
+## [2026-09-01] Compare T12 native results by exact scientific content
+
+### Motivation
+
+The real three-process canary attempt `91b` completed both terminal workers
+with 210 strict counterfactuals.  Its uninterrupted and resumed
+`scientific_state` dictionaries are exactly equal, including the canonical
+native-result SHA-256
+`4c6d4df28e9435905bd22c95bb55abcc9f7e367b762f425024a24d8758da9f10`.
+The two raw `torch.save` archives nevertheless have different SHA-256 values.
+The prior verifier compared the archive bytes first and therefore conflated a
+serialization representation difference with scientific divergence.
+
+### Decision
+
+Keep both raw archive hashes as evidence, but do not use their equality as the
+scientific replay contract.  Gate replay on a recursive canonical native-result
+snapshot that covers every mapping key/value, exact sequence and tensor element
+order, tensor dtype and shape, and exact scalar values.  Mapping insertion order
+is canonicalized by key because it is not scientific content.  No tolerance or
+`allclose` is allowed.  If canonical hashes or any other scientific-state field
+differ, fail closed.  If canonical state is exact and only raw archive bytes
+differ, classify it explicitly as
+`NON_SEMANTIC_SERIALIZATION_REPRESENTATION_ONLY`.
+
+### Consequences
+
+- The already committed `91b` observations can be independently re-verified;
+  the observation schema is unchanged and the gate schema is bumped to v2.
+- A gate records both raw hashes, their equality flag, the canonical contract
+  and canonical digest.  It cannot silently discard the byte-level difference.
+- This repairs the verifier only.  The receipt remains
+  `production_released=false`, and no T12 cell or full-run PASS is implied.
+
+## [2026-09-01] Bound T12 bridge history without weakening official full parameters
+
+### Motivation
+
+The exact three-process canary retains every complete collision payload,
+embedding vector, coverage vector and lineage counter in one Python mapping.
+That is intentionally auditable at 16 steps but cannot be extrapolated to the
+pinned full route.  The full scientific parameters remain
+`M=20000`, `sample_size=10000` and `candidate_capacity=100000`; only changing
+the latter two to the canary's 128/512 values would be an unauthorized method
+change.
+
+### Decision
+
+Add a Taste-T12-only production bridge mode.  Keep complete first-row records
+only for the official live `graph_map`/ordered-candidate/current domain, whose
+20k upper bound is `min(k, M+1)=20001`, plus at most one 10k neighbour batch as
+transient state.  Every scored observation instead enters a fixed 272-byte,
+append-only SHA-256 chain.  The compact record contains graph and semantic
+digests, three probabilities, discrete outcome flags, covered-parent count and
+a lineage digest; it contains no historical graph payload, embedding values,
+coverage vector or lineage payload.  A bounded-page-cache SQLite index is
+derived from the journal and rebuilt from the authenticated committed prefix
+after restart.  It is never authority.  Re-entry of an evicted graph requires
+exact embedding/coverage/failure digests and the reviewed probability envelope;
+drift blocks rather than choosing a new first row.
+
+Bind the resource proof and checkpoint identity to the official 10k/100k
+parameters and 10k/20k cursors.  The worst scored-row count is
+`1 + 20000*10000 = 200000001`; the journal prefix bound is 54,400,008,488
+bytes under a 64-GiB cap.  With explicit 512-KiB deep/256-KiB serialized
+per-live-row gates, the bridge RAM formula is 15,863,382,016 bytes under
+16 GiB and its checkpoint component formula is 5,310,251,008 bytes under
+8 GiB.  A complete checkpoint is hard-capped at 32 GiB before publication.
+The narrow orchestrator permits only fresh 1--10k and resumed 10001--20k
+segments and only 10k/20k manifests.
+
+Do not claim that this bridge proof closes the whole official state.  At the
+pinned parameters and 3,778 parents, the raw official transition dictionary
+can reference 200,020,000 coverage rows: about 3.02 TB as dense float32 and
+94,459,445,000 bytes even if coverage alone is bit-packed.  Production commit
+therefore fails closed unless a dataset-specific external compact transition
+store with bounded expanded LRU and exact checkpoint export is installed.
+This remaining item must preserve sampled actions, importance, coverage,
+ordering and RNG; lowering sample size or candidate capacity is not allowed.
+
+### Consequences
+
+- The all-history canary remains unchanged and continues to be the required
+  exact A800 replay gate.
+- Bridge history is reopenable across the 10k process boundary without
+  retaining historical payloads in RAM or copying the journal into the model
+  checkpoint.
+- T12 full is still not launch-ready: a real A800 canary PASS, bounded official
+  transition store, candidate persistence, calibration/test/export wiring and
+  an independent terminal verifier remain required.
+- No remote process, GPU task, calibration/test payload or matrix cell is
+  touched by this implementation.
+
+### Status
+
+Implemented and focused-tested locally; production deliberately remains
+fail-closed at the raw transition-state gate.
+
 ## [2026-09-01] Bind T12 threshold reuse to official source content, not checkout path
 
 ### Motivation

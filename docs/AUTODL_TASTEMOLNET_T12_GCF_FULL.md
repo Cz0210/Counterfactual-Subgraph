@@ -64,6 +64,28 @@ are same-directory fsynced and published with no-replace hard links.  Reopen
 rehashes the full payload before deserialization and proves the restored live
 state and RNG digests.
 
+Production does not use the canary's 128/512 resource values.  It binds the
+pinned official `sample_size=10000` and `candidate_capacity=100000`.  Complete
+bridge rows are limited to the live official graph/candidate/current domain;
+historical observations use a fixed 272-byte append-only hash chain and a
+rebuildable, non-authoritative disk index.  For the 3,778-parent production
+cohort the checked bridge proof is:
+
+- at most 200,000,001 scored observations and a 54,400,008,488-byte journal
+  prefix under the 64-GiB disk cap;
+- at most 20,001 complete live rows plus one 10,000-row transient batch;
+- a 15,863,382,016-byte bridge RAM formula under 16 GiB;
+- a 5,310,251,008-byte bridge checkpoint formula under 8 GiB; and
+- a 32-GiB hard cap on any complete checkpoint before publication.
+
+This is not yet a full-route RAM proof.  The unchanged official transition
+dictionary can reference 200,020,000 coverage rows: 3,022,702,240,000 bytes as
+dense float32, or 94,459,445,000 bytes even if coverage alone is bit-packed.
+The production checkpoint orchestrator therefore rejects a raw dict and
+requires a later dataset-specific external compact transition store with a
+bounded expanded LRU and exact checkpoint export.  Lowering `sample_size` or
+`candidate_capacity` is not an authorized workaround.
+
 ## Mandatory real-GPU replay gate
 
 Before a production worker can consume the checkpoint, run the same fixed
@@ -180,6 +202,16 @@ Only an exact gate prints
 not a method-cell marker, and its receipt explicitly records
 `production_released=false`.
 
+The gate compares the recursively loaded official native result through
+`tastemolnet_t12_native_result_recursive_exact_v1`: all mapping content,
+sequence/tensor order, tensor dtype/shape and scalar values are exact, with no
+`allclose`.  Raw `torch.save` SHA-256 values remain separate serialization
+evidence.  Attempt `91b` produced equal canonical native-result SHA-256
+(`4c6d4df28e9435905bd22c95bb55abcc9f7e367b762f425024a24d8758da9f10`)
+but unequal raw archive SHA-256 values; gate v2 records this as
+`NON_SEMANTIC_SERIALIZATION_REPRESENTATION_ONLY`.  A canonical difference is
+still a hard scientific replay failure.
+
 No real A800 timing is fabricated here.  For scheduling only, the conservative
 pre-measurement envelope is 6--12 GiB peak VRAM and 20--70 minutes total for
 all three phases.  Replace that envelope with the first real receipt/log
@@ -191,13 +223,13 @@ and cluster load can vary.
 The following must still be implemented and reviewed before launching the T12
 20k main-table worker:
 
-1. obtain a real A800 exact replay PASS using the command above;
-2. replace the bounded-canary bridge's unbounded Python record retention with
-   a deterministic dataset-specific production layout: retain complete rows
-   only for the official live registry/candidate/transition/current domain and
-   carry evicted history through a compact reopenable hash chain plus counters;
-   prove a 20k RAM/checkpoint-size upper bound before launch;
-3. production 10k/20k segment orchestration using the checkpoint API;
+1. run gate v2 over the completed real A800 `91b` observations and retain its
+   exact replay receipt (the three workers need not be repeated);
+2. implement the remaining external compact official-transition store and its
+   bounded expanded LRU; the bridge history and 10k/20k orchestration are now
+   implemented, but the raw transition state is deliberately rejected;
+3. run the production resource preflight against the real 3,778-parent route
+   and publish the measured checkpoint/RSS receipt below the hard caps;
 4. lossless native candidate graph persistence and train-only candidate
    materialization;
 5. calibration-only ordering with the externally frozen shared WNode

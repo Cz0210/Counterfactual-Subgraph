@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from src.baselines import tastemolnet_gcf_full_resume as t12
+from src.baselines import tastemolnet_gcf_production_state as production
 
 
 GRAPH_A = "a" * 64
@@ -112,7 +113,7 @@ class _Adapter:
         self.call_count = 0
 
 
-def _bridge(*, adapter=None):
+def _bridge(*, adapter=None, production_history=None):
     return t12.T12StableGCFBridge(
         adapter=adapter or _Adapter(),
         vrrw=SimpleNamespace(
@@ -129,6 +130,7 @@ def _bridge(*, adapter=None):
         distance_threshold=0.125,
         parent_count=2,
         feature_atomic_numbers=(6,),
+        production_history=production_history,
     )
 
 
@@ -233,12 +235,125 @@ def test_stable_bridge_returns_structural_identity_not_embedding_hash(monkeypatc
     assert restored.checkpoint_state() == bridge.checkpoint_state()
 
 
+def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
+    monkeypatch, tmp_path
+):
+    from src.baselines.tastemolnet_comrecgc_smoke import _identity_graph_sha256
+
+    collisions = {
+        "a": {"canonical_graph": "[C]", "num_nodes": 1, "num_edges": 0},
+        "b": {"canonical_graph": "[N]", "num_nodes": 1, "num_edges": 0},
+    }
+    identities = {
+        key: SimpleNamespace(
+            graph_identity_sha256=_identity_graph_sha256(value),
+            collision_payload=lambda value=value: value,
+        )
+        for key, value in collisions.items()
+    }
+    monkeypatch.setattr(
+        t12,
+        "canonical_attributed_graph",
+        lambda graph, **_kwargs: identities[graph.token],
+    )
+    bounds = production.T12ProductionBounds.pinned(parent_count=2)
+    attempt = str(uuid.uuid4())
+    history = production.T12CompactHistoryJournal(
+        root=(tmp_path / "history").resolve(),
+        index_root=(tmp_path / "index-a").resolve(),
+        bounds=bounds,
+        contract_sha256="e" * 64,
+        attempt_id=attempt,
+        generation_token="f" * 64,
+    )
+    adapter = _Adapter()
+    embedding = {"a": [1.0, 2.0], "b": [3.0, 4.0]}
+    adapter.score = lambda values: SimpleNamespace(
+        probabilities=np.asarray([[0.1, 0.2, 0.7] for _ in values]),
+        graph_embeddings=np.asarray(
+            [embedding[value.token] for value in values], dtype=np.float32
+        ),
+        valid_fullgraphs=tuple(True for _ in values),
+        failure_reasons=tuple("" for _ in values),
+    )
+    bridge = _bridge(adapter=adapter, production_history=history)
+    graphs = {
+        key: SimpleNamespace(
+            token=key,
+            num_nodes=1,
+            gcf_origin_index=[0],
+            gcf_node_origin=[0],
+        )
+        for key in ("a", "b")
+    }
+    hashes = {}
+    for key in ("a", "b"):
+        _parts, rows, _coverage = bridge.call([graphs[key]], {})
+        hashes[key] = bridge.calculate_hash(rows[0])
+    bridge.vrrw.graph_map = {hashes["a"]: graphs["a"]}
+    bridge.vrrw.graph_index_map = {hashes["a"]: 0}
+    bridge.vrrw.counterfactual_candidates = [
+        {
+            "frequency": 2,
+            "graph_hash": hashes["a"],
+            "importance_parts": [0.8, 0.5],
+            "input_graphs_covering_list": [1, 0],
+        }
+    ]
+    bridge.vrrw.transitions = {
+        hashes["a"]: (
+            [hashes["a"], hashes["b"]],
+            [("NOTHING", None, None), ("NLC", 0, 0)],
+            [[0.8, 0.5], [0.8, 0.5]],
+            [[1, 0], [1, 0]],
+        )
+    }
+    audit = bridge.retain_official_live_domain(
+        vrrw=bridge.vrrw, current_graph_identity=hashes["a"]
+    )
+    assert audit["live_complete_record_count"] == 1
+    assert audit["evicted_this_boundary"] == 1
+    assert set(bridge.records) == {hashes["a"]}
+    assert bridge.is_graph_counterfactual(hashes["b"]) is True
+    state = bridge.checkpoint_state()
+    assert state["complete_records_are_live_domain_only"] is True
+    assert state["history"]["observation_count"] == 2
+    history.close()
+
+    reopened_history = production.T12CompactHistoryJournal(
+        root=(tmp_path / "history").resolve(),
+        index_root=(tmp_path / "index-b").resolve(),
+        bounds=bounds,
+        contract_sha256="e" * 64,
+        attempt_id=attempt,
+        generation_token="f" * 64,
+        resume_snapshot=state["history"],
+    )
+    restored = _bridge(production_history=reopened_history)
+    restored.restore_checkpoint_state(state)
+    assert set(restored.records) == {hashes["a"]}
+    assert restored.is_graph_counterfactual(hashes["b"]) is True
+    reopened_history.close()
+
+
 def test_production_identity_allows_only_10k_and_20k():
-    accepted = _identity(cursor=10_000, total=20_000, purpose="production")
+    accepted = dict(
+        _identity(cursor=10_000, total=20_000, purpose="production"),
+        sample_size=t12.PINNED_SAMPLE_SIZE,
+        candidate_capacity=t12.PINNED_CANDIDATE_CAPACITY,
+    )
     assert t12.validate_checkpoint_identity(accepted) == accepted
+    terminal = t12.production_checkpoint_identity(
+        accepted, checkpoint_cursor=20_000
+    )
+    assert terminal["checkpoint_cursor"] == 20_000
+    assert terminal["sample_size"] == 10_000
+    assert terminal["candidate_capacity"] == 100_000
     rejected = dict(accepted, checkpoint_cursor=15_000)
     with pytest.raises(t12.TasteGCFFullResumeError, match="10k/20k"):
         t12.validate_checkpoint_identity(rejected)
+    with pytest.raises(t12.TasteGCFFullResumeError, match="sample_size=10000"):
+        t12.validate_checkpoint_identity(dict(accepted, sample_size=128))
 
 
 def test_checkpoint_is_immutable_reopenable_and_restores_rng(tmp_path):
@@ -332,7 +447,9 @@ def _prefix_receipt(tmp_path, process=150):
     }
 
 
-def _observation(role, process, *, prefix=None, changed=False):
+def _observation(
+    role, process, *, prefix=None, changed=False, native_result_sha256="2" * 64
+):
     scientific = {
         "completed_steps": 16,
         "traversed_graph_identities": [GRAPH_A, *("b" * 64 for _ in range(15))],
@@ -355,7 +472,7 @@ def _observation(role, process, *, prefix=None, changed=False):
         gpu_uuid="GPU-test-123",
         process_identity=_process_identity(process),
         scientific_state=scientific,
-        native_result_sha256="2" * 64,
+        native_result_sha256=native_result_sha256,
         checkpoint_reloaded=role == "cross_process_resumed",
         generated_to_original_neurosed_assertion=True,
         checkpoint_process_identity=(
@@ -384,8 +501,15 @@ def test_canary_gate_requires_new_process_and_exact_scientific_state(tmp_path):
     gate = t12.write_canary_gate(output, uninterrupted, resumed, prefix)
     assert gate["status"] == "PASS"
     assert gate["exact_equality"] is True
+    assert gate["exact_equality_scope"] == "canonical_scientific_state"
+    assert gate["scientific_exact_equality"] is True
+    assert gate["native_result_raw_bytes_equal"] is True
+    assert gate["native_result_difference_classification"] == "RAW_BYTES_IDENTICAL"
     assert gate["production_released"] is False
-    with pytest.raises(t12.TasteGCFFullResumeError, match="scientific_state_sha256"):
+    with pytest.raises(
+        t12.TasteGCFFullResumeError,
+        match="native-result scientific content diverged",
+    ):
         t12.compare_canary_observations(
             uninterrupted,
             _observation(
@@ -402,6 +526,78 @@ def test_canary_gate_requires_new_process_and_exact_scientific_state(tmp_path):
     same_process = dict(resumed, process_identity=same_process_identity)
     with pytest.raises(t12.TasteGCFFullResumeError, match="process boundary"):
         t12.compare_canary_observations(uninterrupted, same_process, prefix)
+
+
+def test_canary_gate_classifies_raw_archive_drift_as_nonsemantic(tmp_path):
+    prefix = _prefix_receipt(tmp_path)
+    uninterrupted = _observation(
+        "uninterrupted",
+        100,
+        native_result_sha256=(
+            "c636fb10ee796630f55050b15edf4970b020ab40c673c59f7b556a66cc64ce09"
+        ),
+    )
+    resumed = _observation(
+        "cross_process_resumed",
+        200,
+        prefix=prefix,
+        native_result_sha256=(
+            "3cec981dc116228f503b77dfb948d8208ec83a5c2306f3a679ef802532aa1b0d"
+        ),
+    )
+    gate = t12.compare_canary_observations(uninterrupted, resumed, prefix)
+    assert gate["status"] == "PASS"
+    assert gate["native_result_semantic_sha256"] == "e" * 64
+    assert gate["native_result_raw_bytes_equal"] is False
+    assert gate["native_result_difference_classification"] == (
+        "NON_SEMANTIC_SERIALIZATION_REPRESENTATION_ONLY"
+    )
+    assert gate["native_result_approximate_comparison_used"] is False
+    assert gate["production_released"] is False
+
+
+def test_native_result_contract_binds_content_dtype_shape_and_sequence_order():
+    numpy = pytest.importorskip("numpy")
+    base = {
+        "graph_map": {"b": numpy.array([[1, 2]], dtype=numpy.int64), "a": 3},
+        "counterfactual_candidates": [{"score": numpy.array([0.1, 0.2])}],
+    }
+    reordered_mapping = {
+        "counterfactual_candidates": [{"score": numpy.array([0.1, 0.2])}],
+        "graph_map": {"a": 3, "b": numpy.array([[1, 2]], dtype=numpy.int64)},
+    }
+    digest = t12.canonical_native_result_sha256(base)
+    assert digest == t12.canonical_native_result_sha256(reordered_mapping)
+    for changed in (
+        {
+            **base,
+            "graph_map": {
+                "b": numpy.array([[1, 3]], dtype=numpy.int64),
+                "a": 3,
+            },
+        },
+        {
+            **base,
+            "graph_map": {
+                "b": numpy.array([[1, 2]], dtype=numpy.float64),
+                "a": 3,
+            },
+        },
+        {
+            **base,
+            "graph_map": {
+                "b": numpy.array([1, 2], dtype=numpy.int64),
+                "a": 3,
+            },
+        },
+        {
+            **base,
+            "counterfactual_candidates": [
+                {"score": numpy.array([0.2, 0.1])}
+            ],
+        },
+    ):
+        assert t12.canonical_native_result_sha256(changed) != digest
 
 
 def test_canary_cli_has_paired_hpc_slurm_contract():

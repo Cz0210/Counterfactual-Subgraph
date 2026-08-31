@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections import Counter, deque
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -29,6 +29,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 from typing import Any, Iterator, Mapping, MutableMapping, Sequence
 import uuid
 
@@ -40,6 +41,13 @@ from src.baselines.tastemolnet_gcf_smoke import (
     _restore_rng_state,
     _semantic_sha256,
     score_and_candidate,
+)
+from src.baselines.tastemolnet_gcf_production_state import (
+    PINNED_CANDIDATE_CAPACITY,
+    PINNED_SAMPLE_SIZE,
+    T12CompactHistoryJournal,
+    T12ProductionBounds,
+    TasteT12ProductionStateError,
 )
 
 
@@ -54,10 +62,14 @@ GRAPH_IDENTITY_CONTRACT = "canonical_parent_free_attributed_graph_sha256_v1"
 CHECKPOINT_SCHEMA = "tastemolnet_t12_vrrw_checkpoint_v1"
 CHECKPOINT_MANIFEST_SCHEMA = "tastemolnet_t12_vrrw_checkpoint_manifest_v1"
 BRIDGE_SCHEMA = "tastemolnet_t12_gcf_stable_bridge_v1"
+PRODUCTION_BRIDGE_SCHEMA = "tastemolnet_t12_gcf_bounded_bridge_v2"
 CANARY_OBSERVATION_SCHEMA = "tastemolnet_t12_gpu_replay_observation_v1"
-CANARY_GATE_SCHEMA = "tastemolnet_t12_gpu_replay_gate_v1"
+CANARY_GATE_SCHEMA = "tastemolnet_t12_gpu_replay_gate_v2"
 CANARY_PREFIX_RECEIPT_SCHEMA = "tastemolnet_t12_gpu_replay_prefix_receipt_v1"
 CANARY_PASS_MARKER = "[TASTE_T12_GPU_CROSS_PROCESS_REPLAY_CANARY_PASS]"
+NATIVE_RESULT_SEMANTIC_CONTRACT = (
+    "tastemolnet_t12_native_result_recursive_exact_v1"
+)
 
 GINE_CANONICAL_REUSE_RTOL = 1e-5
 GINE_CANONICAL_REUSE_ATOL = 1e-7
@@ -209,6 +221,28 @@ def _normalized_absolute(path: str | Path, *, field: str) -> Path:
     return value
 
 
+def _deep_size_bytes(value: Any) -> int:
+    """Conservatively count one bridge row without following runtime objects."""
+
+    seen: set[int] = set()
+
+    def visit(item: Any) -> int:
+        identity = id(item)
+        if identity in seen:
+            return 0
+        seen.add(identity)
+        size = sys.getsizeof(item)
+        if is_dataclass(item) and not isinstance(item, type):
+            size += sum(visit(getattr(item, field.name)) for field in fields(item))
+        elif isinstance(item, Mapping):
+            size += sum(visit(key) + visit(child) for key, child in item.items())
+        elif isinstance(item, (tuple, list, set, frozenset, deque, Counter)):
+            size += sum(visit(child) for child in item)
+        return size
+
+    return visit(value)
+
+
 @dataclass(frozen=True, slots=True)
 class T12StableGraphRecord:
     graph_identity_sha256: str
@@ -265,6 +299,7 @@ class T12StableGCFBridge:
         parent_count: int,
         feature_atomic_numbers: Sequence[Any],
         coverage_runtime: Any | None = None,
+        production_history: T12CompactHistoryJournal | None = None,
     ) -> None:
         self.adapter = adapter
         self.vrrw = vrrw
@@ -284,6 +319,17 @@ class T12StableGCFBridge:
             for value in feature_atomic_numbers
         )
         self.coverage_runtime = coverage_runtime
+        self.production_history = production_history
+        self.production_bounds = (
+            production_history.bounds if production_history is not None else None
+        )
+        if (
+            self.production_bounds is not None
+            and self.production_bounds.parent_count != self.parent_count
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 production history parent count differs from the bridge"
+            )
         if (
             not self.feature_atomic_numbers
             or len(set(self.feature_atomic_numbers)) != len(self.feature_atomic_numbers)
@@ -300,6 +346,62 @@ class T12StableGCFBridge:
         self.distance_call_count = 0
         self.distance_evaluated_graph_count = 0
         self.canonical_row_reuse_count = 0
+        self.observed_peak_live_record_count = 0
+        self.observed_peak_live_record_deep_bytes = 0
+        self.observed_peak_live_record_serialized_bytes = 0
+        self.evicted_complete_record_count = 0
+        self._record_deep_bytes: dict[str, int] = {}
+        self._record_serialized_bytes: dict[str, int] = {}
+        self._live_record_deep_bytes_total = 0
+        self._live_record_serialized_bytes_total = 0
+        self._live_domain_synced = production_history is None
+
+    def _record_sizes(self, record: T12StableGraphRecord) -> tuple[int, int]:
+        deep = _deep_size_bytes(record)
+        serialized = len(_canonical_bytes(record.to_dict()))
+        if self.production_bounds is not None:
+            if deep > self.production_bounds.max_live_record_deep_bytes:
+                raise TasteGCFFullResumeError(
+                    "one T12 live bridge row exceeds the production RAM bound"
+                )
+            if serialized > self.production_bounds.max_live_record_serialized_bytes:
+                raise TasteGCFFullResumeError(
+                    "one T12 live bridge row exceeds the checkpoint bound"
+                )
+        return deep, serialized
+
+    def _remember_record(self, key: str, record: T12StableGraphRecord) -> None:
+        deep, serialized = self._record_sizes(record)
+        self.records[key] = record
+        self._record_deep_bytes[key] = deep
+        self._record_serialized_bytes[key] = serialized
+        self._live_record_deep_bytes_total += deep
+        self._live_record_serialized_bytes_total += serialized
+        if self.production_bounds is not None:
+            if len(self.records) > self.production_bounds.max_transient_full_records:
+                raise TasteGCFFullResumeError(
+                    "T12 live bridge rows exceeded the pinned transient bound"
+                )
+            deep_total = self._live_record_deep_bytes_total
+            serialized_total = self._live_record_serialized_bytes_total
+            self.observed_peak_live_record_count = max(
+                self.observed_peak_live_record_count, len(self.records)
+            )
+            self.observed_peak_live_record_deep_bytes = max(
+                self.observed_peak_live_record_deep_bytes, deep_total
+            )
+            self.observed_peak_live_record_serialized_bytes = max(
+                self.observed_peak_live_record_serialized_bytes,
+                serialized_total,
+            )
+            if deep_total > self.production_bounds.max_bridge_ram_bytes:
+                raise TasteGCFFullResumeError(
+                    "T12 live bridge rows exceeded the production RAM cap"
+                )
+            if serialized_total > self.production_bounds.max_bridge_checkpoint_bytes:
+                raise TasteGCFFullResumeError(
+                    "T12 live bridge rows exceeded the production checkpoint cap"
+                )
 
     def _assert_idle(self) -> None:
         if self._pending_hashes:
@@ -389,9 +491,69 @@ class T12StableGCFBridge:
                 canonical_embedding_sha256=_embedding_sha256(raw_embedding),
             )
             previous = self.records.get(graph_hash)
+            historical = None
+            if previous is None and self.production_history is not None:
+                historical = self.production_history.lookup_first(graph_hash)
             if previous is None:
-                record = observed
-                self.records[graph_hash] = record
+                if historical is None:
+                    record = observed
+                else:
+                    first_score, first_prediction, first_condition = score_and_candidate(
+                        historical.probabilities
+                    )
+                    coverage_sha = _sha256_bytes(bytes(coverage_vector))
+                    failure_sha = _sha256_bytes(
+                        str(failures[index]).encode("utf-8")
+                    )
+                    if (
+                        historical.prediction != observed.prediction
+                        or historical.prediction != first_prediction
+                        or historical.candidate is not observed.candidate
+                        or historical.valid_fullgraph is not observed.valid_fullgraph
+                        or historical.candidate
+                        is not bool(historical.valid_fullgraph and first_condition)
+                        or historical.covered_parent_count != sum(coverage_vector)
+                        or historical.coverage_sha256 != coverage_sha
+                        or historical.failure_sha256 != failure_sha
+                        # Once a complete row has left RAM, the compact journal
+                        # retains only its embedding digest.  Re-entry is thus
+                        # stricter than live-row reuse: low-bit drift blocks
+                        # rather than silently choosing a new first row.
+                        or historical.embedding_sha256
+                        != observed.canonical_embedding_sha256
+                        or not np.allclose(
+                            np.asarray(historical.probabilities, dtype=np.float64),
+                            np.asarray(observed.probabilities, dtype=np.float64),
+                            rtol=GINE_CANONICAL_REUSE_RTOL,
+                            atol=GINE_CANONICAL_REUSE_ATOL,
+                        )
+                    ):
+                        raise TasteGCFFullResumeError(
+                            "one evicted T12 identity changed compact GINE/NeuroSED semantics"
+                        )
+                    record = T12StableGraphRecord(
+                        graph_identity_sha256=graph_hash,
+                        collision_payload=collision,
+                        probabilities=historical.probabilities,
+                        prediction=historical.prediction,
+                        score=first_score,
+                        candidate=historical.candidate,
+                        valid_fullgraph=historical.valid_fullgraph,
+                        failure_reason=str(failures[index]),
+                        coverage_vector=coverage_vector,
+                        coverage_ratio=(
+                            historical.covered_parent_count / float(self.parent_count)
+                        ),
+                        canonical_embedding_dtype=raw_embedding.dtype.str,
+                        canonical_embedding_values=tuple(
+                            float(value) for value in raw_embedding.tolist()
+                        ),
+                        canonical_embedding_sha256=(
+                            observed.canonical_embedding_sha256
+                        ),
+                    )
+                    self.canonical_row_reuse_count += 1
+                self._remember_record(graph_hash, record)
             else:
                 previous_embedding = np.asarray(
                     previous.canonical_embedding_values,
@@ -428,10 +590,33 @@ class T12StableGCFBridge:
                 (graph_hash, _embedding_sha256(raw_embedding))
             )
             lineage = _lineage_sha256(graph, graph_identity_sha256=graph_hash)
-            self.lineage_occurrences.setdefault(graph_hash, Counter())[lineage] += 1
+            if self.production_history is None:
+                self.lineage_occurrences.setdefault(graph_hash, Counter())[lineage] += 1
+            else:
+                # Historical lineage identities belong to the compact journal
+                # and its disk index.  RAM retains only the latest lineage for
+                # each complete live row; no per-row Counter can grow with M.
+                self.lineage_occurrences[graph_hash] = Counter({lineage: 1})
+            if self.production_history is not None:
+                try:
+                    self.production_history.append_observation(
+                        graph_identity_sha256=graph_hash,
+                        probabilities=row,
+                        prediction=prediction,
+                        candidate=observed.candidate,
+                        valid_fullgraph=observed.valid_fullgraph,
+                        coverage_vector=coverage_vector,
+                        embedding_sha256=observed.canonical_embedding_sha256,
+                        failure_reason=observed.failure_reason,
+                        lineage_sha256=lineage,
+                    )
+                except TasteT12ProductionStateError as exc:
+                    raise TasteGCFFullResumeError(str(exc)) from exc
             canonical_parts.append((record.score, record.coverage_ratio))
         self.call_count += 1
         self.evaluated_graph_count += len(values)
+        if self.production_history is not None:
+            self._live_domain_synced = False
         return np.asarray(canonical_parts, dtype=float), embeddings, coverage
 
     def calculate_hash(self, graph_embedding: Any) -> str:
@@ -448,11 +633,135 @@ class T12StableGCFBridge:
         return graph_hash
 
     def is_graph_counterfactual(self, graph_hash: Any) -> bool:
-        if type(graph_hash) is not str or graph_hash not in self.records:
+        if type(graph_hash) is not str:
             raise TasteGCFFullResumeError(
                 "official GCF queried an unknown structural identity"
             )
-        return self.records[graph_hash].candidate
+        record = self.records.get(graph_hash)
+        if record is not None:
+            return record.candidate
+        if self.production_history is not None:
+            historical = self.production_history.lookup_first(graph_hash)
+            if historical is not None:
+                return historical.candidate
+        raise TasteGCFFullResumeError(
+            "official GCF queried an unknown structural identity"
+        )
+
+    def retain_official_live_domain(
+        self, *, vrrw: Any, current_graph_identity: str
+    ) -> dict[str, Any]:
+        """Evict complete rows not needed by the official live graph registry.
+
+        Transition-only identities remain queryable through the compact disk
+        index.  Complete payload/embedding/coverage/lineage rows remain only
+        for ``graph_map`` (which exactly equals the ordered candidate registry
+        in the pinned official implementation) and the current graph.
+        """
+
+        self._assert_idle()
+        if self.production_history is None or self.production_bounds is None:
+            raise TasteGCFFullResumeError(
+                "T12 live-domain pruning requires the production history"
+            )
+        current = _stable_graph_hash(
+            current_graph_identity, field="T12 production current graph"
+        )
+        graph_map = getattr(vrrw, "graph_map", None)
+        graph_index_map = getattr(vrrw, "graph_index_map", None)
+        candidates = getattr(vrrw, "counterfactual_candidates", None)
+        transitions = getattr(vrrw, "transitions", None)
+        if (
+            not isinstance(graph_map, Mapping)
+            or not isinstance(graph_index_map, Mapping)
+            or not isinstance(candidates, list)
+            or not isinstance(transitions, Mapping)
+            or set(graph_map) != set(graph_index_map)
+            or current not in graph_map
+            or len(graph_map) > self.production_bounds.max_full_live_records
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 official live graph domain exceeds the production bound"
+            )
+        live = set(graph_map)
+        for index, row in enumerate(candidates):
+            if type(row) is not dict:
+                raise TasteGCFFullResumeError("T12 live candidate is malformed")
+            key = _stable_graph_hash(
+                row.get("graph_hash"), field="T12 live candidate identity"
+            )
+            if key not in live or graph_index_map.get(key) != index:
+                raise TasteGCFFullResumeError(
+                    "T12 candidate/index registry differs during pruning"
+                )
+        transition_target_count = 0
+        for source, transition in transitions.items():
+            source = _stable_graph_hash(
+                source, field="T12 live transition source"
+            )
+            if (
+                source not in live
+                or not isinstance(transition, (list, tuple))
+                or len(transition) != 4
+            ):
+                raise TasteGCFFullResumeError(
+                    "T12 live transition payload is malformed"
+                )
+            targets = transition[0]
+            if (
+                not isinstance(targets, (list, tuple))
+                or len(targets) > self.production_bounds.sample_size + 1
+            ):
+                raise TasteGCFFullResumeError(
+                    "T12 transition target count exceeds the pinned sample size"
+                )
+            transition_target_count += len(targets)
+            for target in targets:
+                target = _stable_graph_hash(
+                    target, field="T12 live transition target"
+                )
+                if self.production_history.lookup_first(target) is None:
+                    raise TasteGCFFullResumeError(
+                        "T12 transition target is absent from compact history"
+                    )
+        missing = live - set(self.records)
+        if missing:
+            raise TasteGCFFullResumeError(
+                "T12 official live graph registry lost complete bridge rows"
+            )
+        evicted = set(self.records) - live
+        for key in evicted:
+            del self.records[key]
+            self.lineage_occurrences.pop(key, None)
+            self._live_record_deep_bytes_total -= self._record_deep_bytes.pop(key)
+            self._live_record_serialized_bytes_total -= (
+                self._record_serialized_bytes.pop(key)
+            )
+        self.evicted_complete_record_count += len(evicted)
+        self._live_domain_synced = True
+        deep_total = self._live_record_deep_bytes_total
+        serialized_total = self._live_record_serialized_bytes_total
+        if (
+            len(self.records) > self.production_bounds.max_full_live_records
+            or deep_total > self.production_bounds.max_bridge_ram_bytes
+            or serialized_total
+            > self.production_bounds.max_bridge_checkpoint_bytes
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 pruned bridge state exceeds a production bound"
+            )
+        return {
+            "live_complete_record_count": len(self.records),
+            "evicted_this_boundary": len(evicted),
+            "evicted_complete_record_count": self.evicted_complete_record_count,
+            "live_record_deep_bytes": deep_total,
+            "live_record_serialized_bytes": serialized_total,
+            "transition_entry_count": len(transitions),
+            "transition_target_reference_count": transition_target_count,
+            "compact_history_observation_count": (
+                self.production_history.observation_count
+            ),
+        }
 
     def checkpoint_state(self) -> dict[str, Any]:
         self._assert_idle()
@@ -469,8 +778,16 @@ class T12StableGCFBridge:
             raise TasteGCFFullResumeError(
                 "T12 NeuroSED retry state is not one mapping"
             )
-        return {
-            "schema_version": BRIDGE_SCHEMA,
+        if self.production_history is not None and not self._live_domain_synced:
+            raise TasteGCFFullResumeError(
+                "T12 production checkpoint requested before live-domain pruning"
+            )
+        state = {
+            "schema_version": (
+                PRODUCTION_BRIDGE_SCHEMA
+                if self.production_history is not None
+                else BRIDGE_SCHEMA
+            ),
             "records": {
                 key: value.to_dict() for key, value in sorted(self.records.items())
             },
@@ -493,11 +810,37 @@ class T12StableGCFBridge:
             "embedding_identity_used": False,
             "coverage_runtime": coverage_runtime,
         }
+        if self.production_history is not None:
+            state.update(
+                {
+                    "complete_records_are_live_domain_only": True,
+                    "history": self.production_history.checkpoint_state(),
+                    "production_bounds": self.production_bounds.to_dict(),
+                    "production_bounds_sha256": self.production_bounds.sha256,
+                    "observed_peak_live_record_count": (
+                        self.observed_peak_live_record_count
+                    ),
+                    "observed_peak_live_record_deep_bytes": (
+                        self.observed_peak_live_record_deep_bytes
+                    ),
+                    "observed_peak_live_record_serialized_bytes": (
+                        self.observed_peak_live_record_serialized_bytes
+                    ),
+                    "evicted_complete_record_count": (
+                        self.evicted_complete_record_count
+                    ),
+                }
+            )
+        return state
 
     def restore_checkpoint_state(self, payload: Mapping[str, Any]) -> None:
         import numpy as np
 
         self._assert_idle()
+        production_payload = (
+            type(payload) is dict
+            and payload.get("schema_version") == PRODUCTION_BRIDGE_SCHEMA
+        )
         expected = {
             "schema_version", "records", "lineage_occurrences", "call_count", "evaluated_graph_count",
             "calculate_hash_count", "distance_call_count",
@@ -507,10 +850,24 @@ class T12StableGCFBridge:
             "python_builtin_hash_used", "embedding_identity_used",
             "coverage_runtime",
         }
+        if production_payload:
+            expected.update(
+                {
+                    "complete_records_are_live_domain_only",
+                    "history",
+                    "production_bounds",
+                    "production_bounds_sha256",
+                    "observed_peak_live_record_count",
+                    "observed_peak_live_record_deep_bytes",
+                    "observed_peak_live_record_serialized_bytes",
+                    "evicted_complete_record_count",
+                }
+            )
         if type(payload) is not dict or set(payload) != expected:
             raise TasteGCFFullResumeError("T12 bridge checkpoint keys changed")
         if (
-            payload.get("schema_version") != BRIDGE_SCHEMA
+            payload.get("schema_version")
+            != (PRODUCTION_BRIDGE_SCHEMA if production_payload else BRIDGE_SCHEMA)
             or payload.get("parent_count") != self.parent_count
             or payload.get("distance_threshold_hex") != self.distance_threshold.hex()
             or payload.get("feature_atomic_numbers") != list(self.feature_atomic_numbers)
@@ -523,6 +880,40 @@ class T12StableGCFBridge:
             or type(payload.get("coverage_runtime")) is not dict
         ):
             raise TasteGCFFullResumeError("T12 bridge checkpoint semantics changed")
+        if production_payload:
+            if (
+                self.production_history is None
+                or self.production_bounds is None
+                or payload.get("complete_records_are_live_domain_only") is not True
+            ):
+                raise TasteGCFFullResumeError(
+                    "T12 production checkpoint requires the compact history"
+                )
+            try:
+                restored_bounds = T12ProductionBounds.from_dict(
+                    payload.get("production_bounds")
+                )
+            except TasteT12ProductionStateError as exc:
+                raise TasteGCFFullResumeError(str(exc)) from exc
+            if (
+                restored_bounds != self.production_bounds
+                or payload.get("production_bounds_sha256")
+                != self.production_bounds.sha256
+            ):
+                raise TasteGCFFullResumeError(
+                    "T12 production bounds changed on restore"
+                )
+            # The journal constructor has already independently reopened and
+            # rebuilt this exact committed prefix.  Equality here binds it to
+            # the checkpoint without creating a second active history writer.
+            if self.production_history.checkpoint_state() != payload.get("history"):
+                raise TasteGCFFullResumeError(
+                    "T12 compact history differs from the checkpoint"
+                )
+        elif self.production_history is not None:
+            raise TasteGCFFullResumeError(
+                "T12 cannot restore an all-history canary bridge as production"
+            )
         records: dict[str, T12StableGraphRecord] = {}
         for key, raw in payload["records"].items():
             key = _stable_graph_hash(key, field="T12 checkpoint graph identity")
@@ -605,6 +996,16 @@ class T12StableGCFBridge:
                 canonical_embedding_sha256=raw["canonical_embedding_sha256"],
             )
         self.records = records
+        self._record_deep_bytes = {}
+        self._record_serialized_bytes = {}
+        for key, record in records.items():
+            deep, serialized = self._record_sizes(record)
+            self._record_deep_bytes[key] = deep
+            self._record_serialized_bytes[key] = serialized
+        self._live_record_deep_bytes_total = sum(self._record_deep_bytes.values())
+        self._live_record_serialized_bytes_total = sum(
+            self._record_serialized_bytes.values()
+        )
         lineages: dict[str, Counter[str]] = {}
         for key, raw in payload["lineage_occurrences"].items():
             if key not in records or type(raw) is not dict or not raw:
@@ -638,36 +1039,85 @@ class T12StableGCFBridge:
             "canonical_row_reuse_count",
         ):
             setattr(self, field, _native_int(payload.get(field), field=f"T12 bridge {field}"))
+        if production_payload:
+            for field in (
+                "observed_peak_live_record_count",
+                "observed_peak_live_record_deep_bytes",
+                "observed_peak_live_record_serialized_bytes",
+                "evicted_complete_record_count",
+            ):
+                setattr(
+                    self,
+                    field,
+                    _native_int(payload.get(field), field=f"T12 bridge {field}"),
+                )
+            if (
+                self.observed_peak_live_record_count < len(self.records)
+                or self.observed_peak_live_record_deep_bytes
+                < self._live_record_deep_bytes_total
+                or self.observed_peak_live_record_serialized_bytes
+                < self._live_record_serialized_bytes_total
+                or len(self.records) > self.production_bounds.max_full_live_records
+                or self.production_history.observation_count
+                != self.evaluated_graph_count
+            ):
+                raise TasteGCFFullResumeError(
+                    "T12 production bridge resource counters changed"
+                )
+            self._live_domain_synced = True
         if (
             self.evaluated_graph_count != self.calculate_hash_count
             or self.distance_evaluated_graph_count != self.evaluated_graph_count
-            or sum(
-                sum(values.values()) for values in self.lineage_occurrences.values()
+            or (
+                not production_payload
+                and sum(
+                    sum(values.values())
+                    for values in self.lineage_occurrences.values()
+                )
+                != self.evaluated_graph_count
             )
-            != self.evaluated_graph_count
         ):
             raise TasteGCFFullResumeError("T12 bridge checkpoint lost call closure")
 
     def report(self) -> dict[str, Any]:
         state = self.checkpoint_state()
+        history = self.production_history
         return {
             **{key: value for key, value in state.items() if key != "records"},
-            "unique_graph_count": len(self.records),
-            "unique_lineage_count": sum(
-                len(values) for values in self.lineage_occurrences.values()
+            "unique_graph_count": (
+                history.first_seen_graph_count if history is not None else len(self.records)
             ),
-            "lineage_occurrence_count": sum(
-                sum(values.values()) for values in self.lineage_occurrences.values()
+            "unique_lineage_count": (
+                history.first_seen_lineage_count
+                if history is not None
+                else sum(len(values) for values in self.lineage_occurrences.values())
             ),
+            "lineage_occurrence_count": (
+                history.observation_count
+                if history is not None
+                else sum(
+                    sum(values.values())
+                    for values in self.lineage_occurrences.values()
+                )
+            ),
+            "live_complete_record_count": len(self.records),
             "registry_identity": GRAPH_IDENTITY_CONTRACT,
             "dedup_identity": GRAPH_IDENTITY_CONTRACT,
             "lineage_identity": GRAPH_IDENTITY_CONTRACT,
             "record_cache_identity": GRAPH_IDENTITY_CONTRACT,
-            "strict_counterfactual_count": sum(row.candidate for row in self.records.values()),
+            "strict_counterfactual_count": (
+                history.first_seen_strict_counterfactual_count
+                if history is not None
+                else sum(row.candidate for row in self.records.values())
+            ),
             "destination_prediction_counts": {
-                str(label): sum(
-                    row.candidate and row.prediction == label
-                    for row in self.records.values()
+                str(label): (
+                    history.destination_first_seen_counts[label]
+                    if history is not None
+                    else sum(
+                        row.candidate and row.prediction == label
+                        for row in self.records.values()
+                    )
                 )
                 for label in (0, 2)
             },
@@ -719,6 +1169,13 @@ def validate_checkpoint_identity(raw: Mapping[str, Any]) -> dict[str, Any]:
     if purpose == "production":
         if total_steps != PRODUCTION_TOTAL_STEPS or cursor not in PRODUCTION_CHECKPOINT_CURSORS:
             raise TasteGCFFullResumeError("T12 production checkpoint is not 10k/20k")
+        if (
+            raw.get("sample_size") != PINNED_SAMPLE_SIZE
+            or raw.get("candidate_capacity") != PINNED_CANDIDATE_CAPACITY
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 production must retain official sample_size=10000 and k=100000"
+            )
     elif purpose == "gpu_replay_canary":
         if total_steps > 512 or cursor >= total_steps:
             raise TasteGCFFullResumeError("T12 replay canary is not bounded/intermediate")
@@ -867,6 +1324,32 @@ def capture_checkpoint_payload(
     """Capture every mutable scientific and RNG component after one step."""
 
     frozen_identity = validate_checkpoint_identity(identity)
+    if frozen_identity["purpose"] == "production":
+        if bridge.production_history is None or bridge.production_bounds is None:
+            raise TasteGCFFullResumeError(
+                "T12 production cannot use the canary all-history bridge"
+            )
+        if (
+            bridge.production_bounds.total_steps != frozen_identity["total_steps"]
+            or bridge.production_bounds.sample_size != frozen_identity["sample_size"]
+            or bridge.production_bounds.candidate_capacity
+            != frozen_identity["candidate_capacity"]
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 production resource bounds differ from checkpoint identity"
+            )
+        transitions = getattr(vrrw, "transitions", None)
+        if not (
+            getattr(transitions, "T12_BOUNDED_TRANSITION_STATE", False) is True
+            and callable(getattr(transitions, "export_checkpoint_state", None))
+        ):
+            report = production_transition_bound_report(
+                bounds=bridge.production_bounds
+            )
+            raise TasteGCFFullResumeError(
+                "T12 raw official transition state is not production bounded: "
+                f"bitpacked_coverage_bytes={report['minimum_bitpacked_coverage_bytes']}"
+            )
     current = _stable_graph_hash(
         current_graph_identity, field="T12 checkpoint current graph"
     )
@@ -987,6 +1470,21 @@ def write_checkpoint(
         payload_bytes = temporary_payload.stat().st_size
         if payload_bytes <= 0:
             raise TasteGCFFullResumeError("T12 checkpoint payload is empty")
+        if validated["identity"]["purpose"] == "production":
+            bridge_state = validated["state"].get("bridge")
+            bounds_raw = (
+                bridge_state.get("production_bounds")
+                if type(bridge_state) is dict
+                else None
+            )
+            try:
+                bounds = T12ProductionBounds.from_dict(bounds_raw)
+            except TasteT12ProductionStateError as exc:
+                raise TasteGCFFullResumeError(str(exc)) from exc
+            if payload_bytes > bounds.max_full_checkpoint_bytes:
+                raise TasteGCFFullResumeError(
+                    "T12 production checkpoint exceeds the published size cap"
+                )
         _publish_no_replace(temporary_payload, payload_path)
         manifest = {
             "schema_version": CHECKPOINT_MANIFEST_SCHEMA,
@@ -1118,6 +1616,199 @@ def restore_checkpoint_payload(
     return state["current_graph_identity"]
 
 
+def production_segment_bounds(resume_cursor: int = 0) -> tuple[int, int]:
+    """Return the only legal production segment after a durable cursor."""
+
+    cursor = _native_int(
+        resume_cursor, field="T12 production resume cursor", minimum=0
+    )
+    if cursor == 0:
+        return 1, 10_000
+    if cursor == 10_000:
+        return 10_001, 20_000
+    if cursor == 20_000:
+        raise TasteGCFFullResumeError("T12 production is already at its terminal cursor")
+    raise TasteGCFFullResumeError("T12 production resume cursor must be 0/10k/20k")
+
+
+def production_checkpoint_identity(
+    identity_template: Mapping[str, Any], *, checkpoint_cursor: int
+) -> dict[str, Any]:
+    """Bind one immutable identity to exactly the 10k or 20k cursor."""
+
+    cursor = _native_int(
+        checkpoint_cursor, field="T12 production checkpoint cursor", minimum=1
+    )
+    value = dict(identity_template)
+    if (
+        value.get("sample_size") != PINNED_SAMPLE_SIZE
+        or value.get("candidate_capacity") != PINNED_CANDIDATE_CAPACITY
+    ):
+        raise TasteGCFFullResumeError(
+            "T12 production identity template changed official sample_size/k"
+        )
+    value["purpose"] = "production"
+    value["total_steps"] = PRODUCTION_TOTAL_STEPS
+    value["checkpoint_cursor"] = cursor
+    return validate_checkpoint_identity(value)
+
+
+def production_transition_bound_report(
+    *, bounds: T12ProductionBounds
+) -> dict[str, Any]:
+    """Expose why the raw official transition dictionary cannot run at 20k.
+
+    This is an upper bound, not an assertion that every transition reaches the
+    maximum.  It makes the remaining substrate requirement explicit rather
+    than allowing a bridge-only memory proof to release production.
+    """
+
+    transition_entries = min(bounds.total_steps, bounds.max_full_live_records)
+    target_rows = transition_entries * (bounds.sample_size + 1)
+    coverage_bits = target_rows * bounds.parent_count
+    return {
+        "schema_version": "tastemolnet_t12_transition_bound_audit_v1",
+        "bounds_sha256": bounds.sha256,
+        "M": bounds.total_steps,
+        "sample_size": bounds.sample_size,
+        "candidate_capacity": bounds.candidate_capacity,
+        "parent_count": bounds.parent_count,
+        "max_live_transition_entries": transition_entries,
+        "max_transition_target_rows": target_rows,
+        "dense_float32_coverage_bytes": coverage_bits * 4,
+        "minimum_bitpacked_coverage_bytes": (coverage_bits + 7) // 8,
+        "official_in_memory_transition_dict_allowed": False,
+        "required_substrate": (
+            "dataset_specific_external_compact_transition_store_with_"
+            "bounded_expanded_lru"
+        ),
+        "production_launch_ready": False,
+    }
+
+
+class T12ProductionCheckpointOrchestrator:
+    """Narrow 0->10k->20k checkpoint coordinator for a future full runner."""
+
+    def __init__(
+        self,
+        *,
+        checkpoint_root: str | Path,
+        identity_template: Mapping[str, Any],
+        bounds: T12ProductionBounds,
+    ) -> None:
+        self.checkpoint_root = _normalized_absolute(
+            checkpoint_root, field="T12 production checkpoint root"
+        )
+        self.identity_template = dict(identity_template)
+        self.bounds = bounds
+        # Validate both identities up front.  This prevents a worker from
+        # changing any science/runtime pin between the two process segments.
+        self._identities = {
+            cursor: production_checkpoint_identity(
+                self.identity_template, checkpoint_cursor=cursor
+            )
+            for cursor in sorted(PRODUCTION_CHECKPOINT_CURSORS)
+        }
+        reference = {
+            key: value
+            for key, value in self._identities[10_000].items()
+            if key != "checkpoint_cursor"
+        }
+        if reference != {
+            key: value
+            for key, value in self._identities[20_000].items()
+            if key != "checkpoint_cursor"
+        }:
+            raise TasteGCFFullResumeError(
+                "T12 10k/20k checkpoint identities differ"
+            )
+        if (
+            bounds.total_steps != PRODUCTION_TOTAL_STEPS
+            or bounds.checkpoint_cursors != (10_000, 20_000)
+            or bounds.sample_size != PINNED_SAMPLE_SIZE
+            or bounds.candidate_capacity != PINNED_CANDIDATE_CAPACITY
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 checkpoint orchestration bounds changed"
+            )
+
+    def plan(self, *, resume_cursor: int = 0) -> dict[str, Any]:
+        start, end = production_segment_bounds(resume_cursor)
+        return {
+            "schema_version": "tastemolnet_t12_10k_20k_plan_v1",
+            "resume_cursor": resume_cursor,
+            "segment_start": start,
+            "segment_end": end,
+            "checkpoint_cursor": end,
+            "terminal_after_checkpoint": end == PRODUCTION_TOTAL_STEPS,
+            "checkpoint_identity_sha256": _sha256_bytes(
+                _canonical_bytes(self._identities[end])
+            ),
+            "calibration_loaded": False,
+            "test_loaded": False,
+        }
+
+    def commit(
+        self,
+        *,
+        completed_steps: int,
+        vrrw: Any,
+        bridge: T12StableGCFBridge,
+        adapter: Any,
+        action_counts: Mapping[str, int],
+        current_graph_identity: str,
+        np: Any,
+        torch: Any,
+    ) -> Path:
+        cursor = _native_int(
+            completed_steps, field="T12 completed production steps", minimum=1
+        )
+        if cursor not in PRODUCTION_CHECKPOINT_CURSORS:
+            raise TasteGCFFullResumeError(
+                "T12 production may publish only the 10k/20k checkpoints"
+            )
+        transitions = getattr(vrrw, "transitions", None)
+        if not (
+            getattr(transitions, "T12_BOUNDED_TRANSITION_STATE", False) is True
+            and callable(getattr(transitions, "export_checkpoint_state", None))
+        ):
+            report = production_transition_bound_report(bounds=self.bounds)
+            raise TasteGCFFullResumeError(
+                "T12 raw official transition state is not production bounded: "
+                f"bitpacked_coverage_bytes={report['minimum_bitpacked_coverage_bytes']}"
+            )
+        bridge.retain_official_live_domain(
+            vrrw=vrrw, current_graph_identity=current_graph_identity
+        )
+        payload = capture_checkpoint_payload(
+            identity=self._identities[cursor],
+            vrrw=vrrw,
+            bridge=bridge,
+            adapter=adapter,
+            action_counts=action_counts,
+            current_graph_identity=current_graph_identity,
+            np=np,
+            torch=torch,
+        )
+        return write_checkpoint(self.checkpoint_root, payload, torch=torch)
+
+    def reopen(
+        self, manifest_path: str | Path, *, checkpoint_cursor: int, torch: Any
+    ) -> dict[str, Any]:
+        cursor = _native_int(
+            checkpoint_cursor, field="T12 production reopen cursor", minimum=1
+        )
+        if cursor not in self._identities:
+            raise TasteGCFFullResumeError(
+                "T12 production reopen cursor must be 10k or 20k"
+            )
+        return reopen_checkpoint(
+            manifest_path,
+            expected_identity=self._identities[cursor],
+            torch=torch,
+        )
+
+
 def build_replay_scientific_state(
     *,
     vrrw: Any,
@@ -1179,8 +1870,28 @@ def build_replay_scientific_state(
         ),
         "generated_to_original_coverage_sha256": _semantic_sha256(coverage),
         "official_state_sha256": _semantic_sha256(official),
-        "official_native_result_semantic_sha256": _semantic_sha256(native_result),
+        "official_native_result_semantic_sha256": (
+            canonical_native_result_sha256(native_result)
+        ),
     }
+
+
+def canonical_native_result_sha256(native_result: Mapping[str, Any]) -> str:
+    """Hash the complete native result by scientific value, not archive bytes.
+
+    PyTorch archive bytes also encode serialization representation details such
+    as storage identities and object layout.  Those details can differ after a
+    genuine process restart while the recursively loaded result is exact.  The
+    semantic snapshot covers every mapping key and value, preserves list/tuple
+    and tensor element order, and binds tensor dtype and shape.  Mapping
+    insertion order is canonicalized by key because it is not part of the
+    official result semantics.  Numeric values are exact; no ``allclose`` is
+    used.
+    """
+
+    if type(native_result) is not dict or not native_result:
+        raise TasteGCFFullResumeError("T12 official native result is absent")
+    return _semantic_sha256(native_result)
 
 
 def _validate_canary_process_identity(value: Any, *, field: str) -> dict[str, Any]:
@@ -1554,11 +2265,32 @@ def compare_canary_observations(
             raise TasteGCFFullResumeError(
                 f"T12 resumed observation changed {observation_field}"
             )
-    for field in ("canary_identity_sha256", "gpu_uuid", "native_result_sha256", "scientific_state_sha256"):
+    for field in ("canary_identity_sha256", "gpu_uuid"):
         if uninterrupted[field] != resumed[field]:
             raise TasteGCFFullResumeError(f"T12 replay diverged at {field}")
+    uninterrupted_native_semantic = uninterrupted["scientific_state"][
+        "official_native_result_semantic_sha256"
+    ]
+    resumed_native_semantic = resumed["scientific_state"][
+        "official_native_result_semantic_sha256"
+    ]
+    if uninterrupted_native_semantic != resumed_native_semantic:
+        raise TasteGCFFullResumeError(
+            "T12 replay native-result scientific content diverged"
+        )
+    if (
+        uninterrupted["scientific_state_sha256"]
+        != resumed["scientific_state_sha256"]
+    ):
+        raise TasteGCFFullResumeError(
+            "T12 replay diverged at scientific_state_sha256"
+        )
     if uninterrupted["scientific_state"] != resumed["scientific_state"]:
         raise TasteGCFFullResumeError("T12 replay scientific state is not exact")
+    native_raw_equal = (
+        uninterrupted["native_result_sha256"]
+        == resumed["native_result_sha256"]
+    )
     return {
         "schema_version": CANARY_GATE_SCHEMA,
         "status": "PASS",
@@ -1569,7 +2301,18 @@ def compare_canary_observations(
         "uninterrupted_observation_sha256": _sha256_bytes(_canonical_bytes(uninterrupted)),
         "resumed_observation_sha256": _sha256_bytes(_canonical_bytes(resumed)),
         "scientific_state_sha256": uninterrupted["scientific_state_sha256"],
-        "native_result_sha256": uninterrupted["native_result_sha256"],
+        "native_result_semantic_contract": NATIVE_RESULT_SEMANTIC_CONTRACT,
+        "native_result_semantic_sha256": uninterrupted_native_semantic,
+        "uninterrupted_native_result_raw_sha256": uninterrupted[
+            "native_result_sha256"
+        ],
+        "resumed_native_result_raw_sha256": resumed["native_result_sha256"],
+        "native_result_raw_bytes_equal": native_raw_equal,
+        "native_result_difference_classification": (
+            "RAW_BYTES_IDENTICAL"
+            if native_raw_equal
+            else "NON_SEMANTIC_SERIALIZATION_REPRESENTATION_ONLY"
+        ),
         "checkpoint_manifest_sha256": prefix["checkpoint_manifest_sha256"],
         "checkpoint_identity_sha256": prefix["checkpoint_identity_sha256"],
         "checkpoint_state_sha256": prefix["checkpoint_state_sha256"],
@@ -1577,6 +2320,9 @@ def compare_canary_observations(
         "cross_process": True,
         "cuda_used": True,
         "exact_equality": True,
+        "exact_equality_scope": "canonical_scientific_state",
+        "scientific_exact_equality": True,
+        "native_result_approximate_comparison_used": False,
         "approximate_comparison_used": False,
         "production_released": False,
         "verified_at": _utc_now(),
@@ -1666,17 +2412,26 @@ __all__ = [
     "CHECKPOINT_MANIFEST_SCHEMA",
     "CHECKPOINT_SCHEMA",
     "GRAPH_IDENTITY_CONTRACT",
+    "NATIVE_RESULT_SEMANTIC_CONTRACT",
+    "PINNED_CANDIDATE_CAPACITY",
+    "PINNED_SAMPLE_SIZE",
+    "PRODUCTION_BRIDGE_SCHEMA",
     "PRODUCTION_CHECKPOINT_CURSORS",
     "PRODUCTION_TOTAL_STEPS",
     "STAGE",
     "T12StableGCFBridge",
     "T12StableGraphRecord",
+    "T12ProductionCheckpointOrchestrator",
     "TasteGCFFullResumeError",
     "build_canary_observation",
     "build_replay_scientific_state",
+    "canonical_native_result_sha256",
     "capture_checkpoint_payload",
     "capture_linux_process_identity",
     "compare_canary_observations",
+    "production_checkpoint_identity",
+    "production_segment_bounds",
+    "production_transition_bound_report",
     "reopen_checkpoint",
     "restore_checkpoint_payload",
     "validate_canary_prefix_receipt",
