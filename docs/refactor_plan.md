@@ -13,7 +13,20 @@
 - [ ] Deploy the reviewed successor commit and launch a fresh postprocess root
   against the existing controller-bound exact receipt.  Do not resume the
   prior chemistry-failed root across the project-commit contract change.
+## 2026-09-01: Publish a verified T8 deadline recovery for T13
 
+- [x] Reopen and retain the deadline terminal plus private state tree instead
+  of copying or relabeling science output.
+- [x] Rerun the exact T3/T4/GINE/train/official-source preflight and accept
+  only a fresh recovery UUID with the fixed 25-epoch configuration.
+- [x] Add a raw-only managed-v2 worker and a separate independent verifier
+  that publishes the existing typed T8 schema into a fresh final root.
+- [x] Prove the publication is directly consumable by T13's unchanged
+  `validate_t8_pass()` and reject source drift after SEALED.
+- [x] Synchronize the dataset-specific CLI, Slurm wrapper, tests, and runbook;
+  keep `RUN_GNN_ABLATION=0` and all calibration/test inputs unloaded.
+- [ ] Deploy from a clean immutable checkout only after the real fresh
+  25-epoch deadline recovery has published PASS.
 ## 2026-09-01: Bounded TasteMolNet T8 zero-candidate recovery
 
 - [x] Diagnose the fresh five-epoch failure as nonempty native generation with

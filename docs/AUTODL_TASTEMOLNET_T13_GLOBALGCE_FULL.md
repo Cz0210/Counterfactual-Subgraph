@@ -9,6 +9,10 @@ the real official GlobalGCE science and seals a complete main-table cell.
 not a legacy marker or standalone JSON receipt. T13 retains and revalidates
 the managed terminal, reads the nested typed T8 verification, and requires its
 `oracle_checkpoint_hash` to equal the T13 frozen GINE `model.pt` hash.
+A successful fixed-25-epoch deadline recovery is converted into this exact
+surface only by the two-process adapter documented in
+`AUTODL_TASTEMOLNET_T8_DEADLINE_MANAGED_ADOPTION.md`; the deadline directory
+itself is not a valid `T8_PASS_ROOT`.
 
 ## Scientific contract
 

@@ -122,6 +122,10 @@ See:
 - `docs/AUTODL_TASTEMOLNET_T8_GLOBALGCE_SMOKE.md` (release-disabled contract
   for the real bounded native GlobalGCE two-target smoke on physical GPU 2;
   the paired Slurm entrypoint is an intentional static refusal)
+- `docs/AUTODL_TASTEMOLNET_T8_DEADLINE_MANAGED_ADOPTION.md` (strict CPU-only
+  adoption of a real fresh fixed-25-epoch deadline recovery into the typed
+  managed-v2 final already required by T13; worker SEALED and verifier PASS
+  remain separate processes and no science bytes are copied)
 - `docs/AUTODL_TASTEMOLNET_T9_COMRECGC_SMOKE.md` (trusted-single-operator,
   GPU1-after-T4 M500 worker plus separate managed-v2 verifier and fresh atomic
   aggregate-only publication; no test, full run, or paper claim)

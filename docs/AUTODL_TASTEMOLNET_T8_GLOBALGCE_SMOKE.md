@@ -57,6 +57,14 @@ rewrite, strict filters, and no-validation/calibration/test boundary are
 unchanged. A 25-epoch attempt with no accepted candidate fails closed; it does
 not unlock a further escalation or post-hoc graph repair.
 
+When—and only when—the fresh fixed-25-epoch deadline attempt publishes a real
+PASS, `adopt_tastemolnet_t8_deadline_v2.py` may convert that immutable source
+into T13's existing typed managed-v2 prerequisite. Its worker writes SEALED
+only and a separate verifier repeats the deadline/T3/T4/GINE/train/official
+checks before publishing PASS. See
+`AUTODL_TASTEMOLNET_T8_DEADLINE_MANAGED_ADOPTION.md`. This does not enable the
+original five-epoch managed runner or change its release-disabled status.
+
 Each branch is called twice. The first call is deliberately interrupted only
 after the epoch-0 checkpoint and heartbeat are durable. The second call must
 restore the same identity-bound model, optimizer, scheduler, and

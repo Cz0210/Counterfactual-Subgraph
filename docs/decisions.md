@@ -141,7 +141,37 @@ an interrupted root created by the identical commit and contract.
   already ignores it; typed source evidence is neither stripped nor weakened.
 - Audit manifests now state both graph spaces explicitly, and focused tests
   cover stale-sidecar replay plus the unchanged connected-candidate gate.
+## [2026-09-01] Adopt only a verified 25-epoch T8 deadline PASS into managed-v2
 
+### Motivation
+
+The bounded deadline runner can produce the authorized fixed-25-epoch T8
+science, while T13 correctly accepts only an independently published
+managed-v2 final containing the typed T8 verification. Directly pointing T13
+at the deadline directory would bypass that consumer contract.
+
+### Decision
+
+Add one TasteMolNet-specific adapter that reopens the immutable deadline
+aggregate and private branch state, reruns the exact T3/T4/GINE/train/official
+preflight, and reconstructs the deadline manifest and gate. It accepts only a
+fresh recovery attempt linked to the recorded failed source and the exact
+25-epoch configuration. A worker may publish raw evidence and SEALED only; a
+separate verifier repeats the entire source check and alone atomically
+publishes the existing `tastemolnet_t8_independent_verification_v2` receipt.
+
+The adapter copies no science or private state. Validation, calibration, test,
+RF, heuristic fallback, redistribution, and GNN ablation remain forbidden.
+The verifier must reopen its result through T13's unchanged
+`validate_t8_pass()` before reporting success.
+
+### Consequences
+
+- A five-epoch terminal, failed/incomplete recovery, changed source root, or
+  mismatched recovery/config/input authority cannot release T13.
+- The deadline science remains the sole scientific artifact; managed-v2 adds
+  only independently verified provenance and an atomic consumer surface.
+- No generic controller or trust framework is introduced.
 ### Status
 
 Accepted
