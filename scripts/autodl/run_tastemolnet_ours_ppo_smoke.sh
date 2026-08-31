@@ -5,9 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 
-# Successor authority 5546916 retains the reviewed GPU0 policy and exact
-# model/predecessor pins; its immutable JSON was independently reloaded before
-# this release-only commit. No environment variable can bypass this boundary.
+# Successor authority e871236 retains the reviewed GPU0 policy and exact
+# model/predecessor pins, while authorizing the set-semantic PEFT reload fix;
+# its immutable JSON was independently reloaded before this release-only
+# commit. No environment variable can bypass this boundary.
 TASTE_T6_WRAPPER_RELEASED=1
 [[ "$TASTE_T6_WRAPPER_RELEASED" == "1" ]] \
   || { echo "TASTE_T6_WRAPPER_NOT_RELEASED" >&2; exit 78; }
