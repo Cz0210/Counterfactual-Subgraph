@@ -325,6 +325,19 @@ def resource_cap_decision(*, completed_step: int, valid_unique_rule_count: int) 
     }
 
 
+def fallback_checkpoint_targets(completed_step: int) -> tuple[int, ...]:
+    """Return the only permitted durable continuation cadence after 20k."""
+
+    if (
+        type(completed_step) is not int
+        or completed_step not in {M_MAX, M_MAX + CHECK_INTERVAL}
+    ):
+        raise TasteComRecGCFullError("Taste T14 fallback cursor is invalid")
+    return tuple(
+        range(completed_step + CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL)
+    )
+
+
 def _checkpoint_receipt_path(path: Path) -> Path:
     return path.with_suffix(".json")
 
@@ -687,27 +700,55 @@ def run_t14_full(
             raise TasteComRecGCFullError("Taste T14 generation produced no state")
         completed_now = int(state.completed_step)
         valid = count_train_side_valid_unique(bridge)
-        decision = resource_cap_decision(
-            completed_step=completed_now,
-            valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
-        )
+        if completed_now == M_MAX or completed_now == M_FALLBACK_MAX:
+            decision = resource_cap_decision(
+                completed_step=completed_now,
+                valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
+            )
+        elif M_MAX < completed_now < M_FALLBACK_MAX:
+            receipt_path = root / "resource_cap_receipt.json"
+            if not receipt_path.is_file():
+                raise TasteComRecGCFullError(
+                    "Taste T14 resumed fallback lacks its 20k authorization"
+                )
+            decision = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if (
+                type(decision) is not dict
+                or decision.get("state") != "EXTEND_ONCE_TO_25K"
+                or decision.get("m_effective") != M_MAX
+            ):
+                raise TasteComRecGCFullError(
+                    "Taste T14 fallback authorization changed"
+                )
+        else:
+            raise TasteComRecGCFullError("Taste T14 resume cursor is invalid")
         if decision["state"] == "EXTEND_ONCE_TO_25K":
-            state = run_generation_loop(
-                module,
-                input_graphs=dataset,
-                importance_args=importance_args,
-                teleport_probability=parameters.teleport_probability,
-                max_steps=M_FALLBACK_MAX,
-                heads=parameters.heads,
-                initial_state=state,
-            )
-            _write_checkpoint(
-                module=module,
-                bridge=bridge,
-                loop_state=state,
-                parameters=parameters,
-                path=checkpoint_root / f"checkpoint-{M_FALLBACK_MAX:06d}.pt",
-            )
+            _atomic_json(root / "valid_unique.json", valid)
+            _atomic_json(root / "resource_cap_receipt.json", decision)
+            for target in fallback_checkpoint_targets(completed_now):
+                state = run_generation_loop(
+                    module,
+                    input_graphs=dataset,
+                    importance_args=importance_args,
+                    teleport_probability=parameters.teleport_probability,
+                    max_steps=target,
+                    heads=parameters.heads,
+                    initial_state=state,
+                )
+                _write_checkpoint(
+                    module=module,
+                    bridge=bridge,
+                    loop_state=state,
+                    parameters=parameters,
+                    path=checkpoint_root / f"checkpoint-{target:06d}.pt",
+                )
+                _progress(
+                    root,
+                    phase="FALLBACK_GENERATION",
+                    completed_step=target,
+                    cohort_count=len(cohort),
+                    valid_unique_rule_count=None,
+                )
             valid = count_train_side_valid_unique(bridge)
             decision = resource_cap_decision(
                 completed_step=M_FALLBACK_MAX,
@@ -895,6 +936,7 @@ __all__ = [
     "VALID_UNIQUE_POLICY",
     "build_full_train_correct_source_cohort",
     "count_train_side_valid_unique",
+    "fallback_checkpoint_targets",
     "resource_cap_decision",
     "run_t14_full",
     "validate_t14_full_output",

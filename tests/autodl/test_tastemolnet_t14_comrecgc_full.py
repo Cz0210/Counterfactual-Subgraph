@@ -13,6 +13,7 @@ from src.baselines.tastemolnet_comrecgc_full import (
     GENERATION_PASS_MARKER,
     TasteComRecGCFullError,
     build_full_train_correct_source_cohort,
+    fallback_checkpoint_targets,
     resource_cap_decision,
     validate_t14_full_output,
 )
@@ -81,6 +82,10 @@ def test_resource_cap_uses_20k_then_one_25k_fallback() -> None:
     )["state"] == "SCIENTIFIC_FAILED_INSUFFICIENT_VALID_RULES"
     with pytest.raises(TasteComRecGCFullError, match="off cadence"):
         resource_cap_decision(completed_step=22_500, valid_unique_rule_count=99)
+    assert fallback_checkpoint_targets(20_000) == (22_500, 25_000)
+    assert fallback_checkpoint_targets(22_500) == (25_000,)
+    with pytest.raises(TasteComRecGCFullError, match="cursor"):
+        fallback_checkpoint_targets(17_500)
 
 
 def test_independent_terminal_verifier_reopens_bounded_train_only_closure(
