@@ -10,6 +10,7 @@ import pytest
 
 from scripts import train_tastemolnet_gnn_ppo as runner
 from src.rewards.gnn_ppo_reward import TASTE_GNN_PPO_REWARD_SCHEMA
+from src.train import tastemolnet_gnn_ppo as typed_ppo
 from src.train.tastemolnet_gnn_ppo import (
     TASTE_PPO_CHECKPOINT_IDENTITY_SCHEMA,
     TASTE_PPO_MARKER,
@@ -40,6 +41,44 @@ def test_t6_runtime_receipt_fields_support_real_managed_t2(tmp_path: Path) -> No
     )
     assert root == managed_root
     assert digest == "a" * 64
+
+
+def test_t6_terminal_validator_accepts_real_managed_t2_binding(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "managed-t2").resolve()
+    root.mkdir()
+    files = {
+        name: str(index) * 64
+        for index, name in enumerate(
+            sorted(typed_ppo._TASTE_PPO_MANAGED_T2_RECEIPT_FILES), start=1
+        )
+    }
+    artifacts = {
+        "model.pt": "8" * 64,
+        "feature_schema.json": "9" * 64,
+        "split_manifest.json": "a" * 64,
+    }
+    binding = {
+        "schema_version": typed_ppo.TASTE_PPO_MANAGED_T2_BINDING_SCHEMA,
+        "status": "PASS",
+        "root": str(root),
+        "receipt_id": root.name,
+        "gate_sha256": files["gate.json"],
+        "source_evidence_file_sha256": files["source_evidence.json"],
+        "source_evidence_sha256": "b" * 64,
+        "receipt_inventory_sha256": typed_ppo._canonical_sha256(files),  # noqa: SLF001
+        "file_sha256": files,
+        "source_artifact_hashes": artifacts,
+        "model_sha256": artifacts["model.pt"],
+        "feature_schema_file_sha256": artifacts["feature_schema.json"],
+        "split_manifest_file_sha256": artifacts["split_manifest.json"],
+    }
+    validated = typed_ppo._validate_t2_adoption_binding(binding)  # noqa: SLF001
+    assert validated == binding
+    assert typed_ppo._t2_adoption_receipt_sha256(validated) == binding[  # noqa: SLF001
+        "receipt_inventory_sha256"
+    ]
 
 
 def _row(destination: int) -> dict[str, object]:

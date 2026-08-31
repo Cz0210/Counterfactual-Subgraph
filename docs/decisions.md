@@ -135,6 +135,12 @@ split-manifest file through `HeldT2Receipt`; silently substituting the legacy
 likewise registered through its published `verification.json`, because that
 adoption truthfully has no legacy `output_hashes.json`.
 
+The same managed receipt identity is carried through the runtime input closure,
+the smoke gate, and the independent terminal-output validator. In particular,
+the current receipt-inventory digest replaces the absent legacy receipt-file
+digest at every one of those boundaries; legacy artifacts remain readable only
+through their explicitly tagged historical schema.
+
 ### Consequences
 
 - T6 now revalidates the real managed-v2 predecessor layout instead of a stale

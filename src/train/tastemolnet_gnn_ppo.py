@@ -37,6 +37,35 @@ TASTE_PPO_VALUE_HEAD_PARAMETER_SCHEMA = (
     "tastemolnet_ppo_value_head_parameter_identity_v1"
 )
 TASTE_PPO_OUTPUT_EVIDENCE_SCHEMA = "tastemolnet_ours_ppo_output_evidence_v1"
+TASTE_PPO_MANAGED_T2_BINDING_SCHEMA = "tastemolnet_t6_t2_receipt_binding_v2"
+_TASTE_PPO_MANAGED_T2_RECEIPT_FILES = frozenset(
+    {
+        "PASS",
+        "artifact_hashes.json",
+        "gate.json",
+        "input_hashes.json",
+        "sha256s.txt",
+        "source_evidence.json",
+        "verification.json",
+    }
+)
+_TASTE_PPO_MANAGED_T2_BINDING_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "root",
+        "receipt_id",
+        "gate_sha256",
+        "source_evidence_file_sha256",
+        "source_evidence_sha256",
+        "receipt_inventory_sha256",
+        "file_sha256",
+        "source_artifact_hashes",
+        "model_sha256",
+        "feature_schema_file_sha256",
+        "split_manifest_file_sha256",
+    }
+)
 TASTE_PPO_REQUIRED_UPDATE_METRICS = (
     "global_step",
     "rollout_batch_size",
@@ -117,6 +146,59 @@ def _is_sha256(value: Any) -> bool:
 
 
 def _validate_t2_adoption_binding(value: Any) -> dict[str, Any]:
+    if (
+        type(value) is dict
+        and value.get("schema_version") == TASTE_PPO_MANAGED_T2_BINDING_SCHEMA
+    ):
+        if set(value) != _TASTE_PPO_MANAGED_T2_BINDING_KEYS:
+            raise ValueError("Taste PPO managed T2 adoption binding keys changed")
+        root_value = value.get("root")
+        root = Path(root_value) if type(root_value) is str else None
+        files = value.get("file_sha256")
+        artifacts = value.get("source_artifact_hashes")
+        if (
+            value.get("status") != "PASS"
+            or root is None
+            or not root.is_absolute()
+            or Path(os.path.abspath(root)) != root
+            or "/proc/self/fd/" in str(root)
+            or value.get("receipt_id") != root.name
+            or type(files) is not dict
+            or set(files) != _TASTE_PPO_MANAGED_T2_RECEIPT_FILES
+            or any(not _is_sha256(digest) for digest in files.values())
+            or value.get("receipt_inventory_sha256")
+            != _canonical_sha256(files)
+            or type(artifacts) is not dict
+            or any(
+                name not in artifacts or not _is_sha256(artifacts.get(name))
+                for name in (
+                    "model.pt",
+                    "feature_schema.json",
+                    "split_manifest.json",
+                )
+            )
+            or any(
+                not _is_sha256(value.get(key))
+                for key in (
+                    "gate_sha256",
+                    "source_evidence_file_sha256",
+                    "source_evidence_sha256",
+                    "model_sha256",
+                    "feature_schema_file_sha256",
+                    "split_manifest_file_sha256",
+                )
+            )
+            or value.get("gate_sha256") != files.get("gate.json")
+            or value.get("source_evidence_file_sha256")
+            != files.get("source_evidence.json")
+            or value.get("model_sha256") != artifacts.get("model.pt")
+            or value.get("feature_schema_file_sha256")
+            != artifacts.get("feature_schema.json")
+            or value.get("split_manifest_file_sha256")
+            != artifacts.get("split_manifest.json")
+        ):
+            raise ValueError("Taste PPO managed T2 adoption binding changed")
+        return json.loads(json.dumps(value))
     if type(value) is not dict or set(value) != set(DOWNSTREAM_BINDING_KEYS):
         raise ValueError("Taste PPO T2 adoption binding keys changed")
     if (
@@ -170,6 +252,18 @@ def _validate_t2_adoption_binding(value: Any) -> dict[str, Any]:
     if digest != value["formal_bundle_inventory_sha256"]:
         raise ValueError("Taste PPO T2 formal inventory digest changed")
     return json.loads(json.dumps(value))
+
+
+def _t2_adoption_receipt_sha256(binding: Mapping[str, Any]) -> str:
+    key = (
+        "receipt_inventory_sha256"
+        if binding.get("schema_version") == TASTE_PPO_MANAGED_T2_BINDING_SCHEMA
+        else "receipt_sha256"
+    )
+    value = binding.get(key)
+    if not _is_sha256(value):
+        raise ValueError("Taste PPO T2 adoption receipt digest changed")
+    return str(value)
 
 
 def _canonical_sha256(payload: Mapping[str, Any]) -> str:
@@ -1319,7 +1413,9 @@ class HeldTastePPOOutput:
         )
         expected_t2 = {
             "t2_adoption_gate_sha256": t2_binding["gate_sha256"],
-            "t2_adoption_receipt_sha256": t2_binding["receipt_sha256"],
+            "t2_adoption_receipt_sha256": _t2_adoption_receipt_sha256(
+                t2_binding
+            ),
             "t2_adoption_binding_sha256": _canonical_sha256(t2_binding),
         }
         if any(
