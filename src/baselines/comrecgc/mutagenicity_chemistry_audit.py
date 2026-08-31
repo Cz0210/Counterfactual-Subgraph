@@ -42,6 +42,14 @@ from .project_dataset import (
 from .runtime import _torch_load, _torch_save_atomic, validate_counterfactual_payload
 
 
+AIDS_MULTICOMPONENT_SOURCE_NOOP_ENV = (
+    "ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1"
+)
+AIDS_MULTICOMPONENT_SOURCE_NOOP_POLICY = (
+    "aids_multicomponent_source_noop_identity_v1"
+)
+
+
 def _csv_bytes(rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> bytes:
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=list(fields), extrasaction="ignore")
@@ -197,6 +205,226 @@ def _canonical(smiles: str) -> str:
     if molecule is None:
         raise ValueError(f"Source SMILES is invalid: {smiles!r}")
     return Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
+
+
+def _canonical_isomeric_component_multiset(smiles: str) -> tuple[str, ...]:
+    """Return a multiplicity-preserving canonical identity for every component."""
+
+    from rdkit import Chem
+
+    molecule = Chem.MolFromSmiles(str(smiles))
+    if molecule is None:
+        raise ValueError(f"AIDS source component identity is invalid: {smiles!r}")
+    Chem.SanitizeMol(molecule)
+    components: list[str] = []
+    for component in Chem.GetMolFrags(
+        molecule,
+        asMols=True,
+        sanitizeFrags=True,
+    ):
+        heavy = Chem.RemoveHs(component, sanitize=True)
+        components.append(
+            Chem.MolToSmiles(
+                heavy,
+                canonical=True,
+                isomericSmiles=True,
+            )
+        )
+    if not components:
+        raise ValueError("AIDS source component identity is empty.")
+    return tuple(sorted(components))
+
+
+def _tensor_payload(value: Any) -> tuple[str, tuple[int, ...], Any] | None:
+    if value is None:
+        return None
+    current = value.detach() if hasattr(value, "detach") else value
+    current = current.cpu() if hasattr(current, "cpu") else current
+    shape = tuple(int(item) for item in getattr(current, "shape", ()))
+    payload = current.tolist() if hasattr(current, "tolist") else current
+    return str(getattr(current, "dtype", type(current).__name__)), shape, payload
+
+
+def _tensor_exact(left: Any, right: Any) -> bool:
+    return _tensor_payload(left) == _tensor_payload(right)
+
+
+def _graph_component_count(graph: Any) -> int:
+    num_nodes = int(getattr(graph, "num_nodes", -1))
+    if num_nodes <= 0:
+        raise ValueError("AIDS source graph has no nodes.")
+    edge_index = _tensor_payload(getattr(graph, "edge_index", None))
+    if edge_index is None:
+        raise ValueError("AIDS source graph has no edge_index tensor.")
+    values = edge_index[2]
+    if not isinstance(values, list) or len(values) != 2:
+        raise ValueError("AIDS source graph edge_index is not [2, E].")
+    if len(values[0]) != len(values[1]):
+        raise ValueError("AIDS source graph edge_index rows are misaligned.")
+    adjacency = [set() for _ in range(num_nodes)]
+    for source, target in zip(values[0], values[1], strict=True):
+        a, b = int(source), int(target)
+        if not 0 <= a < num_nodes or not 0 <= b < num_nodes:
+            raise ValueError("AIDS source graph edge_index is outside its node axis.")
+        if a != b:
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+    unseen = set(range(num_nodes))
+    count = 0
+    while unseen:
+        count += 1
+        stack = [unseen.pop()]
+        while stack:
+            node = stack.pop()
+            neighbours = adjacency[node] & unseen
+            unseen.difference_update(neighbours)
+            stack.extend(neighbours)
+    return count
+
+
+def _node_lineage(graph: Any, field: str) -> tuple[int, ...] | None:
+    value = getattr(graph, field, None)
+    if value is None:
+        return None
+    payload = _tensor_payload(value)
+    if payload is None or not isinstance(payload[2], list):
+        return None
+    return tuple(int(item) for item in payload[2])
+
+
+def _aids_source_noop_identity(
+    *,
+    graph: Any,
+    clone_graph: Any,
+    loaded_graph: Any,
+    batched_graph: Any,
+    record: Mapping[str, Any],
+    reconstructed_smiles: str,
+    decoded: Any,
+    multicomponent_authorized: bool,
+) -> dict[str, Any]:
+    """Prove a source-only empty action without relaxing generated decoding."""
+
+    variants = (graph, clone_graph, loaded_graph, batched_graph)
+    expected_components = _canonical_isomeric_component_multiset(
+        str(record["canonical_smiles"])
+    )
+    component_views = {
+        "record": expected_components,
+        "reconstructed": _canonical_isomeric_component_multiset(
+            reconstructed_smiles
+        ),
+        "graph_native": _canonical_isomeric_component_multiset(
+            str(record["graph_native_smiles"])
+        ),
+        "requested_source": _canonical_isomeric_component_multiset(
+            str(record["original_smiles"])
+        ),
+    }
+    component_multiset_exact = all(
+        value == expected_components for value in component_views.values()
+    )
+    molecule_component_count = len(expected_components)
+    graph_component_count = _graph_component_count(graph)
+    is_multicomponent = molecule_component_count > 1
+    if is_multicomponent and not multicomponent_authorized:
+        raise ValueError(
+            "AIDS/HIV multi-component source no-op requires "
+            f"{AIDS_MULTICOMPONENT_SOURCE_NOOP_ENV}=1."
+        )
+
+    expected_origin = tuple(range(int(graph.num_nodes)))
+    comrecgc_lineages = tuple(
+        _node_lineage(value, "comrecgc_node_origin") for value in variants
+    )
+    gcf_lineages = tuple(_node_lineage(value, "gcf_node_origin") for value in variants)
+    node_lineage_exact = bool(
+        all(value == expected_origin for value in comrecgc_lineages)
+        and all(value == expected_origin for value in gcf_lineages)
+    )
+    atom_tensor_record_exact = _tensor_payload(graph.x)[2] == record["x"]
+    bond_tensor_record_exact = (
+        _tensor_payload(graph.edge_index)[2] == record["edge_index"]
+    )
+    atom_tensor_closure_exact = all(
+        _tensor_exact(graph.x, value.x) for value in variants[1:]
+    )
+    bond_tensor_closure_exact = all(
+        _tensor_exact(graph.edge_index, value.edge_index) for value in variants[1:]
+    ) and all(
+        _tensor_exact(
+            getattr(graph, "edge_attr", None),
+            getattr(value, "edge_attr", None),
+        )
+        for value in variants[1:]
+    )
+    node_count_closure_exact = all(
+        int(value.num_nodes) == int(graph.num_nodes) for value in variants[1:]
+    )
+    parent_identity_closure_exact = all(
+        str(getattr(value, "comrecgc_parent_id", ""))
+        == str(record["molecule_id"])
+        for value in variants
+    )
+    graph_hashes = tuple(stable_graph_sha256(value) for value in variants)
+    graph_hash_closure_exact = len(set(graph_hashes)) == 1
+    component_count_exact = bool(
+        graph_component_count == molecule_component_count
+        and all(len(value) == molecule_component_count for value in component_views.values())
+    )
+    if is_multicomponent:
+        # The shared generated-candidate decoder must continue to reject this
+        # disconnected graph. Only the byte/tensor-identical source empty
+        # action is eligible for the separately authorized identity proof.
+        decoder_contract_exact = bool(
+            decoded.decode_ok is False
+            and decoded.failure_reason == "generated_disconnected_or_empty"
+        )
+        identity_mode = AIDS_MULTICOMPONENT_SOURCE_NOOP_POLICY
+    else:
+        decoder_contract_exact = bool(
+            decoded.decode_ok
+            and _canonical_isomeric_component_multiset(decoded.canonical_smiles)
+            == expected_components
+        )
+        identity_mode = "single_component_generated_decoder_v1"
+
+    checks = {
+        "component_multiset_exact": component_multiset_exact,
+        "component_count_exact": component_count_exact,
+        "atom_tensor_record_exact": atom_tensor_record_exact,
+        "bond_tensor_record_exact": bond_tensor_record_exact,
+        "atom_tensor_closure_exact": atom_tensor_closure_exact,
+        "bond_tensor_closure_exact": bond_tensor_closure_exact,
+        "node_count_closure_exact": node_count_closure_exact,
+        "node_lineage_exact": node_lineage_exact,
+        "parent_identity_closure_exact": parent_identity_closure_exact,
+        "graph_hash_closure_exact": graph_hash_closure_exact,
+        "decoder_contract_exact": decoder_contract_exact,
+        "multicomponent_authority_exact": (
+            bool(multicomponent_authorized) if is_multicomponent else True
+        ),
+    }
+    return {
+        "identity_mode": identity_mode,
+        "is_multicomponent_source": is_multicomponent,
+        "component_count": molecule_component_count,
+        "graph_component_count": graph_component_count,
+        "canonical_isomeric_component_multiset": list(expected_components),
+        "canonical_isomeric_component_multiset_sha256": stable_json_sha256(
+            list(expected_components)
+        ),
+        "component_multiplicity_preserved": True,
+        "multicomponent_authorized": bool(multicomponent_authorized),
+        "graph_hashes": {
+            "source": graph_hashes[0],
+            "clone": graph_hashes[1],
+            "save_load": graph_hashes[2],
+            "batch_unbatch": graph_hashes[3],
+        },
+        **checks,
+        "noop_roundtrip_ok": all(checks.values()),
+    }
 
 
 def _project_commit(project_root: Path) -> str:
@@ -362,7 +590,12 @@ def _source_and_noop_gate(
 
 
 def _aids_source_and_noop_gate(
-    *, root: Path, dataset_dir: Path, source_csv: Path, parent_limit: int
+    *,
+    root: Path,
+    dataset_dir: Path,
+    source_csv: Path,
+    parent_limit: int,
+    multicomponent_authorized: bool,
 ) -> tuple[
     dict[str, Any],
     list[Any],
@@ -430,6 +663,7 @@ def _aids_source_and_noop_gate(
         decoded = decode_generated_fullgraph(
             graph, source_record=record, schema=schema
         )
+        clone_graph = graph.clone()
         graph_hash = stable_graph_sha256(graph)
         loaded_hash = stable_graph_sha256(loaded_graph)
         batched_hash = stable_graph_sha256(batched_graph)
@@ -442,10 +676,15 @@ def _aids_source_and_noop_gate(
             and reconstructed == expected
             and node_origin == expected_origin
         )
-        no_op_ok = bool(
-            decoded.decode_ok
-            and decoded.canonical_smiles == expected
-            and graph_hash == loaded_hash == batched_hash
+        identity = _aids_source_noop_identity(
+            graph=graph,
+            clone_graph=clone_graph,
+            loaded_graph=loaded_graph,
+            batched_graph=batched_graph,
+            record=record,
+            reconstructed_smiles=reconstructed,
+            decoded=decoded,
+            multicomponent_authorized=multicomponent_authorized,
         )
         source_rows.append(
             {
@@ -480,12 +719,48 @@ def _aids_source_and_noop_gate(
             {
                 "parent_id": parent_id,
                 "source_graph_sha256": graph_hash,
-                "clone_graph_sha256": stable_graph_sha256(graph.clone()),
+                "clone_graph_sha256": stable_graph_sha256(clone_graph),
                 "save_load_graph_sha256": loaded_hash,
                 "batch_unbatch_graph_sha256": batched_hash,
                 "empty_action_decode_ok": decoded.decode_ok,
-                "canonical_smiles": decoded.canonical_smiles,
-                "noop_roundtrip_ok": no_op_ok,
+                "empty_action_decode_failure_reason": decoded.failure_reason,
+                "canonical_smiles": expected,
+                "identity_mode": identity["identity_mode"],
+                "is_multicomponent_source": identity["is_multicomponent_source"],
+                "component_count": identity["component_count"],
+                "graph_component_count": identity["graph_component_count"],
+                "canonical_isomeric_component_multiset": json.dumps(
+                    identity["canonical_isomeric_component_multiset"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "canonical_isomeric_component_multiset_sha256": identity[
+                    "canonical_isomeric_component_multiset_sha256"
+                ],
+                "component_multiplicity_preserved": identity[
+                    "component_multiplicity_preserved"
+                ],
+                "component_multiset_exact": identity["component_multiset_exact"],
+                "component_count_exact": identity["component_count_exact"],
+                "atom_tensor_record_exact": identity["atom_tensor_record_exact"],
+                "bond_tensor_record_exact": identity["bond_tensor_record_exact"],
+                "atom_tensor_closure_exact": identity[
+                    "atom_tensor_closure_exact"
+                ],
+                "bond_tensor_closure_exact": identity[
+                    "bond_tensor_closure_exact"
+                ],
+                "node_count_closure_exact": identity["node_count_closure_exact"],
+                "node_lineage_closure_exact": identity["node_lineage_exact"],
+                "parent_identity_closure_exact": identity[
+                    "parent_identity_closure_exact"
+                ],
+                "graph_hash_closure_exact": identity["graph_hash_closure_exact"],
+                "decoder_contract_exact": identity["decoder_contract_exact"],
+                "multicomponent_authorized": identity[
+                    "multicomponent_authorized"
+                ],
+                "noop_roundtrip_ok": identity["noop_roundtrip_ok"],
             }
         )
     if not all(bool(row["roundtrip_ok"]) for row in source_rows):
@@ -563,12 +838,21 @@ def run_mutagenicity_chemistry_audit(
         )
 
     if dataset == "aids":
+        authorization_value = os.environ.get(
+            AIDS_MULTICOMPONENT_SOURCE_NOOP_ENV,
+            "0",
+        )
+        if authorization_value not in {"0", "1"}:
+            raise ValueError(
+                f"{AIDS_MULTICOMPONENT_SOURCE_NOOP_ENV} must be exactly 0 or 1."
+            )
         schemas, source_graphs, source_records, source_rows, no_op_rows = (
             _aids_source_and_noop_gate(
                 root=root,
                 dataset_dir=dataset_root,
                 source_csv=Path(str(source_csv)).expanduser().resolve(),
                 parent_limit=parent_limit,
+                multicomponent_authorized=authorization_value == "1",
             )
         )
         schema = next(iter(schemas.values()))
@@ -798,6 +1082,55 @@ def run_mutagenicity_chemistry_audit(
     noop_fields = list(no_op_rows[0])
     _write_csv(root / "source_roundtrip.csv", source_rows, source_fields)
     _write_csv(root / "noop_roundtrip.csv", no_op_rows, noop_fields)
+    aids_source_noop_receipt: dict[str, Any] | None = None
+    if dataset == "aids":
+        component_histogram = Counter(int(row["component_count"]) for row in no_op_rows)
+        multicomponent_count = sum(
+            bool(row["is_multicomponent_source"]) for row in no_op_rows
+        )
+        aids_source_noop_receipt = {
+            "schema_version": AIDS_MULTICOMPONENT_SOURCE_NOOP_POLICY,
+            "dataset": "AIDS/HIV",
+            "authorization_environment": AIDS_MULTICOMPONENT_SOURCE_NOOP_ENV,
+            "authorization_enabled": os.environ.get(
+                AIDS_MULTICOMPONENT_SOURCE_NOOP_ENV
+            )
+            == "1",
+            "source_parent_count": len(source_rows),
+            "expected_source_parent_count": int(parent_limit),
+            "full_requested_cohort_preserved": len(source_rows) == int(parent_limit),
+            "multicomponent_source_count": multicomponent_count,
+            "component_count_histogram": {
+                str(key): int(value) for key, value in sorted(component_histogram.items())
+            },
+            "all_source_roundtrips_passed": all(
+                bool(row["roundtrip_ok"]) for row in source_rows
+            ),
+            "all_source_noop_identities_passed": all(
+                bool(row["noop_roundtrip_ok"]) for row in no_op_rows
+            ),
+            "canonical_isomeric_component_multiset_with_multiplicity": True,
+            "atom_and_bond_tensor_closure_required": True,
+            "node_lineage_closure_required": True,
+            "clone_save_load_batch_unbatch_closure_required": True,
+            "source_roundtrip_path": str(root / "source_roundtrip.csv"),
+            "source_roundtrip_sha256": sha256_file(root / "source_roundtrip.csv"),
+            "noop_roundtrip_path": str(root / "noop_roundtrip.csv"),
+            "noop_roundtrip_sha256": sha256_file(root / "noop_roundtrip.csv"),
+            "source_rows_excluded": 0,
+            "source_components_stripped": False,
+            "source_components_repaired": False,
+            "generated_candidate_decoder_modified": False,
+            "generated_candidate_single_component_gate_preserved": True,
+            "generation_rerun": False,
+            "dbscan_rerun": False,
+            "calibration_loaded": False,
+            "test_loaded": False,
+        }
+        write_json(
+            root / "aids_multicomponent_source_noop_identity.json",
+            aids_source_noop_receipt,
+        )
     _write_csv(root / "raw_candidates.csv", raw_rows, list(raw_rows[0]))
     _write_csv(root / "candidate_validity.csv", repaired_rows, list(repaired_rows[0]))
     _write_jsonl(root / "action_replay.jsonl", action_rows)
@@ -877,6 +1210,28 @@ def run_mutagenicity_chemistry_audit(
         "source_roundtrip_rate": source_pass / len(source_rows),
         "noop_roundtrip_pass_count": noop_pass,
         "noop_roundtrip_rate": noop_pass / len(no_op_rows),
+        "aids_multicomponent_source_noop_identity": (
+            {
+                "policy": AIDS_MULTICOMPONENT_SOURCE_NOOP_POLICY,
+                "authorization_environment": AIDS_MULTICOMPONENT_SOURCE_NOOP_ENV,
+                "authorization_enabled": bool(
+                    aids_source_noop_receipt
+                    and aids_source_noop_receipt["authorization_enabled"]
+                ),
+                "multicomponent_source_count": int(
+                    aids_source_noop_receipt["multicomponent_source_count"]
+                ),
+                "receipt_path": str(
+                    root / "aids_multicomponent_source_noop_identity.json"
+                ),
+                "receipt_sha256": sha256_file(
+                    root / "aids_multicomponent_source_noop_identity.json"
+                ),
+                "generated_candidate_single_component_gate_preserved": True,
+            }
+            if aids_source_noop_receipt is not None
+            else None
+        ),
         "trace_parity": bool(trace_evidence["trace_parity_passed"]),
         "trace_integrity": bool(trace_evidence["trace_integrity_passed"]),
         "trace_evidence_kind": trace_evidence["trace_evidence_kind"],
@@ -993,6 +1348,11 @@ def run_mutagenicity_chemistry_audit(
                 for name in (
                     "source_roundtrip.csv",
                     "noop_roundtrip.csv",
+                    *(
+                        ("aids_multicomponent_source_noop_identity.json",)
+                        if aids_source_noop_receipt is not None
+                        else ()
+                    ),
                     "raw_candidates.jsonl",
                     "repair_provenance.jsonl",
                     "official_medoid_repair.csv",

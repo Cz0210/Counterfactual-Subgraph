@@ -21,6 +21,12 @@ export PYTHONPATH=$PWD
 : "${AIDS_POSTPROCESS_OUTPUT_ROOT:?set AIDS_POSTPROCESS_OUTPUT_ROOT}"
 : "${AIDS_POSTPROCESS_HEARTBEAT:?set AIDS_POSTPROCESS_HEARTBEAT}"
 : "${AIDS_POSTPROCESS_MAX_WORKERS:=8}"
+: "${ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1:?set ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1=1}"
+[[ "$ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1" == "1" ]] || {
+  echo "ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1 must equal 1" >&2
+  exit 2
+}
+export ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1
 
 export CUDA_VISIBLE_DEVICES=""
 export DEVICE=cpu
@@ -34,6 +40,7 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "route=cpu_only_exact_dbscan_adoption"
+echo "aids_multicomponent_source_noop_identity_v1=authorized"
 
 python scripts/autodl/run_aids_comrecgc_exact_postprocess_v1.py \
   --config configs/hpc.yaml \

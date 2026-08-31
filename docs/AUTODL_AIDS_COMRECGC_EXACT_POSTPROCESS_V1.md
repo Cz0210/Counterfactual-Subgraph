@@ -26,6 +26,12 @@ component closure, all-core/no-noise state, and sklearn-float64 semantics.
 - The adoption records `dbscan_recomputed=false` and
   `pair_store_recomputed=false` with every source hash and contract.
 - CUDA is hidden and postprocessing is capped at eight CPU workers.
+- The 236 multi-component source parents remain in the exact 1,283-parent
+  cohort. Their empty action requires
+  `ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1=1` plus exact component-
+  multiset/multiplicity, component-count, tensor, lineage, graph-hash,
+  clone/save-load/batch-unbatch closure. This authority is source-only; the
+  generated full-graph decoder remains single-component.
 - Resume is permitted only for the same root and frozen continuation contract.
   PASS requires the common-recourse closure and every downstream stage.
 - Historical `authoritative_backing_freeze_only_v3` lineage summaries may omit
@@ -46,6 +52,7 @@ cd /root/autodl-tmp/worktrees/<immutable-fast16-commit>
 CUDA_VISIBLE_DEVICES= DEVICE=cpu GPU_REQUIRED=0 \
 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 \
 NUMEXPR_NUM_THREADS=8 AIDS_POSTPROCESS_MAX_WORKERS=8 \
+ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1=1 \
 /root/miniconda3/envs/smiles_pip118/bin/python \
   scripts/autodl/run_aids_comrecgc_exact_postprocess_v1.py \
   --config configs/hpc.yaml \

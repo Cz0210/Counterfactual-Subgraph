@@ -3081,6 +3081,25 @@ Mutagenicity roadmaps.
 - [ ] Launch a fresh AIDS postprocess root from the immutable reviewed commit;
   never reuse either failed postprocess root.
 
+## 2026-09-01: AIDS strict multi-component source no-op identity
+
+- [x] Keep the complete 1,283-parent frozen AIDS cohort and completed exact
+  DBSCAN result unchanged; never strip salts or exclude a parent.
+- [x] Require the explicit
+  `ALLOW_AIDS_MULTICOMPONENT_SOURCE_NOOP_IDENTITY_V1=1` authority before any
+  multi-component source empty action can pass.
+- [x] Bind canonical-isomeric component multisets with multiplicity, graph and
+  molecule component counts, atom/bond tensors, both node-lineage tensors,
+  parent identity, stable graph hashes, and clone/save-load/batch-unbatch
+  closure.
+- [x] Publish a dedicated source-only receipt and retain the failed generated
+  decoder reason instead of silently treating it as a generated PASS.
+- [x] Preserve the generated COMRECGC full-graph single-component gate and add
+  negative tests for tensor, lineage, multiplicity, and connected non-no-op
+  drift.
+- [ ] Launch a fresh CPU-only postprocess root from the immutable reviewed
+  successor; never resume or modify the prior chemistry-failed root.
+
 ## 2026-08-31: T6 reviewed GPU0 policy authority closure
 
 - [x] Preserve the already-reviewed T6 GPU0 policy JSON unchanged.
