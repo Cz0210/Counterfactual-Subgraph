@@ -5,9 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 
-# This reviewed execution successor changes the literal together with the
-# exact Python commit/predecessor pins; no environment variable can bypass
-# this boundary.
+# Successor authority 006661f closes the reviewed GPU0 policy hash while
+# retaining the exact model/predecessor pins; no environment variable can
+# bypass this boundary.
 TASTE_T6_WRAPPER_RELEASED=1
 [[ "$TASTE_T6_WRAPPER_RELEASED" == "1" ]] \
   || { echo "TASTE_T6_WRAPPER_NOT_RELEASED" >&2; exit 78; }
