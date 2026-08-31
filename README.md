@@ -72,6 +72,9 @@ See:
 
 - `docs/EXPERIMENT_TRACKING.md`
 - `docs/EXPERIMENT_LOG.md`
+- `docs/AUTODL_FAST16_MATRIX_PUBLISHER.md` (strict per-cell final-terminal
+  adoption and one locked, hash-closed authority chain for Taste and non-Taste
+  4x4 matrix completion)
 - `docs/AUTODL_BACE_FROZEN_GNN_DOWNSTREAM.md` (foreground B7 prep and B8--B14)
 - `docs/AUTODL_BACE_GLOBALGCE_K20_EXTENSION.md` (GPU2-only, train-only
   80/200/500 raw native-rule escalation while the published selector remains

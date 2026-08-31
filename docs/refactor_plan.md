@@ -14,6 +14,23 @@
 - [ ] Deploy the sidecar against the live resume executor and verify its first
   waiting heartbeat.
 
+## 2026-09-01: One locked authority chain for the remaining paper cells
+
+- [x] Add strict one-cell terminal validation for AIDS/ComRecGC,
+  Mutagenicity/ComRecGC, BACE/GlobalGCE, and BACE/ComRecGC.
+- [x] Reuse the existing Mut exact-postprocess appender as read-only terminal
+  evidence while republishing from the current shared pointer, never its stale
+  fork.
+- [x] Serialize Taste and non-Taste publication through one `flock`-protected,
+  hash-reopened authority pointer.
+- [x] Make the durable CPU-only queue idempotent for cells already applied and
+  fail closed while a future terminal locator is absent.
+- [x] Add direct/queue CLIs, paired Slurm wrappers, focused tests, and a
+  deployment runbook.
+- [ ] Deploy from one immutable commit, initialize the pointer from the current
+  8/16 authority exactly once, then let each genuine terminal append
+  independently.
+
 ## 2026-09-01: Strict TasteMolNet paper-cell matrix append
 
 - [x] Reuse the existing hash-closed registry schema and atomic writer.

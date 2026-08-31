@@ -119,6 +119,34 @@ Only that verifier writes `[TASTE_COMRECGC_PASS]` as the final file.
 Implemented with focused local tests; AutoDL execution pending.
 
 ---
+## [2026-09-01] Serialize all remaining paper-cell appends through one authority pointer
+
+### Motivation
+
+Taste and non-Taste method terminals can finish in any order.  Independent
+append jobs seeded from the same 8/16 root would each be internally valid but
+would create incompatible matrix forks.  Mutagenicity's older exact
+postprocess also publishes its own strict fork before its outer PASS.
+
+### Decision
+
+Keep dataset-specific terminal validators, but serialize their immutable
+one-cell append operations with one exact `flock` and one atomically rewritten
+pointer.  Under the lock, always reopen the pointer's hash-closed authority,
+publish to a fresh root, independently reopen it, and update the pointer only
+if the passing-cell set is exactly the predecessor plus the requested cell.
+Reopen Mutagenicity's original append as terminal evidence, but never advance
+the shared pointer to that possibly stale fork.  Treat a cell already present
+after queue restart as adopted success.
+
+### Consequences
+
+- T11--T14, AIDS, Mutagenicity, and the two pending BACE methods may publish in
+  their actual completion order without losing another cell.
+- Science/smoke/generation-only/failed roots remain ineligible; terminal
+  validation failures do not block unrelated ready cells.
+- The pointer adds no scientific stage and owns no GPU.  It is only the
+  serialization boundary around existing strict appenders.
 
 ## [2026-09-01] Append Taste paper cells only from exact full terminals
 
