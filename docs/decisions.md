@@ -53,6 +53,12 @@ than twenty, never duplicate a rule, and plateau Figure 3 for `k > R` when
 freeze and standardization tasks; do not rerun training or expose test bytes to
 recovery.
 
+Keep the selected 360-parent source pool distinct from the persisted 353-row
+source optimization cohort.  The latter is accepted only when its 282/71
+train/validation counts exactly match the stored disjoint in-range indices and
+the hash-closed resume identity/terminal heartbeat; it is not inflated to the
+outer selected-parent count.
+
 ### Consequences
 
 - The numeric rule validator remains strict; only the missing typed edge bridge

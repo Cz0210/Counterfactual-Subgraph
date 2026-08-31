@@ -242,6 +242,44 @@ def _load_rules(path: Path) -> Mapping[str, Any]:
     return payload
 
 
+def _cohort_indices_match(
+    cohort: Any,
+    *,
+    train_indices: Any,
+    validation_indices: Any,
+    parent_universe_size: int,
+) -> bool:
+    """Bind the resume cohort to its persisted train/validation indices.
+
+    The 360 selected source parents include seven rows that are not members of
+    the source model's train/validation optimization cohort.  The completed
+    run therefore correctly records a 353-row source cohort.  Requiring the
+    cohort count to equal the selected-parent count conflates those contracts.
+    """
+
+    if (
+        type(cohort) is not dict
+        or type(train_indices) is not list
+        or type(validation_indices) is not list
+        or any(type(value) is not int for value in [*train_indices, *validation_indices])
+    ):
+        return False
+    train = set(train_indices)
+    validation = set(validation_indices)
+    if (
+        len(train) != len(train_indices)
+        or len(validation) != len(validation_indices)
+        or train & validation
+        or any(value < 0 or value >= parent_universe_size for value in train | validation)
+    ):
+        return False
+    return bool(
+        cohort.get("train_count") == len(train_indices)
+        and cohort.get("val_count") == len(validation_indices)
+        and cohort.get("count") == len(train_indices) + len(validation_indices)
+    )
+
+
 def _validate_completed_training(
     *,
     source: Path,
@@ -292,8 +330,12 @@ def _validate_completed_training(
         or training_config.get("gspan_exact_top_k_pruning") is not True
         or type(oracle_identity) is not dict
         or oracle_identity.get("checkpoint_id") != checkpoint_hash
-        or type(source_cohort) is not dict
-        or source_cohort.get("count") != EXPECTED_SOURCE_PARENT_COUNT
+        or not _cohort_indices_match(
+            source_cohort,
+            train_indices=core.get("source_train_idx"),
+            validation_indices=core.get("source_val_idx"),
+            parent_universe_size=EXPECTED_SOURCE_PARENT_COUNT,
+        )
         or heartbeat.get("stage") != "complete"
         or heartbeat.get("next_epoch") != EXPECTED_EPOCHS + 1
         or heartbeat.get("resume_identity") != resume_identity

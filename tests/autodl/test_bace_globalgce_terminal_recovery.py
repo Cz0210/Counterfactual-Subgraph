@@ -14,6 +14,7 @@ from scripts.autodl.standardize_bace_frozen_cell import (
 from src.baselines.bace_globalgce_terminal_recovery import (
     MIN_RULES,
     PASS_MARKER,
+    _cohort_indices_match,
     build_recovery_controller_fragment,
 )
 from src.baselines.globalgce_bace_native_rules import GlobalGCENativeRule
@@ -102,6 +103,28 @@ def test_affine_edge_scores_are_typed_before_unrelaxed_native_validation() -> No
     # Reopen through the original hard validator; recovery did not broaden its
     # numeric domain or otherwise special-case the row.
     GlobalGCENativeRule.from_payload(rows[0]).validate()
+
+
+def test_source_resume_cohort_is_bound_to_its_persisted_partition_not_pool_size() -> None:
+    cohort = {"count": 353, "train_count": 282, "val_count": 71}
+    assert _cohort_indices_match(
+        cohort,
+        train_indices=list(range(282)),
+        validation_indices=list(range(282, 353)),
+        parent_universe_size=360,
+    )
+    assert not _cohort_indices_match(
+        {**cohort, "count": 360},
+        train_indices=list(range(282)),
+        validation_indices=list(range(282, 353)),
+        parent_universe_size=360,
+    )
+    assert not _cohort_indices_match(
+        cohort,
+        train_indices=list(range(282)),
+        validation_indices=[281, *range(283, 353)],
+        parent_universe_size=360,
+    )
 
 
 def test_recovery_fragment_reuses_candidate_dependency_chain_and_never_trains(
