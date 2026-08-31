@@ -17,11 +17,13 @@ official VRRW loop; it is not a mock producer.  The train-side 20k producer now
 uses the dataset-specific exact external transition store in
 `src/baselines/tastemolnet_gcf_transition_store.py`, the lossless native
 candidate archive in `src/baselines/tastemolnet_gcf_candidate_store.py`, and
-the fresh/resume entry point `scripts/run_tastemolnet_gcf_full.py`.  This is
-still not a T12 paper-result release: generation verification prints only
-`[TASTE_T12_GCF_GENERATION_PASS]`.  The paper marker `[TASTE_GCF_PASS]`
-remains closed until calibration-only freeze, held-out test, standardized
-exports and their separate verifier are implemented and pass.
+the fresh/resume entry point `scripts/run_tastemolnet_gcf_full.py`.
+Generation verification still prints only
+`[TASTE_T12_GCF_GENERATION_PASS]`.  The dataset-specific paper continuation is
+implemented in `src/baselines/tastemolnet_gcf_full_postprocess.py`: it reopens
+that PASS, freezes a calibration-only WNode order, loads held-out test only
+after the freeze, exports Figure 3/Figure 4/Table 2, and requires a distinct
+terminal verifier invocation before `[TASTE_GCF_PASS]` can exist.
 
 ## Authorized identity change
 
@@ -277,18 +279,43 @@ The launcher prints the controller PID/root and status command. A concurrent
 second launch is rejected by a dedicated T12 lock; no general controller
 platform is introduced.
 
-## Remaining paper-cell work
+## Durable generation-to-paper continuation
 
-The following remains before publishing the T12 method cell:
+The paper follower may be started while the generation sidecar is still
+waiting for T11.  It reads the exact generated root from that controller's
+`launch.env`, rejects controller exit/PID reuse before generation PASS, and
+then runs the resumable calibration/test stage followed by a distinct
+terminal verifier process on GPU1.
 
-1. retain and rehash the already-passed real A800 gate-v2 receipt at launch;
-2. run the production resource preflight against the real 3,778-parent route
-   and publish the measured checkpoint/RSS receipt below the hard caps;
-3. calibration-only ordering with the externally frozen shared WNode
-   threshold contract;
-4. post-freeze held-out test evaluation, standardized Figure 3/Figure 4/Table
-   2 exports, and a separate replaying terminal verifier.
+```bash
+export T12_REPO_ROOT=/absolute/deployed/integration-checkout
+export T12_GENERATION_CONTROLLER_ROOT=/absolute/controller-for-running-generation
+export T12_PAPER_CONTROLLER_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/control/t12-paper-$(date -u +%Y%m%dT%H%M%SZ)
+export T12_GPU_INDEX=1
+export T12_TRAIN_CSV=/absolute/prepared/tastemolnet_train.csv
+export T12_CALIBRATION_CSV=/absolute/prepared/tastemolnet_calibration.csv
+export T12_TEST_CSV=/absolute/prepared/tastemolnet_test.csv
+export T12_GNN_CHECKPOINT=/absolute/t3/artifacts/checkpoint
+export T12_MOLCLR_ROOT=/absolute/pinned/molclr/source
+export T12_MOLCLR_CHECKPOINT=/absolute/pinned/molclr/checkpoint.pth
+export T12_WNODE_THRESHOLD_CONTRACT=/absolute/shared-thresholds/tastemolnet.json
+bash scripts/autodl/launch_tastemolnet_t12_paper_after_generation_v1.sh
+```
+
+After exact terminal PASS, the matrix-consumable locator is written atomically
+at `$T12_PAPER_CONTROLLER_ROOT/cell_root_locator.json` with schema
+`fast16_matrix_cell_root_locator_v1`.  The terminal root itself contains exact
+bytes `[TASTE_GCF_PASS]\n`; the distinct verifier root contains the same marker
+and `tastemolnet_t12_terminal_verification_v1` evidence.
+
+For a manual already-generated root, run
+`scripts/run_tastemolnet_gcf_full_postprocess.py` with the same authority paths,
+`--generation-root`, `--generation-verification-root`, `--output-root`, WNode
+cache paths and `--device cuda:0`; add `--resume` when `checkpoint.json` exists.
+Then invoke `scripts/verify_tastemolnet_gcf_full.py` with the same authority,
+paper output, and one fresh `--verification-root`.  The verifier is the only
+process authorized to write the paper PASS.
 
 The NeuroSED distance threshold and shared WNode threshold contract remain
 required external pins.  No value is inferred from a test fixture or generic
-default, and test data must not be opened before calibration freeze.
+default, and test data is not opened before the fsynced calibration freeze.

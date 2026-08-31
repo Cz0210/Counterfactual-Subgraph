@@ -159,10 +159,12 @@
   though the bridge itself is bounded.  Do not lower sample size or k.
 - [x] Add lossless native candidate persistence plus an independent generation
   verifier that reopens the 10k/20k journals, checkpoints and terminal archive.
-- [ ] Add calibration-only ordering, held-out test, standardized exports and
+- [x] Add calibration-only ordering, held-out test, standardized exports and
   the separate paper-cell terminal verifier.
-- [ ] Pin the external shared WNode threshold authority for the full
+- [x] Pin the external shared WNode threshold authority for the full
   calibration/export route; never infer it from test/default values.
+- [ ] Deploy the narrow paper follower beside the existing T12 generation
+  sidecar and adopt only its exact `[TASTE_GCF_PASS]` plus matrix locator.
 
 ## 2026-09-01: TasteMolNet calibration-only threshold authorities
 
