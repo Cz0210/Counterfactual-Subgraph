@@ -59,6 +59,15 @@
   per-parent restart chunks, canonical fragment deduplication, calibration-only
   prefix selection, post-freeze held-out test, standardized export, and a
   separate terminal verifier publishing a fresh root.
+- [x] Require the shared frozen-threshold loader's explicit
+  test-independent/method-shared strict-flip contract; never rewrite those
+  facts as safe defaults in T11 output.
+- [x] Close every generation and calibration/test pair chunk with a typed
+  content/schema/input receipt, and replay any adopted chunk through the same
+  frozen GINE plus MolCLR WNode semantics before resume.
+- [x] Bind the terminal freeze to both generation trees, their canonical merge,
+  the exact frozen calibration/test splits, pair manifests/chunks, and the
+  complete held-out test manifest; cover rehashed semantic and merge tampering.
 - [ ] On AutoDL, supply the existing four-method shared Taste WNode threshold
   JSON plus frozen model/split/MolCLR/cache roots and launch fresh PPO/science/
   final roots; code/tests alone are not a T11 scientific PASS.

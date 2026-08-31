@@ -41,6 +41,7 @@ from src.eval.full_candidate_pool import (
     resolve_adapter_load_path,
     set_global_generation_seed,
 )
+from src.eval.frozen_threshold_manifest import load_shared_frozen_thresholds
 from src.eval.molclr_node_embeddings import canonicalize_smiles
 from src.eval.node_wasserstein_distance import (
     MolCLRNodeWassersteinConfig,
@@ -66,6 +67,143 @@ TABLE_K = 10
 PASS_MARKER = "[TASTE_OURS_PASS]"
 DISTANCE_LINE = "MolCLR-Node-Wasserstein"
 DISTANCE_NAMESPACE = "tastemolnet_ours_full_wnode_v1"
+GENERATION_CHUNK_RECEIPT_SCHEMA = "tastemolnet_t11_generation_chunk_receipt_v2"
+GENERATION_MANIFEST_SCHEMA = "tastemolnet_t11_generation_manifest_v2"
+PAIR_CHUNK_RECEIPT_SCHEMA = "tastemolnet_t11_pair_chunk_receipt_v2"
+PAIR_MANIFEST_SCHEMA = "tastemolnet_t11_pair_manifest_v2"
+GENERATION_ROW_FIELDS = frozenset(
+    {
+        "dataset",
+        "method",
+        "stage",
+        "parent_id",
+        "generation_parent_seed",
+        "parent_smiles",
+        "candidate_index",
+        "candidate_id",
+        "raw_output",
+        "raw_fragment",
+        "canonical_fragment",
+        "parse_ok",
+        "connected",
+        "direct_substructure",
+        "deletion_valid",
+        "oracle_ok",
+        "pred_before",
+        "pred_after",
+        "p_before",
+        "p_after",
+        "cf_drop",
+        "cf_flip",
+        "destination_label",
+        "residual_smiles",
+        "selected_match_index",
+        "reward_total",
+        "oracle_backend",
+        "classifier_family",
+        "rf_oracle_used",
+        "oracle_checkpoint_hash",
+        "split",
+        "calibration_loaded",
+        "test_loaded",
+    }
+)
+PAIR_ROW_FIELDS = frozenset(
+    {
+        "dataset",
+        "method",
+        "stage",
+        "split",
+        "parent_id",
+        "parent_smiles",
+        "candidate_id",
+        "canonical_fragment",
+        "applicable",
+        "num_matches",
+        "num_valid_residuals",
+        "pair_strict_flip",
+        "best_match_index",
+        "best_match_atom_indices",
+        "residual_smiles",
+        "pred_before",
+        "pred_after",
+        "p_before",
+        "p_after",
+        "p1_before",
+        "p1_after",
+        "cf_drop",
+        "wnode_distance",
+        "distance_for_selection",
+        "destination_label",
+        "failure_reason",
+        "action_semantics_version",
+        "match_selection_policy",
+        "cf_mode",
+        "source_label",
+        "oracle_backend",
+        "classifier_family",
+        "rf_oracle_used",
+        "oracle_checkpoint_hash",
+        "temperature_calibration_hash",
+        "feature_schema_hash",
+        "molclr_checkpoint_hash",
+        "distance_namespace",
+    }
+)
+GENERATION_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version", "status", "mode", "identity", "config",
+        "parent_count", "candidate_count", "parent_inventory_sha256",
+        "chunk_inventory", "chunk_inventory_sha256", "candidate_pool_sha256",
+        "train_only", "calibration_loaded", "test_loaded", "rf_oracle_used",
+        "row_schema_sha256", "resume_semantic_replay_required",
+        "semantic_validation",
+    }
+)
+PAIR_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version", "status", "split", "evaluation_identity",
+        "evaluation_identity_sha256", "parent_count", "candidate_count",
+        "pair_count", "chunk_inventory", "chunk_inventory_sha256",
+        "pair_details_sha256", "pair_details_bytes", "row_schema_sha256",
+        "resume_semantic_replay_required", "semantic_validation",
+    }
+)
+SELECTION_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version", "dataset", "method", "stage", "status",
+        "selection_frozen", "selector_fitted_on_calibration", "test_loaded",
+        "test_used_for_selection", "frozen_at", "ordered_rule_ids",
+        "ordered_rule_ids_sha256", "trace", "threshold_config_hash",
+        "threshold_contract_file_sha256", "threshold_shared_across_methods",
+        "theta_star", "cost_cap", "oracle_checkpoint_hash",
+        "temperature_calibration_hash", "feature_schema_hash",
+        "molclr_checkpoint_hash", "action_semantics_version",
+        "distance_namespace", "selected_rules_sha256",
+        "candidate_universe_sha256", "calibration_pair_details_sha256",
+        "calibration_pair_manifest_sha256",
+    }
+)
+TEST_ACCESS_FIELDS = frozenset(
+    {
+        "schema_version", "dataset", "method", "stage", "started_at",
+        "declared_test_sha256", "selection_manifest_sha256",
+        "selection_frozen_before_test", "test_used_for_selection",
+    }
+)
+TEST_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version", "status", "dataset", "method", "stage", "split",
+        "started_at", "completed_at", "selection_manifest_sha256",
+        "selection_frozen_before_test", "test_used_for_selection",
+        "declared_test_sha256", "test_parent_ids_sha256",
+        "oracle_checkpoint_hash", "temperature_calibration_hash",
+        "feature_schema_hash", "molclr_checkpoint_hash",
+        "threshold_config_hash", "threshold_contract_file_sha256",
+        "parent_count", "candidate_count", "pair_count",
+        "pair_details_sha256", "pair_manifest_sha256",
+    }
+)
 GINE_PAYLOAD_FILES = frozenset(
     {
         "model.pt",
@@ -225,6 +363,10 @@ class OursAuthority:
             "cost_cap": self.threshold.cost_cap,
             "threshold_source": self.threshold.source,
             "threshold_source_split": self.threshold.source_split,
+            "threshold_fitted_on_test": False,
+            "threshold_shared_across_methods": True,
+            "test_used_for_selection": False,
+            "cf_mode": "strict_flip",
             "generation": [asdict(GenerationConfig.base()), asdict(GenerationConfig.high_temp())],
         }
 
@@ -310,8 +452,102 @@ def atomic_json(path: Path, payload: Any) -> None:
     _atomic_bytes(path, (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode())
 
 
+def jsonl_bytes(rows: Sequence[Mapping[str, Any]]) -> bytes:
+    return "".join(
+        json.dumps(
+            dict(row), sort_keys=True, ensure_ascii=True, allow_nan=False
+        )
+        + "\n"
+        for row in rows
+    ).encode()
+
+
 def atomic_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    _atomic_bytes(path, "".join(json.dumps(dict(row), sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n" for row in rows).encode())
+    _atomic_bytes(path, jsonl_bytes(rows))
+
+
+def _write_or_validate_json(path: Path, payload: Mapping[str, Any], *, label: str) -> None:
+    expected = dict(payload)
+    if path.is_file():
+        if read_json(path) != expected:
+            raise TasteOursFullError(f"T11 {label} changed across resume")
+        return
+    atomic_json(path, expected)
+
+
+def _write_or_validate_jsonl(
+    path: Path, rows: Sequence[Mapping[str, Any]], *, label: str
+) -> None:
+    expected = jsonl_bytes(rows)
+    if path.is_file():
+        if path.read_bytes() != expected:
+            raise TasteOursFullError(f"T11 {label} changed across resume")
+        return
+    _atomic_bytes(path, expected)
+
+
+def _closed_chunk_receipt(
+    *,
+    schema_version: str,
+    chunk: Path,
+    rows: Sequence[Mapping[str, Any]],
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": schema_version,
+        "status": "PASS",
+        "identity": dict(identity),
+        "identity_sha256": stable_sha256(dict(identity)),
+        "row_count": len(rows),
+        "chunk_name": chunk.name,
+        "chunk_sha256": sha256_file(chunk),
+        "chunk_bytes": chunk.stat().st_size,
+    }
+
+
+def _commit_closed_chunk(
+    *,
+    chunk: Path,
+    receipt_path: Path,
+    rows: Sequence[Mapping[str, Any]],
+    schema_version: str,
+    identity: Mapping[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    if chunk.exists() or receipt_path.exists():
+        raise TasteOursFullError(f"T11 {label} is only partially/unexpectedly present")
+    atomic_jsonl(chunk, rows)
+    receipt = _closed_chunk_receipt(
+        schema_version=schema_version,
+        chunk=chunk,
+        rows=rows,
+        identity=identity,
+    )
+    atomic_json(receipt_path, receipt)
+    return receipt
+
+
+def _load_closed_chunk(
+    *,
+    chunk: Path,
+    receipt_path: Path,
+    schema_version: str,
+    identity: Mapping[str, Any],
+    label: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not chunk.is_file() or not receipt_path.is_file():
+        raise TasteOursFullError(f"T11 {label} lacks its closed chunk/receipt pair")
+    rows = read_jsonl(chunk)
+    expected = _closed_chunk_receipt(
+        schema_version=schema_version,
+        chunk=chunk,
+        rows=rows,
+        identity=identity,
+    )
+    receipt = read_json(receipt_path)
+    if receipt != expected:
+        raise TasteOursFullError(f"T11 {label} receipt/hash changed")
+    return rows, receipt
 
 
 def csv_bytes(rows: Sequence[Mapping[str, Any]]) -> bytes:
@@ -342,6 +578,12 @@ def _is_sha256(value: Any) -> bool:
 def load_threshold_contract(path_like: str | Path) -> ThresholdContract:
     path = Path(path_like).expanduser().resolve(strict=True)
     payload = read_json(path)
+    try:
+        shared = load_shared_frozen_thresholds(path)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TasteOursFullError(
+            "threshold contract is not one shared, test-independent strict-flip authority"
+        ) from exc
     if str(payload.get("dataset") or "").strip().lower() not in {"taste", DATASET_ID}:
         raise TasteOursFullError("threshold contract is not for TasteMolNet")
     raw = payload.get("thresholds")
@@ -365,12 +607,29 @@ def load_threshold_contract(path_like: str | Path) -> ThresholdContract:
         raise TasteOursFullError("threshold contract is not calibration/frozen-protocol authority")
     if payload.get("test_used_for_selection") is not False:
         raise TasteOursFullError("threshold contract does not exclude test selection")
+    if (
+        payload.get("threshold_fitted_on_test") is not False
+        or payload.get("selection_used_test") is True
+        or payload.get("shared_across_methods") is not True
+        or str(payload.get("cf_mode") or "strict_flip") != "strict_flip"
+    ):
+        raise TasteOursFullError(
+            "threshold contract is not shared/test-independent strict-flip evidence"
+        )
     config_hash = stable_sha256(list(values))
     if str(payload.get("threshold_config_hash") or "").lower() != config_hash:
         raise TasteOursFullError("threshold grid hash changed")
     source = str(payload.get("threshold_source") or "").strip()
     if not source:
         raise TasteOursFullError("threshold contract lacks its frozen source")
+    if (
+        tuple(float(value) for value in shared["thresholds"]) != values
+        or float(shared["theta_star"]) != theta_star
+        or float(shared["cost_cap"]) != cost_cap
+        or str(shared["threshold_source"]) != source
+        or str(shared["sha256"]) != sha256_file(path)
+    ):
+        raise TasteOursFullError("shared threshold loader and T11 contract differ")
     return ThresholdContract(values, theta_star, cost_cap, config_hash, source, source_split, sha256_file(path))
 
 
@@ -567,6 +826,152 @@ def _parent_generation_seed(config: GenerationConfig, parent_id: str) -> int:
     return (config.seed + int(stable_sha256({"mode": config.name, "parent_id": parent_id})[:8], 16)) % (2**32 - 1)
 
 
+def _probabilities(value: Any) -> tuple[float, ...] | None:
+    if not isinstance(value, list) or len(value) != NUM_CLASSES:
+        return None
+    if any(type(item) not in {int, float} for item in value):
+        return None
+    try:
+        result = tuple(float(item) for item in value)
+    except (TypeError, ValueError):
+        return None
+    if (
+        any(not math.isfinite(item) or item < 0.0 or item > 1.0 for item in result)
+        or not math.isclose(sum(result), 1.0, rel_tol=0.0, abs_tol=1e-5)
+    ):
+        return None
+    return result
+
+
+def _predicted_label(probabilities: Sequence[float]) -> int:
+    return max(range(len(probabilities)), key=lambda index: probabilities[index])
+
+
+def _same_float(left: Any, right: float) -> bool:
+    if type(left) not in {int, float}:
+        return False
+    try:
+        value = float(left)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(value) and math.isclose(
+        value, float(right), rel_tol=0.0, abs_tol=1e-12
+    )
+
+
+def _validate_generation_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    parent: TrainParent,
+    config: GenerationConfig,
+    oracle_checkpoint_hash: str,
+) -> None:
+    if len(rows) != config.num_return_sequences:
+        raise TasteOursFullError(f"{config.name} parent chunk candidate count changed")
+    expected_seed = _parent_generation_seed(config, parent.parent_id)
+    before_reference: tuple[float, ...] | None = None
+    for index, row in enumerate(rows):
+        if set(row) != GENERATION_ROW_FIELDS:
+            raise TasteOursFullError(f"{config.name} generation row schema changed")
+        raw = str(row.get("raw_output") or "")
+        cleaned = clean_generated_smiles(raw)
+        expected_fragment = canonicalize_smiles(cleaned) if cleaned else None
+        candidate_id = "TASTEGEN_" + stable_sha256(
+            {
+                "mode": config.name,
+                "parent": parent.parent_id,
+                "index": index,
+                "raw": raw,
+            }
+        )[:24].upper()
+        outcomes = enumerate_connected_hard_deletions(
+            parent.smiles,
+            expected_fragment or cleaned,
+            parent_id=parent.parent_id,
+            candidate_id=candidate_id,
+        )
+        valid = [outcome for outcome in outcomes if outcome.valid and outcome.residual_smiles]
+        before = _probabilities(row.get("p_before"))
+        if (
+            row.get("dataset") != DATASET
+            or row.get("method") != METHOD
+            or row.get("stage") != config.name
+            or row.get("parent_id") != parent.parent_id
+            or row.get("parent_smiles") != parent.smiles
+            or type(row.get("generation_parent_seed")) is not int
+            or row.get("generation_parent_seed") != expected_seed
+            or type(row.get("candidate_index")) is not int
+            or row.get("candidate_index") != index
+            or row.get("candidate_id") != candidate_id
+            or row.get("raw_fragment") != (cleaned or None)
+            or row.get("canonical_fragment") != expected_fragment
+            or row.get("parse_ok") is not (expected_fragment is not None)
+            or row.get("connected") is not (
+                expected_fragment is not None and "." not in expected_fragment
+            )
+            or row.get("direct_substructure") is not bool(outcomes)
+            or row.get("deletion_valid") is not bool(valid)
+            or row.get("oracle_ok") is not bool(valid)
+            or before is None
+            or type(row.get("pred_before")) is not int
+            or row.get("pred_before") != _predicted_label(before)
+            or row.get("pred_before") != SOURCE_LABEL
+            or row.get("oracle_backend") != "gnn"
+            or row.get("classifier_family") != "gine"
+            or row.get("rf_oracle_used") is not False
+            or row.get("oracle_checkpoint_hash") != oracle_checkpoint_hash
+            or row.get("split") != "train"
+            or row.get("calibration_loaded") is not False
+            or row.get("test_loaded") is not False
+        ):
+            raise TasteOursFullError(f"{config.name} generation row authority changed")
+        if before_reference is None:
+            before_reference = before
+        elif before != before_reference:
+            raise TasteOursFullError(f"{config.name} parent prediction changed within chunk")
+        if valid:
+            after = _probabilities(row.get("p_after"))
+            selected_index = row.get("selected_match_index")
+            selected = next(
+                (
+                    outcome
+                    for outcome in valid
+                    if type(selected_index) is int and outcome.match_id == selected_index
+                ),
+                None,
+            )
+            if after is None or selected is None:
+                raise TasteOursFullError(f"{config.name} selected deletion evidence changed")
+            destination = _predicted_label(after)
+            drop = before[SOURCE_LABEL] - after[SOURCE_LABEL]
+            strict = destination in DESTINATIONS
+            if (
+                type(row.get("pred_after")) is not int
+                or row.get("pred_after") != destination
+                or not _same_float(row.get("cf_drop"), drop)
+                or row.get("cf_flip") is not strict
+                or (
+                    strict
+                    and type(row.get("destination_label")) is not int
+                )
+                or row.get("destination_label") != (destination if strict else None)
+                or row.get("residual_smiles") != selected.residual_smiles
+                or not _same_float(row.get("reward_total"), drop + (1.0 if strict else 0.0))
+            ):
+                raise TasteOursFullError(f"{config.name} generation score semantics changed")
+        elif (
+            row.get("p_after") != []
+            or row.get("pred_after") is not None
+            or row.get("cf_drop") is not None
+            or row.get("cf_flip") is not False
+            or row.get("destination_label") is not None
+            or row.get("residual_smiles") is not None
+            or row.get("selected_match_index") is not None
+            or row.get("reward_total") is not None
+        ):
+            raise TasteOursFullError(f"{config.name} failed-generation semantics changed")
+
+
 def _score_generation(
     *, parent: TrainParent, raw_outputs: Sequence[str], scorer: Any,
     config: GenerationConfig,
@@ -616,6 +1021,25 @@ def _score_generation(
     return result
 
 
+def _require_generation_semantic_replay(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    parent: TrainParent,
+    scorer: Any,
+    config: GenerationConfig,
+) -> None:
+    replay_rows = _score_generation(
+        parent=parent,
+        raw_outputs=[str(row.get("raw_output") or "") for row in rows],
+        scorer=scorer,
+        config=config,
+    )
+    if jsonl_bytes(replay_rows) != jsonl_bytes(rows):
+        raise TasteOursFullError(
+            f"{config.name} resumed generation chunk fails frozen-GINE replay"
+        )
+
+
 def generate_mode_resumable(
     *, parents: Sequence[TrainParent], authority: OursAuthority, scorer: Any,
     output: Path, config: GenerationConfig,
@@ -624,13 +1048,11 @@ def generate_mode_resumable(
 
     root = output / "raw" / "generation" / config.name
     chunks = root / "parent_chunks"
+    receipts = root / "parent_chunk_receipts"
     chunks.mkdir(parents=True, exist_ok=True)
+    receipts.mkdir(parents=True, exist_ok=True)
     identity = stable_sha256({"authority": authority.identity(), "config": asdict(config), "parents": [(p.parent_id, p.smiles) for p in parents]})
     manifest_path = root / "generation_manifest.json"
-    if manifest_path.is_file():
-        manifest = read_json(manifest_path)
-        if manifest.get("identity") != identity:
-            raise TasteOursFullError(f"{config.name} generation resume identity changed")
     set_global_generation_seed(config.seed)
     tokenizer = _build_tokenizer(base_model_path=authority.base_model, trust_remote_code=True, local_files_only=True)
     model = _build_lora_model(base_model_path=authority.base_model, adapter_path=authority.policy_root, trust_remote_code=True, local_files_only=True)
@@ -643,21 +1065,60 @@ def generate_mode_resumable(
         enable_substructure_distance_reward=False,
     )
     all_rows: list[dict[str, Any]] = []
+    chunk_inventory: list[dict[str, Any]] = []
     for position, parent in enumerate(parents):
         chunk = chunks / f"{position:08d}.jsonl"
-        if chunk.is_file():
+        receipt_path = receipts / f"{position:08d}.json"
+        chunk_identity = {
+            "mode": config.name,
+            "position": position,
+            "parent_id": parent.parent_id,
+            "parent_smiles": parent.smiles,
+            "parent_split": parent.split,
+            "generation_parent_seed": _parent_generation_seed(config, parent.parent_id),
+            "generation_identity": identity,
+            "oracle_checkpoint_hash": scorer.checkpoint_id,
+            "row_schema_sha256": stable_sha256(sorted(GENERATION_ROW_FIELDS)),
+        }
+        if receipt_path.exists() and not chunk.is_file():
+            raise TasteOursFullError(
+                f"{config.name} parent-{position} receipt exists without its chunk"
+            )
+        if chunk.is_file() and not receipt_path.exists():
             rows = read_jsonl(chunk)
-            if len(rows) != config.num_return_sequences or any(
-                row.get("parent_id") != parent.parent_id
-                or row.get("stage") != config.name
-                or row.get("split") != "train"
-                or row.get("oracle_checkpoint_hash") != scorer.checkpoint_id
-                or row.get("rf_oracle_used") is not False
-                or row.get("calibration_loaded") is not False
-                or row.get("test_loaded") is not False
-                for row in rows
-            ):
-                raise TasteOursFullError(f"{config.name} parent chunk changed")
+            _validate_generation_rows(
+                rows,
+                parent=parent,
+                config=config,
+                oracle_checkpoint_hash=scorer.checkpoint_id,
+            )
+            _require_generation_semantic_replay(
+                rows,
+                parent=parent,
+                scorer=scorer,
+                config=config,
+            )
+            receipt = _closed_chunk_receipt(
+                schema_version=GENERATION_CHUNK_RECEIPT_SCHEMA,
+                chunk=chunk,
+                rows=rows,
+                identity=chunk_identity,
+            )
+            atomic_json(receipt_path, receipt)
+        elif chunk.is_file() or receipt_path.is_file():
+            rows, receipt = _load_closed_chunk(
+                chunk=chunk,
+                receipt_path=receipt_path,
+                schema_version=GENERATION_CHUNK_RECEIPT_SCHEMA,
+                identity=chunk_identity,
+                label=f"{config.name} parent-{position}",
+            )
+            _require_generation_semantic_replay(
+                rows,
+                parent=parent,
+                scorer=scorer,
+                config=config,
+            )
         else:
             # Each parent owns a deterministic RNG stream.  Skipping completed
             # chunks on resume therefore produces byte-identical later chunks.
@@ -672,19 +1133,60 @@ def generate_mode_resumable(
             if len(raw) != config.num_return_sequences:
                 raise TasteOursFullError(f"{config.name} generated the wrong candidate count")
             rows = _score_generation(parent=parent, raw_outputs=raw, scorer=scorer, config=config)
-            atomic_jsonl(chunk, rows)
+            _validate_generation_rows(
+                rows,
+                parent=parent,
+                config=config,
+                oracle_checkpoint_hash=scorer.checkpoint_id,
+            )
+            receipt = _commit_closed_chunk(
+                chunk=chunk,
+                receipt_path=receipt_path,
+                rows=rows,
+                schema_version=GENERATION_CHUNK_RECEIPT_SCHEMA,
+                identity=chunk_identity,
+                label=f"{config.name} parent-{position}",
+            )
+        _validate_generation_rows(
+            rows,
+            parent=parent,
+            config=config,
+            oracle_checkpoint_hash=scorer.checkpoint_id,
+        )
         all_rows.extend(rows)
+        chunk_inventory.append(
+            {
+                "position": position,
+                "chunk": str(chunk.relative_to(root)),
+                "receipt": str(receipt_path.relative_to(root)),
+                "chunk_sha256": receipt["chunk_sha256"],
+                "chunk_bytes": receipt["chunk_bytes"],
+                "receipt_sha256": sha256_file(receipt_path),
+            }
+        )
         atomic_json(output / "checkpoint.json", {
             "schema_version": "tastemolnet_t11_stage_checkpoint_v1", "phase": f"GENERATION_{config.name.upper()}",
             "completed_parent_count": position + 1, "parent_count": len(parents), "identity": stable_sha256(authority.identity()),
         })
-    atomic_jsonl(root / "candidate_pool.jsonl", all_rows)
-    atomic_json(manifest_path, {
-        "schema_version": "tastemolnet_t11_generation_manifest_v1", "status": "PASS", "mode": config.name,
+    candidate_pool = root / "candidate_pool.jsonl"
+    _write_or_validate_jsonl(
+        candidate_pool, all_rows, label=f"{config.name} aggregate candidate pool"
+    )
+    manifest = {
+        "schema_version": GENERATION_MANIFEST_SCHEMA, "status": "PASS", "mode": config.name,
         "identity": identity, "config": asdict(config), "parent_count": len(parents), "candidate_count": len(all_rows),
-        "candidate_pool_sha256": sha256_file(root / "candidate_pool.jsonl"), "train_only": True,
+        "parent_inventory_sha256": stable_sha256(
+            [(parent.parent_id, parent.smiles, parent.split) for parent in parents]
+        ),
+        "chunk_inventory": chunk_inventory,
+        "chunk_inventory_sha256": stable_sha256(chunk_inventory),
+        "candidate_pool_sha256": sha256_file(candidate_pool), "train_only": True,
         "calibration_loaded": False, "test_loaded": False, "rf_oracle_used": False,
-    })
+        "row_schema_sha256": stable_sha256(sorted(GENERATION_ROW_FIELDS)),
+        "resume_semantic_replay_required": True,
+        "semantic_validation": "raw_canonical_deletion_frozen_gine_replay",
+    }
+    _write_or_validate_json(manifest_path, manifest, label=f"{config.name} manifest")
     return all_rows
 
 
@@ -714,9 +1216,54 @@ def merge_candidate_modes(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, A
     return universe
 
 
+def build_pair_evaluation_identity(
+    *,
+    split: str,
+    parents: Sequence[TrainParent],
+    candidates: Sequence[Mapping[str, Any]],
+    oracle_checkpoint_hash: str,
+    temperature_calibration_hash: str,
+    feature_schema_hash: str,
+    molclr_checkpoint_hash: str,
+    threshold_config_hash: str,
+    threshold_contract_file_sha256: str,
+) -> dict[str, Any]:
+    if split not in {"calibration", "test"}:
+        raise TasteOursFullError("T11 pair identity has an unsupported split")
+    return {
+        "schema_version": "tastemolnet_t11_pair_evaluation_identity_v2",
+        "dataset": DATASET,
+        "method": METHOD,
+        "stage": STAGE,
+        "split": split,
+        "parent_inventory_sha256": stable_sha256(
+            [(row.parent_id, row.smiles, row.split) for row in parents]
+        ),
+        "candidate_inventory_sha256": stable_sha256(
+            [
+                (str(row["candidate_id"]), str(row["canonical_fragment"]))
+                for row in candidates
+            ]
+        ),
+        "oracle_checkpoint_hash": oracle_checkpoint_hash,
+        "temperature_calibration_hash": temperature_calibration_hash,
+        "feature_schema_hash": feature_schema_hash,
+        "molclr_checkpoint_hash": molclr_checkpoint_hash,
+        "threshold_config_hash": threshold_config_hash,
+        "threshold_contract_file_sha256": threshold_contract_file_sha256,
+        "distance_line": DISTANCE_LINE,
+        "distance_namespace": DISTANCE_NAMESPACE,
+        "action_semantics_version": CONNECTED_ACTION_SEMANTICS,
+        "match_selection_policy": CONNECTED_MATCH_SELECTION_POLICY,
+        "cf_mode": "strict_flip",
+        "pair_row_schema_sha256": stable_sha256(sorted(PAIR_ROW_FIELDS)),
+    }
+
+
 def evaluate_parent(
     *, parent: TrainParent, candidates: Sequence[Mapping[str, Any]], scorer: Any,
     distance: MolCLRNodeWassersteinDistance, split: str,
+    evaluation_identity: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     before = scorer.score_smiles([parent.smiles])[0]
     result: list[dict[str, Any]] = []
@@ -755,6 +1302,8 @@ def evaluate_parent(
             "best_match_atom_indices": list(outcome.match_atom_indices) if outcome else [],
             "residual_smiles": str(outcome.residual_smiles) if outcome else None,
             "pred_before": int(before["predicted_label"]), "pred_after": destination,
+            "p_before": list(before["probabilities"]),
+            "p_after": list(after["probabilities"]) if after else [],
             "p1_before": float(before["probabilities"][1]), "p1_after": float(after["probabilities"][1]) if after else None,
             "cf_drop": drop, "wnode_distance": value, "distance_for_selection": value if value is not None else "+inf",
             "destination_label": destination if destination in DESTINATIONS else None,
@@ -762,57 +1311,338 @@ def evaluate_parent(
             "action_semantics_version": CONNECTED_ACTION_SEMANTICS, "match_selection_policy": CONNECTED_MATCH_SELECTION_POLICY,
             "cf_mode": "strict_flip", "source_label": SOURCE_LABEL, "oracle_backend": "gnn",
             "classifier_family": "gine", "rf_oracle_used": False, "oracle_checkpoint_hash": scorer.checkpoint_id,
+            "temperature_calibration_hash": evaluation_identity[
+                "temperature_calibration_hash"
+            ],
+            "feature_schema_hash": evaluation_identity["feature_schema_hash"],
+            "molclr_checkpoint_hash": evaluation_identity["molclr_checkpoint_hash"],
+            "distance_namespace": evaluation_identity["distance_namespace"],
         })
     return result
+
+
+def _require_pair_semantic_replay(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    parent: TrainParent,
+    candidates: Sequence[Mapping[str, Any]],
+    scorer: Any,
+    distance: MolCLRNodeWassersteinDistance,
+    split: str,
+    evaluation_identity: Mapping[str, Any],
+) -> None:
+    replay_rows = evaluate_parent(
+        parent=parent,
+        candidates=candidates,
+        scorer=scorer,
+        distance=distance,
+        split=split,
+        evaluation_identity=evaluation_identity,
+    )
+    if jsonl_bytes(replay_rows) != jsonl_bytes(rows):
+        raise TasteOursFullError(
+            f"T11 {split} resumed pair chunk fails GINE/WNode replay"
+        )
+
+
+def _validate_pair_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    parent: TrainParent,
+    candidates: Sequence[Mapping[str, Any]],
+    split: str,
+    evaluation_identity: Mapping[str, Any],
+) -> None:
+    if len(rows) != len(candidates):
+        raise TasteOursFullError(f"T11 {split} pair chunk count changed")
+    for candidate, row in zip(candidates, rows, strict=True):
+        candidate_id = str(candidate["candidate_id"])
+        fragment = str(candidate["canonical_fragment"])
+        if set(row) != PAIR_ROW_FIELDS:
+            raise TasteOursFullError(f"T11 {split} pair row schema changed")
+        outcomes = enumerate_connected_hard_deletions(
+            parent.smiles,
+            fragment,
+            parent_id=parent.parent_id,
+            candidate_id=candidate_id,
+        )
+        valid = [outcome for outcome in outcomes if outcome.valid and outcome.residual_smiles]
+        before = _probabilities(row.get("p_before"))
+        if (
+            row.get("dataset") != DATASET
+            or row.get("method") != METHOD
+            or row.get("stage") != STAGE
+            or row.get("split") != split
+            or row.get("parent_id") != parent.parent_id
+            or row.get("parent_smiles") != parent.smiles
+            or row.get("candidate_id") != candidate_id
+            or row.get("canonical_fragment") != fragment
+            or row.get("applicable") is not bool(outcomes)
+            or type(row.get("num_matches")) is not int
+            or row.get("num_matches") != len(outcomes)
+            or type(row.get("num_valid_residuals")) is not int
+            or row.get("num_valid_residuals") != len(valid)
+            or type(row.get("pair_strict_flip")) is not bool
+            or before is None
+            or type(row.get("pred_before")) is not int
+            or row.get("pred_before") != _predicted_label(before)
+            or not _same_float(row.get("p1_before"), before[SOURCE_LABEL])
+            or row.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS
+            or row.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY
+            or row.get("cf_mode") != "strict_flip"
+            or type(row.get("source_label")) is not int
+            or row.get("source_label") != SOURCE_LABEL
+            or row.get("oracle_backend") != "gnn"
+            or row.get("classifier_family") != "gine"
+            or row.get("rf_oracle_used") is not False
+            or row.get("oracle_checkpoint_hash")
+            != evaluation_identity["oracle_checkpoint_hash"]
+            or row.get("temperature_calibration_hash")
+            != evaluation_identity["temperature_calibration_hash"]
+            or row.get("feature_schema_hash")
+            != evaluation_identity["feature_schema_hash"]
+            or row.get("molclr_checkpoint_hash")
+            != evaluation_identity["molclr_checkpoint_hash"]
+            or row.get("distance_namespace") != DISTANCE_NAMESPACE
+        ):
+            raise TasteOursFullError(f"T11 {split} pair row authority changed")
+        strict = row.get("pair_strict_flip") is True
+        if strict:
+            after = _probabilities(row.get("p_after"))
+            selected_index = row.get("best_match_index")
+            selected = next(
+                (
+                    outcome
+                    for outcome in valid
+                    if type(selected_index) is int and outcome.match_id == selected_index
+                ),
+                None,
+            )
+            if after is None or selected is None:
+                raise TasteOursFullError(f"T11 {split} strict pair evidence changed")
+            destination = _predicted_label(after)
+            drop = before[SOURCE_LABEL] - after[SOURCE_LABEL]
+            distance_value = row.get("wnode_distance")
+            finite_distance = (
+                float(distance_value)
+                if type(distance_value) in {int, float}
+                else math.nan
+            )
+            if (
+                row.get("pred_before") != SOURCE_LABEL
+                or destination not in DESTINATIONS
+                or type(row.get("pred_after")) is not int
+                or row.get("pred_after") != destination
+                or type(row.get("destination_label")) is not int
+                or row.get("destination_label") != destination
+                or not _same_float(row.get("p1_after"), after[SOURCE_LABEL])
+                or not _same_float(row.get("cf_drop"), drop)
+                or not math.isfinite(finite_distance)
+                or finite_distance < 0.0
+                or not _same_float(row.get("distance_for_selection"), finite_distance)
+                or row.get("best_match_atom_indices")
+                != list(selected.match_atom_indices)
+                or row.get("residual_smiles") != selected.residual_smiles
+                or row.get("failure_reason") is not None
+            ):
+                raise TasteOursFullError(f"T11 {split} strict pair semantics changed")
+        else:
+            expected_failure = (
+                "no_substructure_match"
+                if not outcomes
+                else "no_valid_strict_flip_with_finite_wnode"
+            )
+            if (
+                row.get("p_after") != []
+                or row.get("pred_after") is not None
+                or row.get("p1_after") is not None
+                or row.get("cf_drop") is not None
+                or row.get("wnode_distance") is not None
+                or row.get("distance_for_selection") != "+inf"
+                or row.get("destination_label") is not None
+                or row.get("best_match_index") is not None
+                or row.get("best_match_atom_indices") != []
+                or row.get("residual_smiles") is not None
+                or row.get("failure_reason") != expected_failure
+            ):
+                raise TasteOursFullError(f"T11 {split} failed-pair semantics changed")
 
 
 def evaluate_split_resumable(
     *, split: str, parents: Sequence[TrainParent], candidates: Sequence[Mapping[str, Any]],
     scorer: Any, distance: MolCLRNodeWassersteinDistance, output: Path,
+    evaluation_identity: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     chunks = output / "raw" / f"{split}_pair_chunks"
+    receipts = output / "raw" / f"{split}_pair_chunk_receipts"
     chunks.mkdir(parents=True, exist_ok=True)
+    receipts.mkdir(parents=True, exist_ok=True)
     ids = [str(row["candidate_id"]) for row in candidates]
+    expected_parent_hash = stable_sha256(
+        [(row.parent_id, row.smiles, row.split) for row in parents]
+    )
+    expected_candidate_hash = stable_sha256(
+        [
+            (str(row["candidate_id"]), str(row["canonical_fragment"]))
+            for row in candidates
+        ]
+    )
+    if (
+        evaluation_identity.get("schema_version")
+        != "tastemolnet_t11_pair_evaluation_identity_v2"
+        or evaluation_identity.get("dataset") != DATASET
+        or evaluation_identity.get("method") != METHOD
+        or evaluation_identity.get("stage") != STAGE
+        or evaluation_identity.get("split") != split
+        or evaluation_identity.get("parent_inventory_sha256")
+        != expected_parent_hash
+        or evaluation_identity.get("candidate_inventory_sha256")
+        != expected_candidate_hash
+        or evaluation_identity.get("oracle_checkpoint_hash") != scorer.checkpoint_id
+        or evaluation_identity.get("distance_line") != DISTANCE_LINE
+        or evaluation_identity.get("distance_namespace") != DISTANCE_NAMESPACE
+        or evaluation_identity.get("action_semantics_version")
+        != CONNECTED_ACTION_SEMANTICS
+        or evaluation_identity.get("match_selection_policy")
+        != CONNECTED_MATCH_SELECTION_POLICY
+        or evaluation_identity.get("cf_mode") != "strict_flip"
+        or evaluation_identity.get("pair_row_schema_sha256")
+        != stable_sha256(sorted(PAIR_ROW_FIELDS))
+    ):
+        raise TasteOursFullError(f"T11 {split} pair evaluation identity changed")
     result: list[dict[str, Any]] = []
+    chunk_inventory: list[dict[str, Any]] = []
     for position, parent in enumerate(parents):
         chunk = chunks / f"{position:08d}.jsonl"
-        if chunk.is_file():
+        receipt_path = receipts / f"{position:08d}.json"
+        chunk_identity = {
+            "split": split,
+            "position": position,
+            "parent_id": parent.parent_id,
+            "parent_smiles": parent.smiles,
+            "parent_split": parent.split,
+            "candidate_ids": ids,
+            "evaluation_identity_sha256": stable_sha256(dict(evaluation_identity)),
+            "row_schema_sha256": stable_sha256(sorted(PAIR_ROW_FIELDS)),
+        }
+        if receipt_path.exists() and not chunk.is_file():
+            raise TasteOursFullError(
+                f"T11 {split} parent-{position} receipt exists without its chunk"
+            )
+        if chunk.is_file() and not receipt_path.exists():
             rows = read_jsonl(chunk)
-            if [str(row.get("candidate_id")) for row in rows] != ids or any(
-                row.get("parent_id") != parent.parent_id
-                or row.get("split") != split
-                or row.get("dataset") != DATASET
-                or row.get("method") != METHOD
-                or row.get("oracle_checkpoint_hash") != scorer.checkpoint_id
-                or row.get("rf_oracle_used") is not False
-                or row.get("source_label") != SOURCE_LABEL
-                or row.get("canonical_fragment")
-                != str(candidates[index]["canonical_fragment"])
-                or (
-                    row.get("pair_strict_flip") is True
-                    and (
-                        row.get("destination_label") not in DESTINATIONS
-                        or row.get("wnode_distance") is None
-                        or not math.isfinite(float(row["wnode_distance"]))
-                        or float(row["wnode_distance"]) < 0
-                    )
-                )
-                or (
-                    row.get("pair_strict_flip") is not True
-                    and row.get("wnode_distance") is not None
-                )
-                for index, row in enumerate(rows)
-            ):
-                raise TasteOursFullError(f"T11 {split} resume chunk changed")
+            _validate_pair_rows(
+                rows,
+                parent=parent,
+                candidates=candidates,
+                split=split,
+                evaluation_identity=evaluation_identity,
+            )
+            _require_pair_semantic_replay(
+                rows,
+                parent=parent,
+                candidates=candidates,
+                scorer=scorer,
+                distance=distance,
+                split=split,
+                evaluation_identity=evaluation_identity,
+            )
+            receipt = _closed_chunk_receipt(
+                schema_version=PAIR_CHUNK_RECEIPT_SCHEMA,
+                chunk=chunk,
+                rows=rows,
+                identity=chunk_identity,
+            )
+            atomic_json(receipt_path, receipt)
+        elif chunk.is_file() or receipt_path.is_file():
+            rows, receipt = _load_closed_chunk(
+                chunk=chunk,
+                receipt_path=receipt_path,
+                schema_version=PAIR_CHUNK_RECEIPT_SCHEMA,
+                identity=chunk_identity,
+                label=f"{split} parent-{position}",
+            )
+            _require_pair_semantic_replay(
+                rows,
+                parent=parent,
+                candidates=candidates,
+                scorer=scorer,
+                distance=distance,
+                split=split,
+                evaluation_identity=evaluation_identity,
+            )
         else:
-            rows = evaluate_parent(parent=parent, candidates=candidates, scorer=scorer, distance=distance, split=split)
-            atomic_jsonl(chunk, rows)
+            rows = evaluate_parent(
+                parent=parent,
+                candidates=candidates,
+                scorer=scorer,
+                distance=distance,
+                split=split,
+                evaluation_identity=evaluation_identity,
+            )
+            _validate_pair_rows(
+                rows,
+                parent=parent,
+                candidates=candidates,
+                split=split,
+                evaluation_identity=evaluation_identity,
+            )
+            receipt = _commit_closed_chunk(
+                chunk=chunk,
+                receipt_path=receipt_path,
+                rows=rows,
+                schema_version=PAIR_CHUNK_RECEIPT_SCHEMA,
+                identity=chunk_identity,
+                label=f"{split} parent-{position}",
+            )
+        _validate_pair_rows(
+            rows,
+            parent=parent,
+            candidates=candidates,
+            split=split,
+            evaluation_identity=evaluation_identity,
+        )
         result.extend(rows)
+        chunk_inventory.append(
+            {
+                "position": position,
+                "chunk": str(chunk.relative_to(output / "raw")),
+                "receipt": str(receipt_path.relative_to(output / "raw")),
+                "chunk_sha256": receipt["chunk_sha256"],
+                "chunk_bytes": receipt["chunk_bytes"],
+                "receipt_sha256": sha256_file(receipt_path),
+            }
+        )
         atomic_json(output / "checkpoint.json", {
             "schema_version": "tastemolnet_t11_stage_checkpoint_v1", "phase": f"{split.upper()}_RUNNING",
             "completed_parent_count": position + 1, "parent_count": len(parents), "identity": stable_sha256(ids),
         })
-    atomic_jsonl(output / "raw" / f"{split}_pair_details.jsonl", result)
+    details_path = output / "raw" / f"{split}_pair_details.jsonl"
+    _write_or_validate_jsonl(
+        details_path, result, label=f"{split} aggregate pair details"
+    )
+    pair_manifest = {
+        "schema_version": PAIR_MANIFEST_SCHEMA,
+        "status": "PASS",
+        "split": split,
+        "evaluation_identity": dict(evaluation_identity),
+        "evaluation_identity_sha256": stable_sha256(dict(evaluation_identity)),
+        "parent_count": len(parents),
+        "candidate_count": len(candidates),
+        "pair_count": len(result),
+        "chunk_inventory": chunk_inventory,
+        "chunk_inventory_sha256": stable_sha256(chunk_inventory),
+        "pair_details_sha256": sha256_file(details_path),
+        "pair_details_bytes": details_path.stat().st_size,
+        "row_schema_sha256": stable_sha256(sorted(PAIR_ROW_FIELDS)),
+        "resume_semantic_replay_required": True,
+        "semantic_validation": "connected_deletion_frozen_gine_molclr_replay",
+    }
+    _write_or_validate_json(
+        output / "raw" / f"{split}_pair_manifest.json",
+        pair_manifest,
+        label=f"{split} pair manifest",
+    )
     return result
 
 
@@ -989,13 +1819,33 @@ def run_science(
     base = generate_mode_resumable(parents=parents, authority=authority, scorer=scorer, output=output, config=GenerationConfig.base())
     high = generate_mode_resumable(parents=parents, authority=authority, scorer=scorer, output=output, config=GenerationConfig.high_temp())
     universe = merge_candidate_modes([*base, *high])
-    atomic_jsonl(output / "raw" / "candidate_universe.jsonl", universe)
-    atomic_json(output / "raw" / "merge_manifest.json", {
-        "schema_version": "tastemolnet_t11_merge_manifest_v1", "status": "PASS", "train_only": True,
+    universe_path = output / "raw" / "candidate_universe.jsonl"
+    _write_or_validate_jsonl(
+        universe_path, universe, label="canonical candidate universe"
+    )
+    merge_manifest = {
+        "schema_version": "tastemolnet_t11_merge_manifest_v2", "status": "PASS", "train_only": True,
         "base_count": len(base), "high_temp_count": len(high), "candidate_universe_count": len(universe),
-        "candidate_universe_sha256": sha256_file(output / "raw" / "candidate_universe.jsonl"),
+        "base_candidate_pool_sha256": sha256_file(
+            output / "raw" / "generation" / "base" / "candidate_pool.jsonl"
+        ),
+        "high_temp_candidate_pool_sha256": sha256_file(
+            output / "raw" / "generation" / "high_temp" / "candidate_pool.jsonl"
+        ),
+        "base_generation_manifest_sha256": sha256_file(
+            output / "raw" / "generation" / "base" / "generation_manifest.json"
+        ),
+        "high_temp_generation_manifest_sha256": sha256_file(
+            output / "raw" / "generation" / "high_temp" / "generation_manifest.json"
+        ),
+        "candidate_universe_sha256": sha256_file(universe_path),
         "canonical_dedup_complete": True, "calibration_loaded": False, "test_loaded": False,
-    })
+    }
+    _write_or_validate_json(
+        output / "raw" / "merge_manifest.json",
+        merge_manifest,
+        label="candidate merge manifest",
+    )
     provider = MolCLRNodeWassersteinDistance(MolCLRNodeWassersteinConfig(
         molclr_root=authority.molclr_root, molclr_ckpt=authority.molclr_checkpoint,
         cache_db=Path(wnode_cache_db).expanduser().absolute(), node_emb_cache_dir=Path(node_embedding_cache_dir).expanduser().absolute(),
@@ -1004,6 +1854,34 @@ def run_science(
     try:
         selection_path = output / "raw" / "selection_manifest.json"
         selected_path = output / "raw" / "selected_rules.jsonl"
+        calibration = load_prepared_split(
+            authority.calibration_path,
+            expected_split="calibration",
+            expected_sha256=authority.calibration_sha256,
+        )
+        calibration_identity = build_pair_evaluation_identity(
+            split="calibration",
+            parents=calibration,
+            candidates=universe,
+            oracle_checkpoint_hash=authority.checkpoint_id,
+            temperature_calibration_hash=authority.temperature_calibration_hash,
+            feature_schema_hash=authority.feature_schema_hash,
+            molclr_checkpoint_hash=authority.molclr_checkpoint_sha256,
+            threshold_config_hash=authority.threshold.config_hash,
+            threshold_contract_file_sha256=authority.threshold.file_sha256,
+        )
+        calibration_rows = evaluate_split_resumable(
+            split="calibration",
+            parents=calibration,
+            candidates=universe,
+            scorer=scorer,
+            distance=provider,
+            output=output,
+            evaluation_identity=calibration_identity,
+        )
+        calibration_pair_manifest_sha256 = sha256_file(
+            output / "raw" / "calibration_pair_manifest.json"
+        )
         if selection_path.is_file():
             if not selected_path.is_file():
                 raise TasteOursFullError("T11 committed selection lacks selected rules")
@@ -1011,7 +1889,12 @@ def run_science(
             selected = read_jsonl(selected_path)
             ordered = [str(row["candidate_id"]) for row in selected]
             if (
-                selection.get("status") != "FROZEN" or selection.get("selection_frozen") is not True
+                set(selection) != SELECTION_MANIFEST_FIELDS
+                or selection.get("schema_version") != "tastemolnet_t11_selection_v2"
+                or selection.get("dataset") != DATASET
+                or selection.get("method") != METHOD
+                or selection.get("stage") != STAGE
+                or selection.get("status") != "FROZEN" or selection.get("selection_frozen") is not True
                 or selection.get("selector_fitted_on_calibration") is not True
                 or selection.get("test_loaded") is not False or selection.get("test_used_for_selection") is not False
                 or selection.get("threshold_config_hash") != authority.threshold.config_hash
@@ -1019,15 +1902,30 @@ def run_science(
                 or selection.get("theta_star") != authority.threshold.theta_star
                 or selection.get("cost_cap") != authority.threshold.cost_cap
                 or selection.get("oracle_checkpoint_hash") != authority.checkpoint_id
+                or selection.get("temperature_calibration_hash")
+                != authority.temperature_calibration_hash
+                or selection.get("feature_schema_hash") != authority.feature_schema_hash
                 or selection.get("molclr_checkpoint_hash") != authority.molclr_checkpoint_sha256
+                or selection.get("threshold_shared_across_methods") is not True
+                or selection.get("action_semantics_version")
+                != CONNECTED_ACTION_SEMANTICS
+                or selection.get("distance_namespace") != DISTANCE_NAMESPACE
                 or selection.get("ordered_rule_ids") != ordered or selection.get("selected_rules_sha256") != sha256_file(selected_path)
                 or selection.get("candidate_universe_sha256") != sha256_file(output / "raw" / "candidate_universe.jsonl")
                 or selection.get("calibration_pair_details_sha256") != sha256_file(output / "raw" / "calibration_pair_details.jsonl")
+                or selection.get("calibration_pair_manifest_sha256")
+                != calibration_pair_manifest_sha256
+                or selection.get("ordered_rule_ids_sha256") != stable_sha256(ordered)
             ):
                 raise TasteOursFullError("T11 frozen selection changed")
+            replay_selected, replay_trace = select_on_calibration(
+                universe,
+                calibration_rows,
+                theta_star=authority.threshold.theta_star,
+            )
+            if replay_selected != selected or replay_trace != selection.get("trace"):
+                raise TasteOursFullError("T11 frozen selector replay changed")
         else:
-            calibration = load_prepared_split(authority.calibration_path, expected_split="calibration", expected_sha256=authority.calibration_sha256)
-            calibration_rows = evaluate_split_resumable(split="calibration", parents=calibration, candidates=universe, scorer=scorer, distance=provider, output=output)
             selected, trace = select_on_calibration(universe, calibration_rows, theta_star=authority.threshold.theta_star)
             ordered = [str(row["candidate_id"]) for row in selected]
             if selected_path.is_file():
@@ -1039,16 +1937,22 @@ def run_science(
             else:
                 atomic_jsonl(selected_path, selected)
             selection = {
-                "schema_version": "tastemolnet_t11_selection_v1", "dataset": DATASET, "method": METHOD,
+                "schema_version": "tastemolnet_t11_selection_v2", "dataset": DATASET, "method": METHOD, "stage": STAGE,
                 "status": "FROZEN", "selection_frozen": True, "selector_fitted_on_calibration": True,
                 "test_loaded": False, "test_used_for_selection": False, "frozen_at": utc_now(),
                 "ordered_rule_ids": ordered, "ordered_rule_ids_sha256": stable_sha256(ordered), "trace": trace,
                 "threshold_config_hash": authority.threshold.config_hash, "oracle_checkpoint_hash": authority.checkpoint_id,
                 "threshold_contract_file_sha256": authority.threshold.file_sha256,
+                "threshold_shared_across_methods": True,
                 "theta_star": authority.threshold.theta_star, "cost_cap": authority.threshold.cost_cap,
+                "temperature_calibration_hash": authority.temperature_calibration_hash,
+                "feature_schema_hash": authority.feature_schema_hash,
                 "molclr_checkpoint_hash": authority.molclr_checkpoint_sha256,
+                "action_semantics_version": CONNECTED_ACTION_SEMANTICS,
+                "distance_namespace": DISTANCE_NAMESPACE,
                 "selected_rules_sha256": sha256_file(selected_path), "candidate_universe_sha256": sha256_file(output / "raw" / "candidate_universe.jsonl"),
                 "calibration_pair_details_sha256": sha256_file(output / "raw" / "calibration_pair_details.jsonl"),
+                "calibration_pair_manifest_sha256": calibration_pair_manifest_sha256,
             }
             atomic_json(selection_path, selection)
             atomic_json(output / "checkpoint.json", {"schema_version": "tastemolnet_t11_stage_checkpoint_v1", "phase": "CALIBRATION_SELECTION_FROZEN", "identity": identity_hash, "selection_manifest_sha256": sha256_file(selection_path)})
@@ -1057,16 +1961,27 @@ def run_science(
         if test_access_path.is_file():
             test_access = read_json(test_access_path)
             if (
-                test_access.get("schema_version") != "tastemolnet_t11_test_access_v1"
+                set(test_access) != TEST_ACCESS_FIELDS
+                or test_access.get("schema_version") != "tastemolnet_t11_test_access_v1"
+                or test_access.get("dataset") != DATASET
+                or test_access.get("method") != METHOD
+                or test_access.get("stage") != STAGE
+                or test_access.get("declared_test_sha256")
+                != authority.declared_test_sha256
                 or test_access.get("selection_manifest_sha256") != selection_sha
                 or test_access.get("selection_frozen_before_test") is not True
+                or test_access.get("test_used_for_selection") is not False
                 or not str(test_access.get("started_at") or "")
             ):
                 raise TasteOursFullError("T11 test-access resume receipt changed")
         else:
             test_access = {
                 "schema_version": "tastemolnet_t11_test_access_v1",
+                "dataset": DATASET,
+                "method": METHOD,
+                "stage": STAGE,
                 "started_at": utc_now(),
+                "declared_test_sha256": authority.declared_test_sha256,
                 "selection_manifest_sha256": selection_sha,
                 "selection_frozen_before_test": True,
                 "test_used_for_selection": False,
@@ -1075,18 +1990,62 @@ def run_science(
             atomic_json(test_access_path, test_access)
         test_started = str(test_access["started_at"])
         test = load_prepared_split(authority.test_path, expected_split="test", expected_sha256=authority.declared_test_sha256)
-        test_rows = evaluate_split_resumable(split="test", parents=test, candidates=selected, scorer=scorer, distance=provider, output=output)
+        test_identity = build_pair_evaluation_identity(
+            split="test",
+            parents=test,
+            candidates=selected,
+            oracle_checkpoint_hash=authority.checkpoint_id,
+            temperature_calibration_hash=authority.temperature_calibration_hash,
+            feature_schema_hash=authority.feature_schema_hash,
+            molclr_checkpoint_hash=authority.molclr_checkpoint_sha256,
+            threshold_config_hash=authority.threshold.config_hash,
+            threshold_contract_file_sha256=authority.threshold.file_sha256,
+        )
+        test_rows = evaluate_split_resumable(
+            split="test",
+            parents=test,
+            candidates=selected,
+            scorer=scorer,
+            distance=provider,
+            output=output,
+            evaluation_identity=test_identity,
+        )
         provider_stats = provider.stats_dict()
     finally:
         provider.close()
-    test_manifest = {
-        "schema_version": "tastemolnet_t11_test_manifest_v1", "status": "PASS", "started_at": test_started,
-        "completed_at": utc_now(), "selection_manifest_sha256": selection_sha,
+    test_manifest_path = output / "raw" / "test_evaluation_manifest.json"
+    expected_test_manifest = {
+        "schema_version": "tastemolnet_t11_test_manifest_v2", "status": "PASS",
+        "dataset": DATASET, "method": METHOD, "stage": STAGE, "split": "test",
+        "started_at": test_started,
+        "selection_manifest_sha256": selection_sha,
         "selection_frozen_before_test": True, "test_used_for_selection": False,
+        "declared_test_sha256": authority.declared_test_sha256,
+        "test_parent_ids_sha256": stable_sha256(sorted(row.parent_id for row in test)),
+        "oracle_checkpoint_hash": authority.checkpoint_id,
+        "temperature_calibration_hash": authority.temperature_calibration_hash,
+        "feature_schema_hash": authority.feature_schema_hash,
+        "molclr_checkpoint_hash": authority.molclr_checkpoint_sha256,
+        "threshold_config_hash": authority.threshold.config_hash,
+        "threshold_contract_file_sha256": authority.threshold.file_sha256,
         "parent_count": len(test), "candidate_count": len(selected), "pair_count": len(test_rows),
         "pair_details_sha256": sha256_file(output / "raw" / "test_pair_details.jsonl"),
+        "pair_manifest_sha256": sha256_file(
+            output / "raw" / "test_pair_manifest.json"
+        ),
     }
-    atomic_json(output / "raw" / "test_evaluation_manifest.json", test_manifest)
+    if test_manifest_path.is_file():
+        test_manifest = read_json(test_manifest_path)
+        if (
+            set(test_manifest) != TEST_MANIFEST_FIELDS
+            or {key: test_manifest.get(key) for key in expected_test_manifest}
+            != expected_test_manifest
+            or not str(test_manifest.get("completed_at") or "")
+        ):
+            raise TasteOursFullError("T11 test evaluation manifest changed")
+    else:
+        test_manifest = {**expected_test_manifest, "completed_at": utc_now()}
+        atomic_json(test_manifest_path, test_manifest)
     metrics = standardized_metrics(test_rows, ordered, authority.threshold)
     for name, rows in _artifact_rows(metrics).items():
         atomic_csv(output / name, rows)
@@ -1107,6 +2066,7 @@ def run_science(
         "threshold_contract_file_sha256": authority.threshold.file_sha256,
         "theta_star": authority.threshold.theta_star, "cost_cap": authority.threshold.cost_cap,
         "test_used_for_selection": False, "threshold_fitted_on_test": False,
+        "threshold_shared_across_methods": True,
         "raw_output_root": str(output),
     }
     summary = {
@@ -1131,11 +2091,61 @@ def run_science(
     atomic_json(output / "summary.json", summary)
     atomic_json(output / "oracle_manifest.json", oracle_manifest)
     atomic_json(output / "evaluation_manifest.json", evaluation)
-    immutable = [*_artifact_rows(metrics), "prefix_metrics.json", "summary.json", "oracle_manifest.json", "evaluation_manifest.json", "raw/candidate_universe.jsonl", "raw/calibration_pair_details.jsonl", "raw/selected_rules.jsonl", "raw/selection_manifest.json", "raw/test_access_receipt.json", "raw/test_pair_details.jsonl", "raw/test_evaluation_manifest.json"]
+    immutable = [
+        *_artifact_rows(metrics),
+        "input_identity.json",
+        "prefix_metrics.json",
+        "summary.json",
+        "oracle_manifest.json",
+        "evaluation_manifest.json",
+        "raw/generation/base/candidate_pool.jsonl",
+        "raw/generation/base/generation_manifest.json",
+        "raw/generation/high_temp/candidate_pool.jsonl",
+        "raw/generation/high_temp/generation_manifest.json",
+        "raw/candidate_universe.jsonl",
+        "raw/merge_manifest.json",
+        "raw/calibration_pair_details.jsonl",
+        "raw/calibration_pair_manifest.json",
+        "raw/selected_rules.jsonl",
+        "raw/selection_manifest.json",
+        "raw/test_access_receipt.json",
+        "raw/test_pair_details.jsonl",
+        "raw/test_pair_manifest.json",
+        "raw/test_evaluation_manifest.json",
+    ]
     inventory = {name: {"sha256": sha256_file(output / name), "bytes": (output / name).stat().st_size} for name in immutable}
-    atomic_json(output / "freeze_manifest.json", {"schema_version": "tastemolnet_t11_freeze_manifest_v1", **common, "status": "SEALED", "files": inventory, "inventory_sha256": stable_sha256(inventory), "sealed_at": utc_now()})
+    source_evidence_names = sorted(
+        str(path.relative_to(output))
+        for directory in (
+            output / "raw" / "generation" / "base" / "parent_chunks",
+            output / "raw" / "generation" / "base" / "parent_chunk_receipts",
+            output / "raw" / "generation" / "high_temp" / "parent_chunks",
+            output / "raw" / "generation" / "high_temp" / "parent_chunk_receipts",
+            output / "raw" / "calibration_pair_chunks",
+            output / "raw" / "calibration_pair_chunk_receipts",
+            output / "raw" / "test_pair_chunks",
+            output / "raw" / "test_pair_chunk_receipts",
+        )
+        for path in directory.iterdir()
+        if path.is_file()
+    )
+    source_evidence = {
+        name: {
+            "sha256": sha256_file(output / name),
+            "bytes": (output / name).stat().st_size,
+        }
+        for name in source_evidence_names
+    }
+    atomic_json(output / "freeze_manifest.json", {
+        "schema_version": "tastemolnet_t11_freeze_manifest_v2", **common,
+        "status": "SEALED", "files": inventory,
+        "inventory_sha256": stable_sha256(inventory),
+        "source_evidence_files": source_evidence,
+        "source_evidence_inventory_sha256": stable_sha256(source_evidence),
+        "sealed_at": utc_now(),
+    })
     run_manifest = {
-        "schema_version": "tastemolnet_t11_run_manifest_v1", **common, "status": "SEALED", "state": "SEALED",
+        "schema_version": "tastemolnet_t11_run_manifest_v2", **common, "status": "SEALED", "state": "SEALED",
         "run_complete": False, "frozen": True, "raw_output_complete": True,
         "source_artifacts_complete": True, "selection_frozen_before_test": True,
         "independent_terminal_verification_required": True, "worker_wrote_pass": False,
@@ -1147,6 +2157,337 @@ def run_science(
     return run_manifest
 
 
+def _relative_file(root: Path, value: Any, *, label: str) -> Path:
+    if type(value) is not str:
+        raise TasteOursFullError(f"T11 {label} path is not a string")
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise TasteOursFullError(f"T11 {label} path escaped its root")
+    path = root / relative
+    if not path.is_file() or path.is_symlink():
+        raise TasteOursFullError(f"T11 {label} is not one physical file")
+    return path
+
+
+def _verify_generation_mode(
+    *,
+    science: Path,
+    mode: str,
+    input_identity: Mapping[str, Any],
+    authorized_train_parents: Sequence[TrainParent],
+) -> tuple[list[dict[str, Any]], list[TrainParent], set[str]]:
+    config = GenerationConfig.base() if mode == "base" else GenerationConfig.high_temp()
+    root = science / "raw" / "generation" / mode
+    manifest_path = root / "generation_manifest.json"
+    manifest = read_json(manifest_path)
+    inventory = manifest.get("chunk_inventory")
+    if (
+        set(manifest) != GENERATION_MANIFEST_FIELDS
+        or manifest.get("schema_version") != GENERATION_MANIFEST_SCHEMA
+        or manifest.get("status") != "PASS"
+        or manifest.get("mode") != mode
+        or manifest.get("config") != asdict(config)
+        or manifest.get("train_only") is not True
+        or manifest.get("calibration_loaded") is not False
+        or manifest.get("test_loaded") is not False
+        or manifest.get("rf_oracle_used") is not False
+        or manifest.get("row_schema_sha256")
+        != stable_sha256(sorted(GENERATION_ROW_FIELDS))
+        or manifest.get("resume_semantic_replay_required") is not True
+        or manifest.get("semantic_validation")
+        != "raw_canonical_deletion_frozen_gine_replay"
+        or not isinstance(inventory, list)
+        or not inventory
+        or manifest.get("chunk_inventory_sha256") != stable_sha256(inventory)
+    ):
+        raise TasteOursFullError(f"T11 {mode} generation manifest changed")
+    provisional_parents: list[TrainParent] = []
+    for position, item in enumerate(inventory):
+        if not isinstance(item, dict) or item.get("position") != position:
+            raise TasteOursFullError(f"T11 {mode} chunk inventory order changed")
+        receipt_path = _relative_file(root, item.get("receipt"), label=f"{mode} receipt")
+        receipt = read_json(receipt_path)
+        chunk_identity = receipt.get("identity")
+        if (
+            receipt.get("schema_version") != GENERATION_CHUNK_RECEIPT_SCHEMA
+            or receipt.get("status") != "PASS"
+            or not isinstance(chunk_identity, dict)
+            or chunk_identity.get("mode") != mode
+            or chunk_identity.get("position") != position
+            or type(chunk_identity.get("parent_id")) is not str
+            or not chunk_identity.get("parent_id")
+            or type(chunk_identity.get("parent_smiles")) is not str
+            or not chunk_identity.get("parent_smiles")
+            or chunk_identity.get("parent_split") != "train"
+            or chunk_identity.get("oracle_checkpoint_hash")
+            != input_identity.get("checkpoint_id")
+            or chunk_identity.get("row_schema_sha256")
+            != stable_sha256(sorted(GENERATION_ROW_FIELDS))
+        ):
+            raise TasteOursFullError(f"T11 {mode} chunk identity changed")
+        provisional_parents.append(
+            TrainParent(
+                str(chunk_identity["parent_id"]),
+                str(chunk_identity["parent_smiles"]),
+                SOURCE_LABEL,
+                "train",
+            )
+        )
+    authorized = {
+        (parent.parent_id, parent.smiles, parent.split)
+        for parent in authorized_train_parents
+    }
+    observed = [
+        (parent.parent_id, parent.smiles, parent.split)
+        for parent in provisional_parents
+    ]
+    if len(set(observed)) != len(observed) or any(item not in authorized for item in observed):
+        raise TasteOursFullError(
+            f"T11 {mode} generation parents escaped the frozen train split"
+        )
+    generation_identity = stable_sha256(
+        {
+            "authority": dict(input_identity),
+            "config": asdict(config),
+            "parents": [(parent.parent_id, parent.smiles) for parent in provisional_parents],
+        }
+    )
+    if (
+        manifest.get("identity") != generation_identity
+        or manifest.get("parent_count") != len(provisional_parents)
+        or manifest.get("parent_inventory_sha256")
+        != stable_sha256(
+            [
+                (parent.parent_id, parent.smiles, parent.split)
+                for parent in provisional_parents
+            ]
+        )
+    ):
+        raise TasteOursFullError(f"T11 {mode} generation parent authority changed")
+    result: list[dict[str, Any]] = []
+    evidence_names: set[str] = set()
+    replay_inventory: list[dict[str, Any]] = []
+    for position, (item, parent) in enumerate(zip(inventory, provisional_parents, strict=True)):
+        expected_chunk_name = f"parent_chunks/{position:08d}.jsonl"
+        expected_receipt_name = f"parent_chunk_receipts/{position:08d}.json"
+        if (
+            item.get("chunk") != expected_chunk_name
+            or item.get("receipt") != expected_receipt_name
+        ):
+            raise TasteOursFullError(f"T11 {mode} chunk path changed")
+        chunk = _relative_file(root, expected_chunk_name, label=f"{mode} chunk")
+        receipt_path = _relative_file(
+            root, expected_receipt_name, label=f"{mode} receipt"
+        )
+        chunk_identity = {
+            "mode": mode,
+            "position": position,
+            "parent_id": parent.parent_id,
+            "parent_smiles": parent.smiles,
+            "parent_split": "train",
+            "generation_parent_seed": _parent_generation_seed(config, parent.parent_id),
+            "generation_identity": generation_identity,
+            "oracle_checkpoint_hash": input_identity["checkpoint_id"],
+            "row_schema_sha256": stable_sha256(sorted(GENERATION_ROW_FIELDS)),
+        }
+        rows, receipt = _load_closed_chunk(
+            chunk=chunk,
+            receipt_path=receipt_path,
+            schema_version=GENERATION_CHUNK_RECEIPT_SCHEMA,
+            identity=chunk_identity,
+            label=f"{mode} parent-{position}",
+        )
+        _validate_generation_rows(
+            rows,
+            parent=parent,
+            config=config,
+            oracle_checkpoint_hash=str(input_identity["checkpoint_id"]),
+        )
+        replay_item = {
+            "position": position,
+            "chunk": expected_chunk_name,
+            "receipt": expected_receipt_name,
+            "chunk_sha256": receipt["chunk_sha256"],
+            "chunk_bytes": receipt["chunk_bytes"],
+            "receipt_sha256": sha256_file(receipt_path),
+        }
+        replay_inventory.append(replay_item)
+        result.extend(rows)
+        evidence_names.update(
+            {
+                str(chunk.relative_to(science)),
+                str(receipt_path.relative_to(science)),
+            }
+        )
+    candidate_pool = root / "candidate_pool.jsonl"
+    if (
+        replay_inventory != inventory
+        or candidate_pool.read_bytes() != jsonl_bytes(result)
+        or manifest.get("candidate_count") != len(result)
+        or manifest.get("candidate_pool_sha256") != sha256_file(candidate_pool)
+    ):
+        raise TasteOursFullError(f"T11 {mode} generation cannot be replayed")
+    return result, provisional_parents, evidence_names
+
+
+def _verify_pair_artifacts(
+    *,
+    science: Path,
+    split: str,
+    candidates: Sequence[Mapping[str, Any]],
+    run_manifest: Mapping[str, Any],
+    authorized_parents: Sequence[TrainParent],
+) -> tuple[list[dict[str, Any]], list[TrainParent], set[str]]:
+    raw = science / "raw"
+    manifest_path = raw / f"{split}_pair_manifest.json"
+    manifest = read_json(manifest_path)
+    inventory = manifest.get("chunk_inventory")
+    if (
+        set(manifest) != PAIR_MANIFEST_FIELDS
+        or manifest.get("schema_version") != PAIR_MANIFEST_SCHEMA
+        or manifest.get("status") != "PASS"
+        or manifest.get("split") != split
+        or not isinstance(inventory, list)
+        or not inventory
+        or manifest.get("chunk_inventory_sha256") != stable_sha256(inventory)
+        or manifest.get("row_schema_sha256")
+        != stable_sha256(sorted(PAIR_ROW_FIELDS))
+        or manifest.get("resume_semantic_replay_required") is not True
+        or manifest.get("semantic_validation")
+        != "connected_deletion_frozen_gine_molclr_replay"
+    ):
+        raise TasteOursFullError(f"T11 {split} pair manifest changed")
+    parents: list[TrainParent] = []
+    for position, item in enumerate(inventory):
+        if not isinstance(item, dict) or item.get("position") != position:
+            raise TasteOursFullError(f"T11 {split} pair inventory order changed")
+        receipt_path = _relative_file(
+            raw, item.get("receipt"), label=f"{split} pair receipt"
+        )
+        receipt = read_json(receipt_path)
+        identity = receipt.get("identity")
+        if (
+            receipt.get("schema_version") != PAIR_CHUNK_RECEIPT_SCHEMA
+            or receipt.get("status") != "PASS"
+            or not isinstance(identity, dict)
+            or identity.get("split") != split
+            or identity.get("position") != position
+            or identity.get("parent_split") != split
+            or type(identity.get("parent_id")) is not str
+            or not identity.get("parent_id")
+            or type(identity.get("parent_smiles")) is not str
+            or not identity.get("parent_smiles")
+            or identity.get("row_schema_sha256")
+            != stable_sha256(sorted(PAIR_ROW_FIELDS))
+        ):
+            raise TasteOursFullError(f"T11 {split} pair receipt identity changed")
+        parents.append(
+            TrainParent(
+                str(identity["parent_id"]),
+                str(identity["parent_smiles"]),
+                SOURCE_LABEL,
+                split,
+            )
+        )
+    if len({parent.parent_id for parent in parents}) != len(parents):
+        raise TasteOursFullError(f"T11 {split} pair manifest repeats a parent")
+    if parents != list(authorized_parents):
+        raise TasteOursFullError(
+            f"T11 {split} pair parents differ from the frozen split"
+        )
+    evaluation_identity = build_pair_evaluation_identity(
+        split=split,
+        parents=parents,
+        candidates=candidates,
+        oracle_checkpoint_hash=str(run_manifest.get("oracle_checkpoint_hash") or ""),
+        temperature_calibration_hash=str(
+            run_manifest.get("temperature_calibration_hash") or ""
+        ),
+        feature_schema_hash=str(run_manifest.get("feature_schema_hash") or ""),
+        molclr_checkpoint_hash=str(run_manifest.get("molclr_checkpoint_hash") or ""),
+        threshold_config_hash=str(run_manifest.get("threshold_config_hash") or ""),
+        threshold_contract_file_sha256=str(
+            run_manifest.get("threshold_contract_file_sha256") or ""
+        ),
+    )
+    if (
+        manifest.get("evaluation_identity") != evaluation_identity
+        or manifest.get("evaluation_identity_sha256")
+        != stable_sha256(evaluation_identity)
+        or evaluation_identity.get("pair_row_schema_sha256")
+        != stable_sha256(sorted(PAIR_ROW_FIELDS))
+    ):
+        raise TasteOursFullError(f"T11 {split} pair evaluation identity changed")
+    result: list[dict[str, Any]] = []
+    evidence_names: set[str] = set()
+    replay_inventory: list[dict[str, Any]] = []
+    candidate_ids = [str(row["candidate_id"]) for row in candidates]
+    for position, (item, parent) in enumerate(zip(inventory, parents, strict=True)):
+        expected_chunk_name = f"{split}_pair_chunks/{position:08d}.jsonl"
+        expected_receipt_name = f"{split}_pair_chunk_receipts/{position:08d}.json"
+        if (
+            item.get("chunk") != expected_chunk_name
+            or item.get("receipt") != expected_receipt_name
+        ):
+            raise TasteOursFullError(f"T11 {split} pair chunk path changed")
+        chunk = _relative_file(raw, expected_chunk_name, label=f"{split} pair chunk")
+        receipt_path = _relative_file(
+            raw, expected_receipt_name, label=f"{split} pair receipt"
+        )
+        chunk_identity = {
+            "split": split,
+            "position": position,
+            "parent_id": parent.parent_id,
+            "parent_smiles": parent.smiles,
+            "parent_split": split,
+            "candidate_ids": candidate_ids,
+            "evaluation_identity_sha256": stable_sha256(evaluation_identity),
+            "row_schema_sha256": stable_sha256(sorted(PAIR_ROW_FIELDS)),
+        }
+        rows, receipt = _load_closed_chunk(
+            chunk=chunk,
+            receipt_path=receipt_path,
+            schema_version=PAIR_CHUNK_RECEIPT_SCHEMA,
+            identity=chunk_identity,
+            label=f"{split} parent-{position}",
+        )
+        _validate_pair_rows(
+            rows,
+            parent=parent,
+            candidates=candidates,
+            split=split,
+            evaluation_identity=evaluation_identity,
+        )
+        replay_item = {
+            "position": position,
+            "chunk": expected_chunk_name,
+            "receipt": expected_receipt_name,
+            "chunk_sha256": receipt["chunk_sha256"],
+            "chunk_bytes": receipt["chunk_bytes"],
+            "receipt_sha256": sha256_file(receipt_path),
+        }
+        replay_inventory.append(replay_item)
+        result.extend(rows)
+        evidence_names.update(
+            {
+                str(chunk.relative_to(science)),
+                str(receipt_path.relative_to(science)),
+            }
+        )
+    details = raw / f"{split}_pair_details.jsonl"
+    if (
+        replay_inventory != inventory
+        or details.read_bytes() != jsonl_bytes(result)
+        or manifest.get("parent_count") != len(parents)
+        or manifest.get("candidate_count") != len(candidates)
+        or manifest.get("pair_count") != len(result)
+        or manifest.get("pair_details_sha256") != sha256_file(details)
+        or manifest.get("pair_details_bytes") != details.stat().st_size
+    ):
+        raise TasteOursFullError(f"T11 {split} pair artifacts cannot be replayed")
+    return result, parents, evidence_names
+
+
 def verify_and_publish(*, science_root: str | Path, final_root: str | Path, threshold_contract: str | Path) -> dict[str, Any]:
     science = Path(science_root).expanduser().resolve(strict=True)
     final = Path(final_root).expanduser().absolute()
@@ -1156,20 +2497,184 @@ def verify_and_publish(*, science_root: str | Path, final_root: str | Path, thre
         raise TasteOursFullError("T11 verifier requires SEALED worker output without PASS")
     run_manifest = read_json(science / "run_manifest.json")
     freeze = read_json(science / "freeze_manifest.json")
-    if run_manifest.get("status") != "SEALED" or run_manifest.get("worker_wrote_pass") is not False or run_manifest.get("freeze_manifest_sha256") != sha256_file(science / "freeze_manifest.json"):
+    if (
+        run_manifest.get("schema_version") != "tastemolnet_t11_run_manifest_v2"
+        or run_manifest.get("dataset") != DATASET
+        or run_manifest.get("method") != METHOD
+        or run_manifest.get("stage") != STAGE
+        or run_manifest.get("status") != "SEALED"
+        or run_manifest.get("state") != "SEALED"
+        or run_manifest.get("rf_oracle_used") is not False
+        or run_manifest.get("selection_frozen_before_test") is not True
+        or run_manifest.get("test_used_for_selection") is not False
+        or run_manifest.get("threshold_fitted_on_test") is not False
+        or run_manifest.get("threshold_shared_across_methods") is not True
+        or run_manifest.get("worker_wrote_pass") is not False
+        or run_manifest.get("freeze_manifest_sha256")
+        != sha256_file(science / "freeze_manifest.json")
+    ):
         raise TasteOursFullError("T11 sealed manifest changed")
     files = freeze.get("files")
-    if not isinstance(files, dict) or any(sha256_file(science / name) != row.get("sha256") or (science / name).stat().st_size != row.get("bytes") for name, row in files.items()):
+    source_files = freeze.get("source_evidence_files")
+    required_files = set(_artifact_rows({
+            "figure3": [], "figure4": [], "prefix": [], "parent_best": [],
+            "destination": [], "table2": [],
+        })) | {
+        "input_identity.json",
+        "prefix_metrics.json",
+        "summary.json",
+        "oracle_manifest.json",
+        "evaluation_manifest.json",
+        "raw/generation/base/candidate_pool.jsonl",
+        "raw/generation/base/generation_manifest.json",
+        "raw/generation/high_temp/candidate_pool.jsonl",
+        "raw/generation/high_temp/generation_manifest.json",
+        "raw/candidate_universe.jsonl",
+        "raw/merge_manifest.json",
+        "raw/calibration_pair_details.jsonl",
+        "raw/calibration_pair_manifest.json",
+        "raw/selected_rules.jsonl",
+        "raw/selection_manifest.json",
+        "raw/test_access_receipt.json",
+        "raw/test_pair_details.jsonl",
+        "raw/test_pair_manifest.json",
+        "raw/test_evaluation_manifest.json",
+    }
+    if (
+        freeze.get("schema_version") != "tastemolnet_t11_freeze_manifest_v2"
+        or freeze.get("status") != "SEALED"
+        or not isinstance(files, dict)
+        or set(files) != required_files
+        or freeze.get("inventory_sha256") != stable_sha256(files)
+        or not isinstance(source_files, dict)
+        or not source_files
+        or freeze.get("source_evidence_inventory_sha256")
+        != stable_sha256(source_files)
+    ):
         raise TasteOursFullError("T11 immutable inventory changed")
+    for label, inventory in (("publication", files), ("source evidence", source_files)):
+        for name, row in inventory.items():
+            path = _relative_file(science, name, label=label)
+            if (
+                not isinstance(row, dict)
+                or row.get("sha256") != sha256_file(path)
+                or row.get("bytes") != path.stat().st_size
+            ):
+                raise TasteOursFullError(f"T11 {label} inventory changed")
+    input_identity = read_json(science / "input_identity.json")
+    if (
+        run_manifest.get("oracle_checkpoint_hash")
+        != input_identity.get("checkpoint_id")
+        or run_manifest.get("dataset_hash") != input_identity.get("dataset_hash")
+        or run_manifest.get("temperature_calibration_hash")
+        != input_identity.get("temperature_calibration_hash")
+        or run_manifest.get("feature_schema_hash")
+        != input_identity.get("feature_schema_hash")
+        or run_manifest.get("feature_schema_file_sha256")
+        != input_identity.get("feature_schema_file_sha256")
+        or run_manifest.get("policy_checkpoint_hash")
+        != input_identity.get("policy_hash")
+        or run_manifest.get("oracle_checkpoint")
+        != input_identity.get("checkpoint")
+        or run_manifest.get("molclr_checkpoint_hash")
+        != input_identity.get("molclr_checkpoint_sha256")
+        or run_manifest.get("threshold_config_hash")
+        != input_identity.get("threshold_config_hash")
+        or run_manifest.get("threshold_contract_file_sha256")
+        != input_identity.get("threshold_contract_file_sha256")
+        or run_manifest.get("test_split_hash")
+        != input_identity.get("declared_test_sha256")
+        or run_manifest.get("theta_star") != input_identity.get("theta_star")
+        or run_manifest.get("cost_cap") != input_identity.get("cost_cap")
+        or input_identity.get("threshold_fitted_on_test") is not False
+        or input_identity.get("threshold_shared_across_methods") is not True
+        or input_identity.get("test_used_for_selection") is not False
+        or input_identity.get("cf_mode") != "strict_flip"
+    ):
+        raise TasteOursFullError("T11 sealed input identity changed")
+    try:
+        train_authority = load_prepared_split(
+            Path(str(input_identity["train_path"])),
+            expected_split="train",
+            expected_sha256=str(input_identity["train_sha256"]),
+        )
+        calibration_authority = load_prepared_split(
+            Path(str(input_identity["calibration_path"])),
+            expected_split="calibration",
+            expected_sha256=str(input_identity["calibration_sha256"]),
+        )
+        test_authority = load_prepared_split(
+            Path(str(input_identity["test_path"])),
+            expected_split="test",
+            expected_sha256=str(input_identity["declared_test_sha256"]),
+        )
+    except KeyError as exc:
+        raise TasteOursFullError("T11 sealed split identity is incomplete") from exc
+    base_rows, base_parents, base_evidence = _verify_generation_mode(
+        science=science,
+        mode="base",
+        input_identity=input_identity,
+        authorized_train_parents=train_authority,
+    )
+    high_rows, high_parents, high_evidence = _verify_generation_mode(
+        science=science,
+        mode="high_temp",
+        input_identity=input_identity,
+        authorized_train_parents=train_authority,
+    )
+    if base_parents != high_parents:
+        raise TasteOursFullError("T11 base/high generation cohorts differ")
+    replay_universe = merge_candidate_modes([*base_rows, *high_rows])
+    universe_path = science / "raw" / "candidate_universe.jsonl"
+    universe = read_jsonl(universe_path)
+    merge = read_json(science / "raw" / "merge_manifest.json")
+    expected_merge = {
+        "schema_version": "tastemolnet_t11_merge_manifest_v2",
+        "status": "PASS",
+        "train_only": True,
+        "base_count": len(base_rows),
+        "high_temp_count": len(high_rows),
+        "candidate_universe_count": len(replay_universe),
+        "base_candidate_pool_sha256": sha256_file(
+            science / "raw" / "generation" / "base" / "candidate_pool.jsonl"
+        ),
+        "high_temp_candidate_pool_sha256": sha256_file(
+            science / "raw" / "generation" / "high_temp" / "candidate_pool.jsonl"
+        ),
+        "base_generation_manifest_sha256": sha256_file(
+            science / "raw" / "generation" / "base" / "generation_manifest.json"
+        ),
+        "high_temp_generation_manifest_sha256": sha256_file(
+            science / "raw" / "generation" / "high_temp" / "generation_manifest.json"
+        ),
+        "candidate_universe_sha256": sha256_file(universe_path),
+        "canonical_dedup_complete": True,
+        "calibration_loaded": False,
+        "test_loaded": False,
+    }
+    if merge != expected_merge or replay_universe != universe:
+        raise TasteOursFullError("T11 base/high generation merge cannot be replayed")
     selection = read_json(science / "raw" / "selection_manifest.json")
     selected = read_jsonl(science / "raw" / "selected_rules.jsonl")
     ordered = [str(row["candidate_id"]) for row in selected]
-    universe = read_jsonl(science / "raw" / "candidate_universe.jsonl")
-    calibration_rows = read_jsonl(science / "raw" / "calibration_pair_details.jsonl")
+    calibration_rows, _calibration_parents, calibration_evidence = (
+        _verify_pair_artifacts(
+            science=science,
+            split="calibration",
+            candidates=universe,
+            run_manifest=run_manifest,
+            authorized_parents=calibration_authority,
+        )
+    )
     test_access = read_json(science / "raw" / "test_access_receipt.json")
     test_manifest = read_json(science / "raw" / "test_evaluation_manifest.json")
     if (
-        selection.get("status") != "FROZEN" or selection.get("selection_frozen") is not True
+        set(selection) != SELECTION_MANIFEST_FIELDS
+        or selection.get("schema_version") != "tastemolnet_t11_selection_v2"
+        or selection.get("dataset") != DATASET
+        or selection.get("method") != METHOD
+        or selection.get("stage") != STAGE
+        or selection.get("status") != "FROZEN" or selection.get("selection_frozen") is not True
         or selection.get("selector_fitted_on_calibration") is not True
         or selection.get("test_loaded") is not False or selection.get("test_used_for_selection") is not False
         or selection.get("threshold_config_hash") != run_manifest.get("threshold_config_hash")
@@ -1177,17 +2682,59 @@ def verify_and_publish(*, science_root: str | Path, final_root: str | Path, thre
         or selection.get("theta_star") != run_manifest.get("theta_star")
         or selection.get("cost_cap") != run_manifest.get("cost_cap")
         or selection.get("oracle_checkpoint_hash") != run_manifest.get("oracle_checkpoint_hash")
+        or selection.get("temperature_calibration_hash")
+        != run_manifest.get("temperature_calibration_hash")
+        or selection.get("feature_schema_hash")
+        != run_manifest.get("feature_schema_hash")
         or selection.get("molclr_checkpoint_hash") != run_manifest.get("molclr_checkpoint_hash")
+        or selection.get("threshold_shared_across_methods") is not True
+        or selection.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS
+        or selection.get("distance_namespace") != DISTANCE_NAMESPACE
         or selection.get("ordered_rule_ids") != ordered or selection.get("selected_rules_sha256") != sha256_file(science / "raw" / "selected_rules.jsonl")
+        or selection.get("ordered_rule_ids_sha256") != stable_sha256(ordered)
         or selection.get("candidate_universe_sha256") != sha256_file(science / "raw" / "candidate_universe.jsonl")
         or selection.get("calibration_pair_details_sha256") != sha256_file(science / "raw" / "calibration_pair_details.jsonl")
+        or selection.get("calibration_pair_manifest_sha256")
+        != sha256_file(science / "raw" / "calibration_pair_manifest.json")
+        or set(test_access) != TEST_ACCESS_FIELDS
+        or test_access.get("schema_version") != "tastemolnet_t11_test_access_v1"
+        or test_access.get("dataset") != DATASET
+        or test_access.get("method") != METHOD
+        or test_access.get("stage") != STAGE
+        or test_access.get("declared_test_sha256")
+        != run_manifest.get("test_split_hash")
         or test_manifest.get("selection_manifest_sha256") != sha256_file(science / "raw" / "selection_manifest.json")
         or test_access.get("selection_manifest_sha256") != sha256_file(science / "raw" / "selection_manifest.json")
         or test_access.get("selection_frozen_before_test") is not True
         or test_access.get("test_used_for_selection") is not False
+        or set(test_manifest) != TEST_MANIFEST_FIELDS
+        or test_manifest.get("schema_version") != "tastemolnet_t11_test_manifest_v2"
+        or test_manifest.get("status") != "PASS"
+        or test_manifest.get("dataset") != DATASET
+        or test_manifest.get("method") != METHOD
+        or test_manifest.get("stage") != STAGE
+        or test_manifest.get("split") != "test"
         or test_manifest.get("selection_frozen_before_test") is not True
+        or test_manifest.get("test_used_for_selection") is not False
+        or test_manifest.get("declared_test_sha256")
+        != run_manifest.get("test_split_hash")
+        or test_manifest.get("oracle_checkpoint_hash")
+        != run_manifest.get("oracle_checkpoint_hash")
+        or test_manifest.get("temperature_calibration_hash")
+        != run_manifest.get("temperature_calibration_hash")
+        or test_manifest.get("feature_schema_hash")
+        != run_manifest.get("feature_schema_hash")
+        or test_manifest.get("molclr_checkpoint_hash")
+        != run_manifest.get("molclr_checkpoint_hash")
+        or test_manifest.get("threshold_config_hash")
+        != run_manifest.get("threshold_config_hash")
+        or test_manifest.get("threshold_contract_file_sha256")
+        != run_manifest.get("threshold_contract_file_sha256")
         or not str(selection.get("frozen_at") or "")
         or not str(test_manifest.get("started_at") or "")
+        or not str(test_manifest.get("completed_at") or "")
+        or str(test_manifest.get("completed_at") or "")
+        < str(test_manifest.get("started_at") or "")
         or test_access.get("started_at") != test_manifest.get("started_at")
         or str(selection.get("frozen_at") or "") > str(test_manifest.get("started_at") or "")
     ):
@@ -1205,7 +2752,35 @@ def verify_and_publish(*, science_root: str | Path, final_root: str | Path, thre
     )
     if replay_selected != selected or replay_trace != selection.get("trace"):
         raise TasteOursFullError("T11 calibration selector cannot be independently replayed")
-    test_rows = read_jsonl(science / "raw" / "test_pair_details.jsonl")
+    test_rows, test_parents, test_evidence = _verify_pair_artifacts(
+        science=science,
+        split="test",
+        candidates=selected,
+        run_manifest=run_manifest,
+        authorized_parents=test_authority,
+    )
+    if (
+        test_manifest.get("parent_count") != len(test_parents)
+        or test_manifest.get("candidate_count") != len(selected)
+        or test_manifest.get("pair_count") != len(test_rows)
+        or test_manifest.get("pair_details_sha256")
+        != sha256_file(science / "raw" / "test_pair_details.jsonl")
+        or test_manifest.get("pair_manifest_sha256")
+        != sha256_file(science / "raw" / "test_pair_manifest.json")
+        or run_manifest.get("test_parent_ids_sha256")
+        != stable_sha256(sorted(parent.parent_id for parent in test_parents))
+        or test_manifest.get("test_parent_ids_sha256")
+        != stable_sha256(sorted(parent.parent_id for parent in test_parents))
+    ):
+        raise TasteOursFullError("T11 test evaluation manifest is incomplete")
+    expected_source_files = {
+        *base_evidence,
+        *high_evidence,
+        *calibration_evidence,
+        *test_evidence,
+    }
+    if set(source_files) != expected_source_files:
+        raise TasteOursFullError("T11 source evidence inventory is incomplete")
     metrics = standardized_metrics(test_rows, ordered, threshold)
     for name, rows in _artifact_rows(metrics).items():
         if (science / name).read_bytes() != csv_bytes(rows):
@@ -1213,6 +2788,69 @@ def verify_and_publish(*, science_root: str | Path, final_root: str | Path, thre
     expected_prefix = (json.dumps(metrics["prefix"], indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode()
     if (science / "prefix_metrics.json").read_bytes() != expected_prefix:
         raise TasteOursFullError("T11 prefix JSON cannot be replayed")
+    summary = read_json(science / "summary.json")
+    oracle_manifest = read_json(science / "oracle_manifest.json")
+    evaluation_manifest = read_json(science / "evaluation_manifest.json")
+    common_checks = (
+        ("dataset", DATASET),
+        ("method", METHOD),
+        ("stage", STAGE),
+        ("oracle_checkpoint_hash", run_manifest.get("oracle_checkpoint_hash")),
+        ("dataset_hash", run_manifest.get("dataset_hash")),
+        (
+            "temperature_calibration_hash",
+            run_manifest.get("temperature_calibration_hash"),
+        ),
+        ("feature_schema_hash", run_manifest.get("feature_schema_hash")),
+        ("molclr_checkpoint_hash", run_manifest.get("molclr_checkpoint_hash")),
+        ("threshold_config_hash", run_manifest.get("threshold_config_hash")),
+        (
+            "threshold_contract_file_sha256",
+            run_manifest.get("threshold_contract_file_sha256"),
+        ),
+        ("cf_mode", "strict_flip"),
+        ("rf_oracle_used", False),
+        ("test_used_for_selection", False),
+        ("threshold_fitted_on_test", False),
+        ("threshold_shared_across_methods", True),
+    )
+    if any(
+        manifest.get(key) != expected
+        for manifest in (summary, oracle_manifest, evaluation_manifest)
+        for key, expected in common_checks
+    ):
+        raise TasteOursFullError("T11 publication manifest authority changed")
+    if (
+        summary.get("schema_version") != "tastemolnet_t11_summary_v1"
+        or summary.get("status") != "SEALED"
+        or summary.get("selection_frozen_before_test") is not True
+        or summary.get("calibration_loaded") is not True
+        or summary.get("test_loaded") is not True
+        or summary.get("resume_supported") is not True
+        or summary.get("base_generation") != asdict(GenerationConfig.base())
+        or summary.get("high_temp_generation")
+        != asdict(GenerationConfig.high_temp())
+        or summary.get("effective_rule_count") != metrics["effective_rule_count"]
+        or summary.get("parent_count") != metrics["parent_count"]
+        or summary.get("pair_count") != metrics["pair_count"]
+        or oracle_manifest.get("schema_version")
+        != "tastemolnet_t11_oracle_manifest_v1"
+        or oracle_manifest.get("status") != "SEALED"
+        or oracle_manifest.get("same_frozen_gine_for_generation_calibration_test")
+        is not True
+        or oracle_manifest.get("calibration_loaded_for_training") is not False
+        or oracle_manifest.get("test_loaded_for_training") is not False
+        or evaluation_manifest.get("schema_version")
+        != "tastemolnet_t11_evaluation_manifest_v1"
+        or evaluation_manifest.get("status") != "SEALED"
+        or evaluation_manifest.get("selection_manifest_sha256")
+        != sha256_file(science / "raw" / "selection_manifest.json")
+        or evaluation_manifest.get("test_evaluation_manifest_sha256")
+        != sha256_file(science / "raw" / "test_evaluation_manifest.json")
+        or evaluation_manifest.get("selection_frozen_before_test") is not True
+        or evaluation_manifest.get("full_cartesian_test_pairs") is not True
+    ):
+        raise TasteOursFullError("T11 publication manifests cannot be replayed")
     staging = final.parent / f".{final.name}.staging-{os.getpid()}"
     if staging.exists():
         raise FileExistsError(f"T11 verification staging root exists: {staging}")
@@ -1222,23 +2860,45 @@ def verify_and_publish(*, science_root: str | Path, final_root: str | Path, thre
             destination = staging / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(science / name, destination)
+        shutil.copyfile(science / "freeze_manifest.json", staging / "freeze_manifest.json")
         final_summary = read_json(staging / "summary.json")
         final_summary.update({"status": "PASS", "run_complete": True, "independent_terminal_verification_passed": True})
         atomic_json(staging / "summary.json", final_summary)
         final_manifest = {
-            **run_manifest, "schema_version": "tastemolnet_t11_final_run_manifest_v1", "status": "PASS", "state": "PASS",
+            **run_manifest, "schema_version": "tastemolnet_t11_final_run_manifest_v2", "status": "PASS", "state": "PASS",
             "run_complete": True, "independent_terminal_verification_required": True,
             "independent_terminal_verification_passed": True, "worker_wrote_pass": False,
-            "science_root": str(science), "verified_at": utc_now(),
+            "science_root": str(science),
+            "science_freeze_manifest_sha256": sha256_file(
+                science / "freeze_manifest.json"
+            ),
+            "source_evidence_inventory_sha256": freeze[
+                "source_evidence_inventory_sha256"
+            ],
+            "base_high_merge_replayed": True,
+            "calibration_pair_chunks_replayed": True,
+            "test_pair_chunks_replayed": True,
+            "verified_at": utc_now(),
         }
         atomic_json(staging / "run_manifest.json", final_manifest)
+        final_inventory_names = [
+            *files,
+            "freeze_manifest.json",
+            "run_manifest.json",
+        ]
         audit = {
-            "schema_version": "tastemolnet_t11_final_artifact_audit_v1", "dataset": DATASET, "method": METHOD,
+            "schema_version": "tastemolnet_t11_final_artifact_audit_v2", "dataset": DATASET, "method": METHOD,
             "stage": STAGE, "status": "PASS", "independent_verifier": True,
             "passed": True, "audit_passed": True,
             "science_freeze_manifest_sha256": sha256_file(science / "freeze_manifest.json"),
-            "recomputed_metrics": True, "selection_frozen_before_test": True, "test_used_for_selection": False,
-            "files": {name: {"sha256": sha256_file(staging / name), "bytes": (staging / name).stat().st_size} for name in files},
+            "source_evidence_inventory_sha256": freeze[
+                "source_evidence_inventory_sha256"
+            ],
+            "recomputed_metrics": True, "base_high_merge_replayed": True,
+            "calibration_pair_chunks_replayed": True,
+            "test_pair_chunks_replayed": True,
+            "selection_frozen_before_test": True, "test_used_for_selection": False,
+            "files": {name: {"sha256": sha256_file(staging / name), "bytes": (staging / name).stat().st_size} for name in final_inventory_names},
         }
         atomic_json(staging / "final_artifact_audit.json", audit)
         _atomic_bytes(staging / "PASS", (PASS_MARKER + "\n").encode())

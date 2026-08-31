@@ -235,10 +235,16 @@ After T6 independently passes, T11 is executed through
 fresh `T11_PPO_OUTPUT_ROOT`, `T11_SCIENCE_ROOT`, and `T11_FINAL_ROOT` values,
 the frozen three-class GINE and train/calibration/test splits, the pinned
 MolCLR source/checkpoint/cache paths, and the existing shared Taste WNode
-threshold JSON.  It never invents the missing threshold.  To resume PPO, set a
-periodic `T11_PPO_RESUME_CHECKPOINT` and a new PPO output root; downstream
-science resumes automatically when its stage checkpoint exists.  Only the
-second verifier process can publish `[TASTE_OURS_PASS]`.
+threshold JSON.  That manifest must explicitly be method-shared,
+test-independent, and strict-flip; T11 never invents or refits it.  Generation
+and pair-evaluation resume points are closed by typed receipts plus exact row,
+input, and schema hashes, and adopted chunks are replayed through the frozen
+GINE (and MolCLR WNode for pair rows).  The terminal verifier reconstructs both
+generation pools, replays their canonical merge and both split-bound pair
+matrices, and checks the complete held-out manifest before publication.  To
+resume PPO, set a periodic `T11_PPO_RESUME_CHECKPOINT` and a new PPO output
+root; downstream science resumes automatically when its stage checkpoint
+exists.  Only the second verifier process can publish `[TASTE_OURS_PASS]`.
 
 After a formal Taste GINE bundle closes, T3 adopts its existing
 validation-fitted temperature without refitting or copying the checkpoint.

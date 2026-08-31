@@ -327,6 +327,56 @@ Accepted
 
 ---
 
+## [2026-08-31] Close T11 threshold, resume, and terminal evidence
+
+### Motivation
+
+The first dataset-specific T11 implementation correctly ran the full PPO and
+kept selection before test, but three evidence gaps remained. Its local
+threshold parser could accept a manifest that the shared-threshold contract
+would reject and then emit safe-looking leakage fields. Existing generation
+and pair chunks were checked only by a few metadata fields, so a finite forged
+WNode value or internally consistent probability row could survive resume.
+Finally, the terminal freeze omitted the base/high chunk closure and did not
+reconstruct their merge or require complete held-out counts and hashes.
+
+### Decision
+
+Load the threshold through `load_shared_frozen_thresholds` and additionally
+require the Taste calibration/frozen-protocol source and explicit
+`test_used_for_selection=false`. The accepted authority must say
+`threshold_fitted_on_test=false`, `shared_across_methods=true`, and
+`cf_mode=strict_flip`; the T11 manifests may report those facts only after the
+loader has established them.
+
+Give every generation and pair chunk a typed receipt binding its byte hash,
+closed row schema, parent/candidate inventory, split, model identities, and
+evaluation configuration. On resume, recompute generation rows with the same
+frozen GINE and recompute pair rows with the same GINE plus MolCLR WNode path;
+adopt only byte-identical replay. At sealing, freeze all aggregate manifests
+and every chunk/receipt hash. The separate terminal verifier must reopen the
+frozen train/calibration/test authorities, reconstruct both generation pools,
+replay canonical merge and calibration selection, reconstruct both pair
+matrices, validate the full held-out test manifest, recompute paper metrics,
+and carry the exact science freeze into the fresh PASS root.
+
+### Consequences
+
+- T11 cannot turn a method-specific or test-fitted threshold into apparently
+  shared, test-independent output.
+- Resume remains per-parent, while scientific probabilities, WNode values,
+  action semantics, and raw-to-canonical identities are fail-closed.
+- A self-rehashed aggregate, merge, or test manifest is insufficient without
+  replay against the frozen chunk and split evidence.
+- These are dataset-specific T11 checks; no new controller or generic trust
+  framework is introduced, and real AutoDL science is still required.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Add the executable TasteMolNet T13 native GlobalGCE full route
 
 ### Motivation
