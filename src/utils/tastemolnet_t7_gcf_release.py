@@ -374,7 +374,7 @@ def hold_external_authority(
         "controller_receipt_sha256": release["controller_receipt_sha256"],
         "gpu_lease_receipt_sha256": release["gpu_lease_receipt_sha256"],
         "gpu_index": SMOKE_GPU_INDEX,
-        "cuda_visible_devices": "1",
+        "cuda_visible_devices": "0",
         "output_parent": release["output_parent"],
     }
     if any(
@@ -502,12 +502,12 @@ def _verify_controller_process(controller: Mapping[str, Any]) -> None:
 
 def _gpu_runtime_evidence(expected_uuid: str) -> dict[str, Any]:
     if (
-        os.environ.get("AUTODL_PHYSICAL_GPU_INDEX") != "1"
+        os.environ.get("AUTODL_PHYSICAL_GPU_INDEX") != "0"
         or os.environ.get("AUTODL_PHYSICAL_GPU_UUID") != expected_uuid
-        or os.environ.get("CUDA_VISIBLE_DEVICES") != "1"
+        or os.environ.get("CUDA_VISIBLE_DEVICES") != "0"
     ):
         raise TasteGCFSmokeError(
-            "Taste T7 GPU1 environment differs from typed authority"
+            "Taste T7 GPU0 environment differs from typed authority"
         )
     completed = subprocess.run(
         [
@@ -526,11 +526,11 @@ def _gpu_runtime_evidence(expected_uuid: str) -> dict[str, Any]:
             raise TasteGCFSmokeError("Taste T7 GPU inventory is malformed")
         inventory[int(index.strip())] = uuid.strip()
     if inventory.get(SMOKE_GPU_INDEX) != expected_uuid:
-        raise TasteGCFSmokeError("Taste T7 physical GPU1 UUID changed")
+        raise TasteGCFSmokeError("Taste T7 physical GPU0 UUID changed")
     return {
         "physical_gpu_index": SMOKE_GPU_INDEX,
         "gpu_uuid": expected_uuid,
-        "cuda_visible_devices": "1",
+        "cuda_visible_devices": "0",
     }
 
 

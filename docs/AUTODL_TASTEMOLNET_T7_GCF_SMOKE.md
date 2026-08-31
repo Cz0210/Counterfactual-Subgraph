@@ -151,7 +151,7 @@ before managed-v2 sealing:
 
 1. a clean one-parent release checkout and exact critical blobs;
 2. the SHA-pinned external release authority;
-3. typed live controller and exclusive GPU-1 lease receipts;
+3. typed live controller and exclusive GPU-0 lease receipts;
 4. the exact five-file T2 adoption, opened once with
    `hold_t2_gine_pass_adoption` using the release-pinned root, gate, receipt,
    and embedded-source SHA-256 values; no historical controller,

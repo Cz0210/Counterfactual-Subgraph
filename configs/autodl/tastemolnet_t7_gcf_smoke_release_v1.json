@@ -27,6 +27,6 @@
   "taste_gcf_neurosed_feature_schema_sha256": null,
   "taste_gcf_neurosed_sha256s_sha256": null,
   "managed_stage_root": null,
-  "gpu_index": 1,
+  "gpu_index": 0,
   "output_parent": null
 }

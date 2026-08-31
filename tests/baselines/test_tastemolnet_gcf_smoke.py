@@ -174,7 +174,7 @@ def _dummy_inputs() -> SimpleNamespace:
             "sha256s_sha256": "4" * 64,
         },
         controller={"run_id": "run-t7"},
-        gpu={"gpu_index": 1, "gpu_uuid": "GPU-test"},
+        gpu={"gpu_index": SMOKE_GPU_INDEX, "gpu_uuid": "GPU-test"},
     )
 
 
@@ -1706,7 +1706,7 @@ def test_wrappers_are_autodl_only_and_static_refusal() -> None:
         'source "$SCRIPT_DIR/common.sh"'
     )
     assert "--stage T7_GCF_SMOKE" in wrapper
-    assert "--gpu-index 1" in wrapper
+    assert "--gpu-index 0" in wrapper
     assert "--required-log-marker" not in wrapper
 
     slurm = (

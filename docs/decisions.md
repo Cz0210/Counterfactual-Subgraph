@@ -13782,6 +13782,37 @@ Accepted
 
 ---
 
+## [2026-08-31] Bind the Taste T7 smoke successor to physical GPU0
+
+### Motivation
+
+GPU1 is reserved for the independent Taste T14 full-generation route.  The
+authorized shortest schedule runs T6, T8, and T7 serially on GPU0, while the
+already-adopted NeuroSED model makes T7 independent of any new training.
+
+### Decision
+
+Change only the dataset-specific T7 physical-device contract from index 1 to
+index 0 across its frozen smoke constant, typed controller/GPU receipts,
+runtime environment check, disabled release candidate, AutoDL wrapper, tests,
+and documentation.  Keep logical model device `cuda:0`, exclusive UUID lock,
+official GCF/VRRW semantics, frozen three-class GINE, and generated-query to
+original-target NeuroSED direction unchanged.  This implementation commit
+does not enable the release; a separate pinned successor is still required.
+
+### Consequences
+
+- T7 can follow T8 on GPU0 without competing with T14 on GPU1.
+- A GPU1 lease, mismatched UUID, or environment remap fails before science.
+- No NeuroSED retraining, split change, oracle change, or paper-result claim is
+  introduced.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Stabilize T8 checkpoint metadata before publishing resume evidence
 
 ### Motivation

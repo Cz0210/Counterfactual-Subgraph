@@ -2816,6 +2816,17 @@ Mutagenicity roadmaps.
 - [ ] Run under an existing real controller and issue the separate typed T7
   release successor after its published final is independently pinned.
 
+## 2026-08-31: T7 dataset-specific GPU0 release successor
+
+- [x] Move the exact typed T7 GPU/UUID/environment contract from physical GPU1
+  to physical GPU0 without changing logical `cuda:0` inference.
+- [x] Keep the checked-in implementation release-disabled and all runtime pins
+  null until a separate one-parent successor is constructed.
+- [x] Synchronize the AutoDL wrapper, fixed release config, tests, and protocol
+  documentation; retain the static-refusal Slurm entrypoint.
+- [ ] After T8 finishes on GPU0, publish exact controller/lease/NeuroSED/T3/T4
+  pins in a fresh release successor and run T7 smoke.
+
 ## 2026-08-31: T8 epoch-checkpoint metadata stabilization
 
 - [x] Diagnose the failed target-0 run from preserved checkpoint, heartbeat,
