@@ -45,7 +45,7 @@ M_MAX = 20_000
 M_FALLBACK_MAX = 25_000
 MIN_VALID_UNIQUE_RULES = 10
 CHECK_INTERVAL = 2_500
-PASS_MARKER = "[TASTE_T14_COMRECGC_PASS]"
+GENERATION_PASS_MARKER = "[TASTE_T14_COMRECGC_FULL_GENERATION_PASS]"
 
 
 class TasteComRecGCFullError(TasteComRecGCSmokeError):
@@ -763,10 +763,18 @@ def run_t14_full(
         "validation_loaded": False,
         "calibration_loaded": False,
         "test_loaded": False,
+        "calibration_status": "NOT_EVALUATED",
+        "held_out_test_status": "NOT_EVALUATED",
+        "export_status": "NOT_EVALUATED",
+        "paper_result_eligible": False,
+        "method_cell_pass": False,
         "completed_at": _utc_now(),
     }
     _atomic_json(root / "generation_manifest.json", final)
-    _atomic_write(root / "PASS", f"{PASS_MARKER}\n".encode("utf-8"))
+    _atomic_write(
+        root / "GENERATION_PASS",
+        f"{GENERATION_PASS_MARKER}\n".encode("utf-8"),
+    )
     _atomic_json(
         root / "progress.json",
         {
@@ -792,7 +800,7 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
     if not root.is_absolute() or Path(os.path.abspath(root)) != root:
         raise TasteComRecGCFullError("Taste T14 verification root must be normalized")
     required = {
-        "PASS",
+        "GENERATION_PASS",
         "cohort.jsonl",
         "cohort_manifest.json",
         "generation_manifest.json",
@@ -808,8 +816,10 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         info = (root / name).lstat()
         if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
             raise TasteComRecGCFullError(f"Taste T14 {name} is not a regular file")
-    if (root / "PASS").read_bytes() != f"{PASS_MARKER}\n".encode("utf-8"):
-        raise TasteComRecGCFullError("Taste T14 PASS marker changed")
+    if (root / "GENERATION_PASS").read_bytes() != (
+        f"{GENERATION_PASS_MARKER}\n".encode("utf-8")
+    ):
+        raise TasteComRecGCFullError("Taste T14 generation marker changed")
     manifest = json.loads((root / "generation_manifest.json").read_text("utf-8"))
     cohort_manifest = json.loads((root / "cohort_manifest.json").read_text("utf-8"))
     resource = json.loads((root / "resource_cap_receipt.json").read_text("utf-8"))
@@ -828,6 +838,11 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         or manifest.get("calibration_loaded") is not False
         or manifest.get("test_loaded") is not False
         or manifest.get("rf_oracle_used") is not False
+        or manifest.get("calibration_status") != "NOT_EVALUATED"
+        or manifest.get("held_out_test_status") != "NOT_EVALUATED"
+        or manifest.get("export_status") != "NOT_EVALUATED"
+        or manifest.get("paper_result_eligible") is not False
+        or manifest.get("method_cell_pass") is not False
         or manifest.get("cohort_manifest_sha256") != _sha256_file(root / "cohort_manifest.json")
         or manifest.get("cohort_jsonl_sha256") != _sha256_bytes(cohort_bytes)
         or manifest.get("resource_cap") != resource
@@ -853,7 +868,7 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
     return {
         "schema_version": "tastemolnet_t14_independent_verification_v1",
         "status": "PASS",
-        "marker": PASS_MARKER,
+        "marker": GENERATION_PASS_MARKER,
         "output_root": str(root),
         "m_effective": effective,
         "valid_unique_rule_count": valid["valid_unique_rule_count"],
@@ -861,6 +876,8 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         "validation_loaded": False,
         "calibration_loaded": False,
         "test_loaded": False,
+        "paper_result_eligible": False,
+        "method_cell_pass": False,
         "verified_at": _utc_now(),
     }
 
@@ -871,7 +888,7 @@ __all__ = [
     "M_FALLBACK_MAX",
     "M_MAX",
     "MIN_VALID_UNIQUE_RULES",
-    "PASS_MARKER",
+    "GENERATION_PASS_MARKER",
     "STAGE",
     "TasteComRecGCFullError",
     "TasteComRecGCFullParameters",

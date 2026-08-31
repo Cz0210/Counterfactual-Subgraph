@@ -10,7 +10,7 @@ import pytest
 from src.baselines.tastemolnet_comrecgc_full import (
     M_FALLBACK_MAX,
     M_MAX,
-    PASS_MARKER,
+    GENERATION_PASS_MARKER,
     TasteComRecGCFullError,
     build_full_train_correct_source_cohort,
     resource_cap_decision,
@@ -116,18 +116,24 @@ def test_independent_terminal_verifier_reopens_bounded_train_only_closure(
         "calibration_loaded": False,
         "test_loaded": False,
         "rf_oracle_used": False,
+        "calibration_status": "NOT_EVALUATED",
+        "held_out_test_status": "NOT_EVALUATED",
+        "export_status": "NOT_EVALUATED",
+        "paper_result_eligible": False,
+        "method_cell_pass": False,
         "cohort_manifest_sha256": _sha((root / "cohort_manifest.json").read_bytes()),
         "cohort_jsonl_sha256": _sha(cohort),
         "resource_cap": resource,
         "valid_unique": valid,
     }
     (root / "generation_manifest.json").write_text(json.dumps(manifest))
-    (root / "PASS").write_text(f"{PASS_MARKER}\n")
+    (root / "GENERATION_PASS").write_text(f"{GENERATION_PASS_MARKER}\n")
 
     receipt = validate_t14_full_output(root)
     assert receipt["status"] == "PASS"
     assert receipt["m_effective"] == M_MAX
     assert receipt["test_loaded"] is False
+    assert receipt["method_cell_pass"] is False
 
     manifest["test_loaded"] = True
     (root / "generation_manifest.json").write_text(json.dumps(manifest))
