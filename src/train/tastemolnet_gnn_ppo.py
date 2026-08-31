@@ -558,8 +558,37 @@ def validate_taste_adapter_checkpoint_reload(
             or "/proc/self/fd/" in expected_base
         ):
             raise ValueError("Taste PPO adapter base-model authority drifted")
-        if config_payload != dict(expected_adapter_config):
-            raise ValueError("Taste PPO adapter config differs from in-memory PEFT authority")
+        observed_config = dict(config_payload)
+        expected_config = dict(expected_adapter_config)
+        for label, candidate in (
+            ("saved", observed_config),
+            ("in-memory", expected_config),
+        ):
+            target_modules = candidate.get("target_modules")
+            if type(target_modules) is list:
+                if (
+                    not target_modules
+                    or any(type(item) is not str or not item for item in target_modules)
+                    or len(set(target_modules)) != len(target_modules)
+                ):
+                    raise ValueError(
+                        f"Taste PPO {label} target_modules authority is malformed"
+                    )
+                # PEFT stores target_modules as a set in memory but emits a JSON
+                # list in hash-table iteration order.  The module set is the
+                # scientific authority; raw checkpoint bytes remain separately
+                # hash-bound below.
+                candidate["target_modules"] = sorted(target_modules)
+        if observed_config != expected_config:
+            changed = sorted(
+                key
+                for key in set(observed_config) | set(expected_config)
+                if observed_config.get(key) != expected_config.get(key)
+            )
+            raise ValueError(
+                "Taste PPO adapter config differs from in-memory PEFT authority: "
+                f"changed={changed}"
+            )
         from safetensors.torch import load as load_safetensors
     except ImportError as exc:  # pragma: no cover - AutoDL dependency
         close_all()

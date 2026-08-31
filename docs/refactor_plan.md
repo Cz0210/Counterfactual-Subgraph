@@ -1,5 +1,15 @@
 # Refactor Plan
 
+## 2026-08-31: T6 PEFT target-module reload semantics
+
+- [x] Reproduce the production reload failure and show that only ordering of
+  the same five `target_modules` differs under PEFT 0.18.1.
+- [x] Normalize that one native set-valued field while retaining raw config and
+  checkpoint byte hashes.
+- [x] Cover reordered membership acceptance and missing-member rejection.
+- [ ] Launch a fresh T6 attempt from the immutable successor; do not adopt the
+  completed-but-terminally-failed five-step attempt.
+
 ## 2026-08-31: Reconcile AIDS freeze-only trace RNG evidence
 
 - [x] Reproduce the postprocess chemistry failure after the complete

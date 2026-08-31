@@ -1,5 +1,39 @@
 # Decisions Log
 
+## [2026-08-31] Compare T6 PEFT target modules by their native set semantics
+
+### Motivation
+
+The first T6 run to complete all five real PPO updates wrote byte-valid final
+and periodic safetensors checkpoints, then failed reload because PEFT 0.18.1
+serialized its in-memory `target_modules` set in a different JSON-list order.
+The saved and in-memory authorities contained exactly the same five module
+names; all other fields matched.
+
+### Decision
+
+At checkpoint reload, normalize only a nonempty unique-string
+`target_modules` list to sorted set order on both sides before comparing the
+complete adapter configuration.  Continue to hash-bind the raw
+`adapter_config.json` bytes and all safetensors/value-head bytes.  Reject any
+missing, added, duplicate, empty, or non-string module and report changed
+fields instead of weakening the reload gate.
+
+### Consequences
+
+- PEFT hash-table iteration order is not misclassified as a scientific config
+  change.
+- The exact target-module membership and every other adapter field remain
+  fail-closed.
+- The failed five-step attempt remains non-adoptable; the fix requires a fresh
+  UUID/root.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Close the reviewed T6 GPU0 policy authority after relocation
 
 ### Motivation

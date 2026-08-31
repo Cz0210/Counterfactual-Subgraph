@@ -618,6 +618,7 @@ def test_taste_checkpoint_reload_builds_taste_identity_from_held_bytes(
     config_payload = {
         "peft_type": "LORA",
         "base_model_name_or_path": str(tmp_path / "source-model"),
+        "target_modules": ["w1", "wqkv", "w2", "w3", "wo"],
     }
     config.write_text(
         json.dumps(config_payload)
@@ -641,7 +642,10 @@ def test_taste_checkpoint_reload_builds_taste_identity_from_held_bytes(
     result = validate_taste_adapter_checkpoint_reload(
         checkpoint,
         expected_base_model_path=tmp_path / "source-model",
-        expected_adapter_config=config_payload,
+        expected_adapter_config={
+            **config_payload,
+            "target_modules": ["wo", "w3", "w2", "wqkv", "w1"],
+        },
     )
     assert result["checkpoint_reload_pass"] is True
     assert result["policy_checkpoint_hash_schema"] == TASTE_PPO_CHECKPOINT_IDENTITY_SCHEMA
@@ -657,7 +661,53 @@ def test_taste_checkpoint_reload_builds_taste_identity_from_held_bytes(
     assert result["checkpoint_directory_identity"]["inode"] == (
         checkpoint.stat().st_ino
     )
-    assert "bace" not in json.dumps(result).lower()
+    # Cryptographic digests are arbitrary hexadecimal strings and may contain
+    # the substring ``bace`` by chance.  Check the semantic authority fields
+    # that previously risked cross-dataset leakage instead.
+    assert "bace" not in result["policy_checkpoint_hash_schema"].lower()
+    assert "bace" not in result["policy_checkpoint_hash_payload"][
+        "schema_version"
+    ].lower()
+    assert "bace" not in result["adapter_config"]["path"].lower()
+    assert "bace" not in result["adapter_weights"]["path"].lower()
+
+
+def test_taste_checkpoint_reload_rejects_target_module_membership_change(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    config_payload = {
+        "peft_type": "LORA",
+        "base_model_name_or_path": str(tmp_path / "source-model"),
+        "target_modules": ["w1", "wqkv", "w2", "w3", "wo"],
+    }
+    (checkpoint / "adapter_config.json").write_text(
+        json.dumps(config_payload) + "\n", encoding="utf-8"
+    )
+    import torch
+    from safetensors.torch import save_file
+
+    save_file(
+        {
+            "base_model.model.layer.lora_A.weight": torch.ones((2, 3)),
+            "base_model.model.layer.lora_B.weight": torch.zeros((4, 2)),
+        },
+        str(checkpoint / "adapter_model.safetensors"),
+    )
+    torch.save(
+        {"summary.weight": torch.ones((1, 4)), "summary.bias": torch.zeros(1)},
+        checkpoint / "decoded_chem_value_head.pt",
+    )
+    with pytest.raises(ValueError, match=r"changed=\['target_modules'\]"):
+        validate_taste_adapter_checkpoint_reload(
+            checkpoint,
+            expected_base_model_path=tmp_path / "source-model",
+            expected_adapter_config={
+                **config_payload,
+                "target_modules": ["w1", "wqkv", "w2", "w3"],
+            },
+        )
 
 
 def test_taste_checkpoint_reload_rejects_equal_byte_weights_replacement_during_load(
