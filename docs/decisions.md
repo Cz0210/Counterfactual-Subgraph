@@ -43,6 +43,47 @@ Accepted for the minimal AIDS postprocess compatibility repair.
 
 ---
 
+## [2026-08-31] Close T13 over the real T8 and all resumable science bytes
+
+### Motivation
+
+The first T13 integration accepted a legacy flat `PASS` shape although the
+real T8 is a managed-execution-v2 terminal with its typed T8 verification
+nested in `verification.json`. It also trusted completed branch and
+per-parent checkpoint paths more narrowly than the independent terminal
+verifier could replay, and applied the ten-rule paper gate to each target
+branch instead of to their canonical merged rule set.
+
+### Decision
+
+Require T13 to descriptor-reopen the published managed-v2 T8 directory,
+validate the nested typed T8 receipt, and cross-bind its frozen three-class
+GINE checkpoint. Hash-close every target-branch file, including official
+model/rule/epoch checkpoints, and independently parse the typed training
+resume identity. Bind every adopted evaluation chunk to the complete split,
+parent, ordered-rule, GINE, MolCLR, threshold, distance, and counterfactual
+configuration. Freeze every raw file, then have the separate verifier re-hash
+the exact raw closure and replay branch validation, canonical merge/dedup,
+calibration-only selection, chunk reconstruction, and standardized exports.
+
+Allow either target branch to contribute fewer than ten native rules. Require
+at least ten unique rules only after the two branches are canonically merged;
+do not copy rules or weaken the final paper gate.
+
+### Consequences
+
+- The real managed-v2 T8 publication is consumable without a legacy adapter.
+- A resumed chunk or branch can be adopted only when its complete content and
+  science configuration still match.
+- The terminal verifier no longer passes placeholder branch, merge, selector,
+  or checkpoint evidence.
+- Matrix publication remains an explicit downstream registry/publisher step;
+  T13 publishes only its independently verified cell artifacts.
+
+### Status
+
+Accepted
+
 ## [2026-08-31] Add the executable TasteMolNet T13 native GlobalGCE full route
 
 ### Motivation

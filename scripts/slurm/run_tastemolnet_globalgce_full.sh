@@ -20,7 +20,7 @@ python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available()); print("cuda_devices=", torch.cuda.device_count())'
 nvidia-smi
 
-: "${T8_PASS_ROOT:?set T8_PASS_ROOT to the verified T8 PASS root/receipt}"
+: "${T8_PASS_ROOT:?set T8_PASS_ROOT to the published managed-v2 T8 final directory}"
 : "${TASTEMOLNET_GNN_CHECKPOINT:?set TASTEMOLNET_GNN_CHECKPOINT}"
 : "${TASTEMOLNET_TRAIN_CSV:?set TASTEMOLNET_TRAIN_CSV}"
 : "${TASTEMOLNET_CALIBRATION_CSV:?set TASTEMOLNET_CALIBRATION_CSV}"

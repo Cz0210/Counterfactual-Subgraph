@@ -31,6 +31,7 @@ import tempfile
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from src.baselines.globalgce_bace_native_rules import (
+    OFFICIAL_GLOBALGCE_COMMIT,
     GlobalGCENativeRule,
     apply_rule_to_parent,
     validate_official_globalgce_root,
@@ -41,7 +42,14 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     OfficialGlobalGCEMutagenicityGenerator,
     TrainParent,
 )
-from src.baselines.tastemolnet_globalgce_smoke import FrozenTasteGINEScorer
+from src.baselines.globalgce_resumable import (
+    normalize_globalgce_training_resume_identity,
+)
+from src.baselines.tastemolnet_globalgce_smoke import (
+    MANAGED_TASK_ID as T8_MANAGED_TASK_ID,
+    STAGE as T8_STAGE,
+    FrozenTasteGINEScorer,
+)
 from src.data.tastemolnet_ppo import LABEL_MAP, TASTEMOLNET_PREPARED_FIELDS
 from src.eval.four_by_four_registry import (
     PASS_STATUSES,
@@ -52,6 +60,11 @@ from src.eval.node_wasserstein_distance import (
     MolCLRNodeWassersteinConfig,
     MolCLRNodeWassersteinDistance,
 )
+from src.utils.managed_final_consumer_v2 import (
+    ManagedFinalConsumerV2Error,
+    hold_verified_managed_final,
+)
+from src.utils.tastemolnet_t8_managed_v2 import T8_VERIFICATION_SCHEMA
 
 
 STAGE = "T13_GLOBALGCE_FULL"
@@ -74,8 +87,21 @@ BRANCH_MANIFEST_SCHEMA = "tastemolnet_t13_branch_manifest_v1"
 SELECTION_SCHEMA = "tastemolnet_t13_calibration_selection_v1"
 RUN_MANIFEST_SCHEMA = "tastemolnet_t13_run_manifest_v1"
 VERIFY_SCHEMA = "tastemolnet_t13_terminal_verification_v1"
+CHUNK_MANIFEST_SCHEMA = "tastemolnet_t13_pair_chunk_manifest_v1"
+CHUNK_INVENTORY_SCHEMA = "tastemolnet_t13_pair_chunk_inventory_v1"
 PASS_MARKER = "[TASTE_T13_GLOBALGCE_PASS]"
 GINE_FILES = tuple(sorted(FROZEN_GINE_IN_MEMORY_FILES))
+BRANCH_REQUIRED_FILES = frozenset(
+    {
+        "native_rule_catalog.jsonl",
+        "native_rule_rejections.jsonl",
+        "globalgce_model.pt",
+        "globalgce_rules.pt",
+        "training_core_summary.json",
+        "globalgce_training_checkpoints/training_checkpoint.pt",
+        "globalgce_training_checkpoints/training_heartbeat.json",
+    }
+)
 
 
 class TasteGlobalGCEFullError(RuntimeError):
@@ -141,6 +167,31 @@ class TasteGlobalGCEFullConfig:
             "seed": self.seed,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "TasteGlobalGCEFullConfig":
+        if type(payload) is not dict:
+            raise TasteGlobalGCEFullError("T13 config payload is not one object")
+        try:
+            config = cls(
+                epochs=payload["epochs"],
+                top_k_native=payload["top_k_native"],
+                min_freq=payload["min_freq"],
+                learning_rate=float.fromhex(payload["learning_rate_hex"]),
+                dropout=float.fromhex(payload["dropout_hex"]),
+                generation_chunk_size=payload["generation_chunk_size"],
+                oracle_batch_size=payload["oracle_batch_size"],
+                gspan_flush_every=payload["gspan_flush_every"],
+                gspan_max_in_memory_candidates=payload[
+                    "gspan_max_in_memory_candidates"
+                ],
+                seed=payload["seed"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TasteGlobalGCEFullError("T13 config payload is invalid") from exc
+        if config.to_dict() != payload:
+            raise TasteGlobalGCEFullError("T13 config payload changed")
+        return config
+
 
 @dataclass(frozen=True, slots=True)
 class ThresholdContract:
@@ -185,6 +236,7 @@ class InputAuthority:
     split_manifest_sha256: str
     molclr_checkpoint_sha256: str
     t8_pass_sha256: str
+    t8_oracle_checkpoint_hash: str
     threshold: ThresholdContract
     train_count: int
     train_label_counts: dict[str, int]
@@ -206,6 +258,7 @@ class InputAuthority:
             "split_manifest_sha256": self.split_manifest_sha256,
             "molclr_checkpoint_sha256": self.molclr_checkpoint_sha256,
             "t8_pass_sha256": self.t8_pass_sha256,
+            "t8_oracle_checkpoint_hash": self.t8_oracle_checkpoint_hash,
             "threshold_config_hash": self.threshold.config_hash,
         }
 
@@ -385,68 +438,81 @@ def load_threshold_contract(path_like: str | Path) -> ThresholdContract:
     )
 
 
-def _find_t8_pass_document(root: Path) -> tuple[Path, dict[str, Any]]:
-    candidates = (
-        "gate.json",
-        "verification.json",
-        "managed_verification.json",
-        "run_manifest.json",
-        "manifest.json",
-    )
-    observed: list[tuple[Path, dict[str, Any]]] = []
-    for name in candidates:
-        path = root / name
-        if path.is_file():
-            observed.append((path, read_json(path)))
-    for path, payload in observed:
-        stage_values = {
-            str(payload.get(key) or "").strip().upper()
-            for key in ("stage", "task_id", "managed_task_id")
-        }
-        pass_values = {
-            str(payload.get(key) or "").strip().upper()
-            for key in ("status", "state", "gate_state")
-        }
-        explicit_pass = any(
-            payload.get(key) is True
-            for key in ("passed", "gate_passed", "verification_passed")
-        )
-        if (
-            any("T8" in value or "GLOBALGCE_SMOKE" in value for value in stage_values)
-            and (explicit_pass or bool(pass_values & {"PASS", "PASSED"}))
-        ):
-            return path, payload
-    raise TasteGlobalGCEFullError("T13 prerequisite has no typed T8 PASS document")
+def validate_t8_pass(path_like: str | Path) -> tuple[Path, dict[str, Any]]:
+    """Reopen the real managed-v2 T8 publication and its nested typed receipt."""
 
-
-def validate_t8_pass(path_like: str | Path) -> tuple[Path, str]:
     requested = Path(path_like).expanduser().resolve(strict=True)
-    if requested.is_file():
-        payload = read_json(requested)
-        root = requested.parent
-        pass_path = requested
-        stage = " ".join(
-            str(payload.get(key) or "") for key in ("stage", "task_id", "managed_task_id")
-        ).upper()
-        state = str(payload.get("status") or payload.get("state") or "").upper()
-        if not (
-            ("T8" in stage or "GLOBALGCE_SMOKE" in stage)
-            and (
-                state in {"PASS", "PASSED"}
-                or payload.get("passed") is True
-                or payload.get("gate_passed") is True
+    if not requested.is_dir():
+        raise TasteGlobalGCEFullError(
+            "T13 requires the published managed-v2 T8 final root"
+        )
+    try:
+        with hold_verified_managed_final(requested) as held:
+            terminal_evidence = dict(held.revalidate())
+            outer = held.verification_payload
+            typed = outer.get("verification")
+            destination_distribution = (
+                typed.get("destination_distribution")
+                if type(typed) is dict
+                else None
             )
-        ):
-            raise TasteGlobalGCEFullError("T13 prerequisite receipt is not T8 PASS")
-    elif requested.is_dir():
-        root = requested
-        marker = root / "PASS"
-        if not marker.is_file() or marker.read_text(encoding="utf-8").strip() != "PASS":
-            raise TasteGlobalGCEFullError("T13 prerequisite root lacks exact PASS marker")
-        pass_path, _payload = _find_t8_pass_document(root)
-    else:  # pragma: no cover - resolve(strict=True) already excludes this.
-        raise TasteGlobalGCEFullError("T8 prerequisite is not a file/directory")
-    return root, sha256_file(pass_path)
+            if (
+                type(typed) is not dict
+                or typed.get("schema_version") != T8_VERIFICATION_SCHEMA
+                or typed.get("status") != "PASS"
+                or typed.get("stage") != T8_STAGE
+                or typed.get("dataset") != DATASET_ID
+                or typed.get("method") != METHOD
+                or typed.get("task_id") != T8_MANAGED_TASK_ID
+                or typed.get("attempt_id") != terminal_evidence.get("attempt_id")
+                or typed.get("generation_token")
+                != terminal_evidence.get("generation_token")
+                or typed.get("official_globalgce_commit")
+                != OFFICIAL_GLOBALGCE_COMMIT
+                or typed.get("target_branches") != [0, 2]
+                or type(typed.get("strict_flip_count")) is not int
+                or typed["strict_flip_count"] <= 0
+                or type(destination_distribution) is not dict
+                or set(destination_distribution) != {"0", "2"}
+                or any(
+                    type(value) is not int or value < 0
+                    for value in destination_distribution.values()
+                )
+                or sum(destination_distribution.values())
+                != typed["strict_flip_count"]
+                or typed.get("same_three_class_gine") is not True
+                or typed.get("checkpoint_resume_verified") is not True
+                or typed.get("official_lhs_to_rhs_verified") is not True
+                or typed.get("isolated_imports_verified") is not True
+                or typed.get("rf_oracle_used") is not False
+                or typed.get("data_redistributed") is not False
+                or typed.get("worker_self_signed") is not False
+                or typed.get("external_authority_revalidated") is not True
+                or not _is_sha256(typed.get("oracle_checkpoint_hash"))
+                or not _is_sha256(typed.get("input_authority_sha256"))
+                or not _is_sha256(typed.get("science_sha256"))
+                or not _is_sha256(typed.get("official_startup_sha256"))
+            ):
+                raise TasteGlobalGCEFullError(
+                    "T13 prerequisite is not the typed managed-v2 T8 PASS"
+                )
+            evidence = {
+                "schema_version": "tastemolnet_t13_t8_adoption_v1",
+                "managed_terminal": terminal_evidence,
+                "typed_verification": dict(typed),
+            }
+            evidence["adoption_sha256"] = stable_sha256(evidence)
+            # Revalidate again while every managed terminal descriptor remains
+            # retained, so the returned digest never names a one-shot read.
+            if dict(held.revalidate()) != terminal_evidence:
+                raise TasteGlobalGCEFullError(
+                    "managed-v2 T8 terminal changed during adoption"
+                )
+            return requested, evidence
+    except ManagedFinalConsumerV2Error as exc:
+        raise TasteGlobalGCEFullError(
+            "T13 could not reopen the managed-v2 T8 terminal"
+        ) from exc
 
 
 def _checkpoint_payloads(checkpoint: Path) -> dict[str, bytes]:
@@ -484,7 +550,7 @@ def load_input_authority(
     molclr_ckpt = Path(molclr_checkpoint).expanduser().resolve(strict=True)
     threshold_path = Path(threshold_contract).expanduser().resolve(strict=True)
     threshold = load_threshold_contract(threshold_path)
-    t8_root, t8_sha = validate_t8_pass(t8_pass_root)
+    t8_root, t8_evidence = validate_t8_pass(t8_pass_root)
     validate_official_globalgce_root(official)
     payloads = _checkpoint_payloads(checkpoint)
     card = json.loads(payloads["model_card.json"].decode("utf-8"))
@@ -500,6 +566,13 @@ def load_input_authority(
     checkpoint_id = sha256_bytes(payloads["model.pt"])
     if card.get("checkpoint_id") != checkpoint_id:
         raise TasteGlobalGCEFullError("frozen GINE checkpoint_id differs from model.pt")
+    t8_oracle_checkpoint_hash = str(
+        t8_evidence["typed_verification"]["oracle_checkpoint_hash"]
+    )
+    if t8_oracle_checkpoint_hash != checkpoint_id:
+        raise TasteGlobalGCEFullError(
+            "managed-v2 T8 and T13 do not use the same frozen GINE"
+        )
     split = json.loads(payloads["split_manifest.json"].decode("utf-8"))
     files = split.get("files")
     roles = split.get("roles")
@@ -559,7 +632,8 @@ def load_input_authority(
         dataset_hash=dataset_hash,
         split_manifest_sha256=sha256_bytes(payloads["split_manifest.json"]),
         molclr_checkpoint_sha256=sha256_file(molclr_ckpt),
-        t8_pass_sha256=t8_sha,
+        t8_pass_sha256=str(t8_evidence["adoption_sha256"]),
+        t8_oracle_checkpoint_hash=t8_oracle_checkpoint_hash,
         threshold=threshold,
         train_count=train_count,
         train_label_counts={str(key): int(value) for key, value in train_counts.items()},
@@ -736,6 +810,163 @@ def _branch_manifest(root: Path) -> Path:
     return root / "branch_manifest.json"
 
 
+def _parent_cohort_sha256(parents: Sequence[TrainParent]) -> str:
+    return stable_sha256(
+        [
+            {
+                "position": position,
+                "parent_id": parent.parent_id,
+                "smiles": parent.smiles,
+                "label": parent.label,
+                "split": parent.split,
+            }
+            for position, parent in enumerate(parents)
+        ]
+    )
+
+
+def _branch_file_inventory(root: Path) -> dict[str, dict[str, Any]]:
+    files: dict[str, dict[str, Any]] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise TasteGlobalGCEFullError("T13 branch contains a symbolic link")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise TasteGlobalGCEFullError("T13 branch contains a non-regular entry")
+        relative = path.relative_to(root).as_posix()
+        if relative == "branch_manifest.json":
+            continue
+        files[relative] = {
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+        }
+    if not BRANCH_REQUIRED_FILES <= set(files):
+        missing = sorted(BRANCH_REQUIRED_FILES - set(files))
+        raise TasteGlobalGCEFullError(
+            f"T13 branch artifact closure is incomplete: {missing}"
+        )
+    return files
+
+
+def _validate_completed_branch(
+    *,
+    branch_root: Path,
+    target_label: int,
+    config: TasteGlobalGCEFullConfig,
+    expected_checkpoint_id: str,
+    expected_parent_cohort_sha256: str,
+    expected_parent_count: int,
+) -> dict[str, Any]:
+    manifest = read_json(_branch_manifest(branch_root))
+    files = manifest.get("files")
+    if (
+        manifest.get("schema_version") != BRANCH_MANIFEST_SCHEMA
+        or manifest.get("status") != "PASS"
+        or manifest.get("target_label") != target_label
+        or manifest.get("source_label") != SOURCE_LABEL
+        or manifest.get("num_classes") != NUM_CLASSES
+        or manifest.get("config") != config.to_dict()
+        or manifest.get("train_only") is not True
+        or manifest.get("calibration_loaded") is not False
+        or manifest.get("test_loaded") is not False
+        or manifest.get("oracle_backend") != "gnn"
+        or manifest.get("classifier_family") != "gine"
+        or manifest.get("rf_oracle_used") is not False
+        or manifest.get("rules_only_min_valid_native_rules") != 0
+        or manifest.get("oracle_checkpoint_hash") != expected_checkpoint_id
+        or manifest.get("train_parent_cohort_sha256")
+        != expected_parent_cohort_sha256
+        or manifest.get("train_parent_count") != expected_parent_count
+        or manifest.get("official_epoch_checkpoint_resume_enabled") is not True
+        or type(manifest.get("trained_model_resumed")) is not bool
+        or not isinstance(files, dict)
+        or set(files) != set(_branch_file_inventory(branch_root))
+    ):
+        raise TasteGlobalGCEFullError("T13 completed branch manifest changed")
+    observed = _branch_file_inventory(branch_root)
+    if files != observed or manifest.get("file_inventory_sha256") != stable_sha256(files):
+        raise TasteGlobalGCEFullError("T13 completed branch artifact bytes changed")
+    training = read_json(branch_root / "training_core_summary.json")
+    identity = training.get("training_resume_identity")
+    try:
+        normalized_identity, identity_sha256 = (
+            normalize_globalgce_training_resume_identity(identity)
+        )
+    except (TypeError, ValueError) as exc:
+        raise TasteGlobalGCEFullError(
+            "T13 branch training resume identity is invalid"
+        ) from exc
+    oracle_identity = normalized_identity.get("oracle_identity")
+    native_cohort = normalized_identity.get("native_train_cohort")
+    source_cohort = normalized_identity.get("source_train_cohort")
+    official_source_identity = normalized_identity.get("official_source_identity")
+    training_config = normalized_identity.get("training_config")
+    gnn_training = training.get("gnn_training")
+    if (
+        training.get("dataset_name") != DATASET
+        or normalized_identity.get("dataset") != DATASET
+        or normalized_identity.get("num_classes") != NUM_CLASSES
+        or normalized_identity.get("source_label") != SOURCE_LABEL
+        or normalized_identity.get("target_label") != target_label
+        or training.get("selected_parent_count") != expected_parent_count
+        or training.get("num_classes") != NUM_CLASSES
+        or training.get("source_label") != SOURCE_LABEL
+        or training.get("target_label") != target_label
+        or training.get("prediction_backend")
+        != "frozen_gine_differentiable_bridge"
+        or training.get("rf_oracle_used") is not False
+        or training.get("training_resume_identity_sha256") != identity_sha256
+        or manifest.get("training_resume_identity_sha256") != identity_sha256
+        or not isinstance(oracle_identity, dict)
+        or oracle_identity.get("checkpoint_id") != expected_checkpoint_id
+        or manifest.get("oracle_resume_identity_sha256")
+        != oracle_identity.get("identity_sha256")
+        or not isinstance(native_cohort, dict)
+        or manifest.get("native_train_cohort_sha256")
+        != stable_sha256(native_cohort)
+        or not isinstance(source_cohort, dict)
+        or source_cohort.get("count") != expected_parent_count
+        or manifest.get("source_train_cohort_sha256")
+        != stable_sha256(source_cohort)
+        or not isinstance(official_source_identity, dict)
+        or manifest.get("official_source_identity_sha256")
+        != official_source_identity.get("identity_sha256")
+        or not isinstance(training_config, dict)
+        or training_config.get("seed") != config.seed
+        or training_config.get("epochs") != config.epochs
+        or training_config.get("top_k_native") != config.top_k_native
+        or training_config.get("learning_rate_hex") != config.learning_rate.hex()
+        or training_config.get("dropout_hex") != config.dropout.hex()
+        or training_config.get("min_freq") != config.min_freq
+        or training_config.get("gspan_flush_every") != config.gspan_flush_every
+        or training_config.get("gspan_max_in_memory_candidates")
+        != config.gspan_max_in_memory_candidates
+        or training_config.get("gspan_exact_top_k_pruning") is not False
+        or training_config.get("gspan_adoption_identity") is not None
+        or training.get("gspan_exact_top_k_pruning") is not False
+        or training.get("trained_once") is not True
+        or training.get("rule_selection_performed_once") is not True
+        or not isinstance(gnn_training, dict)
+        or gnn_training.get("checkpoint_id") != expected_checkpoint_id
+        or training.get("gnn_checkpoint_sha256") != expected_checkpoint_id
+        or training.get("globalgce_model_checkpoint_sha256")
+        != sha256_file(branch_root / "globalgce_model.pt")
+        or training.get("rules_checkpoint_sha256")
+        != sha256_file(branch_root / "globalgce_rules.pt")
+    ):
+        raise TasteGlobalGCEFullError("T13 branch training/GINE identity changed")
+    catalog = read_jsonl(branch_root / "native_rule_catalog.jsonl")
+    if (
+        manifest.get("valid_native_rule_count") != len(catalog)
+        or len(catalog) > K_MAX
+    ):
+        raise TasteGlobalGCEFullError("T13 branch native-rule count changed")
+    for row in catalog:
+        GlobalGCENativeRule.from_payload(row)
+    return manifest
+
+
 def run_native_branch(
     *,
     target_label: int,
@@ -743,6 +974,8 @@ def run_native_branch(
     parents: Sequence[TrainParent],
     branch_root: Path,
     config: TasteGlobalGCEFullConfig,
+    expected_checkpoint_id: str,
+    expected_parent_cohort_sha256: str,
 ) -> dict[str, Any]:
     """Run/resume one real official branch and close its rule artifacts."""
 
@@ -751,23 +984,14 @@ def run_native_branch(
     branch_root.mkdir(parents=True, exist_ok=True)
     existing = _branch_manifest(branch_root)
     if existing.is_file():
-        manifest = read_json(existing)
-        if (
-            manifest.get("schema_version") != BRANCH_MANIFEST_SCHEMA
-            or manifest.get("status") != "PASS"
-            or manifest.get("target_label") != target_label
-            or manifest.get("config") != config.to_dict()
-        ):
-            raise TasteGlobalGCEFullError("T13 completed branch manifest changed")
-        for name, identity in (manifest.get("files") or {}).items():
-            path = branch_root / str(name)
-            if (
-                not path.is_file()
-                or path.stat().st_size != int(identity.get("bytes", -1))
-                or sha256_file(path) != identity.get("sha256")
-            ):
-                raise TasteGlobalGCEFullError("T13 completed branch bytes changed")
-        return manifest
+        return _validate_completed_branch(
+            branch_root=branch_root,
+            target_label=target_label,
+            config=config,
+            expected_checkpoint_id=expected_checkpoint_id,
+            expected_parent_cohort_sha256=expected_parent_cohort_sha256,
+            expected_parent_count=len(parents),
+        )
     result: NativeGenerationResult = generator.generate(
         parents,
         output_dir=branch_root,
@@ -795,22 +1019,18 @@ def run_native_branch(
         on_generation_complete=None,
     )
     summary = result.training_summary
-    required = (
-        "native_rule_catalog.jsonl",
-        "native_rule_rejections.jsonl",
-        "globalgce_model.pt",
-        "globalgce_rules.pt",
-        "training_core_summary.json",
-        "globalgce_training_checkpoints/training_checkpoint.pt",
-        "globalgce_training_checkpoints/training_heartbeat.json",
-    )
-    files: dict[str, dict[str, Any]] = {}
-    for relative in required:
-        path = branch_root / relative
-        if not path.is_file() or path.stat().st_size <= 0:
-            raise TasteGlobalGCEFullError(f"T13 target-{target_label} lacks {relative}")
-        files[relative] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
+    files = _branch_file_inventory(branch_root)
     valid_rules = summary.get("valid_native_rule_count")
+    gnn_training = summary.get("gnn_training")
+    training_identity = summary.get("training_resume_identity")
+    try:
+        normalized_identity, training_identity_sha256 = (
+            normalize_globalgce_training_resume_identity(training_identity)
+        )
+    except (TypeError, ValueError) as exc:
+        raise TasteGlobalGCEFullError(
+            f"T13 target-{target_label} lacks a typed training resume identity"
+        ) from exc
     if (
         summary.get("prediction_backend") != "frozen_gine_differentiable_bridge"
         or summary.get("classifier_family") != "gine"
@@ -823,7 +1043,12 @@ def run_native_branch(
         or summary.get("calibration_loaded") is not False
         or summary.get("test_loaded") is not False
         or type(valid_rules) is not int
-        or valid_rules < MIN_RULES
+        or valid_rules < 0
+        or valid_rules > K_MAX
+        or not isinstance(gnn_training, dict)
+        or gnn_training.get("checkpoint_id") != expected_checkpoint_id
+        or summary.get("training_resume_identity_sha256")
+        != training_identity_sha256
     ):
         raise TasteGlobalGCEFullError(f"T13 target-{target_label} science contract failed")
     manifest = {
@@ -842,16 +1067,39 @@ def run_native_branch(
         "oracle_backend": "gnn",
         "classifier_family": "gine",
         "rf_oracle_used": False,
+        "rules_only_min_valid_native_rules": 0,
+        "oracle_checkpoint_hash": expected_checkpoint_id,
+        "train_parent_count": len(parents),
+        "train_parent_cohort_sha256": expected_parent_cohort_sha256,
         "valid_native_rule_count": valid_rules,
-        "training_resume_identity_sha256": summary.get(
-            "training_resume_identity_sha256"
+        "training_resume_identity_sha256": training_identity_sha256,
+        "oracle_resume_identity_sha256": normalized_identity["oracle_identity"][
+            "identity_sha256"
+        ],
+        "native_train_cohort_sha256": stable_sha256(
+            normalized_identity["native_train_cohort"]
         ),
-        "official_epoch_checkpoint_resume": True,
+        "source_train_cohort_sha256": stable_sha256(
+            normalized_identity["source_train_cohort"]
+        ),
+        "official_source_identity_sha256": normalized_identity[
+            "official_source_identity"
+        ]["identity_sha256"],
+        "official_epoch_checkpoint_resume_enabled": True,
+        "trained_model_resumed": bool(summary.get("trained_model_resumed")),
         "files": files,
+        "file_inventory_sha256": stable_sha256(files),
         "completed_at": utc_now(),
     }
     atomic_json(existing, manifest)
-    return manifest
+    return _validate_completed_branch(
+        branch_root=branch_root,
+        target_label=target_label,
+        config=config,
+        expected_checkpoint_id=expected_checkpoint_id,
+        expected_parent_cohort_sha256=expected_parent_cohort_sha256,
+        expected_parent_count=len(parents),
+    )
 
 
 def merge_branch_rules(branch_roots: Mapping[int, Path]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -861,8 +1109,6 @@ def merge_branch_rules(branch_roots: Mapping[int, Path]) -> tuple[list[dict[str,
     branch_counts: dict[int, int] = {}
     for target in TARGET_BRANCHES:
         rows = read_jsonl(branch_roots[target] / "native_rule_catalog.jsonl")
-        if len(rows) < MIN_RULES:
-            raise TasteGlobalGCEFullError(f"T13 target-{target} has fewer than 10 rules")
         seen: set[str] = set()
         for rank, raw in enumerate(rows, start=1):
             rule = GlobalGCENativeRule.from_payload(raw)
@@ -1098,19 +1344,50 @@ def evaluate_split_resumable(
     provider: MolCLRNodeWassersteinDistance,
     output: Path,
     checkpoint_callback: Callable[[int], None],
+    evaluation_identity: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     chunks = output / "raw" / f"{split}_pair_chunks"
     chunks.mkdir(parents=True, exist_ok=True)
+    identity = dict(evaluation_identity)
+    if (
+        identity.get("schema_version") != "tastemolnet_t13_split_evaluation_identity_v1"
+        or identity.get("split") != split
+        or identity.get("oracle_checkpoint_hash") != scorer.checkpoint_id
+        or identity.get("distance_line") != DISTANCE_LINE
+        or identity.get("distance_namespace") != DISTANCE_NAMESPACE
+        or identity.get("cf_mode") != CF_MODE
+        or identity.get("num_classes") != NUM_CLASSES
+        or identity.get("source_label") != SOURCE_LABEL
+    ):
+        raise TasteGlobalGCEFullError("T13 split evaluation identity changed")
+    evaluation_identity_sha256 = stable_sha256(identity)
     candidate_ids = [str(row["candidate_id"]) for row in rules]
     if len(candidate_ids) < MIN_RULES or len(candidate_ids) != len(set(candidate_ids)):
         raise TasteGlobalGCEFullError("T13 evaluation rule identity is invalid")
     all_rows: list[dict[str, Any]] = []
+    chunk_inventory: list[dict[str, Any]] = []
     for position, parent in enumerate(parents):
         chunk = chunks / f"{position:08d}.jsonl"
-        if chunk.is_file():
+        chunk_manifest = chunks / f"{position:08d}.manifest.json"
+        if chunk_manifest.is_file() and not chunk.is_file():
+            raise TasteGlobalGCEFullError(
+                f"T13 {split} resume manifest exists without its chunk"
+            )
+        if chunk.is_file() and chunk_manifest.is_file():
+            manifest = read_json(chunk_manifest)
             rows = read_jsonl(chunk)
             if (
-                len(rows) != len(rules)
+                manifest.get("schema_version") != CHUNK_MANIFEST_SCHEMA
+                or manifest.get("split") != split
+                or manifest.get("position") != position
+                or manifest.get("parent_id") != parent.parent_id
+                or manifest.get("evaluation_identity_sha256")
+                != evaluation_identity_sha256
+                or manifest.get("candidate_ids_sha256")
+                != stable_sha256(candidate_ids)
+                or manifest.get("row_count") != len(rules)
+                or manifest.get("rows_sha256") != sha256_file(chunk)
+                or len(rows) != len(rules)
                 or [str(row.get("candidate_id")) for row in rows] != candidate_ids
                 or any(
                     row.get("parent_id") != parent.parent_id or row.get("split") != split
@@ -1127,10 +1404,47 @@ def evaluate_split_resumable(
                 split=split,
             )
             atomic_jsonl(chunk, rows)
+            atomic_json(
+                chunk_manifest,
+                {
+                    "schema_version": CHUNK_MANIFEST_SCHEMA,
+                    "split": split,
+                    "position": position,
+                    "parent_id": parent.parent_id,
+                    "evaluation_identity_sha256": evaluation_identity_sha256,
+                    "candidate_ids_sha256": stable_sha256(candidate_ids),
+                    "row_count": len(rows),
+                    "rows_sha256": sha256_file(chunk),
+                },
+            )
         all_rows.extend(rows)
+        chunk_inventory.append(
+            {
+                "position": position,
+                "parent_id": parent.parent_id,
+                "chunk": chunk.relative_to(output).as_posix(),
+                "chunk_sha256": sha256_file(chunk),
+                "manifest": chunk_manifest.relative_to(output).as_posix(),
+                "manifest_sha256": sha256_file(chunk_manifest),
+            }
+        )
         checkpoint_callback(position + 1)
     pair_path = output / "raw" / f"{split}_pair_details.jsonl"
     atomic_jsonl(pair_path, all_rows)
+    chunk_inventory_payload = {
+        "schema_version": CHUNK_INVENTORY_SCHEMA,
+        "split": split,
+        "evaluation_identity": identity,
+        "evaluation_identity_sha256": evaluation_identity_sha256,
+        "parent_count": len(parents),
+        "candidate_count": len(rules),
+        "pair_count": len(all_rows),
+        "chunks": chunk_inventory,
+        "chunks_sha256": stable_sha256(chunk_inventory),
+        "pair_details_sha256": sha256_file(pair_path),
+    }
+    chunk_inventory_path = output / "raw" / f"{split}_pair_chunk_inventory.json"
+    atomic_json(chunk_inventory_path, chunk_inventory_payload)
     return all_rows, {
         "split": split,
         "parent_count": len(parents),
@@ -1141,7 +1455,131 @@ def evaluate_split_resumable(
         "candidate_ids_sha256": stable_sha256(candidate_ids),
         "resumable_parent_chunks": True,
         "checkpointed_parent_count": len(parents),
+        "evaluation_identity_sha256": evaluation_identity_sha256,
+        "chunk_inventory_sha256": sha256_file(chunk_inventory_path),
     }
+
+
+def build_split_evaluation_identity(
+    *,
+    split: str,
+    parents: Sequence[TrainParent],
+    rules: Sequence[Mapping[str, Any]],
+    oracle_checkpoint_hash: str,
+    molclr_checkpoint_hash: str,
+    threshold_config_hash: str,
+) -> dict[str, Any]:
+    if (
+        split not in {"calibration", "test"}
+        or not _is_sha256(oracle_checkpoint_hash)
+        or not _is_sha256(molclr_checkpoint_hash)
+        or not _is_sha256(threshold_config_hash)
+        or not parents
+        or any(parent.split != split for parent in parents)
+    ):
+        raise TasteGlobalGCEFullError("T13 split evaluation authority is invalid")
+    rule_identities = []
+    for row in rules:
+        candidate_id = str(row.get("candidate_id") or "")
+        content_hash = str(row.get("rule_content_hash") or "")
+        if not candidate_id or not _is_sha256(content_hash):
+            raise TasteGlobalGCEFullError("T13 evaluation rule identity is incomplete")
+        rule_identities.append(
+            {"candidate_id": candidate_id, "rule_content_hash": content_hash}
+        )
+    return {
+        "schema_version": "tastemolnet_t13_split_evaluation_identity_v1",
+        "split": split,
+        "parent_cohort_sha256": _parent_cohort_sha256(parents),
+        "parent_count": len(parents),
+        "ordered_rules_sha256": stable_sha256(rule_identities),
+        "candidate_count": len(rule_identities),
+        "oracle_checkpoint_hash": oracle_checkpoint_hash,
+        "molclr_checkpoint_hash": molclr_checkpoint_hash,
+        "threshold_config_hash": threshold_config_hash,
+        "distance_line": DISTANCE_LINE,
+        "distance_namespace": DISTANCE_NAMESPACE,
+        "cf_mode": CF_MODE,
+        "num_classes": NUM_CLASSES,
+        "source_label": SOURCE_LABEL,
+    }
+
+
+def verify_pair_chunk_inventory(
+    *, output: Path, split: str, pair_rows: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    inventory_path = output / "raw" / f"{split}_pair_chunk_inventory.json"
+    inventory = read_json(inventory_path)
+    chunks = inventory.get("chunks")
+    identity = inventory.get("evaluation_identity")
+    if (
+        inventory.get("schema_version") != CHUNK_INVENTORY_SCHEMA
+        or inventory.get("split") != split
+        or type(chunks) is not list
+        or type(identity) is not dict
+        or inventory.get("evaluation_identity_sha256") != stable_sha256(identity)
+        or inventory.get("chunks_sha256") != stable_sha256(chunks)
+        or inventory.get("pair_details_sha256")
+        != sha256_file(output / "raw" / f"{split}_pair_details.jsonl")
+    ):
+        raise TasteGlobalGCEFullError(f"T13 {split} chunk inventory changed")
+    reconstructed: list[dict[str, Any]] = []
+    for expected_position, entry in enumerate(chunks):
+        if type(entry) is not dict or entry.get("position") != expected_position:
+            raise TasteGlobalGCEFullError(f"T13 {split} chunk order changed")
+        expected_chunk = (
+            f"raw/{split}_pair_chunks/{expected_position:08d}.jsonl"
+        )
+        expected_manifest = (
+            f"raw/{split}_pair_chunks/{expected_position:08d}.manifest.json"
+        )
+        if (
+            entry.get("chunk") != expected_chunk
+            or entry.get("manifest") != expected_manifest
+        ):
+            raise TasteGlobalGCEFullError(f"T13 {split} chunk path changed")
+        chunk = output / expected_chunk
+        manifest_path = output / expected_manifest
+        if (
+            not chunk.is_file()
+            or not manifest_path.is_file()
+            or sha256_file(chunk) != entry.get("chunk_sha256")
+            or sha256_file(manifest_path) != entry.get("manifest_sha256")
+        ):
+            raise TasteGlobalGCEFullError(f"T13 {split} chunk bytes changed")
+        manifest = read_json(manifest_path)
+        rows = read_jsonl(chunk)
+        candidate_ids = [str(row.get("candidate_id") or "") for row in rows]
+        if (
+            manifest.get("schema_version") != CHUNK_MANIFEST_SCHEMA
+            or manifest.get("split") != split
+            or manifest.get("position") != expected_position
+            or manifest.get("parent_id") != entry.get("parent_id")
+            or manifest.get("evaluation_identity_sha256")
+            != inventory.get("evaluation_identity_sha256")
+            or manifest.get("row_count") != len(rows)
+            or manifest.get("rows_sha256") != entry.get("chunk_sha256")
+            or manifest.get("candidate_ids_sha256")
+            != stable_sha256(candidate_ids)
+            or len(rows) != inventory.get("candidate_count")
+            or any(
+                row.get("parent_id") != entry.get("parent_id")
+                or row.get("split") != split
+                for row in rows
+            )
+        ):
+            raise TasteGlobalGCEFullError(f"T13 {split} chunk manifest changed")
+        reconstructed.extend(rows)
+    if reconstructed != [dict(row) for row in pair_rows]:
+        raise TasteGlobalGCEFullError(
+            f"T13 {split} chunks differ from frozen pair details"
+        )
+    if (
+        inventory.get("parent_count") != len(chunks)
+        or inventory.get("pair_count") != len(pair_rows)
+    ):
+        raise TasteGlobalGCEFullError(f"T13 {split} chunk counts changed")
+    return inventory
 
 
 def select_rules_on_calibration(
@@ -1153,14 +1591,33 @@ def select_rules_on_calibration(
     by_candidate: dict[str, list[Mapping[str, Any]]] = {
         str(row["candidate_id"]): [] for row in rules
     }
+    seen_pairs: set[tuple[str, str]] = set()
     for row in pair_rows:
         candidate = str(row.get("candidate_id") or "")
-        if candidate not in by_candidate or row.get("split") != "calibration":
+        parent = str(row.get("parent_id") or "")
+        pair = (parent, candidate)
+        if (
+            candidate not in by_candidate
+            or not parent
+            or pair in seen_pairs
+            or row.get("split") != "calibration"
+        ):
             raise TasteGlobalGCEFullError("calibration pair matrix escaped rule/split identity")
+        seen_pairs.add(pair)
         by_candidate[candidate].append(row)
     rule_by_id = {str(row["candidate_id"]): dict(row) for row in rules}
-    if any(not rows for rows in by_candidate.values()):
-        raise TasteGlobalGCEFullError("calibration matrix lacks one or more native rules")
+    parent_sets = [
+        {str(row["parent_id"]) for row in rows} for rows in by_candidate.values()
+    ]
+    if (
+        any(not rows for rows in by_candidate.values())
+        or not parent_sets
+        or any(parents != parent_sets[0] for parents in parent_sets[1:])
+        or len(pair_rows) != len(by_candidate) * len(parent_sets[0])
+    ):
+        raise TasteGlobalGCEFullError(
+            "calibration matrix is not a complete Cartesian product"
+        )
     selected: list[str] = []
     covered_theta: set[str] = set()
     covered_strict: set[str] = set()
@@ -1471,7 +1928,7 @@ def compute_standardized_metrics(
 
 
 def _immutable_artifact_inventory(output: Path) -> dict[str, dict[str, Any]]:
-    names = (
+    required_names = (
         "figure3_coverage_vs_k.csv",
         "figure4_coverage_vs_threshold.csv",
         "prefix_metrics.csv",
@@ -1483,16 +1940,33 @@ def _immutable_artifact_inventory(output: Path) -> dict[str, dict[str, Any]]:
         "oracle_manifest.json",
         "evaluation_manifest.json",
         "raw/merged_rules.jsonl",
+        "raw/merge_manifest.json",
+        "raw/train_cohort_manifest.json",
+        "raw/target_0/branch_manifest.json",
+        "raw/target_2/branch_manifest.json",
         "raw/calibration_pair_details.jsonl",
+        "raw/calibration_pair_chunk_inventory.json",
         "raw/selected_rules.jsonl",
         "raw/test_pair_details.jsonl",
+        "raw/test_pair_chunk_inventory.json",
         "raw/selection_manifest.json",
         "raw/test_evaluation_manifest.json",
     )
+    names = set(required_names)
+    raw_root = output / "raw"
+    for path in sorted(raw_root.rglob("*")):
+        if path.is_symlink():
+            raise TasteGlobalGCEFullError(
+                "T13 immutable raw artifact tree contains a symbolic link"
+            )
+        if path.is_file():
+            names.add(path.relative_to(output).as_posix())
     inventory: dict[str, dict[str, Any]] = {}
-    for name in names:
+    for name in sorted(names):
         path = output / name
-        if not path.is_file() or path.stat().st_size <= 0:
+        if not path.is_file() or (
+            name in required_names and path.stat().st_size <= 0
+        ):
             raise TasteGlobalGCEFullError(f"T13 immutable artifact is absent: {name}")
         inventory[name] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
     return inventory
@@ -1521,6 +1995,9 @@ def _common_manifest(
         "test_split_hash": authority.declared_test_sha256,
         "distance_line": DISTANCE_LINE,
         "molclr_checkpoint_hash": authority.molclr_checkpoint_sha256,
+        "t8_pass_root": str(authority.t8_pass_root),
+        "t8_pass_sha256": authority.t8_pass_sha256,
+        "t8_oracle_checkpoint_hash": authority.t8_oracle_checkpoint_hash,
         "cf_mode": CF_MODE,
         "threshold_config_hash": authority.threshold.config_hash,
         "test_used_for_selection": False,
@@ -1571,6 +2048,15 @@ def run_t13_full(
     selected_train, train_selection = select_full_sweet_train_cohort(
         train_rows, scorer=scorer, batch_size=config.oracle_batch_size
     )
+    train_parent_cohort_sha256 = _parent_cohort_sha256(selected_train)
+    if train_selection.get("selected_cohort_sha256") != stable_sha256(
+        [
+            {"parent_id": row.parent_id, "smiles": row.smiles, "split": row.split}
+            for row in selected_train
+        ]
+    ):
+        raise TasteGlobalGCEFullError("T13 train cohort selection hash changed")
+    train_selection["ordered_parent_cohort_sha256"] = train_parent_cohort_sha256
     atomic_json(output / "raw" / "train_cohort_manifest.json", train_selection)
     branch_roots = {target: output / "raw" / f"target_{target}" for target in TARGET_BRANCHES}
     branch_manifests: dict[int, dict[str, Any]] = {}
@@ -1593,6 +2079,7 @@ def run_t13_full(
             target_label=target,
             num_classes=NUM_CLASSES,
             require_isolated_imports=True,
+            rules_only_min_valid_native_rules=0,
         )
         branch_manifests[target] = run_native_branch(
             target_label=target,
@@ -1600,6 +2087,8 @@ def run_t13_full(
             parents=selected_train,
             branch_root=branch_roots[target],
             config=config,
+            expected_checkpoint_id=authority.checkpoint_id,
+            expected_parent_cohort_sha256=train_parent_cohort_sha256,
         )
         if not branch_already_complete:
             write_checkpoint(
@@ -1677,6 +2166,14 @@ def run_t13_full(
                 scorer=scorer,
                 provider=provider,
                 output=output,
+                evaluation_identity=build_split_evaluation_identity(
+                    split="calibration",
+                    parents=calibration_parents,
+                    rules=merged_rules,
+                    oracle_checkpoint_hash=authority.checkpoint_id,
+                    molclr_checkpoint_hash=authority.molclr_checkpoint_sha256,
+                    threshold_config_hash=authority.threshold.config_hash,
+                ),
                 checkpoint_callback=lambda count: write_checkpoint(
                     output,
                     phase="CALIBRATION_RUNNING",
@@ -1730,6 +2227,14 @@ def run_t13_full(
             scorer=scorer,
             provider=provider,
             output=output,
+            evaluation_identity=build_split_evaluation_identity(
+                split="test",
+                parents=test_parents,
+                rules=selected_rules,
+                oracle_checkpoint_hash=authority.checkpoint_id,
+                molclr_checkpoint_hash=authority.molclr_checkpoint_sha256,
+                threshold_config_hash=authority.threshold.config_hash,
+            ),
             checkpoint_callback=lambda count: write_checkpoint(
                 output,
                 phase="TEST_RUNNING",
@@ -1778,6 +2283,9 @@ def run_t13_full(
         "calibration_loaded": True,
         "test_loaded": True,
         "target_branches": [0, 2],
+        "config": config.to_dict(),
+        "train_parent_count": len(selected_train),
+        "train_parent_cohort_sha256": train_parent_cohort_sha256,
         "canonical_dedup_complete": True,
         "effective_rule_count": metrics["effective_rule_count"],
         "parent_count": metrics["parent_count"],
@@ -1792,6 +2300,7 @@ def run_t13_full(
             str(target): sha256_file(_branch_manifest(branch_roots[target]))
             for target in TARGET_BRANCHES
         },
+        "merge_manifest_sha256": sha256_file(output / "raw" / "merge_manifest.json"),
     }
     oracle_manifest = {
         "schema_version": "tastemolnet_t13_oracle_manifest_v1",
@@ -1853,6 +2362,11 @@ def run_t13_full(
         "freeze_manifest_sha256": sha256_file(output / "freeze_manifest.json"),
         "independent_terminal_verification_required": True,
         "worker_wrote_pass": False,
+        "config": config.to_dict(),
+        "train_parent_count": len(selected_train),
+        "train_parent_cohort_sha256": train_parent_cohort_sha256,
+        "branch_manifests": summary["branch_manifests"],
+        "merge_manifest_sha256": summary["merge_manifest_sha256"],
         "sealed_at": utc_now(),
     }
     atomic_json(output / "run_manifest.json", run_manifest)
@@ -1897,11 +2411,88 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
             or sha256_file(path) != identity.get("sha256")
         ):
             raise TasteGlobalGCEFullError(f"T13 frozen artifact changed: {name}")
+    if _immutable_artifact_inventory(output) != inventory:
+        raise TasteGlobalGCEFullError("T13 frozen artifact closure changed")
+    summary = read_json(output / "summary.json")
+    config = TasteGlobalGCEFullConfig.from_dict(run_manifest.get("config"))
+    if (
+        summary.get("config") != config.to_dict()
+        or run_manifest.get("branch_manifests") != summary.get("branch_manifests")
+        or run_manifest.get("merge_manifest_sha256")
+        != summary.get("merge_manifest_sha256")
+        or run_manifest.get("train_parent_count")
+        != summary.get("train_parent_count")
+        or run_manifest.get("train_parent_cohort_sha256")
+        != summary.get("train_parent_cohort_sha256")
+        or run_manifest.get("oracle_checkpoint_hash")
+        != run_manifest.get("t8_oracle_checkpoint_hash")
+    ):
+        raise TasteGlobalGCEFullError("T13 sealed source identity changed")
+    train_cohort = read_json(output / "raw" / "train_cohort_manifest.json")
+    if (
+        train_cohort.get("ordered_parent_cohort_sha256")
+        != run_manifest.get("train_parent_cohort_sha256")
+        or train_cohort.get("selected_count")
+        != run_manifest.get("train_parent_count")
+        or train_cohort.get("train_only") is not True
+        or train_cohort.get("calibration_loaded") is not False
+        or train_cohort.get("test_loaded") is not False
+    ):
+        raise TasteGlobalGCEFullError("T13 frozen train cohort changed")
+    branch_roots = {
+        target: output / "raw" / f"target_{target}" for target in TARGET_BRANCHES
+    }
+    validated_branches: dict[int, dict[str, Any]] = {}
+    for target in TARGET_BRANCHES:
+        validated_branches[target] = _validate_completed_branch(
+            branch_root=branch_roots[target],
+            target_label=target,
+            config=config,
+            expected_checkpoint_id=str(run_manifest["oracle_checkpoint_hash"]),
+            expected_parent_cohort_sha256=str(
+                run_manifest["train_parent_cohort_sha256"]
+            ),
+            expected_parent_count=int(run_manifest["train_parent_count"]),
+        )
+        if sha256_file(_branch_manifest(branch_roots[target])) != (
+            run_manifest.get("branch_manifests") or {}
+        ).get(str(target)):
+            raise TasteGlobalGCEFullError("T13 branch manifest hash changed")
+    for identity_key in (
+        "oracle_resume_identity_sha256",
+        "native_train_cohort_sha256",
+        "source_train_cohort_sha256",
+        "official_source_identity_sha256",
+    ):
+        if validated_branches[0].get(identity_key) != validated_branches[2].get(
+            identity_key
+        ):
+            raise TasteGlobalGCEFullError(
+                f"T13 target branches differ in {identity_key}"
+            )
+    replayed_merged, replayed_merge = merge_branch_rules(branch_roots)
+    merged_rules = read_jsonl(output / "raw" / "merged_rules.jsonl")
+    merge_manifest = read_json(output / "raw" / "merge_manifest.json")
+    if (
+        replayed_merged != merged_rules
+        or merge_manifest.get("merged_rules_sha256")
+        != sha256_file(output / "raw" / "merged_rules.jsonl")
+        or run_manifest.get("merge_manifest_sha256")
+        != sha256_file(output / "raw" / "merge_manifest.json")
+        or any(merge_manifest.get(key) != value for key, value in replayed_merge.items())
+    ):
+        raise TasteGlobalGCEFullError("T13 canonical branch merge replay changed")
     selection = read_json(output / "raw" / "selection_manifest.json")
     test_manifest = read_json(output / "raw" / "test_evaluation_manifest.json")
     selected_rules = read_jsonl(output / "raw" / "selected_rules.jsonl")
     calibration_rows = read_jsonl(output / "raw" / "calibration_pair_details.jsonl")
     test_rows = read_jsonl(output / "raw" / "test_pair_details.jsonl")
+    calibration_chunks = verify_pair_chunk_inventory(
+        output=output, split="calibration", pair_rows=calibration_rows
+    )
+    test_chunks = verify_pair_chunk_inventory(
+        output=output, split="test", pair_rows=test_rows
+    )
     if (
         selection.get("status") != "FROZEN"
         or selection.get("selection_frozen") is not True
@@ -1916,6 +2507,30 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
         or str(selection.get("frozen_at")) > str(test_manifest.get("started_at"))
     ):
         raise TasteGlobalGCEFullError("T13 calibration/test isolation replay failed")
+    calibration_manifest = selection.get("calibration_manifest") or {}
+    for observed, frozen, label in (
+        (calibration_chunks, calibration_manifest, "calibration"),
+        (test_chunks, test_manifest, "test"),
+    ):
+        parent_ids_sha256 = stable_sha256(
+            sorted(str(row.get("parent_id") or "") for row in observed["chunks"])
+        )
+        if (
+            frozen.get("split") != label
+            or frozen.get("parent_count") != observed.get("parent_count")
+            or frozen.get("candidate_count") != observed.get("candidate_count")
+            or frozen.get("pair_count") != observed.get("pair_count")
+            or frozen.get("pair_details_sha256")
+            != observed.get("pair_details_sha256")
+            or frozen.get("parent_ids_sha256") != parent_ids_sha256
+            or frozen.get("evaluation_identity_sha256")
+            != observed.get("evaluation_identity_sha256")
+            or frozen.get("chunk_inventory_sha256")
+            != sha256_file(output / "raw" / f"{label}_pair_chunk_inventory.json")
+        ):
+            raise TasteGlobalGCEFullError(
+                f"T13 frozen {label} evaluation manifest changed"
+            )
     ordered = [str(row["candidate_id"]) for row in selected_rules]
     if ordered != list(selection.get("ordered_rule_ids") or []):
         raise TasteGlobalGCEFullError("T13 selected-rule bytes/order changed")
@@ -1930,6 +2545,51 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
     )
     if threshold.config_hash != stable_json_sha256(list(threshold.values)):
         raise TasteGlobalGCEFullError("T13 verifier threshold grid hash changed")
+    replayed_selected, replayed_selection = select_rules_on_calibration(
+        merged_rules, calibration_rows, theta_star=threshold.theta_star
+    )
+    if (
+        replayed_selected != selected_rules
+        or any(selection.get(key) != value for key, value in replayed_selection.items())
+    ):
+        raise TasteGlobalGCEFullError(
+            "T13 calibration-only selector replay differs from frozen order"
+        )
+    for chunk_inventory, expected_split, expected_rules in (
+        (calibration_chunks, "calibration", merged_rules),
+        (test_chunks, "test", selected_rules),
+    ):
+        split_identity = chunk_inventory.get("evaluation_identity") or {}
+        rule_identities = [
+            {
+                "candidate_id": str(row.get("candidate_id") or ""),
+                "rule_content_hash": str(row.get("rule_content_hash") or ""),
+            }
+            for row in expected_rules
+        ]
+        if (
+            split_identity.get("split") != expected_split
+            or split_identity.get("candidate_count") != len(expected_rules)
+            or split_identity.get("ordered_rules_sha256")
+            != stable_sha256(rule_identities)
+            or split_identity.get("parent_count")
+            != chunk_inventory.get("parent_count")
+            or not _is_sha256(split_identity.get("parent_cohort_sha256"))
+            or split_identity.get("oracle_checkpoint_hash")
+            != run_manifest.get("oracle_checkpoint_hash")
+            or split_identity.get("molclr_checkpoint_hash")
+            != run_manifest.get("molclr_checkpoint_hash")
+            or split_identity.get("threshold_config_hash")
+            != run_manifest.get("threshold_config_hash")
+        ):
+            raise TasteGlobalGCEFullError(
+                f"T13 {expected_split} evaluation identity changed"
+            )
+    observed_test_parent_hash = stable_sha256(
+        sorted({str(row.get("parent_id") or "") for row in test_rows})
+    )
+    if observed_test_parent_hash != run_manifest.get("test_parent_ids_sha256"):
+        raise TasteGlobalGCEFullError("T13 test parent cohort hash changed")
     recomputed = compute_standardized_metrics(test_rows, ordered, threshold)
     expected_csvs = {
         "figure3_coverage_vs_k.csv": recomputed["figure3"],
@@ -1955,6 +2615,8 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
         "both_target_branches_present": True,
         "canonical_rule_dedup_replayed": True,
         "calibration_only_selector": True,
+        "calibration_selector_replayed": True,
+        "resumed_chunk_hashes_replayed": True,
         "selection_frozen_before_test": True,
         "held_out_test_cartesian_complete": True,
         "standardized_metrics_recomputed": True,
@@ -1979,6 +2641,9 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
             "test_split_hash",
             "distance_line",
             "molclr_checkpoint_hash",
+            "t8_pass_root",
+            "t8_pass_sha256",
+            "t8_oracle_checkpoint_hash",
             "cf_mode",
             "threshold_config_hash",
             "test_used_for_selection",

@@ -3036,6 +3036,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         ) = None,
         require_isolated_imports: bool = False,
         gspan_scratch_root: str | Path | None = None,
+        rules_only_min_valid_native_rules: int = 20,
     ) -> None:
         self.official_src = _resolve_official_src(official_root)
         repo_root = Path(__file__).resolve().parents[2]
@@ -3083,6 +3084,15 @@ class OfficialGlobalGCEMutagenicityGenerator:
             if gspan_scratch_root is None
             else _descriptor_path_or_resolve(gspan_scratch_root)
         )
+        if (
+            type(rules_only_min_valid_native_rules) is not int
+            or rules_only_min_valid_native_rules < 0
+        ):
+            raise ValueError(
+                "rules_only_min_valid_native_rules must be an exact "
+                "nonnegative integer."
+            )
+        self.rules_only_min_valid_native_rules = rules_only_min_valid_native_rules
         if native_train_payload is not None and (
             type(native_train_payload) is not bytes or not native_train_payload
         ):
@@ -3380,6 +3390,13 @@ class OfficialGlobalGCEMutagenicityGenerator:
         ):
             raise ValueError(
                 "start_parent_offset must be within the selected parent cohort."
+            )
+        if (
+            rules_only
+            and self.rules_only_min_valid_native_rules > int(top_k_native)
+        ):
+            raise ValueError(
+                "rules_only_min_valid_native_rules cannot exceed top_k_native."
             )
         if self.native_train_payload is None and not self.native_train_csv.is_file():
             raise FileNotFoundError(
@@ -4216,9 +4233,12 @@ class OfficialGlobalGCEMutagenicityGenerator:
         if rules_only:
             if not use_frozen_gine:
                 raise ValueError("rules_only is reserved for the frozen-GINE route")
-            if int(training_summary.get("valid_native_rule_count") or 0) < 20:
+            if int(training_summary.get("valid_native_rule_count") or 0) < int(
+                self.rules_only_min_valid_native_rules
+            ):
                 raise RuntimeError(
-                    "Frozen-GINE GlobalGCE produced fewer than twenty valid native rules"
+                    "Frozen-GINE GlobalGCE produced fewer than the configured "
+                    "minimum valid native rules"
                 )
             _notify_generation_complete()
             return NativeGenerationResult([], training_summary)

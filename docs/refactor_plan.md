@@ -17,6 +17,15 @@
 
 ## 2026-08-31: TasteMolNet T11-T13 full-runner closure
 
+- [x] Consume the real managed-v2 T8 final and its nested typed verification,
+  including exact frozen-GINE cross-binding.
+- [x] Hash-close and independently replay both complete train-only branch
+  trees, typed training resume identities, checkpoints, merge/dedup, and the
+  calibration selector.
+- [x] Bind resumable parent chunks to strong content/config identities and
+  include the complete raw tree in the immutable terminal inventory.
+- [x] Apply `MIN_RULES=10` to the canonical two-branch merge, not separately
+  to target 0 and target 2.
 - [x] Add a real dataset-specific T13 GlobalGCE full runner over independent
   target-0 and target-2 official branches.
 - [x] Persist official epoch resume plus T13 stage and per-parent evaluation
