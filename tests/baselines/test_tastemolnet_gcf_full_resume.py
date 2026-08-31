@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import pickle
 from types import SimpleNamespace
@@ -283,10 +285,57 @@ def test_checkpoint_is_immutable_reopenable_and_restores_rng(tmp_path):
     assert restored_actions == {"NLC": 3}
 
 
-def _observation(role, process, *, changed=False):
+def _process_identity(process):
+    return {
+        "pid": process,
+        "start_ticks": process * 10,
+        "command_sha256": "b" * 64,
+        "executable_sha256": "c" * 64,
+        "cwd_sha256": "d" * 64,
+    }
+
+
+def _prefix_receipt(tmp_path, process=150):
+    manifest = {
+        "schema_version": t12.CHECKPOINT_MANIFEST_SCHEMA,
+        "status": "COMMITTED",
+        "stage": t12.STAGE,
+        "purpose": "gpu_replay_canary",
+        "checkpoint_cursor": 8,
+        "total_steps": 16,
+        "identity_sha256": "f" * 64,
+        "state_sha256": "1" * 64,
+        "rng_sha256": "2" * 64,
+        "immutable_no_replace": True,
+    }
+    manifest_path = tmp_path / "checkpoint-00000008.manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return {
+        "schema_version": t12.CANARY_PREFIX_RECEIPT_SCHEMA,
+        "status": "CHECKPOINT_COMMITTED",
+        "stage": t12.STAGE,
+        "checkpoint_manifest": str(manifest_path),
+        "checkpoint_manifest_sha256": hashlib.sha256(
+            manifest_path.read_bytes()
+        ).hexdigest(),
+        "checkpoint_identity_sha256": "f" * 64,
+        "checkpoint_state_sha256": "1" * 64,
+        "checkpoint_rng_sha256": "2" * 64,
+        "checkpoint_cursor": 8,
+        "total_steps": 16,
+        "canary_identity_sha256": "1" * 64,
+        "gpu_uuid": "GPU-test-123",
+        "process_identity": _process_identity(process),
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "production_released": False,
+    }
+
+
+def _observation(role, process, *, prefix=None, changed=False):
     scientific = {
-        "completed_steps": 2,
-        "traversed_graph_identities": [GRAPH_A, "b" * 64],
+        "completed_steps": 16,
+        "traversed_graph_identities": [GRAPH_A, *("b" * 64 for _ in range(15))],
         "candidate_frequency_order": [[GRAPH_A, 2, "3" * 64, "4" * 64]],
         "graph_map_sha256": "5" * 64,
         "graph_index_map_sha256": "6" * 64,
@@ -297,41 +346,62 @@ def _observation(role, process, *, changed=False):
         "action_counts_sha256": "9" * 64,
         "rng_state_sha256": "a" * 64,
         "generated_to_original_coverage_sha256": "d" * 64,
+        "official_state_sha256": "0" * 64,
         "official_native_result_semantic_sha256": ("e" if not changed else "f") * 64,
     }
     return t12.build_canary_observation(
         role=role,
         canary_identity_sha256="1" * 64,
         gpu_uuid="GPU-test-123",
-        process_identity={
-            "pid": process,
-            "start_ticks": process * 10,
-            "command_sha256": "b" * 64,
-            "executable_sha256": "c" * 64,
-            "cwd_sha256": "d" * 64,
-        },
+        process_identity=_process_identity(process),
         scientific_state=scientific,
         native_result_sha256="2" * 64,
         checkpoint_reloaded=role == "cross_process_resumed",
         generated_to_original_neurosed_assertion=True,
+        checkpoint_process_identity=(
+            prefix["process_identity"] if prefix is not None else None
+        ),
+        checkpoint_manifest_sha256=(
+            prefix["checkpoint_manifest_sha256"] if prefix is not None else None
+        ),
+        checkpoint_identity_sha256=(
+            prefix["checkpoint_identity_sha256"] if prefix is not None else None
+        ),
+        checkpoint_state_sha256=(
+            prefix["checkpoint_state_sha256"] if prefix is not None else None
+        ),
+        checkpoint_rng_sha256=(
+            prefix["checkpoint_rng_sha256"] if prefix is not None else None
+        ),
     )
 
 
 def test_canary_gate_requires_new_process_and_exact_scientific_state(tmp_path):
+    prefix = _prefix_receipt(tmp_path)
     uninterrupted = _observation("uninterrupted", 100)
-    resumed = _observation("cross_process_resumed", 200)
+    resumed = _observation("cross_process_resumed", 200, prefix=prefix)
     output = tmp_path.resolve() / "gate.json"
-    gate = t12.write_canary_gate(output, uninterrupted, resumed)
+    gate = t12.write_canary_gate(output, uninterrupted, resumed, prefix)
     assert gate["status"] == "PASS"
     assert gate["exact_equality"] is True
     assert gate["production_released"] is False
     with pytest.raises(t12.TasteGCFFullResumeError, match="scientific_state_sha256"):
         t12.compare_canary_observations(
-            uninterrupted, _observation("cross_process_resumed", 300, changed=True)
+            uninterrupted,
+            _observation(
+                "cross_process_resumed", 300, prefix=prefix, changed=True
+            ),
+            prefix,
         )
-    same_process = dict(resumed, process_identity=dict(uninterrupted["process_identity"]))
+    same_process_identity = dict(resumed["process_identity"])
+    same_process_identity.update(
+        pid=uninterrupted["process_identity"]["pid"],
+        start_ticks=uninterrupted["process_identity"]["start_ticks"],
+        cwd_sha256="9" * 64,
+    )
+    same_process = dict(resumed, process_identity=same_process_identity)
     with pytest.raises(t12.TasteGCFFullResumeError, match="process boundary"):
-        t12.compare_canary_observations(uninterrupted, same_process)
+        t12.compare_canary_observations(uninterrupted, same_process, prefix)
 
 
 def test_canary_cli_has_paired_hpc_slurm_contract():
@@ -354,3 +424,4 @@ def test_canary_cli_has_paired_hpc_slurm_contract():
         assert token in slurm
     assert "write_canary_gate" in cli
     assert "CANARY_PASS_MARKER" in cli
+    assert "--checkpoint-prefix-receipt" in cli

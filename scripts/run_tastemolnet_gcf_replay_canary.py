@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--uninterrupted", type=_absolute, required=True)
     parser.add_argument("--cross-process-resumed", type=_absolute, required=True)
+    parser.add_argument("--checkpoint-prefix-receipt", type=_absolute, required=True)
     parser.add_argument("--output", type=_absolute, required=True)
     return parser
 
@@ -63,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output,
         _read(args.uninterrupted, label="uninterrupted"),
         _read(args.cross_process_resumed, label="cross-process resumed"),
+        _read(args.checkpoint_prefix_receipt, label="checkpoint prefix receipt"),
     )
     print(json.dumps(gate, sort_keys=True), flush=True)
     print(CANARY_PASS_MARKER, flush=True)

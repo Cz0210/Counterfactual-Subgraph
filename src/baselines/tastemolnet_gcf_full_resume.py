@@ -56,6 +56,7 @@ CHECKPOINT_MANIFEST_SCHEMA = "tastemolnet_t12_vrrw_checkpoint_manifest_v1"
 BRIDGE_SCHEMA = "tastemolnet_t12_gcf_stable_bridge_v1"
 CANARY_OBSERVATION_SCHEMA = "tastemolnet_t12_gpu_replay_observation_v1"
 CANARY_GATE_SCHEMA = "tastemolnet_t12_gpu_replay_gate_v1"
+CANARY_PREFIX_RECEIPT_SCHEMA = "tastemolnet_t12_gpu_replay_prefix_receipt_v1"
 CANARY_PASS_MARKER = "[TASTE_T12_GPU_CROSS_PROCESS_REPLAY_CANARY_PASS]"
 
 GINE_CANONICAL_REUSE_RTOL = 1e-5
@@ -82,6 +83,7 @@ _CANARY_SCIENCE_FIELDS = frozenset(
         "action_counts_sha256",
         "rng_state_sha256",
         "generated_to_original_coverage_sha256",
+        "official_state_sha256",
         "official_native_result_semantic_sha256",
     }
 )
@@ -262,6 +264,7 @@ class T12StableGCFBridge:
         distance_threshold: float,
         parent_count: int,
         feature_atomic_numbers: Sequence[Any],
+        coverage_runtime: Any | None = None,
     ) -> None:
         self.adapter = adapter
         self.vrrw = vrrw
@@ -280,6 +283,7 @@ class T12StableGCFBridge:
             _native_int(value, field="T12 feature atomic number", minimum=1)
             for value in feature_atomic_numbers
         )
+        self.coverage_runtime = coverage_runtime
         if (
             not self.feature_atomic_numbers
             or len(set(self.feature_atomic_numbers)) != len(self.feature_atomic_numbers)
@@ -452,6 +456,19 @@ class T12StableGCFBridge:
 
     def checkpoint_state(self) -> dict[str, Any]:
         self._assert_idle()
+        coverage_runtime = (
+            self.coverage_runtime.checkpoint_state()
+            if self.coverage_runtime is not None
+            else {
+                "schema_version": "tastemolnet_t12_neurosed_retry_state_v1",
+                "bounded_cuda_oom_retry": False,
+                "calls": [],
+            }
+        )
+        if type(coverage_runtime) is not dict:
+            raise TasteGCFFullResumeError(
+                "T12 NeuroSED retry state is not one mapping"
+            )
         return {
             "schema_version": BRIDGE_SCHEMA,
             "records": {
@@ -474,6 +491,7 @@ class T12StableGCFBridge:
             "generated_to_original_neurosed": True,
             "python_builtin_hash_used": False,
             "embedding_identity_used": False,
+            "coverage_runtime": coverage_runtime,
         }
 
     def restore_checkpoint_state(self, payload: Mapping[str, Any]) -> None:
@@ -487,6 +505,7 @@ class T12StableGCFBridge:
             "parent_count", "distance_threshold_hex", "feature_atomic_numbers",
             "graph_identity_contract", "generated_to_original_neurosed",
             "python_builtin_hash_used", "embedding_identity_used",
+            "coverage_runtime",
         }
         if type(payload) is not dict or set(payload) != expected:
             raise TasteGCFFullResumeError("T12 bridge checkpoint keys changed")
@@ -501,6 +520,7 @@ class T12StableGCFBridge:
             or payload.get("embedding_identity_used") is not False
             or type(payload.get("records")) is not dict
             or type(payload.get("lineage_occurrences")) is not dict
+            or type(payload.get("coverage_runtime")) is not dict
         ):
             raise TasteGCFFullResumeError("T12 bridge checkpoint semantics changed")
         records: dict[str, T12StableGraphRecord] = {}
@@ -599,6 +619,19 @@ class T12StableGCFBridge:
         if set(lineages) != set(records):
             raise TasteGCFFullResumeError("T12 checkpoint lost stable-key lineage")
         self.lineage_occurrences = lineages
+        if self.coverage_runtime is None:
+            if payload["coverage_runtime"] != {
+                "schema_version": "tastemolnet_t12_neurosed_retry_state_v1",
+                "bounded_cuda_oom_retry": False,
+                "calls": [],
+            }:
+                raise TasteGCFFullResumeError(
+                    "T12 checkpoint requires a NeuroSED retry runtime"
+                )
+        else:
+            self.coverage_runtime.restore_checkpoint_state(
+                payload["coverage_runtime"]
+            )
         for field in (
             "call_count", "evaluated_graph_count", "calculate_hash_count",
             "distance_call_count", "distance_evaluated_graph_count",
@@ -1145,6 +1178,7 @@ def build_replay_scientific_state(
             _capture_rng_state(np=np, torch=torch)
         ),
         "generated_to_original_coverage_sha256": _semantic_sha256(coverage),
+        "official_state_sha256": _semantic_sha256(official),
         "official_native_result_semantic_sha256": _semantic_sha256(native_result),
     }
 
@@ -1231,6 +1265,11 @@ def build_canary_observation(
     native_result_sha256: str,
     checkpoint_reloaded: bool,
     generated_to_original_neurosed_assertion: bool,
+    checkpoint_process_identity: Mapping[str, Any] | None = None,
+    checkpoint_manifest_sha256: str | None = None,
+    checkpoint_identity_sha256: str | None = None,
+    checkpoint_state_sha256: str | None = None,
+    checkpoint_rng_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Build the small JSON compared by the independent canary gate."""
 
@@ -1242,6 +1281,40 @@ def build_canary_observation(
     scientific = _validate_canary_scientific_state(
         scientific_state, field="T12 canary"
     )
+    checkpoint_process: dict[str, Any] | None = None
+    checkpoint_hashes = (
+        checkpoint_manifest_sha256,
+        checkpoint_identity_sha256,
+        checkpoint_state_sha256,
+        checkpoint_rng_sha256,
+    )
+    if role == "uninterrupted":
+        if checkpoint_reloaded is not False or any(
+            value is not None
+            for value in (checkpoint_process_identity, *checkpoint_hashes)
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 uninterrupted observation contains checkpoint evidence"
+            )
+    else:
+        if checkpoint_reloaded is not True or checkpoint_process_identity is None:
+            raise TasteGCFFullResumeError(
+                "T12 resumed observation lacks checkpoint-process evidence"
+            )
+        checkpoint_process = _validate_canary_process_identity(
+            checkpoint_process_identity, field="T12 checkpoint producer"
+        )
+        for name, value in zip(
+            (
+                "manifest",
+                "identity",
+                "state",
+                "RNG",
+            ),
+            checkpoint_hashes,
+            strict=True,
+        ):
+            _require_sha256(value, field=f"T12 checkpoint {name} SHA")
     return {
         "schema_version": CANARY_OBSERVATION_SCHEMA,
         "stage": STAGE,
@@ -1252,6 +1325,11 @@ def build_canary_observation(
         "gpu_uuid": gpu_uuid if _GPU_UUID.fullmatch(gpu_uuid or "") else _invalid_gpu_uuid(),
         "cuda_used": True,
         "process_identity": process,
+        "checkpoint_process_identity": checkpoint_process,
+        "checkpoint_manifest_sha256": checkpoint_manifest_sha256,
+        "checkpoint_identity_sha256": checkpoint_identity_sha256,
+        "checkpoint_state_sha256": checkpoint_state_sha256,
+        "checkpoint_rng_sha256": checkpoint_rng_sha256,
         "checkpoint_reloaded": checkpoint_reloaded,
         "generated_to_original_neurosed_assertion": generated_to_original_neurosed_assertion,
         "graph_identity_contract": GRAPH_IDENTITY_CONTRACT,
@@ -1269,14 +1347,95 @@ def _invalid_gpu_uuid() -> str:
     raise TasteGCFFullResumeError("T12 canary GPU UUID is invalid")
 
 
+def validate_canary_prefix_receipt(value: Any) -> dict[str, Any]:
+    expected = {
+        "schema_version",
+        "status",
+        "stage",
+        "checkpoint_manifest",
+        "checkpoint_manifest_sha256",
+        "checkpoint_identity_sha256",
+        "checkpoint_state_sha256",
+        "checkpoint_rng_sha256",
+        "checkpoint_cursor",
+        "total_steps",
+        "canary_identity_sha256",
+        "gpu_uuid",
+        "process_identity",
+        "calibration_loaded",
+        "test_loaded",
+        "production_released",
+    }
+    if (
+        type(value) is not dict
+        or set(value) != expected
+        or value.get("schema_version") != CANARY_PREFIX_RECEIPT_SCHEMA
+        or value.get("status") != "CHECKPOINT_COMMITTED"
+        or value.get("stage") != STAGE
+        or value.get("calibration_loaded") is not False
+        or value.get("test_loaded") is not False
+        or value.get("production_released") is not False
+        or type(value.get("checkpoint_cursor")) is not int
+        or value["checkpoint_cursor"] < 1
+        or type(value.get("total_steps")) is not int
+        or value["total_steps"] <= value["checkpoint_cursor"]
+        or type(value.get("gpu_uuid")) is not str
+        or _GPU_UUID.fullmatch(value["gpu_uuid"]) is None
+    ):
+        raise TasteGCFFullResumeError("T12 checkpoint prefix receipt is invalid")
+    _validate_canary_process_identity(
+        value.get("process_identity"), field="T12 checkpoint prefix"
+    )
+    for field in (
+        "checkpoint_manifest_sha256",
+        "checkpoint_identity_sha256",
+        "checkpoint_state_sha256",
+        "checkpoint_rng_sha256",
+        "canary_identity_sha256",
+    ):
+        _require_sha256(value.get(field), field=f"T12 prefix {field}")
+    manifest_path = _normalized_absolute(
+        value.get("checkpoint_manifest"), field="T12 prefix checkpoint manifest"
+    )
+    if manifest_path.resolve(strict=True) != manifest_path or manifest_path.is_symlink():
+        raise TasteGCFFullResumeError("T12 prefix checkpoint manifest is an alias")
+    if _sha256_file(manifest_path) != value["checkpoint_manifest_sha256"]:
+        raise TasteGCFFullResumeError("T12 prefix checkpoint manifest bytes changed")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TasteGCFFullResumeError(
+            "T12 prefix checkpoint manifest is unreadable"
+        ) from exc
+    if (
+        type(manifest) is not dict
+        or manifest.get("schema_version") != CHECKPOINT_MANIFEST_SCHEMA
+        or manifest.get("status") != "COMMITTED"
+        or manifest.get("stage") != STAGE
+        or manifest.get("purpose") != "gpu_replay_canary"
+        or manifest.get("checkpoint_cursor") != value["checkpoint_cursor"]
+        or manifest.get("total_steps") != value["total_steps"]
+        or manifest.get("identity_sha256") != value["checkpoint_identity_sha256"]
+        or manifest.get("state_sha256") != value["checkpoint_state_sha256"]
+        or manifest.get("rng_sha256") != value["checkpoint_rng_sha256"]
+        or manifest.get("immutable_no_replace") is not True
+    ):
+        raise TasteGCFFullResumeError("T12 prefix checkpoint manifest changed")
+    return dict(value)
+
+
 def compare_canary_observations(
-    uninterrupted: Mapping[str, Any], resumed: Mapping[str, Any]
+    uninterrupted: Mapping[str, Any],
+    resumed: Mapping[str, Any],
+    prefix_receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Require byte/semantic exactness; allclose is intentionally forbidden."""
 
     expected = {
         "schema_version", "stage", "role", "canary_identity_sha256", "gpu_uuid",
-        "cuda_used", "process_identity", "checkpoint_reloaded",
+        "cuda_used", "process_identity", "checkpoint_process_identity",
+        "checkpoint_manifest_sha256", "checkpoint_identity_sha256",
+        "checkpoint_state_sha256", "checkpoint_rng_sha256", "checkpoint_reloaded",
         "generated_to_original_neurosed_assertion", "graph_identity_contract",
         "python_builtin_hash_used", "embedding_identity_used", "native_result_sha256",
         "scientific_state", "scientific_state_sha256",
@@ -1307,14 +1466,94 @@ def compare_canary_observations(
             != value.get("scientific_state")
             or value.get("scientific_state_sha256")
             != _semantic_sha256(value.get("scientific_state"))
+            or (
+                role == "uninterrupted"
+                and any(
+                    value.get(field) is not None
+                    for field in (
+                        "checkpoint_process_identity",
+                        "checkpoint_manifest_sha256",
+                        "checkpoint_identity_sha256",
+                        "checkpoint_state_sha256",
+                        "checkpoint_rng_sha256",
+                    )
+                )
+            )
+            or (
+                role == "cross_process_resumed"
+                and (
+                    _validate_canary_process_identity(
+                        value.get("checkpoint_process_identity"),
+                        field="T12 resumed checkpoint producer",
+                    )
+                    != value.get("checkpoint_process_identity")
+                    or any(
+                        _require_sha256(
+                            value.get(field), field=f"T12 resumed {field}"
+                        )
+                        != value.get(field)
+                        for field in (
+                            "checkpoint_manifest_sha256",
+                            "checkpoint_identity_sha256",
+                            "checkpoint_state_sha256",
+                            "checkpoint_rng_sha256",
+                        )
+                    )
+                )
+            )
         ):
             raise TasteGCFFullResumeError(f"T12 {label} canary observation is invalid")
         _require_sha256(value.get("canary_identity_sha256"), field=f"T12 {label} identity")
         _require_sha256(value.get("native_result_sha256"), field=f"T12 {label} result")
         if type(value.get("gpu_uuid")) is not str or _GPU_UUID.fullmatch(value["gpu_uuid"]) is None:
             raise TasteGCFFullResumeError(f"T12 {label} GPU UUID is invalid")
-    if uninterrupted["process_identity"] == resumed["process_identity"]:
+    prefix = validate_canary_prefix_receipt(prefix_receipt)
+    uninterrupted_instance = (
+        uninterrupted["process_identity"]["pid"],
+        uninterrupted["process_identity"]["start_ticks"],
+    )
+    resumed_instance = (
+        resumed["process_identity"]["pid"],
+        resumed["process_identity"]["start_ticks"],
+    )
+    checkpoint_instance = (
+        prefix["process_identity"]["pid"],
+        prefix["process_identity"]["start_ticks"],
+    )
+    if len({uninterrupted_instance, resumed_instance, checkpoint_instance}) != 3:
         raise TasteGCFFullResumeError("T12 canary did not cross a process boundary")
+    if resumed["checkpoint_process_identity"] != prefix["process_identity"]:
+        raise TasteGCFFullResumeError("T12 resumed observation changed checkpoint process")
+    if (
+        prefix["canary_identity_sha256"]
+        != uninterrupted["canary_identity_sha256"]
+        or prefix["canary_identity_sha256"]
+        != resumed["canary_identity_sha256"]
+        or prefix["gpu_uuid"] != uninterrupted["gpu_uuid"]
+        or prefix["gpu_uuid"] != resumed["gpu_uuid"]
+    ):
+        raise TasteGCFFullResumeError(
+            "T12 checkpoint prefix belongs to another canary or GPU"
+        )
+    if (
+        prefix["checkpoint_cursor"] != 8
+        or prefix["total_steps"] != 16
+        or uninterrupted["scientific_state"]["completed_steps"]
+        != prefix["total_steps"]
+        or resumed["scientific_state"]["completed_steps"]
+        != prefix["total_steps"]
+    ):
+        raise TasteGCFFullResumeError("T12 bounded canary cursor/terminal changed")
+    for observation_field, receipt_field in (
+        ("checkpoint_manifest_sha256", "checkpoint_manifest_sha256"),
+        ("checkpoint_identity_sha256", "checkpoint_identity_sha256"),
+        ("checkpoint_state_sha256", "checkpoint_state_sha256"),
+        ("checkpoint_rng_sha256", "checkpoint_rng_sha256"),
+    ):
+        if resumed[observation_field] != prefix[receipt_field]:
+            raise TasteGCFFullResumeError(
+                f"T12 resumed observation changed {observation_field}"
+            )
     for field in ("canary_identity_sha256", "gpu_uuid", "native_result_sha256", "scientific_state_sha256"):
         if uninterrupted[field] != resumed[field]:
             raise TasteGCFFullResumeError(f"T12 replay diverged at {field}")
@@ -1331,6 +1570,10 @@ def compare_canary_observations(
         "resumed_observation_sha256": _sha256_bytes(_canonical_bytes(resumed)),
         "scientific_state_sha256": uninterrupted["scientific_state_sha256"],
         "native_result_sha256": uninterrupted["native_result_sha256"],
+        "checkpoint_manifest_sha256": prefix["checkpoint_manifest_sha256"],
+        "checkpoint_identity_sha256": prefix["checkpoint_identity_sha256"],
+        "checkpoint_state_sha256": prefix["checkpoint_state_sha256"],
+        "checkpoint_rng_sha256": prefix["checkpoint_rng_sha256"],
         "cross_process": True,
         "cuda_used": True,
         "exact_equality": True,
@@ -1361,6 +1604,13 @@ def write_canary_observation(
         generated_to_original_neurosed_assertion=observation.get(
             "generated_to_original_neurosed_assertion"
         ),
+        checkpoint_process_identity=observation.get(
+            "checkpoint_process_identity"
+        ),
+        checkpoint_manifest_sha256=observation.get("checkpoint_manifest_sha256"),
+        checkpoint_identity_sha256=observation.get("checkpoint_identity_sha256"),
+        checkpoint_state_sha256=observation.get("checkpoint_state_sha256"),
+        checkpoint_rng_sha256=observation.get("checkpoint_rng_sha256"),
     )
     if validated != dict(observation):
         raise TasteGCFFullResumeError("T12 canary observation contains drift")
@@ -1385,10 +1635,11 @@ def write_canary_gate(
     output_path: str | Path,
     uninterrupted: Mapping[str, Any],
     resumed: Mapping[str, Any],
+    prefix_receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Atomically create (never replace) the independent canary gate."""
 
-    gate = compare_canary_observations(uninterrupted, resumed)
+    gate = compare_canary_observations(uninterrupted, resumed, prefix_receipt)
     path = _normalized_absolute(output_path, field="T12 canary gate")
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.parent.resolve(strict=True) != path.parent:
@@ -1411,6 +1662,7 @@ __all__ = [
     "CANARY_GATE_SCHEMA",
     "CANARY_OBSERVATION_SCHEMA",
     "CANARY_PASS_MARKER",
+    "CANARY_PREFIX_RECEIPT_SCHEMA",
     "CHECKPOINT_MANIFEST_SCHEMA",
     "CHECKPOINT_SCHEMA",
     "GRAPH_IDENTITY_CONTRACT",
@@ -1427,6 +1679,7 @@ __all__ = [
     "compare_canary_observations",
     "reopen_checkpoint",
     "restore_checkpoint_payload",
+    "validate_canary_prefix_receipt",
     "validate_checkpoint_identity",
     "validate_checkpoint_payload",
     "write_canary_gate",

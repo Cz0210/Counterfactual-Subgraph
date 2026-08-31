@@ -16,13 +16,23 @@
 - [x] Add the independent exact replay observation/gate and paired CLI/Slurm
   entrypoint.  It rejects a same-process comparison or any approximate match.
 - [x] Add focused identity, checkpoint/reopen/RNG and canary-gate tests.
-- [ ] Build the dataset-specific real-GPU producer that uses this substrate
-  to emit the uninterrupted and cross-process resumed observations.
+- [x] Build the dataset-specific real-GPU producer around the exact held T7
+  GINE/NeuroSED/official VRRW path; emit uninterrupted, checkpoint-prefix and
+  resumed evidence from three distinct processes in one allocation.
+- [x] Pin deterministic CUDA error mode and bind the prefix manifest plus full
+  official mutable-state digest into the independent exact gate.
+- [x] Consume and rehash the real calibration-only T7 NeuroSED threshold
+  selector authority, receipt, input authority and file inventory; reject a
+  scalar/default replacement.
 - [ ] Run and adopt the exact A800 replay gate before production.
+- [ ] Before 20k, replace bounded-canary all-history Python record retention
+  with a compact deterministic live-registry plus reopenable history hash
+  chain and prove RAM/checkpoint-size bounds; do not launch the current bridge
+  directly at 20k.
 - [ ] Add lossless native candidate persistence, calibration-only ordering,
   held-out test, standardized exports and the separate terminal verifier.
-- [ ] Pin the external NeuroSED distance and shared WNode threshold
-  authorities; never infer either from test/default values.
+- [ ] Pin the external shared WNode threshold authority for the full
+  calibration/export route; never infer it from test/default values.
 
 ## 2026-09-01: TasteMolNet calibration-only threshold authorities
 

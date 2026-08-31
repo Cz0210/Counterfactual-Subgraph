@@ -146,17 +146,29 @@ before production; an `allclose` terminal comparison is insufficient.
 
 - The stable identity/checkpoint/replay-gate substrate is implemented without
   modifying vendored official source or creating a generic controller.
+- The dataset-specific producer now reconstructs the real held T7
+  GINE/NeuroSED/VRRW route.  Its checkpoint prefix, resume suffix and
+  uninterrupted reference must be three distinct Linux process instances in
+  one A800 allocation; the independent gate rehashes the manifest and exact
+  official mutable state.
+- CUDA execution is pinned to deterministic-error mode with cuDNN benchmarking,
+  TF32 and supported reduced-precision reductions disabled.  An unsupported
+  deterministic PyG kernel is a real blocker, not grounds for `allclose`.
 - The canary marker is not a T12 cell PASS and explicitly does not release
   production.
-- The full runner still requires a real-GPU canary producer, lossless native
-  candidate persistence, calibration/test/export wiring, and independent
-  verification.
-- NeuroSED and shared WNode thresholds remain explicit external pins.  No
-  default or held-out value is authorized.
+- The producer consumes the calibration-only T7 threshold selector artifact,
+  its input authority, receipt and inventory; scalar/default thresholds are
+  rejected.  The full runner still requires a real A800 PASS, lossless native
+  candidate persistence, the shared WNode authority, calibration/test/export
+  wiring, and independent verification.
+- The bounded bridge intentionally retains complete replay rows.  It must not
+  be scaled directly to 20k: production first needs a deterministic compact
+  live-registry/history-hash layout and a measured RAM/checkpoint-size bound.
 
 ### Status
 
-Identity and restart substrate accepted; production remains gated.
+Identity, restart substrate and bounded real-route producer accepted; real A800
+canary execution and production remain gated.
 
 ---
 
