@@ -129,6 +129,9 @@ See:
 - `docs/AUTODL_TASTEMOLNET_T9_COMRECGC_SMOKE.md` (trusted-single-operator,
   GPU1-after-T4 M500 worker plus separate managed-v2 verifier and fresh atomic
   aggregate-only publication; no test, full run, or paper claim)
+- `docs/AUTODL_TASTEMOLNET_T14_COMRECGC_POSTPROCESS.md` (read-only adoption of
+  the train-only T14 checkpoint, calibration-only top-20 freeze, post-freeze
+  held-out test, standardized exports, and no-replace terminal publication)
 - `docs/TASTE_GCF_NEUROSED_PROTOCOL.md` (Taste-specific, train-fit/
   validation-select NeuroSED auxiliary distance model, official GREED/GCF
   runner semantics, no calibration/test access, and managed-v2 publication)

@@ -1,5 +1,51 @@
 # Decisions Log
 
+## [2026-09-01] Separate T14 train generation from paper-cell evaluation
+
+### Motivation
+
+The fixed-cohort T14 runner correctly opens train only and ends at
+`GENERATION_PASS`. Its terminal manifest leaves calibration, held-out test,
+standardized export, and paper eligibility unevaluated, so generation alone
+cannot count as the Taste ComRecGC matrix cell.
+
+### Decision
+
+Add one Taste-specific postprocess that read-only reopens the effective 20k or
+25k checkpoint. Materialize only official common-recourse representatives by
+joining their graph hashes to checkpointed bridge graph and lineage payloads;
+require 10--20 unique connected frozen-GINE strict flips and never backfill an
+invalid or missing representative.
+
+Evaluate calibration in resumable one-parent chunks and freeze the prefix with
+the shared greedy marginal theta/strict coverage rule. Only after selection
+and its stage checkpoint are fsynced may held-out test bytes be opened. Reuse
+the same calibrated three-class GINE, method-shared Taste WNode threshold, and
+MolCLR provider as the other Taste full methods. Persist configured/fallback/
+effective M, resource-cap use, early-stop use, and stop reason.
+
+The worker stops at `SEALED`. A distinct verifier rejoins generation lineage,
+replays chunk inventories, calibration order, and standardized metrics, runs
+the four-by-four registry gate, and atomically publishes a fresh final root.
+Only that verifier writes `[TASTE_COMRECGC_PASS]` as the final file.
+
+### Consequences
+
+- Generation and evaluation remain independently resumable without mutating
+  the native walk.
+- Calibration/test isolation is a physical file-access barrier, not only a
+  manifest assertion.
+- If the official representative set has fewer than ten entries, the route
+  fails scientifically rather than padding from unselected walk states.
+- Code integration creates no paper result until real AutoDL execution and
+  independent publication complete.
+
+### Status
+
+Implemented with focused local tests; AutoDL execution pending.
+
+---
+
 ## [2026-09-01] Compare T12 native results by exact scientific content
 
 ### Motivation

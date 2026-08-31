@@ -137,6 +137,22 @@
   The checkpoint-free failed root cannot be resumed; use resume mode only
   after a new attempt publishes `checkpoints/LATEST`.
 
+## 2026-09-01: Close T14 generation into a Taste paper cell
+
+- [x] Reopen only the effective 20k/25k checkpoint and join official
+  common-recourse representative hashes to checkpointed graph/lineage payloads.
+- [x] Require 10--20 unique connected strict non-Sweet representatives; never
+  backfill, repair, or change native generation order.
+- [x] Add resumable calibration/test chunks, calibration-only top-20 ordering,
+  a durable pre-test freeze barrier, and shared Taste GINE/MolCLR/WNode pins.
+- [x] Export Figure 3, Figure 4, K-prefix, destination, and Table 2 K=10 with
+  complete M configured/effective/resource-cap disclosures.
+- [x] Add a separate verifier that replays chunks, selection, metrics, and the
+  registry gate before atomic no-replace publication of PASS.
+- [x] Add AutoDL/Slurm parity, focused tests, and operator documentation.
+- [ ] After generation PASS, run one fresh postprocess/final pair on AutoDL;
+  code integration alone is not a Taste ComRecGC matrix cell.
+
 ## 2026-09-01: TasteMolNet T12 cross-process VRRW blocker
 
 - [x] Audit the complete T7 checkpoint payload: official mutable maps/lists,
