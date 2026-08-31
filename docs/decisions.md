@@ -1,5 +1,47 @@
 # Decisions Log
 
+## [2026-08-31] Add the executable TasteMolNet T13 native GlobalGCE full route
+
+### Motivation
+
+The T8 implementation proves the two-target multiclass bridge and one planned
+checkpoint/reload, but its fixed 16-parent, five-epoch bounds intentionally
+cannot produce the paper main-table cell. Wrapping that smoke in a full-stage
+name would leave calibration, held-out test evaluation, standardized export,
+and process-restart behavior absent.
+
+### Decision
+
+Add one dataset-specific T13 runner that uses the existing official GlobalGCE
+generator for independent Sweet-to-Bitter and Sweet-to-Tasteless train-only
+branches. Use its existing epoch checkpoint/resume implementation, merge and
+deduplicate native rules by tensor-content identity, order at most twenty rules
+on calibration only, freeze that order before opening held-out test, and
+evaluate native LHS-to-RHS applications with the same three-class GINE and
+MolCLR-Node-Wasserstein. Require one explicit frozen TasteMolNet threshold
+contract shared by the four methods. Persist per-parent evaluation chunks for
+restart, export the complete registry schema, and let a separate verifier
+process replay the frozen metrics and publish PASS.
+
+Do not add T11/T12 wrappers that merely call their currently bounded smoke
+loops; those require real full-scale generation primitives before they can be
+truthfully released.
+
+### Consequences
+
+- T8 PASS can release a real T13 science process without waiting for T10.
+- Official GlobalGCE model/optimizer/scheduler/RNG checkpoints and the T13
+  stage checkpoint are both usable after interruption.
+- Test bytes remain unopened until calibration selection is durably frozen.
+- The output is directly auditable by the existing 4-by-4 registry and reports
+  destinations 0 and 2 without binary projection or RF fallback.
+- T11 and T12 remain explicit implementation blockers rather than mislabeled
+  smoke results.
+
+### Status
+
+Accepted
+
 ## [2026-08-31] Adopt completed AIDS exact DBSCAN read-only for postprocessing
 
 ### Motivation

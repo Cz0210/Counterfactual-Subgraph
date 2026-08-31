@@ -1,5 +1,22 @@
 # Refactor Plan
 
+## 2026-08-31: TasteMolNet T11-T13 full-runner closure
+
+- [x] Add a real dataset-specific T13 GlobalGCE full runner over independent
+  target-0 and target-2 official branches.
+- [x] Persist official epoch resume plus T13 stage and per-parent evaluation
+  checkpoints.
+- [x] Freeze calibration ordering before held-out test access and export the
+  complete Figure 3/Figure 4/Table 2 registry artifact set.
+- [x] Add a separate terminal verifier invocation, paired Slurm wrapper,
+  focused tests, and operator documentation.
+- [ ] Extend the T6 PPO implementation beyond its hard smoke bounds with a
+  full train-only optimization schedule and base/high-temperature generation;
+  then implement T11 without wrapping smoke evidence.
+- [ ] Extend native T7 from its fixed 16-step in-process smoke checkpoint to a
+  persistent fixed-budget full VRRW loop; then implement T12 calibration/test
+  and standardized export without retraining the adopted NeuroSED model.
+
 ## 2026-08-31: Postprocess the completed AIDS exact partition read-only
 
 - [x] Bind the controller exact receipt, DBSCAN/vector/contract identity, and
