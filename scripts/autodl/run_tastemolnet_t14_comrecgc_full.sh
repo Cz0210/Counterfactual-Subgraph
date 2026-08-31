@@ -68,6 +68,7 @@ T14_SCIENCE_ARGS=(
   --config "$PROJECT_ROOT/configs/hpc.yaml"
   --output-dir "$TASTEMOLNET_T14_OUTPUT"
   --run-id "$TASTEMOLNET_T14_RUN_ID" --gpu-uuid "$GPU_UUID"
+  --physical-gpu-index "$TASTEMOLNET_T14_GPU_INDEX"
   --t2-adoption-root "$TASTEMOLNET_T2_ADOPTION_ROOT"
   --t2-adoption-gate-sha256 "$TASTEMOLNET_T2_ADOPTION_GATE_SHA256"
   --t2-adoption-receipt-sha256 "$TASTEMOLNET_T2_ADOPTION_RECEIPT_SHA256"

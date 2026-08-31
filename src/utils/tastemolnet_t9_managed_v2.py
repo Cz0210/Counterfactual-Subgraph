@@ -207,7 +207,11 @@ def inspect_clean_execution() -> dict[str, str]:
     return {"commit": observed["commit"], "tree": observed["tree"]}
 
 
-def _validate_t9_input_authority(value: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_t9_input_authority(
+    value: Mapping[str, Any],
+    *,
+    expected_physical_gpu_index: int = PHYSICAL_GPU_INDEX,
+) -> dict[str, Any]:
     keys = {
         "schema_version",
         "trust_model",
@@ -269,7 +273,7 @@ def _validate_t9_input_authority(value: Mapping[str, Any]) -> dict[str, Any]:
         or type(gpu) is not dict
         or set(gpu) != {"physical_index", "uuid", "logical_device"}
         or type(gpu.get("physical_index")) is not int
-        or gpu["physical_index"] != PHYSICAL_GPU_INDEX
+        or gpu["physical_index"] != int(expected_physical_gpu_index)
         or type(gpu.get("uuid")) is not str
         or _GPU_UUID_RE.fullmatch(gpu["uuid"]) is None
         or gpu.get("logical_device") != "cuda:0"
@@ -641,6 +645,7 @@ class HeldTasteT9Inputs:
     source_rows: tuple[Any, ...]
     graph_schema: Any
     authority: Mapping[str, Any]
+    physical_gpu_index: int = PHYSICAL_GPU_INDEX
 
     def revalidate(self) -> dict[str, Any]:
         self.config_file.revalidate()
@@ -669,7 +674,10 @@ class HeldTasteT9Inputs:
             != self.authority["checkpoint"]["checkpoint_inventory_sha256"]
         ):
             raise TasteT9ManagedV2Error("T9 retained input authority changed")
-        return _validate_t9_input_authority(self.authority)
+        return _validate_t9_input_authority(
+            self.authority,
+            expected_physical_gpu_index=self.physical_gpu_index,
+        )
 
     def close(self) -> None:
         self.stack.close()
@@ -696,6 +704,7 @@ def hold_t9_inputs(
     checkpoint_dir: str | Path,
     train_csv: str | Path,
     official_root: str | Path,
+    physical_gpu_index: int = PHYSICAL_GPU_INDEX,
 ) -> HeldTasteT9Inputs:
     """Retain every exact T9 scientific input without opening held-out data."""
 
@@ -809,6 +818,8 @@ def hold_t9_inputs(
         )
         official_evidence = official.revalidate()
         execution = inspect_clean_execution()
+        if type(physical_gpu_index) is not int or physical_gpu_index not in range(4):
+            raise TasteT9ManagedV2Error("physical GPU index must be one of 0,1,2,3")
         authority = {
             "schema_version": T9_INPUT_AUTHORITY_SCHEMA,
             "trust_model": TRUST_MODEL,
@@ -819,7 +830,7 @@ def hold_t9_inputs(
                 "sha256": config_file.sha256,
             },
             "gpu": {
-                "physical_index": PHYSICAL_GPU_INDEX,
+                "physical_index": physical_gpu_index,
                 "uuid": gpu_uuid,
                 "logical_device": "cuda:0",
             },
@@ -855,7 +866,10 @@ def hold_t9_inputs(
                 "dataset_redistributed": False,
             },
         }
-        frozen_authority = _validate_t9_input_authority(authority)
+        frozen_authority = _validate_t9_input_authority(
+            authority,
+            expected_physical_gpu_index=physical_gpu_index,
+        )
         held = HeldTasteT9Inputs(
             stack=stack,
             t2=t2,
@@ -868,6 +882,7 @@ def hold_t9_inputs(
             source_rows=tuple(loaded.sweet_rows[:SMOKE_SOURCE_POOL]),
             graph_schema=loaded.schema,
             authority=frozen_authority,
+            physical_gpu_index=physical_gpu_index,
         )
         held.revalidate()
         return held
@@ -879,16 +894,26 @@ def hold_t9_inputs(
 def require_gpu1_runtime(gpu_uuid: str) -> None:
     """Require the trusted launcher to expose physical GPU1 as logical cuda:0."""
 
-    if os.environ.get("CUDA_VISIBLE_DEVICES") != str(PHYSICAL_GPU_INDEX):
-        raise TasteT9ManagedV2Error("T9 requires CUDA_VISIBLE_DEVICES=1")
-    if os.environ.get("AUTODL_PHYSICAL_GPU_INDEX") != str(PHYSICAL_GPU_INDEX):
-        raise TasteT9ManagedV2Error("T9 physical GPU index binding is absent")
+    require_gpu_runtime(gpu_uuid, physical_gpu_index=PHYSICAL_GPU_INDEX)
+
+
+def require_gpu_runtime(gpu_uuid: str, *, physical_gpu_index: int) -> None:
+    """Require one explicitly selected physical GPU as logical ``cuda:0``."""
+
+    if type(physical_gpu_index) is not int or physical_gpu_index not in range(4):
+        raise TasteT9ManagedV2Error("physical GPU index must be one of 0,1,2,3")
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != str(physical_gpu_index):
+        raise TasteT9ManagedV2Error(
+            "CUDA_VISIBLE_DEVICES differs from the selected physical GPU"
+        )
+    if os.environ.get("AUTODL_PHYSICAL_GPU_INDEX") != str(physical_gpu_index):
+        raise TasteT9ManagedV2Error("physical GPU index binding is absent")
     if os.environ.get("AUTODL_PHYSICAL_GPU_UUID") != gpu_uuid:
         raise TasteT9ManagedV2Error("T9 physical GPU UUID binding changed")
     import torch
 
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise TasteT9ManagedV2Error("T9 requires exactly one visible CUDA device")
+        raise TasteT9ManagedV2Error("exactly one visible CUDA device is required")
 
 
 def _write_artifact_json(
@@ -1300,6 +1325,7 @@ __all__ = [
     "inspect_clean_execution",
     "load_t9_verified_gate",
     "open_t9_sealed",
+    "require_gpu_runtime",
     "require_gpu1_runtime",
     "run_t9_worker",
     "seal_t9_worker_evidence",

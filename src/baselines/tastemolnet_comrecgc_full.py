@@ -404,10 +404,14 @@ def _checkpoint_identity(
     from src.baselines.comrecgc.generation_checkpoint import scientific_command_sha256
 
     checkpoint = authority.get("checkpoint")
+    gpu = authority.get("gpu")
     official = authority.get("official")
     execution = authority.get("execution")
     train = authority.get("train")
-    if not all(type(value) is dict for value in (checkpoint, official, execution, train)):
+    if not all(
+        type(value) is dict
+        for value in (checkpoint, gpu, official, execution, train)
+    ):
         raise TasteComRecGCFullError("Taste T14 checkpoint authority is incomplete")
     scientific_argv = (
         "tastemolnet_t14_comrecgc_full_v1",
@@ -417,6 +421,8 @@ def _checkpoint_identity(
         f"parameters_sha256={_sha256_bytes(_canonical_bytes(asdict(parameters)))}",
         f"official_sha256={_sha256_bytes(_canonical_bytes(official))}",
         f"execution_commit={execution.get('commit')}",
+        f"physical_gpu_index={gpu.get('physical_index')}",
+        f"gpu_uuid={gpu.get('uuid')}",
     )
     command_sha256 = scientific_command_sha256(scientific_argv)
     provenance = {
@@ -430,6 +436,8 @@ def _checkpoint_identity(
         "parameters_sha256": _sha256_bytes(_canonical_bytes(asdict(parameters))),
         "official_authority_sha256": _sha256_bytes(_canonical_bytes(official)),
         "execution_commit": str(execution.get("commit")),
+        "physical_gpu_index": str(gpu.get("physical_index")),
+        "gpu_uuid": str(gpu.get("uuid")),
         "runtime_state_schema": RUNTIME_STATE_SCHEMA,
         "transition_cache_policy": "compact_transition_action_replay_lru_v1",
         "graph_state_policy": "authoritative_backing_live_graph_resolution_v2",

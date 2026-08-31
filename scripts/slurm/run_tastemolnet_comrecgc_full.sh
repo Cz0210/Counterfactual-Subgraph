@@ -17,13 +17,15 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
-echo "T14 uses the AutoDL GPU1 retained-input launcher; direct Slurm execution is disabled" >&2
+echo "T14 uses the AutoDL retained-input launcher; direct Slurm execution is disabled" >&2
 exit 64
 
 # Required CLI parity (documentation only):
 # python scripts/run_tastemolnet_comrecgc_full.py --config configs/hpc.yaml \
 #   --output-dir "$TASTEMOLNET_T14_OUTPUT" --run-id "$TASTEMOLNET_T14_RUN_ID" \
-#   --gpu-uuid "$TASTEMOLNET_GPU_UUID" --set inference.fallback_to_heuristic=false
+#   --gpu-uuid "$TASTEMOLNET_GPU_UUID" \
+#   --physical-gpu-index "$TASTEMOLNET_T14_GPU_INDEX" \
+#   --set inference.fallback_to_heuristic=false
 # Add --resume only after the fresh route has atomically published
 # "$TASTEMOLNET_T14_OUTPUT/checkpoints/LATEST"; the AutoDL wrapper exposes this
 # as TASTEMOLNET_T14_RESUME=1.

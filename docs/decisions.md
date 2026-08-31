@@ -47,7 +47,8 @@ size 10,000, and minimum ten valid unique rules are unchanged.
   that root with `TASTEMOLNET_T14_RESUME=1`.
 - `TASTEMOLNET_T14_GPU_INDEX=0..3` selects an explicitly scheduled physical
   GPU (default `1`); UUID discovery and the existing exclusive GPU lock remain
-  mandatory, so this scheduling option does not change science semantics.
+  mandatory.  The selected index and UUID are checkpoint-bound, so any exact
+  resume returns to the same physical device.
 - Checkpoint validation now includes the compact transition state and SQLite
   snapshot.  Calibration and test remain unopened during generation.
 

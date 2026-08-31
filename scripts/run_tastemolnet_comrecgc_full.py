@@ -19,7 +19,7 @@ from src.baselines.tastemolnet_comrecgc_full import (  # noqa: E402
 )
 from src.utils.tastemolnet_t9_managed_v2 import (  # noqa: E402
     hold_t9_inputs,
-    require_gpu1_runtime,
+    require_gpu_runtime,
 )
 
 
@@ -36,6 +36,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=_absolute, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--gpu-uuid", required=True)
+    parser.add_argument(
+        "--physical-gpu-index", type=int, choices=range(4), required=True
+    )
     parser.add_argument("--t2-adoption-root", type=_absolute, required=True)
     parser.add_argument("--t2-adoption-gate-sha256", required=True)
     parser.add_argument("--t2-adoption-receipt-sha256", required=True)
@@ -68,8 +71,12 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_dir=args.checkpoint_dir,
         train_csv=args.train_csv,
         official_root=args.official_root,
+        physical_gpu_index=args.physical_gpu_index,
     ) as inputs:
-        require_gpu1_runtime(args.gpu_uuid)
+        require_gpu_runtime(
+            args.gpu_uuid,
+            physical_gpu_index=args.physical_gpu_index,
+        )
         if args.validate_only:
             result = validate_t14_full_output(args.output_dir)
         else:

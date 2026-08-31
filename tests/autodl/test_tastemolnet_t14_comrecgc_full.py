@@ -290,6 +290,7 @@ def test_t14_launchers_keep_explicit_gpu_budget_and_slurm_contract() -> None:
     for token in (
         'TASTEMOLNET_T14_GPU_INDEX="${TASTEMOLNET_T14_GPU_INDEX:-1}"',
         '--gpu-index "$TASTEMOLNET_T14_GPU_INDEX"',
+        '--physical-gpu-index "$TASTEMOLNET_T14_GPU_INDEX"',
         "TASTEMOLNET_T14_OUTPUT",
         "TASTEMOLNET_T14_GPU_INDEX",
         "RUN_GNN_ABLATION",
