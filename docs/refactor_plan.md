@@ -12,6 +12,21 @@
   prepares the fresh manifest, launches it once, and leaves matrix publication
   to the strict cell-authority publisher.
 
+## 2026-09-01: Strict TasteMolNet paper-cell matrix append
+
+- [x] Reuse the existing hash-closed registry schema and atomic writer.
+- [x] Require exact T11--T14 full terminal contracts; reject smoke/canary
+  markers and reserve a fail-closed T12 production schema.
+- [x] Reopen the managed T3 GINE/temperature and prove shared split, test
+  cohort, MolCLR and threshold identities across passing Taste cells.
+- [x] Preserve every non-target row and advance by exactly the number of newly
+  supplied full terminals.
+- [x] Add the CPU-only CLI, paired Slurm wrapper, focused tests and runbook.
+- [x] Expose GlobalGCE in the BACE frozen-standardization CLI, matching its
+  existing implementation and task builder.
+- [ ] Deploy the committed appender and enqueue one invocation after each real
+  T11--T14 final PASS, always chaining from the latest authority root.
+
 
 ## 2026-09-01: Route AIDS chemistry through its frozen untyped candidate space
 

@@ -23,7 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument(
-        "--method", choices=("Ours", "GCFExplainer", "ComRecGC"), required=True
+        "--method",
+        choices=("Ours", "GCFExplainer", "GlobalGCE", "ComRecGC"),
+        required=True,
     )
     parser.add_argument("--source-final-root", required=True)
     parser.add_argument("--gnn-checkpoint", required=True)

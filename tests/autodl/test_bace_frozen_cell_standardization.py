@@ -9,6 +9,7 @@ from scripts.autodl.build_bace_cell_standardization_tasks import (
     CONTROLLER_TASKS,
     build_fragment,
 )
+from scripts.autodl.standardize_bace_frozen_cell import build_parser
 from scripts.autodl.run_four_gpu_recovery_controller import load_controller_manifest
 from src.chem.hard_deletion import (
     CONNECTED_ACTION_SEMANTICS,
@@ -29,6 +30,22 @@ HISTORICAL_B13_FIXTURE = (
     / "fixtures"
     / "bace_ours_b13_verification_v1_structure.json"
 )
+
+
+def test_standardization_cli_accepts_globalgce() -> None:
+    args = build_parser().parse_args(
+        [
+            "--method",
+            "GlobalGCE",
+            "--source-final-root",
+            "/source",
+            "--gnn-checkpoint",
+            "/checkpoint",
+            "--output-dir",
+            "/output",
+        ]
+    )
+    assert args.method == "GlobalGCE"
 
 
 def _write_json(path: Path, payload: object) -> None:

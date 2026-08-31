@@ -24,7 +24,7 @@ python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 python scripts/autodl/standardize_bace_frozen_cell.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
-  --method "${METHOD:?Set METHOD to Ours, GCFExplainer, or ComRecGC}" \
+  --method "${METHOD:?Set METHOD to Ours, GCFExplainer, GlobalGCE, or ComRecGC}" \
   --source-final-root "${SOURCE_FINAL_ROOT:?Set SOURCE_FINAL_ROOT}" \
   --gnn-checkpoint "${GNN_CHECKPOINT:?Set GNN_CHECKPOINT}" \
   --output-dir "${OUTPUT_DIR:?Set OUTPUT_DIR}"
