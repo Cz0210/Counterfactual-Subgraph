@@ -530,15 +530,42 @@ def _terminal_controller_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path, 
     controller_start_ticks = 67890
     proc_root = tmp_path / "proc"
     proc_root.mkdir()
-    control = tmp_path / "control" / "mut_fast_accurate_v2" / controller_id
+    control_root = tmp_path / "control"
+    control = control_root / "mut_fast_accurate_v2" / controller_id
     control.mkdir(parents=True)
-    terminal_root = tmp_path / "four-gpu" / controller_id
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    terminal_root = control_root / "four_gpu_recovery" / controller_id
     terminal_root.mkdir(parents=True)
+    terminal_identity = {
+        "pid": 22222,
+        "start_ticks": 33333,
+        "command_sha256": "b" * 64,
+    }
     terminal_state_path = terminal_root / "controller_state.json"
     _write_json(
         terminal_state_path,
-        {"controller_id": controller_id, "state": "FAILED"},
+        {
+            "controller_id": controller_id,
+            "state": "FAILED",
+            "process_identity": terminal_identity,
+        },
     )
+    terminal_manifest_path = terminal_root / "controller_manifest.json"
+    _write_json(terminal_manifest_path, {"controller_id": controller_id})
+    controller_lock = terminal_root / "controller.lock"
+    controller_lock.write_text("terminal\n", encoding="utf-8")
+    terminal_task_state = terminal_root / "tasks" / "task" / "state.json"
+    _write_json(
+        terminal_task_state,
+        {"state": "FAILED", "instances": {"main": {"state": "FAILED"}}},
+    )
+    matrix_root = control_root / "fast16_matrix_authority"
+    matrix_root.mkdir()
+    matrix_state = matrix_root / "state.json"
+    _write_json(matrix_state, {"latest_count": 8})
+    matrix_lock = matrix_root / "publish.lock"
+    matrix_lock.write_text("", encoding="utf-8")
     heartbeat_path = control / "heartbeat.json"
     _write_json(
         heartbeat_path,
@@ -552,6 +579,24 @@ def _terminal_controller_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path, 
     )
     spec_path = tmp_path / "spec.json"
     spec_path.write_text("{}\n", encoding="utf-8")
+    prior_snapshot: dict[str, Any] = {
+        "schema_version": "mut_prior_live_controller_snapshot_v1",
+        "spec_path": str(spec_path),
+        "spec_file_sha256": sha256_file(spec_path),
+        "controller_cwd": str(project_root),
+        "controller": {
+            "controller_id": controller_id,
+            "pid": controller_pid,
+            "start_ticks": controller_start_ticks,
+            "command_sha256": "a" * 64,
+            "heartbeat_state": "RUNNING",
+            "heartbeat_path": str(heartbeat_path),
+            "heartbeat_at": "2026-09-01T08:40:36+00:00",
+        },
+    }
+    prior_snapshot["snapshot_sha256"] = stable_json_sha256(prior_snapshot)
+    prior_snapshot_path = control / "prior_live_controller_snapshot_test.json"
+    _write_json(prior_snapshot_path, prior_snapshot)
     evidence: dict[str, Any] = {
         "schema_version": "mut_terminal_controller_attachment_v1",
         "controller_id": controller_id,
@@ -561,25 +606,37 @@ def _terminal_controller_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path, 
         "controller_heartbeat_path": str(heartbeat_path),
         "controller_heartbeat_file_sha256": sha256_file(heartbeat_path),
         "controller_terminal_state": "FAILED",
+        "controller_terminal_at": "2026-09-01T08:41:36+00:00",
+        "spec_path": str(spec_path),
+        "spec_file_sha256": sha256_file(spec_path),
         "four_gpu_controller_state_path": str(terminal_state_path),
         "four_gpu_controller_state_file_sha256": sha256_file(terminal_state_path),
+        "four_gpu_controller_manifest_path": str(terminal_manifest_path),
+        "four_gpu_controller_manifest_file_sha256": sha256_file(
+            terminal_manifest_path
+        ),
+        "four_gpu_controller_process_identity": terminal_identity,
+        "four_gpu_task_state_files": {
+            str(terminal_task_state): sha256_file(terminal_task_state)
+        },
+        "four_gpu_controller_lock_path": str(controller_lock),
+        "four_gpu_controller_lock_observed_free": True,
+        "matrix_authority_state_path": str(matrix_state),
+        "matrix_authority_lock_path": str(matrix_lock),
         "allow_terminal_one_shot_attachment": True,
         "fresh_controller_started": False,
-        "prior_live_attachment": {
-            "controller_id": controller_id,
-            "pid": controller_pid,
-            "start_ticks": controller_start_ticks,
-            "command_sha256": "a" * 64,
-            "heartbeat_state": "RUNNING",
-        },
+        "controller_restart_performed": False,
+        "prior_live_evidence_path": str(prior_snapshot_path),
+        "prior_live_evidence_file_sha256": sha256_file(prior_snapshot_path),
     }
     evidence["receipt_sha256"] = stable_json_sha256(evidence)
-    evidence_path = tmp_path / "terminal-controller-evidence.json"
+    evidence_path = control / "terminal_controller_attachment_test.json"
     _write_json(evidence_path, evidence)
     spec = {
         "controller_id": controller_id,
         "proc_root": str(proc_root),
-        "control_root": str(tmp_path / "control"),
+        "control_root": str(control_root),
+        "project_root": str(project_root),
         "poll_seconds": 60,
     }
     return spec, spec_path, evidence_path
@@ -608,12 +665,38 @@ def test_worker_refuses_terminal_attachment_when_successor_is_live(
     live = Path(spec["proc_root"]) / "777"
     live.mkdir()
     live.joinpath("cmdline").write_bytes(
-        b"python\0/run_mut_fast_accurate_v2.py\0run\0--spec\0"
-        + str(spec_path).encode("utf-8")
-        + b"\0"
+        b"python\0/run_mut_fast_accurate_v2.py\0run\0--spec\0/different.json\0"
     )
 
     with pytest.raises(worker.MutTraceWorkerError, match="live Mut successor"):
+        worker._verify_controller(
+            spec=spec,
+            spec_path=spec_path,
+            controller_pid=12345,
+            controller_start_ticks=67890,
+            terminal_evidence_path=evidence_path,
+        )
+
+
+def test_worker_refuses_failed_heartbeat_while_controller_pid_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec, spec_path, evidence_path = _terminal_controller_fixture(tmp_path)
+    monkeypatch.setattr(
+        worker,
+        "_process_start_ticks",
+        lambda _proc, pid: 67890 if pid == 12345 else None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_process_cmdline",
+        lambda _proc, _pid: (
+            "python /frozen/run_mut_fast_accurate_v2.py run --spec "
+            + str(spec_path)
+        ),
+    )
+
+    with pytest.raises(worker.MutTraceWorkerError, match="heartbeat is terminal"):
         worker._verify_controller(
             spec=spec,
             spec_path=spec_path,
