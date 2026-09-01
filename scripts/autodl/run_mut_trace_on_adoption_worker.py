@@ -158,6 +158,46 @@ def _write_jsonl(path: Path, value: Mapping[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def _write_scoped_git_global_config(path: Path, *, upstream_root: Path) -> dict[str, Any]:
+    target = _absolute(path, exists=False, label="scoped Git global config")
+    upstream = _absolute(upstream_root, label="frozen COMRECGC checkout")
+    if any(character in str(upstream) for character in ("\n", "\r", "\0")):
+        raise MutTraceWorkerError("Frozen upstream path cannot be represented in Git config")
+    if target.exists() or target.is_symlink():
+        raise FileExistsError(f"Scoped Git global config must be fresh: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = f"[safe]\n\tdirectory = {upstream}\n".encode("utf-8")
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o400)
+        os.replace(temporary, target)
+        directory = os.open(
+            target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {
+        "schema_version": "mut_scoped_git_global_config_v1",
+        "status": "PASS",
+        "path": str(target),
+        "file_sha256": sha256_file(target),
+        "safe_directory": str(upstream),
+        "scope": "CANARY_CHILD_PROCESSES_ONLY",
+        "system_config_disabled": True,
+        "user_global_config_modified": False,
+        "scientific_state_changed": False,
+    }
+
+
 def _process_start_ticks(proc_root: Path, pid: int) -> int | None:
     try:
         raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
@@ -1885,6 +1925,14 @@ def _run(args: argparse.Namespace) -> int:
             heartbeat("TRACE_ON_ADOPTION_EVALUATION_READY")
             replay_contract = _validate_frozen_replay_contract(spec)
             atomic_json(output / "frozen_replay_contract.json", replay_contract)
+            scoped_git_config = _write_scoped_git_global_config(
+                output / "scoped_git_global.config",
+                upstream_root=Path(str(replay_contract["upstream_root"])),
+            )
+            atomic_json(
+                output / "scoped_git_global_config_receipt.json",
+                scoped_git_config,
+            )
             historical_review = _absolute(
                 args.historical_project_root, label="historical review worktree"
             )
@@ -2090,6 +2138,8 @@ def _run(args: argparse.Namespace) -> int:
                             environment = {
                                 **os.environ,
                                 "CUDA_VISIBLE_DEVICES": str(selected.index),
+                                "GIT_CONFIG_GLOBAL": str(scoped_git_config["path"]),
+                                "GIT_CONFIG_NOSYSTEM": "1",
                                 "PYTHONDONTWRITEBYTECODE": "1",
                                 "PYTHONHASHSEED": "0",
                                 "OMP_NUM_THREADS": "1",
@@ -2097,6 +2147,11 @@ def _run(args: argparse.Namespace) -> int:
                                 "TOKENIZERS_PARALLELISM": "false",
                                 "RUN_GNN_ABLATION": "0",
                             }
+                            for key in list(environment):
+                                if key == "GIT_CONFIG_COUNT" or key.startswith(
+                                    ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+                                ):
+                                    environment.pop(key, None)
                             gate_runs: list[dict[str, Any]] = []
                             instrumentation_run = output / "instrumentation-equivalence-run"
                             instrumentation_output = output / "instrumentation-equivalence"

@@ -524,6 +524,33 @@ def test_worker_uses_explicit_git_dir_without_repository_discovery(
     assert result["status"] == "PASS"
 
 
+def test_worker_writes_one_path_scoped_git_global_config(tmp_path: Path) -> None:
+    upstream = tmp_path / "vendor-comrecgc"
+    upstream.mkdir()
+    target = tmp_path / "run" / "scoped_git_global.config"
+
+    receipt = worker._write_scoped_git_global_config(
+        target,
+        upstream_root=upstream,
+    )
+
+    assert target.read_text(encoding="utf-8") == (
+        f"[safe]\n\tdirectory = {upstream.resolve()}\n"
+    )
+    assert target.stat().st_mode & 0o777 == 0o400
+    assert receipt == {
+        "schema_version": "mut_scoped_git_global_config_v1",
+        "status": "PASS",
+        "path": str(target),
+        "file_sha256": sha256_file(target),
+        "safe_directory": str(upstream.resolve()),
+        "scope": "CANARY_CHILD_PROCESSES_ONLY",
+        "system_config_disabled": True,
+        "user_global_config_modified": False,
+        "scientific_state_changed": False,
+    }
+
+
 def _terminal_controller_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path, Path]:
     controller_id = "mut-controller"
     controller_pid = 12345
