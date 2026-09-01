@@ -125,11 +125,13 @@ def _require_current_fixed_worktree(project: Path) -> str:
         raise RuntimeError("execution worktree is dirty")
     fixed = project / "src/eval/bace_native_baseline_gnn.py"
     oracle = project / "src/oracles/gnn_oracle.py"
+    fixed_source = fixed.read_text(encoding="utf-8")
+    oracle_source = oracle.read_text(encoding="utf-8")
     if (
-        "NO_EVALUABLE_GRAPHS_AFTER_PRE_ORACLE_FILTERS"
-        not in fixed.read_text(encoding="utf-8")
-        or "UNEXPECTED_EMPTY_GRAPH_SEQUENCE"
-        not in oracle.read_text(encoding="utf-8")
+        "EXPECTED_EMPTY_GRAPH_SEQUENCE" not in fixed_source
+        or "UNEXPECTED_EMPTY_GRAPH_SEQUENCE" not in fixed_source
+        or "NO_EVALUABLE_GRAPHS_AFTER_PRE_ORACLE_FILTERS" not in oracle_source
+        or "UNEXPECTED_EMPTY_GRAPH_SEQUENCE" not in oracle_source
     ):
         raise RuntimeError("expected-empty implementation is absent")
     return commit
