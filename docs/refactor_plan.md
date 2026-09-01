@@ -1,5 +1,22 @@
 # Refactor Plan
 
+## 2026-09-01: Final Taste T12/T8/T13 relays
+
+- [x] Replace the process-coupled T12 queue with an independent GPU3 successor
+  gated only by T3, T7, NeuroSED, and the typed managed release.
+- [x] Preserve fresh UUID/root, 10k/20k checkpointing, generation verification,
+  persistent PID/heartbeat, and `RUN_GNN_ABLATION=0` for T12.
+- [x] Add read-only validation/sealing of existing T8 target-0 and target-2
+  model, rule, checkpoint, split, GINE, feature-schema, and exact-top-k bytes.
+- [x] Reapply retained native rules, merge/deduplicate canonically, and require
+  original-order untargeted strict flips before managed-v2 adoption.
+- [x] Emit a target-specific rerun request on branch failure and retain every
+  passing sibling rather than rerunning both branches.
+- [x] Persist a GPU1 T13 relay released by typed T8 PASS alone.
+- [ ] Run focused tests in the project environment, deploy one immutable clean
+  checkout, launch T12 on newly free GPU3, then launch T8 salvage without
+  mutating the retained source attempt.
+
 ## 2026-09-01: Execute the BACE ComRecGC resource-cap continuation
 
 - [x] Reopen the executor cap receipt and materialized train-only generation
@@ -3446,3 +3463,51 @@ Mutagenicity roadmaps.
   read-only and close Mutagenicity/ComRecGC through the unique matrix authority.
   Otherwise enter fresh trace-off Route B using measured admission evidence.
 - [ ] Keep `RUN_GNN_ABLATION=0` until the 4x4 main table reaches 16/16.
+
+## 2026-09-01: BACE GlobalGCE expected-empty calibration batches
+
+- [x] Count the deduplicated native-rule application graphs before frozen-GINE
+  inference and bypass the oracle only when that expected count is exactly zero.
+- [x] Preserve explicit `(0, C)` logits/probabilities and `(0,)` prediction
+  shapes plus `NO_EVALUABLE_GRAPHS_AFTER_PRE_ORACLE_FILTERS` evidence in the
+  shard manifest.
+- [x] Fail closed with `UNEXPECTED_EMPTY_GRAPH_SEQUENCE` when a positive count
+  was expected but the actual graph sequence is empty.
+- [x] Keep the GNN oracle empty-input default strict; require the exact
+  `allow_empty=True, expected_count=0` opt-in pair for typed empty returns.
+- [x] Add focused tests proving the caller does not invoke the oracle, the
+  opt-in shapes/dtypes, the default rejection, and the positive-count failure.
+
+## 2026-09-01: BACE ComRecGC committed-20k handover closure
+
+- [x] Restrict the named 20k formal/exclusion receipts to the exact
+  `RESOURCE_CAP_20000` route with at least ten clean unique rules.
+- [x] Reopen the physical checkpoint manifest and committed generation-state
+  container, and verify their hashes after checkpoint reload.
+- [x] Reopen the materialized official 20k candidate universe and require its
+  live SHA-256 to match the materialization manifest.
+- [x] Hash-bind the exact-PID resource-cap/signal receipts and require graceful
+  SIGTERM exit with no SIGKILL before formal closure.
+- [x] Publish `bace_comrecgc_20k_resource_cap_receipt.json` and
+  `excluded_after_20k.json`, preserving but excluding all later partial work.
+- [x] Bind both formal receipt file hashes into `POSTPROCESS_QUEUE_READY` and
+  retain calibration/test exclusion from the stopping decision.
+- [x] Add focused happy-path, signal-identity-drift, physical-candidate-drift,
+  and wrong-policy tests.
+- [ ] Verify the already-running remote materialization publishes or is
+  reconciled against the formal receipts; the old deployed executor already
+  completed exact-PID SIGTERM and must not be signaled again.
+
+## 2026-09-01: AIDS completed-science terminal/publication reconciliation
+
+- [x] Keep the completed AIDS science and failed outer-controller roots
+  read-only; require all typed recovery stage gates PASS and full quiescence.
+- [x] Reopen the exact/final receipts, continuation/common terminals,
+  standardized freeze, Figure 3/4 and Table 2 from the original source.
+- [x] Preserve the legitimate zero-strict-flip result as zero coverage with
+  unavailable conditional cost; prohibit candidate or numeric imputation.
+- [x] Publish a fresh hash-closed wrapper and route its one-cell append through
+  the existing `fast16_matrix_authority` state and lock.
+- [x] Add a thin AutoDL CLI, paired Slurm wrapper, and focused fail-closed tests.
+- [ ] Run reconciliation against the immutable completed AutoDL root, then
+  publish the AIDS/ComRecGC cell from the current shared authority pointer.

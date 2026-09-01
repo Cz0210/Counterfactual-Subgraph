@@ -1,5 +1,20 @@
 # AutoDL TasteMolNet T12 GCFExplainer Full Route
 
+## Independent GPU3 release relay
+
+`scripts/autodl/launch_tastemolnet_t12_release_relay_v1.sh` supersedes the old
+process-coupled queue.  The successor has exactly four release dependencies:
+the calibrated T3 terminal, managed T7 smoke PASS, managed NeuroSED PASS, and
+the typed managed release root.  It validates all four before writing
+`[TASTE_T12_DEPENDENCY_DECOUPLED]`; it does not inspect or wait for another
+Taste full process.
+
+The relay is pinned to physical GPU3.  After the card is naturally idle it
+creates a fresh UUID and output root, writes its PID/heartbeat/launch receipt,
+and starts the unchanged 10k-to-20k production route.  Launching real science
+writes `[TASTE_T12_GCF_FULL_LAUNCHED]`; generation is not successful until the
+existing independent verifier publishes its generation PASS.
+
 ## Scope and current release state
 
 T12 is the TasteMolNet `GCFExplainer` main-table cell.  Its scientific route

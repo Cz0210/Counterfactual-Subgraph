@@ -1,5 +1,15 @@
 # AutoDL TasteMolNet T13 native GlobalGCE full route
 
+## Persistent relay after read-only T8 salvage
+
+`scripts/autodl/run_tastemolnet_t13_after_t8_salvage_v1.sh` first reopens the
+managed-v2 T8 final through the existing typed validator, then waits only for
+physical GPU1 to become idle.  It creates a fresh T13 UUID/output root and runs
+the unchanged full science plus independent verifier.  It has no dependency
+on any other Taste full cell.  The launch marker
+`[TASTE_T13_GLOBALGCE_FULL_LAUNCHED]` proves only that the real science PID was
+started; it is not a cell PASS.
+
 `scripts/run_tastemolnet_globalgce_full.py` is the executable, dataset-specific
 successor to the bounded T8 smoke. It is not a release gate or a disabled
 skeleton. Once the T8 PASS receipt and all explicit inputs are present, it runs

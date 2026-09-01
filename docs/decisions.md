@@ -1,5 +1,45 @@
 # Decisions Log
 
+## [2026-09-01] Decouple T12 and salvage completed T8 branches read-only
+
+### Motivation
+
+The durable T12 generation relay was unnecessarily gated by one unrelated
+Taste full-process identity even though T3, T7, NeuroSED, and the typed managed
+release already close every scientific dependency.  Separately, both fixed
+25-epoch T8 destination branches have complete model/rule/checkpoint artifacts;
+discarding a valid branch when only its sibling fails would repeat expensive
+train-only science without changing the protocol.
+
+### Decision
+
+Add a dataset-specific T12 successor that reopens only T3, T7, NeuroSED, and
+the typed managed release, then starts a fresh UUID/root on physical GPU3.
+Retain the existing 10k-to-20k checkpoint and independent generation verifier.
+
+Add a separate T8 salvage path that never writes either source branch.  It
+requires no active writer, recursively retains and hashes both trees, verifies
+the frozen three-class GINE and feature schema, model/rule/checkpoint hashes,
+train-only split, target labels, isolated official source, and exact-top-k
+identity.  It copies validated bytes to a fresh private state, canonically
+merges rules, reapplies the native attachment-aware action to the bounded train
+cohort, deduplicates parent/candidate graphs, and requires an untargeted strict
+flip from both target branches before publishing a fresh smoke terminal.  The
+existing two-process managed-v2 adopter remains the only bridge to T13.
+
+### Consequences
+
+- T12 no longer waits for an unrelated full Taste task and always uses a fresh
+  GPU3 attempt.
+- One invalid T8 branch produces a receipt naming only that target; a valid
+  sibling is preserved and no automatic two-branch rerun occurs.
+- A passing managed T8 final immediately persists the T13 GPU1 relay.  That
+  relay depends on T8 only and does not wait for any other Taste full cell.
+- No main-table success is claimed by these code changes; real AutoDL science
+  and independent terminal verification are still required.
+
+---
+
 ## [2026-09-01] Make the BACE ComRecGC resource-cap fragment executable
 
 ### Motivation
@@ -446,6 +486,51 @@ The verifier must reopen its result through T13's unchanged
 ### Status
 
 Accepted
+
+---
+
+## [2026-09-01] Reconcile completed zero-flip AIDS science outside its source root
+
+### Motivation
+
+The AIDS ComRecGC final science root already contains PASS-last continuation,
+common-recourse, unified RF/WNode evaluation, Figure 3/4, Table 2, final audit,
+and standardized freeze artifacts.  Its strict-flip result is genuinely empty,
+which the frozen COMRECGC protocol defines as zero coverage with unavailable
+conditional cost, not an engineering failure.  All typed recovery stages
+passed, but the controller exited before publishing its outer terminal, so the
+ordinary matrix appender could not bind the finished cell.
+
+### Decision
+
+Keep the completed science and controller roots read-only.  Permit one fresh
+reconciliation wrapper only when every typed stage gate reopens as PASS, the
+controller process and writer lock are gone, no partial publication remains,
+the final science receipt and standardized closure reopen, and every saved
+prefix/figure/table row proves zero strict-flip coverage without a numeric
+conditional-cost imputation.  Hash-bind those source files into the wrapper,
+publish PASS last, and let the existing locked `fast16_matrix_authority`
+appender consume that wrapper.  Do not restart the recovery controller and do
+not create an alternate matrix authority.
+
+The older generic registry expects its first conditional-cost column to be
+finite.  For this wrapper only, the appender may clear exactly the two known
+Figure-3/Table-2 parse reasons after the stronger zero-result verifier has
+proved all K rows, thresholds, fixed-capped costs, typed gates, and blank
+conditional costs.  No other registry reason is waived.
+
+### Consequences
+
+- Controller orchestration failure no longer discards a completed scientific
+  zero result.
+- Missing science, an active writer, a non-PASS typed stage, nonzero coverage,
+  or an imputed zero conditional cost still fails closed.
+- Reconciliation recomputes no candidate, classifier prediction, WNode
+  distance, metric, pair store, or DBSCAN result.
+
+### Status
+
+Implemented locally; AutoDL reconciliation and authority publication pending.
 
 ---
 
@@ -15645,3 +15730,94 @@ is fabricated.
 ### Status
 
 Accepted as policy; scientific adoption remains pending all gates.
+
+---
+
+## [2026-09-01] Make expected-empty BACE GlobalGCE calibration explicit
+
+### Motivation
+
+A native GlobalGCE rule can have no legal, sanitized application in one fixed
+BACE calibration shard.  In that case the deduplicated application graph batch
+is truthfully empty, but the shard evaluator previously forwarded the empty
+sequence to the frozen GINE oracle.  That conflated an expected property of the
+rule applications with a classifier failure and left the empty result's array
+shapes implicit.
+
+### Decision
+
+Count the deduplicated application graphs before inference.  When the
+independently established `expected_count` is zero, the calibration caller must
+not call the oracle.  It emits empty float64 logits and probabilities with
+shape `(0, C)`, empty int64 predictions with shape `(0,)`, and the explicit
+reason `NO_EVALUABLE_GRAPHS_AFTER_PRE_ORACLE_FILTERS` in the shard manifest.
+If the expected count is positive while the actual batch is empty, fail closed
+with `UNEXPECTED_EMPTY_GRAPH_SEQUENCE`.
+
+Keep `GNNOracle` strict by default.  Its public prediction methods may return an
+empty typed result only when the caller supplies both `allow_empty=True` and
+`expected_count=0`; either signal alone is insufficient.  No label,
+probability, strict flip, or WNode distance is fabricated for a rule with no
+legal application.
+
+### Consequences
+
+- A legitimately empty GlobalGCE application batch can complete its Cartesian
+  calibration rows without invoking the classifier on invalid input.
+- Accidental data loss remains terminal whenever a nonzero batch was expected.
+- Nonempty oracle inference, the frozen BACE GINE, split isolation, native rule
+  semantics, and selection metrics are unchanged.
+
+### Status
+
+Accepted
+
+---
+
+## [2026-09-01] Bind BACE ComRecGC to the committed 20k checkpoint and exclude later partial work
+
+### Motivation
+
+The BACE ComRecGC legacy worker reached a fully committed step-20,000
+checkpoint and satisfied the authorized resource-cap handover.  It could still
+have written progress or temporary source-root files after that checkpoint and
+before the exact-PID SIGTERM completed.  Those later uncommitted files must not
+silently enter the paper result.  The executor that performed the live SIGTERM
+was deployed before the formal exclusion receipt fields in this code change,
+so repository support must not be described as proof that the already-running
+materialization has published those receipts yet.
+
+### Decision
+
+Materialize the formal generation only from the independently reloaded,
+fully-committed step-20,000 checkpoint.  For the exact
+`RESOURCE_CAP_20000` route, reopen and hash the physical checkpoint manifest,
+the committed `generation_state.pt` container (which binds Python, NumPy,
+PyTorch CPU, and PyTorch CUDA RNG state), and the materialized official
+`counterfactuals.pt` candidate universe.  Also reopen the original resource-cap
+and signal receipts and require the same exact PID/start ticks, graceful
+SIGTERM exit, and `sigkill_used=false`.  Publish a dedicated formal
+resource-cap receipt and `excluded_after_20k.json`, then bind both file hashes
+into the postprocess-ready executor state.
+
+Record that steps after 20,000 and later partial source-root rows are excluded,
+not deleted.  Never use those files as scientific inputs.  Do not emit a
+20k-named exclusion receipt for preregistered convergence before 20k or the
+25k fallback route; their existing truthful resource-cap receipts remain in
+force.  Calibration and test remain absent from the stop decision.
+
+### Consequences
+
+- The adopted candidate universe is byte-bound to the exact committed 20k
+  checkpoint and cannot drift to a later partial writer state.
+- Source files remain preserved for audit while `later_partial_rows_adopted`
+  and `later_temporary_outputs_deleted` are both explicitly false.
+- A missing or changed checkpoint state, checkpoint manifest, candidate file,
+  or exact-20k policy field fails before the postprocess queue is published.
+- The remote run that already received SIGTERM must still produce or be
+  reconciled against these formal receipts; this source change does not
+  retroactively claim that publication occurred.
+
+### Status
+
+Accepted; remote formal-receipt publication remains to be verified.
