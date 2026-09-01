@@ -1145,10 +1145,15 @@ def _reconcile_aids_zero_registry_row(
         }
     if reasons != allowed_reasons:
         return row
+    expected_registry_status = (
+        CellStatus.STALE_METRIC.value
+        if _AIDS_ZERO_THRESHOLD_GRID_REGISTRY_REASON in reasons
+        else CellStatus.INCOMPLETE.value
+    )
     if (
         row.get("dataset") != "AIDS"
         or row.get("method") != "ComRecGC"
-        or row.get("status") != CellStatus.INCOMPLETE.value
+        or row.get("status") != expected_registry_status
         or row.get("k_max") != 20
         or row.get("table2_k") != 10
     ):

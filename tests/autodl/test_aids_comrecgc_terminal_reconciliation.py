@@ -1359,7 +1359,7 @@ def test_aids_zero_threshold_hash_mismatch_requires_bound_grid_receipt() -> None
     target = {
         "dataset": "AIDS",
         "method": "ComRecGC",
-        "status": registry.CellStatus.INCOMPLETE.value,
+        "status": registry.CellStatus.STALE_METRIC.value,
         "k_max": 20,
         "table2_k": 10,
         "threshold_config_hash": target_hash,
@@ -1371,7 +1371,7 @@ def test_aids_zero_threshold_hash_mismatch_requires_bound_grid_receipt() -> None
     }
     assert matrix._reconcile_aids_zero_registry_row(
         target, terminal=terminal
-    )["status"] == registry.CellStatus.INCOMPLETE.value
+    )["status"] == registry.CellStatus.STALE_METRIC.value
 
     evidence = {
         "schema_version": matrix._AIDS_ZERO_THRESHOLD_GRID_EQUIVALENCE_SCHEMA,
