@@ -3520,3 +3520,17 @@ Mutagenicity roadmaps.
 - [x] Add a thin AutoDL CLI, paired Slurm wrapper, and focused fail-closed tests.
 - [ ] Run reconciliation against the immutable completed AutoDL root, then
   publish the AIDS/ComRecGC cell from the current shared authority pointer.
+
+## 2026-09-01: BACE GlobalGCE calibration-only successor
+
+- [x] Reopen the old controller/task/gate and exact experiment-registry
+  launch/state records before accepting the completed candidate dependency.
+- [x] Revalidate the immutable recovered candidate root and require exactly 20
+  rules, its PASS log marker, input/config hashes, and no active writer.
+- [x] Build the fresh DAG from the current generic fragment, replacing only
+  its root candidate task with strict `adopt_existing_run_id` evidence.
+- [x] Reject training, gSpan, bridge, candidate-generation, and GNN-ablation
+  work from the fresh downstream fragment.
+- [x] Add a focused fail-closed test and paired Slurm CLI contract.
+- [ ] Deploy from a clean descendant of the expected-empty fix, launch the
+  fresh controller, and record its PID, heartbeat, and output root.

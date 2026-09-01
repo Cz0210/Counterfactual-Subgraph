@@ -15869,3 +15869,43 @@ unique `fast16_matrix_authority` pointer and lock.
 ### Status
 
 Accepted; AutoDL reconciliation and authority publication remain to be run.
+
+---
+
+## [2026-09-01] Restart only BACE GlobalGCE calibration from the sealed 20-rule pool
+
+### Motivation
+
+The train-only affine-edge recovery already published a registry-backed,
+20-rule GlobalGCE candidate pool.  A later calibration shard failed on the
+legitimate case where pre-oracle filtering leaves zero evaluable graphs.  The
+expected-empty semantics are now fixed, so replaying training, gSpan, or
+candidate materialization would add cost without changing the frozen science.
+
+### Decision
+
+Build a fresh calibration successor whose sole root is an exact
+`adopt_existing_run_id` binding to the completed candidate run.  Reopen the old
+controller manifest, task state/gate, registry launch spec/state, input and
+config hashes, PASS log marker, recovered candidate closure, 20-rule count,
+and active-writer scan before publishing the successor manifest.  The generic
+controller must recheck the exact historical command, worktree, environment,
+interpreter, output, and registry identity when it binds the adoption.
+
+Only calibration shards, calibration merge/selection, held-out test shards,
+final freeze, and standardization are fresh.  They execute from a clean
+worktree containing the expected-empty fix.  The fragment rejects any fresh
+training, gSpan, bridge, candidate-generation, or GNN-ablation task.
+
+### Consequences
+
+- Adoption disagreement terminates the fresh controller before any fallback
+  candidate command can run.
+- The sealed 20-rule pool remains read-only and its historical execution
+  commit remains distinct from the newer downstream execution commit.
+- Existing BACE, AIDS, Mutagenicity, and Taste workers are neither signalled
+  nor preempted; ordinary global GPU locks still govern calibration launches.
+
+### Status
+
+Accepted; build and launch from a fresh immutable AutoDL checkout.
