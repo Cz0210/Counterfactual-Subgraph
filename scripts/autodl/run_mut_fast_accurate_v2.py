@@ -176,9 +176,16 @@ def load_spec(path: Path, *, require_inputs: bool = True) -> dict[str, Any]:
             "instrumentation_project_root",
         ):
             _absolute(value.get(key), label=key)
-        python = _absolute(value.get("python"), label="python")
-        if not os.access(python, os.X_OK):
+        python_requested = Path(str(value.get("python") or "")).expanduser()
+        if not python_requested.is_absolute():
+            raise MutFastError("configured Python must be an absolute path")
+        try:
+            python = python_requested.resolve(strict=True)
+        except OSError as exc:
+            raise MutFastError("configured Python is absent") from exc
+        if not python.is_file() or not os.access(python, os.X_OK):
             raise MutFastError("configured Python is not executable")
+        value["python"] = str(python)
         for section in ("replay", "standardization"):
             if not isinstance(value.get(section), Mapping):
                 raise MutFastError(f"{section} must be one object")

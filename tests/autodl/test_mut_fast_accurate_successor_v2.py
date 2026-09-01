@@ -28,6 +28,56 @@ def test_cgroup_v1_read_only_mount_detection_is_exact() -> None:
     assert successor._mount_is_read_only(row, Path("/sys/fs/cgroup/memory"))
 
 
+def test_spec_accepts_absolute_python_symlink_but_normalizes_target(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    control = runtime / "control"
+    repairs = (
+        runtime
+        / "outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs"
+    )
+    project = tmp_path / "project"
+    legacy = tmp_path / "legacy"
+    instrumented = tmp_path / "instrumented"
+    proc = tmp_path / "proc"
+    cgroup = tmp_path / "cgroup"
+    for path in (control, repairs, project, legacy, instrumented, proc, cgroup):
+        path.mkdir(parents=True, exist_ok=True)
+    real_python = tmp_path / "python-real"
+    real_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    real_python.chmod(0o755)
+    python_link = tmp_path / "python"
+    python_link.symlink_to(real_python)
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "configs/autodl/mut_fast_accurate_v2.template.json"
+        ).read_text(encoding="utf-8")
+        .replace("__PROJECT_ROOT__", str(project))
+        .replace("__LEGACY_PROJECT_ROOT__", str(legacy))
+        .replace("__INSTRUMENTATION_PROJECT_ROOT__", str(instrumented))
+        .replace("__TIMESTAMP__", "20260901T000000Z")
+    )
+    fixture.update(
+        {
+            "runtime_root": str(runtime),
+            "control_root": str(control),
+            "fresh_output_root": str(repairs / "fresh"),
+            "python": str(python_link),
+            "proc_root": str(proc),
+            "mountinfo_path": str(tmp_path / "mountinfo"),
+            "cgroup_memory_root": str(cgroup),
+            "historical_source_root": str(project),
+            "completed_common_root": str(project),
+        }
+    )
+    (tmp_path / "mountinfo").write_text("fixture\n", encoding="utf-8")
+    spec = _json(tmp_path / "spec.json", fixture)
+    loaded = successor.load_spec(spec)
+    assert loaded["python"] == str(real_python.resolve())
+
+
 def test_manifest_reuses_exclusive_controller_but_stops_before_unapproved_adoption(
     tmp_path: Path,
 ) -> None:
