@@ -524,6 +524,105 @@ def test_worker_uses_explicit_git_dir_without_repository_discovery(
     assert result["status"] == "PASS"
 
 
+def _terminal_controller_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path, Path]:
+    controller_id = "mut-controller"
+    controller_pid = 12345
+    controller_start_ticks = 67890
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    control = tmp_path / "control" / "mut_fast_accurate_v2" / controller_id
+    control.mkdir(parents=True)
+    terminal_root = tmp_path / "four-gpu" / controller_id
+    terminal_root.mkdir(parents=True)
+    terminal_state_path = terminal_root / "controller_state.json"
+    _write_json(
+        terminal_state_path,
+        {"controller_id": controller_id, "state": "FAILED"},
+    )
+    heartbeat_path = control / "heartbeat.json"
+    _write_json(
+        heartbeat_path,
+        {
+            "controller_id": controller_id,
+            "pid": controller_pid,
+            "state": "FAILED",
+            "heartbeat_at": "2026-09-01T08:41:36+00:00",
+            "four_gpu_controller_root": str(terminal_root),
+        },
+    )
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text("{}\n", encoding="utf-8")
+    evidence: dict[str, Any] = {
+        "schema_version": "mut_terminal_controller_attachment_v1",
+        "controller_id": controller_id,
+        "controller_pid": controller_pid,
+        "controller_start_ticks": controller_start_ticks,
+        "controller_control_dir": str(control),
+        "controller_heartbeat_path": str(heartbeat_path),
+        "controller_heartbeat_file_sha256": sha256_file(heartbeat_path),
+        "controller_terminal_state": "FAILED",
+        "four_gpu_controller_state_path": str(terminal_state_path),
+        "four_gpu_controller_state_file_sha256": sha256_file(terminal_state_path),
+        "allow_terminal_one_shot_attachment": True,
+        "fresh_controller_started": False,
+        "prior_live_attachment": {
+            "controller_id": controller_id,
+            "pid": controller_pid,
+            "start_ticks": controller_start_ticks,
+            "command_sha256": "a" * 64,
+            "heartbeat_state": "RUNNING",
+        },
+    }
+    evidence["receipt_sha256"] = stable_json_sha256(evidence)
+    evidence_path = tmp_path / "terminal-controller-evidence.json"
+    _write_json(evidence_path, evidence)
+    spec = {
+        "controller_id": controller_id,
+        "proc_root": str(proc_root),
+        "control_root": str(tmp_path / "control"),
+        "poll_seconds": 60,
+    }
+    return spec, spec_path, evidence_path
+
+
+def test_worker_attaches_to_exact_terminal_controller_receipt(tmp_path: Path) -> None:
+    spec, spec_path, evidence_path = _terminal_controller_fixture(tmp_path)
+
+    result = worker._verify_controller(
+        spec=spec,
+        spec_path=spec_path,
+        controller_pid=12345,
+        controller_start_ticks=67890,
+        terminal_evidence_path=evidence_path,
+    )
+
+    assert result["attachment_mode"] == "TERMINAL_CONTROLLER_RECEIPT"
+    assert result["live_successor_pids"] == []
+    assert result["controller_restart_performed"] is False
+
+
+def test_worker_refuses_terminal_attachment_when_successor_is_live(
+    tmp_path: Path,
+) -> None:
+    spec, spec_path, evidence_path = _terminal_controller_fixture(tmp_path)
+    live = Path(spec["proc_root"]) / "777"
+    live.mkdir()
+    live.joinpath("cmdline").write_bytes(
+        b"python\0/run_mut_fast_accurate_v2.py\0run\0--spec\0"
+        + str(spec_path).encode("utf-8")
+        + b"\0"
+    )
+
+    with pytest.raises(worker.MutTraceWorkerError, match="live Mut successor"):
+        worker._verify_controller(
+            spec=spec,
+            spec_path=spec_path,
+            controller_pid=12345,
+            controller_start_ticks=67890,
+            terminal_evidence_path=evidence_path,
+        )
+
+
 def test_worker_reopens_embedded_and_external_transitive_binding_receipts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

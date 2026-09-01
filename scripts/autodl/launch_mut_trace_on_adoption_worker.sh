@@ -35,6 +35,14 @@ unset mut_trace_path
   echo "unsafe MUT_TRACE_CONTROLLER_START_TICKS" >&2
   exit 64
 }
+if [[ -n "${MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE:-}" ]]; then
+  [[ "$MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE" == /* \
+    && -f "$MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE" \
+    && ! -L "$MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE" ]] || {
+    echo "physical terminal-controller evidence required" >&2
+    exit 64
+  }
+fi
 
 TIMESTAMP="${MUT_TRACE_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$TIMESTAMP" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || {
@@ -87,6 +95,12 @@ COMMAND=(
   --successor-guard-script run_mut_checkpoint_instrumentation_equivalence.py
   --successor-guard-action run-pair
 )
+if [[ -n "${MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE:-}" ]]; then
+  COMMAND+=(
+    --terminal-controller-evidence
+    "$MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE"
+  )
+fi
 
 export RUN_GNN_ABLATION=0
 if command -v tmux >/dev/null 2>&1; then
@@ -106,6 +120,7 @@ echo "controller_id=$CONTROLLER_ID"
 echo "authorization_receipt=$AUTHORIZATION"
 echo "output_root=$OUTPUT_ROOT"
 echo "worker_heartbeat=$CONTROL_DIR/trace_on_adoption_worker_heartbeat.json"
+echo "terminal_controller_evidence=${MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE:-none}"
 echo "log=$LOG"
 echo "gnn_ablation_started=false"
 echo "fresh_50k_launched=false"

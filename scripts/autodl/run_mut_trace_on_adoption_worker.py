@@ -194,15 +194,149 @@ def _process_cmdline(proc_root: Path, pid: int) -> str:
         raise MutTraceWorkerError(f"Cannot read process command: pid={pid}") from exc
 
 
+def _live_successor_pids(proc_root: Path, *, spec_path: Path) -> list[int]:
+    matches: list[int] = []
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            arguments = [
+                item.decode("utf-8", errors="replace")
+                for item in (entry / "cmdline").read_bytes().split(b"\0")
+                if item
+            ]
+        except OSError:
+            continue
+        runner_indices = [
+            index
+            for index, argument in enumerate(arguments)
+            if Path(argument).name == "run_mut_fast_accurate_v2.py"
+        ]
+        if not runner_indices or "run" not in arguments:
+            continue
+        try:
+            spec_index = arguments.index("--spec")
+            command_spec = Path(arguments[spec_index + 1]).resolve(strict=True)
+        except (ValueError, IndexError, OSError):
+            continue
+        if command_spec == spec_path:
+            matches.append(int(entry.name))
+    return sorted(matches)
+
+
+def _verify_terminal_controller_attachment(
+    *,
+    evidence_path: Path,
+    spec: Mapping[str, Any],
+    spec_path: Path,
+    proc_root: Path,
+    control: Path,
+    heartbeat_path: Path,
+    heartbeat: Mapping[str, Any],
+    controller_pid: int,
+    controller_start_ticks: int,
+) -> dict[str, Any]:
+    evidence_path = _absolute(
+        evidence_path, label="terminal controller attachment evidence"
+    )
+    evidence = _physical_json(
+        evidence_path, label="terminal controller attachment evidence"
+    )
+    if evidence.get("schema_version") != "mut_terminal_controller_attachment_v1":
+        raise MutTraceWorkerError("Terminal controller evidence schema changed")
+    claimed_sha = str(evidence.get("receipt_sha256") or "")
+    unsigned = {key: value for key, value in evidence.items() if key != "receipt_sha256"}
+    if claimed_sha != stable_json_sha256(unsigned):
+        raise MutTraceWorkerError("Terminal controller evidence self hash changed")
+    expected = {
+        "controller_id": str(spec["controller_id"]),
+        "controller_pid": int(controller_pid),
+        "controller_start_ticks": int(controller_start_ticks),
+        "controller_control_dir": str(control),
+        "controller_heartbeat_path": str(heartbeat_path),
+        "controller_terminal_state": "FAILED",
+        "allow_terminal_one_shot_attachment": True,
+        "fresh_controller_started": False,
+    }
+    mismatches = [key for key, value in expected.items() if evidence.get(key) != value]
+    if mismatches:
+        raise MutTraceWorkerError(
+            f"Terminal controller evidence identity changed: {mismatches}"
+        )
+    if _process_start_ticks(proc_root, controller_pid) is not None:
+        raise MutTraceWorkerError("Terminal controller PID has been reused")
+    live_successors = _live_successor_pids(proc_root, spec_path=spec_path)
+    if live_successors:
+        raise MutTraceWorkerError(
+            f"A live Mut successor exists; terminal attachment refused: {live_successors}"
+        )
+    if (
+        heartbeat.get("controller_id") != spec["controller_id"]
+        or int(heartbeat.get("pid", -1)) != controller_pid
+        or heartbeat.get("state") != "FAILED"
+        or sha256_file(heartbeat_path)
+        != evidence.get("controller_heartbeat_file_sha256")
+    ):
+        raise MutTraceWorkerError("Terminal controller heartbeat binding changed")
+    prior = evidence.get("prior_live_attachment")
+    if not isinstance(prior, Mapping):
+        raise MutTraceWorkerError("Prior live controller evidence is absent")
+    if (
+        prior.get("controller_id") != spec["controller_id"]
+        or int(prior.get("pid", -1)) != controller_pid
+        or int(prior.get("start_ticks", -1)) != controller_start_ticks
+        or not str(prior.get("command_sha256") or "")
+        or prior.get("heartbeat_state") == "FAILED"
+    ):
+        raise MutTraceWorkerError("Prior live controller identity is invalid")
+    terminal_root = _absolute(
+        str(heartbeat.get("four_gpu_controller_root") or ""),
+        label="terminal four-GPU controller root",
+    )
+    terminal_state_path = _absolute(
+        terminal_root / "controller_state.json",
+        label="terminal four-GPU controller state",
+    )
+    terminal_state = _physical_json(
+        terminal_state_path, label="terminal four-GPU controller state"
+    )
+    if (
+        str(terminal_state_path)
+        != evidence.get("four_gpu_controller_state_path")
+        or sha256_file(terminal_state_path)
+        != evidence.get("four_gpu_controller_state_file_sha256")
+        or terminal_state.get("controller_id") != spec["controller_id"]
+        or terminal_state.get("state") != "FAILED"
+    ):
+        raise MutTraceWorkerError("Terminal four-GPU controller receipt changed")
+    return {
+        "controller_id": spec["controller_id"],
+        "pid": controller_pid,
+        "start_ticks": controller_start_ticks,
+        "command_sha256": str(prior["command_sha256"]),
+        "heartbeat_path": str(heartbeat_path),
+        "heartbeat_at": heartbeat.get("heartbeat_at"),
+        "heartbeat_age_seconds": None,
+        "heartbeat_state": heartbeat.get("state"),
+        "control_dir": str(control),
+        "attachment_mode": "TERMINAL_CONTROLLER_RECEIPT",
+        "terminal_evidence_path": str(evidence_path),
+        "terminal_evidence_file_sha256": sha256_file(evidence_path),
+        "live_successor_pids": [],
+        "controller_restart_performed": False,
+    }
+
+
 def _verify_controller(
-    *, spec: Mapping[str, Any], controller_pid: int, controller_start_ticks: int
+    *,
+    spec: Mapping[str, Any],
+    spec_path: Path,
+    controller_pid: int,
+    controller_start_ticks: int,
+    terminal_evidence_path: Path | None = None,
 ) -> dict[str, Any]:
     proc_root = _absolute(spec["proc_root"], label="proc root")
-    if _process_start_ticks(proc_root, controller_pid) != controller_start_ticks:
-        raise MutTraceWorkerError("Successor controller PID/start-ticks changed")
-    command = _process_cmdline(proc_root, controller_pid)
-    if "run_mut_fast_accurate_v2.py" not in command or " run " not in f" {command} ":
-        raise MutTraceWorkerError("Successor controller command is not the frozen runner")
+    spec_path = _absolute(spec_path, label="live successor spec")
     control = (
         _absolute(spec["control_root"], label="control root")
         / "mut_fast_accurate_v2"
@@ -215,6 +349,24 @@ def _verify_controller(
         or int(heartbeat.get("pid", -1)) != controller_pid
     ):
         raise MutTraceWorkerError("Successor heartbeat identity does not match process")
+    current_ticks = _process_start_ticks(proc_root, controller_pid)
+    if current_ticks != controller_start_ticks:
+        if current_ticks is not None or terminal_evidence_path is None:
+            raise MutTraceWorkerError("Successor controller PID/start-ticks changed")
+        return _verify_terminal_controller_attachment(
+            evidence_path=terminal_evidence_path,
+            spec=spec,
+            spec_path=spec_path,
+            proc_root=proc_root,
+            control=control,
+            heartbeat_path=heartbeat_path,
+            heartbeat=heartbeat,
+            controller_pid=controller_pid,
+            controller_start_ticks=controller_start_ticks,
+        )
+    command = _process_cmdline(proc_root, controller_pid)
+    if "run_mut_fast_accurate_v2.py" not in command or " run " not in f" {command} ":
+        raise MutTraceWorkerError("Successor controller command is not the frozen runner")
     try:
         heartbeat_text = str(heartbeat["heartbeat_at"])
         heartbeat_time = datetime.fromisoformat(
@@ -241,6 +393,8 @@ def _verify_controller(
         "heartbeat_age_seconds": heartbeat_age,
         "heartbeat_state": heartbeat.get("state"),
         "control_dir": str(control),
+        "attachment_mode": "LIVE_CONTROLLER_PID",
+        "controller_restart_performed": False,
     }
 
 
@@ -1522,8 +1676,10 @@ def _run(args: argparse.Namespace) -> int:
     spec = load_spec(args.spec)
     controller = _verify_controller(
         spec=spec,
+        spec_path=args.spec,
         controller_pid=int(args.controller_pid),
         controller_start_ticks=int(args.controller_start_ticks),
+        terminal_evidence_path=args.terminal_controller_evidence,
     )
     control = Path(controller["control_dir"])
     output = _absolute(args.output_root, exists=False, label="worker output")
@@ -1543,8 +1699,10 @@ def _run(args: argparse.Namespace) -> int:
     def heartbeat(state: str, **extra: Any) -> None:
         current = _verify_controller(
             spec=spec,
+            spec_path=args.spec,
             controller_pid=int(args.controller_pid),
             controller_start_ticks=int(args.controller_start_ticks),
+            terminal_evidence_path=args.terminal_controller_evidence,
         )
         atomic_json(
             heartbeat_path,
@@ -2002,6 +2160,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--output-root", type=Path, required=True)
     run.add_argument("--controller-pid", type=int, required=True)
     run.add_argument("--controller-start-ticks", type=int, required=True)
+    run.add_argument("--terminal-controller-evidence", type=Path)
     run.add_argument("--successor-guard-script", required=True, help=argparse.SUPPRESS)
     run.add_argument("--successor-guard-action", required=True, help=argparse.SUPPRESS)
     return parser
