@@ -1,5 +1,18 @@
 # Refactor Plan
 
+## 2026-09-01: Stabilize exact Taste T12 coverage and T14 resume
+
+- [x] Reuse the first verified generated-to-fixed-original NeuroSED coverage
+  only for an exact generated query under the same target cohort and threshold.
+- [x] Bind T12 checkpoint rows to exact NeuroSED query bytes and keep changed
+  query/cohort/threshold inputs fail-closed.
+- [x] Keep T14 source-cohort reconstruction on its historical uncached GINE
+  semantics; enable canonical replay only at the generation bridge boundary.
+- [x] Prime T14 generation replay from validated bridge records after restoring
+  an existing checkpoint, without changing the checkpoint/cohort contract.
+- [ ] Deploy in a fresh immutable AutoDL checkout, rerun the T12 canary, and
+  resume T14 from the committed 5k checkpoint.
+
 ## 2026-09-01: Final Taste T12/T8/T13 relays
 
 - [x] Replace the process-coupled T12 queue with an independent GPU3 successor
@@ -3548,3 +3561,34 @@ Mutagenicity roadmaps.
 - [x] Add focused live, replay, checkpoint, collision, and diagnostic tests.
 - [ ] Deploy from an immutable worktree, run the fresh T12 canary, and resume
   T14 from the existing committed 5k checkpoint on naturally available GPUs.
+
+## 2026-09-01: BACE merge and zero-calibration closeout
+
+- [x] Make calibration merge directly depend on its frozen candidate output.
+- [x] Make test merge directly depend on the frozen selection output.
+- [x] Permit ComRecGC and GlobalGCE to consume the hash-validated shared Ours
+  B12 threshold authority without opening held-out test data.
+- [x] Preserve zero strict-flip calibration evidence without synthesizing a
+  finite distance, threshold, or positive coverage value.
+- [ ] Complete fresh selection/test/freeze/standardization from the already
+  validated calibration shards and append each terminal cell atomically.
+
+## 2026-09-01: Fixed T8 dual-branch recovery relay
+
+- [x] Pin the relay to the exact `7c8` state and durable `fadc2ac6` receipt
+  proving invalid targets `[0, 2]`, preserved targets `[]`, and zero candidates
+  for both branches.
+- [x] Capture and revalidate the shared T3/T4 GINE, feature schema, train split,
+  and official GlobalGCE inputs without opening calibration or test data.
+- [x] Wait for natural GPU1 availability and run target 0 then target 2 through
+  the existing fixed-25-epoch single-branch entrypoint using distinct fresh
+  UUID/state/scratch roots.
+- [x] Require typed per-branch PASS, same GINE, three classes, train-only
+  evidence, and explicit test/calibration/RF/GNN-ablation exclusions.
+- [x] Release the branch GPU lock before handing both fresh roots to the
+  existing salvage -> managed adoption -> T13 relay chain.
+- [x] Add persistent PID/heartbeat state, a thin launcher, a paired fail-closed
+  GPU1 Slurm wrapper, focused sequential and receipt-rejection tests, shell
+  syntax validation, and no process-signalling path.
+- [ ] Deploy from one clean immutable checkout and launch only when GPU1 is
+  naturally available; never reuse either `7c8` FAILED terminal root.

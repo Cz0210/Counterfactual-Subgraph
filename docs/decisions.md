@@ -1,5 +1,41 @@
 # Decisions Log
 
+## [2026-09-01] Replay exact T12 coverage and preserve the T14 cohort boundary
+
+### Motivation
+
+The first T12 recovery canary reproduced an identical frozen-GINE embedding
+but recomputed one generated-to-original NeuroSED coverage bit differently;
+the probability difference was only low-bit numerical drift.  Separately,
+enabling the new canonical score cache during T14 source initialization made
+resume reconstruct a cohort with semantics different from the already
+committed 5k checkpoint.
+
+### Decision
+
+For T12, bind each coverage row to the exact generated NeuroSED query tensor
+bytes, fixed target embeddings/counts, and exact threshold.  Evaluate a novel
+query once and return that first verified binary coverage for later exact
+occurrences, including rows restored from the bridge checkpoint.  A changed
+query, target cohort, or threshold remains a hard failure; no tolerance or
+coverage bit is altered.
+
+For T14, run source-cohort reconstruction with the historical uncached GINE
+path.  Enable exact canonical replay only after that evidence passes and
+before the generation bridge is restored.  Validated bridge records then
+prime the generation cache using the existing checkpoint schema.
+
+### Consequences
+
+- T12 no longer repeats a numerically unstable NeuroSED reduction for an
+  identical query and cannot reuse coverage across a changed scientific input.
+- T14 resumes the existing 5k cohort byte-for-byte while retaining stable
+  generation replay after checkpoint restore.
+- Neither fix changes classifier, split, threshold, candidate predicate,
+  resource budget, or method semantics.
+
+---
+
 ## [2026-09-01] Decouple T12 and salvage completed T8 branches read-only
 
 ### Motivation
@@ -15945,3 +15981,84 @@ tolerance or candidate predicate is changed.
 ### Status
 
 Accepted; focused tests pass and immutable AutoDL deployment is pending.
+
+---
+
+## [2026-09-01] Preserve direct merge provenance and shared BACE thresholds
+
+### Motivation
+
+Fresh GlobalGCE and ComRecGC calibration shards completed, but their merge
+tasks treated the train candidate pool as a transitive path and rewrote it
+under the merge attempt's private auxiliary directory.  After correcting that
+path, GlobalGCE legitimately reported zero calibration strict flips; deriving
+a method-local distance grid was therefore undefined even though the paper
+protocol already requires the frozen BACE Ours B12 grid.
+
+### Decision
+
+Calibration merge directly depends on the candidate task, and test merge
+directly depends on the frozen selection task.  Their predecessor arguments
+must resolve to those exact dependency outputs.  ComRecGC and GlobalGCE may
+adopt the same hash-validated Ours B12 threshold authority already required by
+GCFExplainer.  This adoption reads calibration authority only, does not load
+test data, and permits a truthful zero-coverage candidate ordering without
+inventing a finite distance or nonzero flip.
+
+### Consequences
+
+- Completed generation and calibration shards remain reusable.
+- Missing or identity-mismatched shared thresholds still fail closed.
+- Held-out test remains inaccessible until the shared-grid selection is
+  frozen; zero calibration coverage is not converted into a positive result.
+
+### Status
+
+Accepted; focused dependency, empty-batch, and threshold-route tests pass.
+
+---
+
+## [2026-09-01] Recover both damaged Taste T8 branches sequentially
+
+### Motivation
+
+The read-only salvage attempt rooted at fixed recovery attempt
+`7c8cafa6-6679-49d7-bdc6-8d6259a0fbf4` passed both branch artifact gates, but
+native rule materialization produced zero candidates for target 0 and target 2.
+Its durable rerun receipt names both targets, preserves no valid sibling, and
+therefore cannot enter the earlier one-invalid-branch recovery path.  Reusing
+the FAILED terminal or repeating salvage over the same rules cannot change that
+scientific outcome.
+
+### Decision
+
+Add one TasteMolNet-specific relay pinned to the exact `7c8` failure state and
+its `fadc2ac6-d1e8-4ede-b526-e06d0744eb8e` zero/zero receipt.  It accepts only
+the exact dual-target rerun schema and reasons, binds the frozen T3/T4 GINE,
+feature schema, train split, and official GlobalGCE source, and waits for
+physical GPU1 to become naturally idle.  It then runs the existing fixed
+25-epoch single-branch recovery first for target 0 and then for target 2, with
+different fresh UUIDs, state roots, and gSpan scratch roots.  Target 2 cannot
+start unless target 0 has a typed PASS receipt; no two branch workers overlap.
+
+Only after both fresh receipts reclose the same GINE and train-only boundary
+does the relay release its GPU lock and invoke the existing salvage, managed-v2
+adoption, and T13 relay chain.  That downstream chain performs its own fresh
+GPU admission and fresh terminal publication.  Calibration/test data are not
+opened by either branch recovery, `RUN_GNN_ABLATION=0` remains mandatory, and
+the relay sends no termination signal to any process.
+
+### Consequences
+
+- The prior single-invalid-branch policy remains unchanged for ordinary
+  salvage failures; this is one explicit dataset/receipt-specific exception.
+- The `7c8` state and FAILED salvage receipt are immutable trigger evidence,
+  never candidate inputs or output roots for the fresh recoveries.
+- A failure of either branch or the downstream scientific materialization
+  stops the relay with persisted PID, heartbeat, logs, and completed preceding
+  evidence; it does not retry both branches or claim T8/T13 PASS.
+
+### Status
+
+Accepted and implemented locally; AutoDL launch remains pending natural GPU1
+availability.
