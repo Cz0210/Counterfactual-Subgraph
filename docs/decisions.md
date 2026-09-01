@@ -449,6 +449,49 @@ Accepted
 
 ---
 
+## [2026-09-01] Replace the Mut static memory gate with truthful historical adoption
+
+### Motivation
+
+The independent Mut queue was waiting for 440 GiB of cgroup headroom even
+though that value had no production measurement behind it.  A completed,
+hash-closed 50,000-step trace-enabled generation already supplies the exact
+payload used by the finished pair-store and DBSCAN route.  Re-running another
+50,000 steps solely to obtain trace-off parity would add several days without
+changing the adopted candidate universe.
+
+### Decision
+
+Mark the 440 GiB gate `SUPERSEDED_UNMEASURED_STATIC_GATE`.  The audited AutoDL
+runtime exposes a read-only cgroup-v1 mount and no live systemd manager, so
+admit the pinned 500-step legacy/checkpointed equivalence run only through the
+explicitly recorded 96 GiB parent-headroom fallback with exact process-session
+monitoring.  Derive any later full-run limit from the measured peak rather
+than from another static estimate.
+
+Allow the completed historical Mut generation to proceed through chemistry,
+WNode evaluation, freeze, and matrix publication only after that 500-step gate
+passes and an independent verifier reopens the complete lineage plus the exact
+generation-to-pair-store-to-DBSCAN binding.  Publish a new schema that states
+the source was trace-enabled and that neither a trace-off reference nor full
+50k parity rerun occurred.  Do not weaken or rewrite the old parity schema.
+
+### Consequences
+
+- Existing pair-store and DBSCAN work is reused without recomputation only
+  when its full transitive source binding remains exact.
+- Historical cross-parent representative metadata is disclosed and accepted
+  only when all selected-predecessor and replay correctness counters pass.
+- One durable successor may replace the pure 440 GiB waiter, but it must reuse
+  the existing GPU locks and matrix authority.
+- GNN ablation remains disabled before 16/16.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-09-01] Accept the independent Mut parity-v2 standardization as a distinct strict matrix terminal
 
 ### Background
