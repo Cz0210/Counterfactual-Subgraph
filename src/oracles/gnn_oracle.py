@@ -50,6 +50,9 @@ TASTE_REQUIRED_CHECKPOINT_FILES = (
     "checkpoint_reload.json",
 )
 
+EXPECTED_EMPTY_GRAPH_SEQUENCE = "NO_EVALUABLE_GRAPHS_AFTER_PRE_ORACLE_FILTERS"
+UNEXPECTED_EMPTY_GRAPH_SEQUENCE = "UNEXPECTED_EMPTY_GRAPH_SEQUENCE"
+
 
 def _descriptor_path_or_resolve(path_like: str | Path) -> Path:
     """Preserve an already-held Linux procfs directory authority."""
@@ -790,7 +793,75 @@ class GNNOracle(BaseOracle):
                 values[start : start + size], edge_feature_dim=self.edge_feature_dim
             )
 
-    def _predict_logits(self, graphs: Any, batch_size: int | None) -> np.ndarray:
+    def _known_graph_count(self, graphs: Any) -> int | None:
+        """Return an input count when the public graph container exposes one."""
+
+        if isinstance(graphs, MolecularGraphBatch):
+            return int(graphs.num_graphs)
+        if isinstance(graphs, MolecularGraphDataset):
+            return len(graphs)
+        if isinstance(graphs, Sequence) and not isinstance(
+            graphs, (str, bytes, bytearray)
+        ):
+            return len(graphs)
+        if hasattr(graphs, "x") and hasattr(graphs, "edge_index"):
+            return None
+        return None
+
+    def _authorized_empty_logits(
+        self,
+        graphs: Any,
+        *,
+        allow_empty: bool,
+        expected_count: int | None,
+    ) -> np.ndarray | None:
+        """Return an explicitly authorized empty batch or fail closed.
+
+        Empty inference is never inferred from a truthy flag alone.  The
+        caller must opt in with the exact pair ``allow_empty=True`` and
+        ``expected_count=0``.  This keeps the default oracle contract strict
+        while allowing a caller that has independently proved an expected
+        empty application batch to preserve its typed array shapes.
+        """
+
+        if expected_count is not None and (
+            type(expected_count) is not int or expected_count < 0
+        ):
+            raise ValueError("GNNOracle expected_count must be a non-negative int.")
+        actual_count = self._known_graph_count(graphs)
+        if actual_count is None:
+            return None
+        if expected_count is not None and actual_count != expected_count:
+            if actual_count == 0 and expected_count > 0:
+                raise ValueError(
+                    f"{UNEXPECTED_EMPTY_GRAPH_SEQUENCE}: "
+                    f"expected_count={expected_count}, actual_count=0"
+                )
+            raise ValueError(
+                "GNNOracle graph sequence count mismatch: "
+                f"expected_count={expected_count}, actual_count={actual_count}."
+            )
+        if actual_count != 0:
+            return None
+        if allow_empty is True and expected_count == 0:
+            return np.empty((0, int(self.num_classes)), dtype=np.float64)
+        raise ValueError("GNNOracle cannot predict an empty graph sequence.")
+
+    def _predict_logits(
+        self,
+        graphs: Any,
+        batch_size: int | None,
+        *,
+        allow_empty: bool = False,
+        expected_count: int | None = None,
+    ) -> np.ndarray:
+        empty = self._authorized_empty_logits(
+            graphs,
+            allow_empty=allow_empty,
+            expected_count=expected_count,
+        )
+        if empty is not None:
+            return empty
         torch = _require_torch()
         outputs: list[Any] = []
         self.model.eval()
@@ -812,31 +883,83 @@ class GNNOracle(BaseOracle):
                 outputs.append(logits.detach().cpu())
         if not outputs:
             raise RuntimeError("GNN oracle produced no logits.")
-        return torch.cat(outputs, dim=0).numpy().astype(np.float64, copy=False)
+        result = torch.cat(outputs, dim=0).numpy().astype(np.float64, copy=False)
+        if int(result.shape[0]) == 0:
+            raise RuntimeError(
+                f"{UNEXPECTED_EMPTY_GRAPH_SEQUENCE}: model returned zero rows"
+            )
+        known_count = self._known_graph_count(graphs)
+        required_count = expected_count if expected_count is not None else known_count
+        if required_count is not None and int(result.shape[0]) != required_count:
+            raise RuntimeError(
+                "GNNOracle prediction row count mismatch: "
+                f"expected_count={required_count}, actual_count={result.shape[0]}."
+            )
+        return result
 
     def predict_logits(
-        self, graphs: Any, *, batch_size: int | None = None
+        self,
+        graphs: Any,
+        *,
+        batch_size: int | None = None,
+        allow_empty: bool = False,
+        expected_count: int | None = None,
     ) -> np.ndarray:
-        return self._predict_logits(graphs, batch_size)
+        return self._predict_logits(
+            graphs,
+            batch_size,
+            allow_empty=allow_empty,
+            expected_count=expected_count,
+        )
 
     def predict_proba(
-        self, graphs: Any, *, batch_size: int | None = None
+        self,
+        graphs: Any,
+        *,
+        batch_size: int | None = None,
+        allow_empty: bool = False,
+        expected_count: int | None = None,
     ) -> np.ndarray:
-        logits = self._predict_logits(graphs, batch_size) / self.temperature
+        logits = self._predict_logits(
+            graphs,
+            batch_size,
+            allow_empty=allow_empty,
+            expected_count=expected_count,
+        ) / self.temperature
         shifted = logits - np.max(logits, axis=1, keepdims=True)
         exponentials = np.exp(shifted)
         return exponentials / np.sum(exponentials, axis=1, keepdims=True)
 
     def predict_label(
-        self, graphs: Any, *, batch_size: int | None = None
+        self,
+        graphs: Any,
+        *,
+        batch_size: int | None = None,
+        allow_empty: bool = False,
+        expected_count: int | None = None,
     ) -> np.ndarray:
         # A positive scalar temperature cannot change argmax.
-        return self._predict_logits(graphs, batch_size).argmax(axis=1)
+        return self._predict_logits(
+            graphs,
+            batch_size,
+            allow_empty=allow_empty,
+            expected_count=expected_count,
+        ).argmax(axis=1)
 
     def predict_records(
-        self, graphs: Any, *, batch_size: int | None = None
+        self,
+        graphs: Any,
+        *,
+        batch_size: int | None = None,
+        allow_empty: bool = False,
+        expected_count: int | None = None,
     ) -> list[dict[str, Any]]:
-        logits = self._predict_logits(graphs, batch_size)
+        logits = self._predict_logits(
+            graphs,
+            batch_size,
+            allow_empty=allow_empty,
+            expected_count=expected_count,
+        )
         scaled = logits / self.temperature
         shifted = scaled - np.max(scaled, axis=1, keepdims=True)
         exponentials = np.exp(shifted)

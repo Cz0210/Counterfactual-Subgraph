@@ -58,6 +58,10 @@ from src.eval.node_wasserstein_distance import (
     MolCLRNodeWassersteinDistance,
 )
 from src.oracles.oracle_factory import build_oracle
+from src.oracles.gnn_oracle import (
+    EXPECTED_EMPTY_GRAPH_SEQUENCE,
+    UNEXPECTED_EMPTY_GRAPH_SEQUENCE,
+)
 
 
 CALIBRATION_STAGE = "BASELINE_CALIBRATION_VERIFY"
@@ -493,6 +497,91 @@ def _fullgraph_pair_rows(
     return pair_rows
 
 
+def _predict_expected_graph_batch(
+    *,
+    oracle: Any,
+    graphs: Sequence[Any],
+    expected_count: int,
+    oracle_batch_size: int,
+) -> dict[str, Any]:
+    """Score one independently counted graph batch without ambiguous emptiness."""
+
+    if type(expected_count) is not int or expected_count < 0:
+        raise ValueError("expected_count must be a non-negative int")
+    actual_count = len(graphs)
+    if actual_count != expected_count:
+        if actual_count == 0 and expected_count > 0:
+            raise RuntimeError(
+                f"{UNEXPECTED_EMPTY_GRAPH_SEQUENCE}: "
+                f"expected_count={expected_count}, actual_count=0"
+            )
+        raise RuntimeError(
+            "ORACLE_GRAPH_SEQUENCE_COUNT_MISMATCH: "
+            f"expected_count={expected_count}, actual_count={actual_count}"
+        )
+    num_classes = int(getattr(oracle, "num_classes", 0))
+    if num_classes < 2:
+        raise RuntimeError("Frozen GINE oracle has an invalid num_classes contract")
+    if expected_count == 0:
+        return {
+            "records": [],
+            "logits": np.empty((0, num_classes), dtype=np.float64),
+            "probabilities": np.empty((0, num_classes), dtype=np.float64),
+            "predictions": np.empty((0,), dtype=np.int64),
+            "expected_count": 0,
+            "actual_count": 0,
+            "oracle_called": False,
+            "reason": EXPECTED_EMPTY_GRAPH_SEQUENCE,
+        }
+
+    records = oracle.predict_records(
+        list(graphs), batch_size=int(oracle_batch_size)
+    )
+    if len(records) != expected_count:
+        raise RuntimeError(
+            "Frozen GINE returned an incomplete application prediction batch"
+        )
+    logits = np.asarray([row["logits"] for row in records], dtype=np.float64)
+    probabilities = np.asarray(
+        [row["probabilities"] for row in records], dtype=np.float64
+    )
+    predictions = np.asarray(
+        [row["predicted_label"] for row in records], dtype=np.int64
+    )
+    if logits.shape != (expected_count, num_classes):
+        raise RuntimeError("Frozen GINE application logits have an invalid shape")
+    if probabilities.shape != (expected_count, num_classes):
+        raise RuntimeError(
+            "Frozen GINE application probabilities have an invalid shape"
+        )
+    if predictions.shape != (expected_count,):
+        raise RuntimeError("Frozen GINE application predictions have an invalid shape")
+    return {
+        "records": records,
+        "logits": logits,
+        "probabilities": probabilities,
+        "predictions": predictions,
+        "expected_count": expected_count,
+        "actual_count": actual_count,
+        "oracle_called": True,
+        "reason": None,
+    }
+
+
+def _prediction_batch_receipt(batch: Mapping[str, Any]) -> dict[str, Any]:
+    """Reduce an in-memory prediction batch to JSON-safe shape evidence."""
+
+    return {
+        "expected_count": int(batch["expected_count"]),
+        "actual_count": int(batch["actual_count"]),
+        "oracle_called": bool(batch["oracle_called"]),
+        "reason": batch["reason"],
+        "logits_shape": list(np.asarray(batch["logits"]).shape),
+        "probabilities_shape": list(np.asarray(batch["probabilities"]).shape),
+        "predictions_shape": list(np.asarray(batch["predictions"]).shape),
+    }
+
+
 def _globalgce_pair_rows(
     *,
     parents: Sequence[Any],
@@ -505,7 +594,7 @@ def _globalgce_pair_rows(
     spec: Any,
     method_id: str,
     oracle_batch_size: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rules = [GlobalGCENativeRule.from_payload(candidate) for candidate in candidates]
     applications: dict[tuple[int, int], list[dict[str, Any]]] = {}
     match_audits: dict[tuple[int, int], list[dict[str, Any]]] = {}
@@ -554,10 +643,13 @@ def _globalgce_pair_rows(
             if not valid and key not in failures:
                 failures[key] = "no_legal_native_lhs_match_or_sanitized_rhs"
     ordered_smiles = sorted(unique_graphs)
-    after_predictions = oracle.predict_records(
-        [unique_graphs[smiles] for smiles in ordered_smiles],
-        batch_size=int(oracle_batch_size),
+    prediction_batch = _predict_expected_graph_batch(
+        oracle=oracle,
+        graphs=[unique_graphs[smiles] for smiles in ordered_smiles],
+        expected_count=len(ordered_smiles),
+        oracle_batch_size=int(oracle_batch_size),
     )
+    after_predictions = prediction_batch["records"]
     prediction_by_smiles = dict(zip(ordered_smiles, after_predictions, strict=True))
     pair_rows: list[dict[str, Any]] = []
     for parent_index, (parent, before) in enumerate(
@@ -719,7 +811,7 @@ def _globalgce_pair_rows(
                     "oracle_checkpoint_hash": card["checkpoint_id"],
                 }
             )
-    return pair_rows
+    return pair_rows, _prediction_batch_receipt(prediction_batch)
 
 
 def _authorize_split(
@@ -825,23 +917,25 @@ def run_fullgraph_verification_shard(
         )
     )
     try:
-        evaluator = (
-            _globalgce_pair_rows
-            if method_id == "globalgce"
-            else _fullgraph_pair_rows
-        )
-        pair_rows = evaluator(
-            parents=parents,
-            before_rows=before_rows,
-            candidates=candidates,
-            featurizer=featurizer,
-            oracle=oracle,
-            provider=provider,
-            card=card,
-            spec=spec,
-            method_id=method_id,
-            oracle_batch_size=int(oracle_batch_size),
-        )
+        evaluation_kwargs = {
+            "parents": parents,
+            "before_rows": before_rows,
+            "candidates": candidates,
+            "featurizer": featurizer,
+            "oracle": oracle,
+            "provider": provider,
+            "card": card,
+            "spec": spec,
+            "method_id": method_id,
+            "oracle_batch_size": int(oracle_batch_size),
+        }
+        if method_id == "globalgce":
+            pair_rows, application_prediction_batch = _globalgce_pair_rows(
+                **evaluation_kwargs
+            )
+        else:
+            pair_rows = _fullgraph_pair_rows(**evaluation_kwargs)
+            application_prediction_batch = None
         provider_stats = provider.stats_dict()
     finally:
         provider.close()
@@ -896,6 +990,8 @@ def run_fullgraph_verification_shard(
         "created_at": utc_now(),
         "run_complete": True,
     }
+    if application_prediction_batch is not None:
+        manifest["application_prediction_batch"] = application_prediction_batch
     if normalized_stage == CALIBRATION_STAGE and method_id == "gcfexplainer":
         candidate_pool_sha256 = sha256_file(predecessor / "candidate_universe.jsonl")
         generation_attempt_id = str(
