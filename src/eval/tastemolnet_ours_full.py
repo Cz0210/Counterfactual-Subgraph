@@ -67,6 +67,7 @@ TABLE_K = 10
 PASS_MARKER = "[TASTE_OURS_PASS]"
 DISTANCE_LINE = "MolCLR-Node-Wasserstein"
 DISTANCE_NAMESPACE = "tastemolnet_ours_full_wnode_v1"
+DISTANCE_IMPLEMENTATION_VERSION = "molclr_node_wasserstein_exact_emd2_v1"
 GENERATION_CHUNK_RECEIPT_SCHEMA = "tastemolnet_t11_generation_chunk_receipt_v2"
 GENERATION_MANIFEST_SCHEMA = "tastemolnet_t11_generation_manifest_v2"
 PAIR_CHUNK_RECEIPT_SCHEMA = "tastemolnet_t11_pair_chunk_receipt_v2"
@@ -1392,6 +1393,7 @@ def evaluate_parent(
                 "match_atom_indices": list(outcome.match_atom_indices), "teacher_sha256": scorer.checkpoint_id,
                 "oracle_checkpoint_id": scorer.checkpoint_id, "action_semantics_version": CONNECTED_ACTION_SEMANTICS,
                 "match_selection_policy": CONNECTED_MATCH_SELECTION_POLICY,
+                "distance_implementation_version": DISTANCE_IMPLEMENTATION_VERSION,
             })
             value = measured.get("distance")
             if measured.get("ok") is True and value is not None and math.isfinite(float(value)) and float(value) >= 0:

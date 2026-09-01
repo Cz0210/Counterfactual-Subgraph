@@ -171,6 +171,10 @@ class _FakeDistance:
     def distance_for_action(
         self, _parent: str, _residual: str, *, action_context: dict[str, object]
     ) -> dict[str, object]:
+        assert (
+            action_context["distance_implementation_version"]
+            == ours.DISTANCE_IMPLEMENTATION_VERSION
+        )
         candidate = str(action_context["candidate_id"])
         return {"ok": True, "distance": 0.1 + int(ours.stable_sha256(candidate)[:4], 16) / 1_000_000}
 

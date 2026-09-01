@@ -16694,3 +16694,17 @@ Implemented on `feat/llm-gnn-ablation-framework-v1`; the authority/receipt
 gate and exact BACE reference have focused adversarial tests.  Final AutoDL
 config-only deployment and a future project-owner authorization receipt remain
 part of this handoff.
+
+# 2026-09-02: Bind Taste T11 action-aware WNode cache keys to the implementation version
+
+- Motivation: the completed T11 generation reached calibration but the first
+  strict-flip WNode lookup failed closed because its action context omitted the
+  required `distance_implementation_version` field.
+- Decision: pass the existing canonical
+  `molclr_node_wasserstein_exact_emd2_v1` implementation identity into every
+  T11 action-aware distance lookup.  Do not alter the distance namespace,
+  selector, split access, or numerical implementation.
+- Resume impact: the already committed calibration parent-0 chunk contains
+  1,412 rows, zero strict flips, and only null WNode values, so it can be
+  independently revalidated and retained.  Resume continues from the existing
+  science root; candidate generation is not rerun.
