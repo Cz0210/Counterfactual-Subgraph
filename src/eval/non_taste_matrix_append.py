@@ -38,6 +38,12 @@ from src.baselines.comrecgc.contracts import (
     UPSTREAM_COMMIT as COMRECGC_UPSTREAM_COMMIT,
 )
 from src.eval.am_legacy_standardization import scan_live_writers
+from src.eval.aids_comrecgc_terminal_reconciliation import (
+    RECONCILIATION_SCHEMA as AIDS_RECONCILIATION_SCHEMA,
+    science_terminal_projection as aids_science_terminal_projection,
+    validate_missing_controller_terminal as validate_aids_missing_controller_terminal,
+    validate_reconciliation_root as validate_aids_reconciliation_root,
+)
 from src.eval.bace_frozen_cell_standardization import (
     BACECellStandardizationError,
     _checkpoint_contract,
@@ -92,6 +98,12 @@ TARGETS = {
 PASS_BYTES = b"PASS\n"
 MAX_HASH_BYTES = 64 * 1024 * 1024
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_AIDS_ZERO_CONDITIONAL_COST_REGISTRY_REASONS = frozenset(
+    {
+        "FIGURE3_INVALID:ValueError",
+        "TABLE2_INVALID:ValueError",
+    }
+)
 _BACE_SHARED_FIELDS = (
     "dataset_hash",
     "split_hash",
@@ -624,12 +636,13 @@ def _validate_aids_standardized(science_root: Path) -> dict[str, Any]:
     return _validate_rf_standardized(science_root, dataset="AIDS", dataset_key="aids")
 
 
-def _validate_aids_terminal(
+def _validate_aids_science_terminal(
     root_like: str | Path,
     *,
     controller_manifest_path: str | Path | None,
     proc_root: str | Path,
     require_writer_audit: bool,
+    require_controller_terminal: bool,
 ) -> dict[str, Any]:
     if controller_manifest_path is None:
         raise NonTasteMatrixAppendError("AIDS append requires --aids-controller-manifest")
@@ -643,14 +656,25 @@ def _validate_aids_terminal(
     )
     try:
         controller = load_bound_controller_manifest(controller_path)
-        controller_terminal = validate_controller_terminal(controller)
+        controller_terminal = (
+            validate_controller_terminal(controller)
+            if require_controller_terminal
+            else None
+        )
         exact = validate_stage_terminal(controller, stage_id=EXACT_STAGE)
         final = validate_stage_terminal(controller, stage_id=FINAL_STAGE)
     except Exception as exc:
         raise NonTasteMatrixAppendError(
             f"AIDS controller/exact/final terminal reopen failed: {exc}"
         ) from exc
-    if controller_terminal.get("schema_version") != AIDS_CONTROLLER_TERMINAL_SCHEMA:
+    if (
+        require_controller_terminal
+        and (
+            not isinstance(controller_terminal, Mapping)
+            or controller_terminal.get("schema_version")
+            != AIDS_CONTROLLER_TERMINAL_SCHEMA
+        )
+    ):
         raise NonTasteMatrixAppendError("AIDS controller terminal schema changed")
     final_manifest = final.get("manifest")
     final_path = _physical_file(final.get("path", ""), label="AIDS final-stage receipt")
@@ -742,13 +766,15 @@ def _validate_aids_terminal(
     writer = _writer_audit(
         science_root, proc_root=proc_root, required=require_writer_audit
     )
-    return {
-        "terminal_kind": "AIDS_EXACT_RECOVERY_CONTROLLER_FINAL",
+    result = {
+        "terminal_kind": (
+            "AIDS_EXACT_RECOVERY_CONTROLLER_FINAL"
+            if require_controller_terminal
+            else "AIDS_EXACT_RECOVERY_SCIENCE_FINAL"
+        ),
         "root": str(science_root),
         "controller_manifest_path": str(controller_path),
         "controller_manifest_sha256": _sha(controller_path),
-        "controller_terminal_schema": AIDS_CONTROLLER_TERMINAL_SCHEMA,
-        "controller_terminal_sha256": stable_json_sha256(controller_terminal),
         "exact_stage_receipt_path": str(exact_path),
         "exact_stage_receipt_sha256": _sha(exact_path),
         "final_stage_receipt_path": str(final_path),
@@ -775,6 +801,161 @@ def _validate_aids_terminal(
             ),
         ),
     }
+    if require_controller_terminal:
+        assert isinstance(controller_terminal, Mapping)
+        result.update(
+            {
+                "controller_terminal_schema": AIDS_CONTROLLER_TERMINAL_SCHEMA,
+                "controller_terminal_sha256": stable_json_sha256(
+                    controller_terminal
+                ),
+            }
+        )
+    return result
+
+
+def _validate_aids_terminal(
+    root_like: str | Path,
+    *,
+    controller_manifest_path: str | Path | None,
+    proc_root: str | Path,
+    require_writer_audit: bool,
+) -> dict[str, Any]:
+    """Dispatch between the ordinary controller terminal and its narrow wrapper."""
+
+    supplied = _physical_directory(root_like, label="AIDS terminal root")
+    run_path = supplied / "run_manifest.json"
+    schema = (
+        _json(run_path, label="AIDS supplied run manifest").get("schema_version")
+        if run_path.is_file() and not run_path.is_symlink()
+        else None
+    )
+    if schema != AIDS_RECONCILIATION_SCHEMA:
+        return _validate_aids_science_terminal(
+            supplied,
+            controller_manifest_path=controller_manifest_path,
+            proc_root=proc_root,
+            require_writer_audit=require_writer_audit,
+            require_controller_terminal=True,
+        )
+    try:
+        receipt = validate_aids_reconciliation_root(supplied, proc_root=proc_root)
+        controller = receipt["controller_terminal_reconciliation"]
+        if (
+            controller_manifest_path is None
+            or Path(controller_manifest_path).expanduser().resolve(strict=True)
+            != Path(str(controller["controller_manifest_path"])).resolve(strict=True)
+        ):
+            raise NonTasteMatrixAppendError(
+                "AIDS reconciliation/controller manifest identity changed"
+            )
+        reopened_controller = validate_aids_missing_controller_terminal(
+            controller_manifest_path, proc_root=proc_root
+        )
+        if reopened_controller != controller:
+            raise NonTasteMatrixAppendError(
+                "AIDS missing-controller terminal evidence changed"
+            )
+        science = _validate_aids_science_terminal(
+            receipt["source_science_root"],
+            controller_manifest_path=controller_manifest_path,
+            proc_root=proc_root,
+            require_writer_audit=require_writer_audit,
+            require_controller_terminal=False,
+        )
+        if aids_science_terminal_projection(science) != receipt.get(
+            "science_terminal_projection"
+        ):
+            raise NonTasteMatrixAppendError(
+                "AIDS reconciled science-terminal projection changed"
+            )
+    except NonTasteMatrixAppendError:
+        raise
+    except Exception as exc:
+        raise NonTasteMatrixAppendError(
+            f"AIDS terminal reconciliation reopen failed: {exc}"
+        ) from exc
+    science.update(
+        {
+            "terminal_kind": "AIDS_ZERO_STRICT_FLIP_TERMINAL_RECONCILIATION",
+            "reconciliation_root": str(supplied),
+            "reconciliation_sha256": receipt["reconciliation_sha256"],
+            "scientific_output_empty": True,
+            "strict_flip_status": "STRICT_FLIP_NOT_OBSERVED",
+            "coverage": 0.0,
+            "conditional_cost_available": False,
+            "numeric_imputation_used": False,
+            "scientific_metrics_recomputed": False,
+            "controller_restart_performed": False,
+            "conditional_cost_unavailable_by_science": True,
+            "registry_numeric_imputation_used": False,
+            "reconciliation_inventory": _critical_inventory(
+                supplied,
+                (
+                    "PASS",
+                    "terminal_reconciliation.json",
+                    "run_manifest.json",
+                    "final_artifact_audit.json",
+                ),
+            ),
+        }
+    )
+    return science
+
+
+def _reconcile_aids_zero_registry_row(
+    target: Mapping[str, Any], *, terminal: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Accept only the registry's known finite-conditional-cost mismatch.
+
+    The generic registry predates the explicit expected-empty ComRecGC
+    contract and therefore tries to parse the blank conditional-cost column as
+    finite before considering the separately reported fixed-capped metric.  A
+    reconciliation terminal has already reopened every zero-result export and
+    proved that the conditional statistic is genuinely undefined.  No other
+    registry reason is waived here.
+    """
+
+    row = dict(target)
+    if terminal.get("terminal_kind") != (
+        "AIDS_ZERO_STRICT_FLIP_TERMINAL_RECONCILIATION"
+    ):
+        return row
+    if (
+        terminal.get("scientific_output_empty") is not True
+        or terminal.get("strict_flip_status") != "STRICT_FLIP_NOT_OBSERVED"
+        or terminal.get("coverage") != 0.0
+        or terminal.get("conditional_cost_available") is not False
+        or terminal.get("numeric_imputation_used") is not False
+        or terminal.get("registry_numeric_imputation_used") is not False
+    ):
+        raise NonTasteMatrixAppendError(
+            "AIDS reconciliation does not prove the legitimate empty-result contract"
+        )
+    reasons = frozenset(
+        reason
+        for reason in str(row.get("rerun_reason") or "").split(";")
+        if reason
+    )
+    if reasons != _AIDS_ZERO_CONDITIONAL_COST_REGISTRY_REASONS:
+        return row
+    if (
+        row.get("dataset") != "AIDS"
+        or row.get("method") != "ComRecGC"
+        or row.get("status") != CellStatus.INCOMPLETE.value
+        or row.get("k_max") != 20
+        or row.get("table2_k") != 10
+    ):
+        raise NonTasteMatrixAppendError(
+            "AIDS zero-result registry mismatch is not the exact known shape"
+        )
+    row["status"] = CellStatus.FROZEN_PASS.value
+    row["adoption_reason"] = (
+        "hash-closed strict-flip result is scientifically empty; conditional cost "
+        "is unavailable and no numeric value was imputed"
+    )
+    row["rerun_reason"] = ""
+    return row
 
 
 def _validate_mut_parity_source_integrity(
@@ -1761,6 +1942,9 @@ def append_non_taste_matrix_cell(
         cell_root,
         registry_cell_root,
     }
+    reconciliation_root = terminal.get("reconciliation_root")
+    if reconciliation_root is not None:
+        protected.add(Path(str(reconciliation_root)).resolve(strict=True))
     if any(destination == root or destination in root.parents or root in destination.parents for root in protected):
         raise NonTasteMatrixAppendError("Matrix output overlaps a protected authority/science root")
 
@@ -1799,6 +1983,9 @@ def append_non_taste_matrix_cell(
         for row in result.matrix_rows
     }
     target = proposed[key]
+    if key == ("AIDS", "ComRecGC"):
+        target = _reconcile_aids_zero_registry_row(target, terminal=terminal)
+        proposed[key] = target
     if (
         target.get("status") != CellStatus.FROZEN_PASS.value
         or Path(str(target.get("standardized_output_root") or "")).resolve(strict=True)
