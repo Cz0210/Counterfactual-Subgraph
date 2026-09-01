@@ -3791,3 +3791,34 @@ Mutagenicity roadmaps.
   segment-end durable closure with focused tests.
 - [ ] Deploy immutably and launch one fresh T12 UUID/root; the failed 15-step
   root has no reusable checkpoint and remains read-only evidence.
+
+## 2026-09-02: Main-table protection plus post-main ablation framework
+
+- [x] Keep the unique fast16 matrix authority read-only during framework work.
+- [x] Keep LLM/GNN run flags and explicit authorization false before 16/16.
+- [x] Replace boolean authorization with a self-hashed, family/commit/contract-
+  scoped project-owner receipt and require both tracked and operator run flags.
+- [x] Reopen the exact pointer/root/16-cell set and bind final audit/Figure 3/
+  Figure 4/Table 2 receipts to the same matrix and combined-audit hashes.
+- [x] Add typed common provenance contracts, output inventories, and atomic
+  read-only status reports.
+- [x] Freeze BACE GINE, split, temperature, MolCLR, WNode, selector, and
+  evaluator identities from actual main artifacts rather than memory.
+- [x] Record BACE's real 386-parent, eight-attempt proposal contract.
+- [x] Reject a non-authority BACE/Ours root, any parent count other than 386,
+  or any drift from the frozen 4+4 seeds/temperatures/top-p/token limits.
+- [x] Fail closed on the absent independently matched BACE SFT checkpoint.
+- [x] Add train-only deterministic BRICS vocabulary and proposal-budget logic.
+- [x] Add shared LLM generator, downstream verifier/selector/evaluator plans,
+  novelty metrics, and schema-only aggregate outputs.
+- [x] Add GINE/GIN/GCN/GATv2 shared runtime bindings and explicit edge-feature
+  modes without overwriting the main GINE root.
+- [x] Add structural proposal-fixed identities plus native/common cohort plans.
+- [x] Keep end-to-end GNN mode config-only and secondary to proposal-fixed.
+- [x] Add claim-safe paper staging templates with no result numbers.
+- [x] Add an AIDS-zero-only canonical threshold-grid publication repair while
+  retaining ordinary hash mismatch failure everywhere else.
+- [ ] Publish the completed AIDS/ComRecGC overlay into the unique authority.
+- [ ] Let existing Mut and Taste main tasks finish and atomically reach 16/16.
+- [ ] Generate final four-dataset Figure 3/Figure 4/Table 2 from the authority.
+- [ ] Obtain a separate explicit user authorization before any ablation science.

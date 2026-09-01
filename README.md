@@ -196,6 +196,15 @@ closures prove 16/16 eligible cells; incomplete campaigns receive a
 non-numeric staging audit only. See
 `docs/AUTODL_FOUR_BY_FOUR_MAIN_RESULTS_EXPORT.md`.
 
+Post-main LLM/GNN ablation status is fail-closed.  It independently reopens the
+exact fast16 pointer and authority root, requires four self-hashed final-output
+receipts bound to that same matrix hash, and accepts project authorization only
+as a self-hashed family/commit/run-contract receipt.  The tracked common config
+keeps both family run flags false; an environment boolean is not authorization.
+The BACE/Ours reference builder additionally requires the exact authority cell,
+386 train parents, the frozen 4+4 proposal regimes, and preserves the missing
+matched-SFT variants as blocked rather than inventing checkpoints.
+
 The partial three-dataset release has a separate persistent CPU-only
 supervisor. It hash-binds all twelve standardized cell roots to their external
 owner manifest/task/output contracts, remains non-numeric while fewer than
@@ -646,3 +655,33 @@ and NeuroSED/GPU2 leases. This is an authority/monitor layer, not the complete
 `main_completion_v4` scheduler. Method-specific blockers are recorded in
 `docs/MANAGED_TASTE_RELEASE_V3_BLOCKERS.json`. See
 `docs/AUTODL_TASTEMOLNET_MAIN_V2_CONTROLLER_AUTHORITY.md`.
+
+---
+
+## 14. Post-main ablation framework
+
+The BACE/Ours LLM-proposer and GNN-backbone ablations are staged under
+`src/ablations/`, `configs/ablations/`, and `scripts/ablations/`.  They are
+config/provenance frameworks, not permission to run science.  The gate-only
+AutoDL status entrypoints are:
+
+```bash
+python scripts/autodl/status_llm_ablation.py \
+  --config configs/hpc.yaml \
+  --common-config configs/ablations/common_v1.yaml \
+  --family llm \
+  --matrix-authority /autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json
+
+python scripts/autodl/status_gnn_ablation.py \
+  --config configs/hpc.yaml \
+  --common-config configs/ablations/common_v1.yaml \
+  --family gnn \
+  --matrix-authority /autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json
+```
+
+Neither command acquires a GPU lock or starts an ablation.  A future science
+run additionally requires the exact 16-cell authority, final-audit and final
+Figure 3/Figure 4/Table 2 receipts from the same authority chain, plus a new
+family- and commit-bound user authorization receipt.  See
+`docs/AUTODL_MAIN_RECOVERY_AND_ABLATION_FRAMEWORK_HANDOFF.md` for the live-main
+handoff and the frozen experiment contracts.

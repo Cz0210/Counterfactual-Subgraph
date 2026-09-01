@@ -16595,3 +16595,102 @@ fails closed without model recomputation.
 
 Implemented and focused-tested locally; immutable deployment and one fresh T12
 production attempt remain required.
+
+---
+
+## [2026-09-02] Reconcile only proven-equivalent AIDS zero-result threshold grids
+
+### Motivation
+
+The completed AIDS/ComRecGC result is a legitimate zero strict-flip result.
+Its scientific and terminal reconciliation artifacts pass, but the unique
+matrix publisher rejected the cell because the older AIDS/Ours threshold grid
+and the new ComRecGC grid serialize the same 601-point decimal lattice with
+slightly different binary-float text.  The endpoints and every canonical grid
+position agree, while the raw threshold hashes necessarily differ.
+
+### Decision
+
+Keep the ordinary threshold-hash gate strict.  Add one AIDS/ComRecGC-only
+compatibility path which applies only to a reconciled valid-zero closure and
+only when both Figure 4 files prove identical Decimal endpoints, row count,
+strict monotonicity, and canonical equidistant positions at `1E-15`, and the
+ComRecGC coverage is exactly zero at every threshold.  Preserve both original
+threshold and Figure 4 hashes and record the equivalence evidence in the
+matrix append receipt.  A real grid change, nonzero coverage, additional gate
+reason, different dataset, or different method remains a hard failure.
+
+### Consequences
+
+- The valid zero result can be published without recomputing or altering any
+  AIDS scientific artifact.
+- Matrix readers can distinguish `equivalent-mismatched` threshold hashes from
+  byte-identical hashes.
+- No tolerance is added to ordinary matrix publication and no nonzero result
+  is synthesized.
+
+### Status
+
+Implemented and focused-tested locally and on the restored AutoDL host; a
+publication-only retry from an immutable worktree is in progress.
+
+---
+
+## [2026-09-02] Build ablation plans now, hold all ablation science after main 16/16
+
+### Motivation
+
+The four-GPU AutoDL server is occupied by main-table recovery and TasteMolNet
+full runs.  LLM-proposer and GNN-backbone ablations need reproducible contracts
+and runnable interfaces, but developing them must not acquire a GPU lock,
+modify a live root, or delay the 4x4 matrix.
+
+### Decision
+
+Add a config-only ablation layer with hash-closed common contracts, output
+inventories, read-only status tools, and a three-part launch gate.  The gate
+independently reopens the exact fast16 pointer/root and exact 16-cell set;
+requires self-hashed final-audit, Figure 3, Figure 4, and Table 2 receipts all
+bound to that same authority root and matrix/combined-audit hashes; and accepts
+authorization only as a self-hashed project-owner receipt bound to the family,
+execution commit, run-contract hash, authority, and four receipt hashes.  The
+tracked common config is read on every status invocation and both family run
+flags remain false.  An environment boolean is never authorization, and both
+the tracked family flag and the operator run request must be true.
+
+For the BACE LLM study, freeze the actual authority-listed Ours reference: 386 train parents,
+four base-regime proposals and four high-temperature proposals per parent,
+the same ChemLLM base/tokenizer, parser, verifier, GINE oracle, WNode distance,
+selector, and evaluator.  BRICS vocabulary construction is train-only and
+never oracle-ranked.  The BACE main policy was initialized as a fresh LoRA on
+the ChemLLM base and then optimized by PPO; it has no independently matched
+SFT checkpoint.  Therefore both matched-SFT variants remain explicitly
+blocked rather than borrowing a checkpoint from another dataset.
+
+For the GNN study, use one structural proposal universe shared by GINE, GIN,
+GCN, and GATv2.  Classifier-dependent values never enter candidate identity.
+Report each backbone's native correctly classified source cohort and the
+four-way common-cohort intersection, with the common cohort as the primary
+stability analysis.  Plan proposal-fixed mode first and keep end-to-end mode
+config-only.  Reuse the repository's feature-schema, checkpoint-bundle, and
+validation-only temperature-calibration implementations.
+
+### Consequences
+
+- Framework construction is CPU-only, low-priority, and cannot claim a GPU or
+  write the main matrix.
+- Status entrypoints launch no science and acquire no project GPU lock; paired
+  Slurm-format files are not an authorization or a recommended submission path.
+- Missing checkpoint provenance is visible as
+  `BLOCKED_MISSING_PROVENANCE`, never replaced by guessed paths or numbers.
+- Result files and paper fragments are schemas/templates containing no
+  fabricated metrics or claims.
+- A future authorized run can start from frozen contracts rather than
+  reinterpreting the main experiment.
+
+### Status
+
+Implemented on `feat/llm-gnn-ablation-framework-v1`; the authority/receipt
+gate and exact BACE reference have focused adversarial tests.  Final AutoDL
+config-only deployment and a future project-owner authorization receipt remain
+part of this handoff.

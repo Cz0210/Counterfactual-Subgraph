@@ -1,0 +1,30 @@
+schema_version: ablation_common_config_v1
+framework_build_only: true
+main_priority: MAIN_16_OF_16
+matrix_authority: /autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json
+main_matrix_total_cells: 16
+explicit_run_authorization: false
+run_llm_ablation: false
+run_gnn_ablation: false
+dataset: bace
+method: ours
+seeds: [7, 17, 27]
+candidate_budget_contract:
+  primary: proposal_attempt_matched
+  secondary_diagnostic: valid_candidate_matched
+  attempts_per_parent: 8
+  base_sampling_attempts_per_parent: 4
+  high_temperature_sampling_attempts_per_parent: 4
+evaluation:
+  counterfactual_mode: strict_flip
+  selector_shared_across_variants: true
+  calibration_only_selection: true
+  test_after_freeze_only: true
+  bootstrap_unit: parent
+  bootstrap_confidence: 0.95
+runtime:
+  gpu_lock_allowed_during_framework_build: false
+  omp_num_threads: 1
+  mkl_num_threads: 1
+  openblas_num_threads: 1
+  tokenizers_parallelism: false

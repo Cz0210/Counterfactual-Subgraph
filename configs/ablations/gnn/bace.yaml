@@ -1,0 +1,61 @@
+schema_version: gnn_backbone_ablation_config_v2
+experiment:
+  id: bace_gnn_backbone_ablation_v1
+  mode: plan_only
+  primary_results_gate: fast16_matrix_16_of_16
+  proposal_mode: proposal_fixed_train_rule_pool
+  generation_per_backbone: false
+dataset:
+  id: bace
+  num_classes: 2
+  source_label: 1
+  config: configs/datasets/bace_gnn.yaml
+feature_schema:
+  provider: default_molecular_feature_schema
+  sha256: 29a66a2d9083d902bd10bd94d9b6ae216b2ca09ce38cee1b61d0c0ffbb0b5398
+splits:
+  fit: train
+  selection: validation
+  proposal: train
+  calibration: calibration
+  evaluation: test
+  test_open_after_selector_freeze: true
+cohorts:
+  common: true
+  native: true
+  minimum_common_parents: 1
+evaluation:
+  distance_metric: WNode
+  wnode_config_source: main_matrix_frozen_contract
+  wnode_shared_across_backbones: true
+  selector_fit_split: calibration
+  held_out_evaluation_split: test
+backbones:
+  gine:
+    role: reference
+    checkpoint_policy: adopt_if_compatible_else_train
+    model_config: configs/gnn/gine.yaml
+  gin:
+    role: ablation
+    checkpoint_policy: train
+    model_config: configs/gnn/gin.yaml
+  gcn:
+    role: ablation
+    checkpoint_policy: train
+    model_config: configs/gnn/gcn.yaml
+  gatv2:
+    role: ablation
+    checkpoint_policy: train
+    model_config: configs/gnn/gatv2.yaml
+outputs:
+  root_template: "{runtime_root}/outputs/autodl/ablations/gnn/{experiment_id}/{attempt_id}"
+policy:
+  matrix_write_allowed: false
+  science_launch_allowed_by_framework: false
+  require_fresh_attempt: true
+data_policy:
+  mode: public_dataset_hash_bound
+  policy_receipt_required: false
+  upstream_terms_status: PUBLIC_DATASET
+  redistribution_allowed: false
+  graph_cache_mode: optional_hash_bound
