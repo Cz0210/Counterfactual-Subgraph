@@ -14,6 +14,7 @@ def test_release_relay_has_only_explicit_science_dependencies() -> None:
         "TASTE_T7_PASS_ROOT",
         "TASTE_MANAGED_NEUROSED_ROOT",
         "T12_MANAGED_RELEASE_ROOT",
+        "T12_RELEASE_VALIDATOR_ROOT",
         "tastemolnet_t7_typed_release_v1.py",
         "[TASTE_T12_DEPENDENCY_DECOUPLED]",
     ):
@@ -32,6 +33,7 @@ def test_release_relay_is_fresh_gpu3_science() -> None:
     assert "checkpoint-00020000.manifest.json" in text
     assert "[TASTE_T12_GCF_FULL_LAUNCHED]" in text
     assert "RUN_GNN_ABLATION" in text
+    assert 'PYTHONPATH="$T12_RELEASE_VALIDATOR_ROOT"' in text
 
 
 def test_launcher_persists_controller_and_heartbeat_root() -> None:

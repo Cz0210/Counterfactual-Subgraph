@@ -9,6 +9,7 @@ set -euo pipefail
 : "${TASTE_T7_PASS_ROOT:?set the managed T7 smoke PASS root}"
 : "${TASTE_MANAGED_NEUROSED_ROOT:?set the managed NeuroSED PASS root}"
 : "${T12_MANAGED_RELEASE_ROOT:?set the typed managed release PASS root}"
+: "${T12_RELEASE_VALIDATOR_ROOT:?set the pinned typed-release implementation root}"
 : "${TASTE_T7_NEUROSED_THRESHOLD_AUTHORITY:?set the typed NeuroSED threshold authority}"
 : "${T12_EXACT_REPLAY_GATE:?set the exact gate-v2 JSON}"
 
@@ -111,8 +112,9 @@ write_heartbeat VALIDATING_RELEASE_DEPENDENCIES 0
 validate_terminal_pass "$TASTE_T3_ROOT" T3
 validate_terminal_pass "$TASTE_T7_PASS_ROOT" T7
 validate_terminal_pass "$TASTE_MANAGED_NEUROSED_ROOT" NeuroSED
-"$PY" scripts/autodl/tastemolnet_t7_typed_release_v1.py \
-  --config "$T12_REPO_ROOT/configs/hpc.yaml" validate \
+PYTHONPATH="$T12_RELEASE_VALIDATOR_ROOT" \
+"$PY" "$T12_RELEASE_VALIDATOR_ROOT/scripts/autodl/tastemolnet_t7_typed_release_v1.py" \
+  --config "$T12_RELEASE_VALIDATOR_ROOT/configs/hpc.yaml" validate \
   --release-root "$T12_MANAGED_RELEASE_ROOT" \
   > "$T12_CONTROLLER_ROOT/managed-release-validation.log"
 
