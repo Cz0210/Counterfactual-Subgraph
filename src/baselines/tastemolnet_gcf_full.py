@@ -514,7 +514,12 @@ def run_t12_generation_segment(
         sources.revalidate()
         original_counts = importance.util.graph_element_counts(input_graphs)
         original_neighbor = vrrw.neighbor_graph_access
-        from src.baselines.tastemolnet_gcf_smoke import graph_lineage_neighbor_wrapper
+        # The lineage-only wrapper is owned by the retained official-GCF
+        # adapter.  The smoke module consumes it but intentionally does not
+        # re-export it.
+        from src.baselines.gcfexplainer_mutagenicity_adapter import (
+            graph_lineage_neighbor_wrapper,
+        )
 
         lineage_neighbor = graph_lineage_neighbor_wrapper(original_neighbor)
         action_counts: Counter[str] = Counter()

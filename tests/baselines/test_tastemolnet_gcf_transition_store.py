@@ -358,3 +358,18 @@ def test_t12_production_wrappers_pin_fresh_resume_and_generation_only_verify():
     assert "verify_tastemolnet_gcf_full_generation.py" in sidecar
     assert "GENERATION_PASS" in sidecar
     assert "[TASTE_GCF_PASS]" not in sidecar
+
+
+def test_t12_full_imports_lineage_wrapper_from_its_owner_module():
+    source = (
+        REPOSITORY / "src/baselines/tastemolnet_gcf_full.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        "from src.baselines.gcfexplainer_mutagenicity_adapter import (\n"
+        "            graph_lineage_neighbor_wrapper,\n"
+        "        )"
+    ) in source
+    assert (
+        "from src.baselines.tastemolnet_gcf_smoke import "
+        "graph_lineage_neighbor_wrapper"
+    ) not in source
