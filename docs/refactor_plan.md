@@ -3422,3 +3422,27 @@ Mutagenicity roadmaps.
 - [ ] Deploy the immutable successor, verify its heartbeat, then retire only
   the exact old pure waiter.  The successor may wait for a real idle GPU and
   96 GiB parent headroom without keeping an interactive Codex session alive.
+
+## 2026-09-01: Mut observational trace-on adoption gate
+
+- [x] Record the project-owner authorization separately from scientific PASS;
+  bind it to the exact historical root, candidate-universe hash, sequential
+  arms, and the canary-only 64 GiB headroom threshold.
+- [x] Preserve the truthful history: the 50k random walk completed with trace
+  enabled, post-walk trace materialization failed and was recovered, no full
+  trace-off parity was run, and the recovery receipt lacks an exact recovery
+  code commit.
+- [x] Add fail-closed static trace-branch classification and a same-code
+  trace-on/off observer that compares steps 1--500 and reload steps 501--510;
+  trace files and row metadata are excluded, while scientific fields are not.
+- [x] Require a real five-minute protected-task baseline and checked canary
+  window; absence of either cannot produce a PASS memory/resource receipt.
+- [ ] Run both arms sequentially on the first naturally idle GPU, then verify
+  memory, checkpoint/reload, lineage, and the generation-native -> pair chunks
+  -> consolidated vectors -> exact DBSCAN transitive binding.  The historical
+  DBSCAN manifest has no native candidate-universe field and must not be made to
+  claim one.
+- [ ] Only after every gate passes, adopt the frozen pair store and DBSCAN
+  read-only and close Mutagenicity/ComRecGC through the unique matrix authority.
+  Otherwise enter fresh trace-off Route B using measured admission evidence.
+- [ ] Keep `RUN_GNN_ABLATION=0` until the 4x4 main table reaches 16/16.

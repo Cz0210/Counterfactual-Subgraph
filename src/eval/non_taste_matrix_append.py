@@ -1118,8 +1118,9 @@ def _validate_mut_fast_accurate_terminal(
         "candidate_capacity": 100_000,
         "candidate_universe_binding_state": "PASS",
         "transitive_binding_kind": (
-            "pair_candidate_universe_via_exact_generation_payload_and_dbscan_vectors"
+            "transitive_generation_pair_store_vectors_dbscan_v1"
         ),
+        "dbscan_native_candidate_universe_sha": None,
         "dbscan_native_candidate_universe_field_present": False,
         "dbscan_universe_binding_via_pair_vectors": True,
         "source_payload_sha256": MUT_SOURCE_PAYLOAD_SHA256,
@@ -1135,8 +1136,11 @@ def _validate_mut_fast_accurate_terminal(
     universe = run.get("candidate_universe_sha")
     if (
         _SHA256_RE.fullmatch(str(universe or "")) is None
+        or run.get("source_native_candidate_universe_sha") != universe
         or run.get("pair_store_source_candidate_universe_sha") != universe
-        or run.get("dbscan_source_candidate_universe_sha") != universe
+        or run.get("dbscan_native_candidate_universe_sha") is not None
+        or run.get("dbscan_transitively_bound_candidate_universe_sha")
+        != universe
     ):
         raise NonTasteMatrixAppendError(
             "Mut fast-accurate candidate-universe binding changed"
@@ -1168,8 +1172,11 @@ def _validate_mut_fast_accurate_terminal(
         or run.get("historical_adoption_sha256") != _sha(adoption_path)
         or historical.get("sha256") != _sha(adoption_path)
         or historical.get("candidate_universe_sha") != universe
+        or historical.get("source_native_candidate_universe_sha") != universe
         or historical.get("pair_store_source_candidate_universe_sha") != universe
-        or historical.get("dbscan_source_candidate_universe_sha") != universe
+        or historical.get("dbscan_native_candidate_universe_sha") is not None
+        or historical.get("dbscan_transitively_bound_candidate_universe_sha")
+        != universe
         or historical.get("pair_candidate_graph_hashes_sha256") != universe
         or run.get("pair_candidate_graph_hashes_sha256") != universe
         or historical.get("dbscan_native_candidate_universe_field_present")
@@ -1255,6 +1262,8 @@ def _validate_mut_fast_accurate_terminal(
             "Mut historical DBSCAN unexpectedly claims a native candidate universe"
         )
     if (
+        dbscan_manifest.get("approximation_used") is not False
+        or
         not isinstance(dbscan_identity, Mapping)
         or dbscan_identity.get("vectors_path") != pair_manifest.get("vectors_path")
         or dbscan_identity.get("vectors_sha256")

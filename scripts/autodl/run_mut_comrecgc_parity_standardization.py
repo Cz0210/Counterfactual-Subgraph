@@ -64,9 +64,7 @@ FAST_ACCURATE_RUN_SCHEMA = "mut_comrecgc_fast_accurate_standardization_v2"
 HISTORICAL_TRACE_EVIDENCE_KIND = (
     "historical_trace_on_50k_with_500_step_semantic_equivalence"
 )
-TRANSITIVE_BINDING_KIND = (
-    "pair_candidate_universe_via_exact_generation_payload_and_dbscan_vectors"
-)
+TRANSITIVE_BINDING_KIND = "transitive_generation_pair_store_vectors_dbscan_v1"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -210,11 +208,12 @@ def _validate_historical_adoption(
 ) -> dict[str, Any]:
     """Reopen the authorized historical trace-on 50k adoption receipt.
 
-    The receipt's three universe aliases must all equal the real strict-flip
-    hash in ``pair_store.scientific_identity.candidate_graph_hashes_sha256``.
-    The legacy DBSCAN manifest has no native universe field, so its relationship
-    is verified only through the exact pair-vector path/SHA chain and disclosed
-    as transitive rather than as a fabricated native three-way identity.
+    The generation-native, pair-store, and DBSCAN-transitive aliases must all
+    equal the real strict-flip hash in
+    ``pair_store.scientific_identity.candidate_graph_hashes_sha256``.  The
+    legacy DBSCAN manifest has no native universe field, so its relationship is
+    verified only through the exact pair-vector path/SHA chain and never
+    represented as a fabricated native three-way identity.
     """
 
     receipt_path = _physical_bound_file(path, label="historical adoption receipt")
@@ -251,6 +250,7 @@ def _validate_historical_adoption(
         "dbscan_recompute_performed": False,
         "candidate_universe_binding_state": "PASS",
         "transitive_binding_kind": TRANSITIVE_BINDING_KIND,
+        "dbscan_native_candidate_universe_sha": None,
         "dbscan_native_candidate_universe_field_present": False,
         "dbscan_universe_binding_via_pair_vectors": True,
     }
@@ -274,8 +274,9 @@ def _validate_historical_adoption(
 
     universe_fields = (
         "candidate_universe_sha",
+        "source_native_candidate_universe_sha",
         "pair_store_source_candidate_universe_sha",
-        "dbscan_source_candidate_universe_sha",
+        "dbscan_transitively_bound_candidate_universe_sha",
     )
     universe_values: list[str] = []
     for field in universe_fields:
@@ -284,7 +285,51 @@ def _validate_historical_adoption(
         except ValueError:
             failures.append(field)
     if len(universe_values) == len(universe_fields) and len(set(universe_values)) != 1:
-        failures.append("candidate_universe_three_way_equality")
+        failures.append("candidate_universe_transitive_equality")
+    if value.get("dbscan_native_candidate_universe_sha") is not None:
+        failures.append("dbscan_native_candidate_universe_sha")
+
+    try:
+        candidate_binding_path = _physical_bound_file(
+            value.get("candidate_pair_dbscan_binding_path"),
+            label="candidate/pair/DBSCAN binding receipt",
+        )
+        if sha256_file(candidate_binding_path) != value.get(
+            "candidate_pair_dbscan_binding_file_sha256"
+        ):
+            failures.append("candidate_pair_dbscan_binding_file_sha256")
+        candidate_binding = _object(
+            candidate_binding_path,
+            label="candidate/pair/DBSCAN binding receipt",
+        )
+        candidate_binding_unhashed = {
+            key: item
+            for key, item in candidate_binding.items()
+            if key != "binding_sha256"
+        }
+        if (
+            candidate_binding.get("schema_version")
+            != "mut_candidate_pair_dbscan_binding_v1"
+            or candidate_binding.get("status") != "PASS"
+            or candidate_binding.get("binding_kind") != TRANSITIVE_BINDING_KIND
+            or candidate_binding.get("binding_sha256")
+            != stable_json_sha256(candidate_binding_unhashed)
+            or candidate_binding.get("source_native_candidate_universe_sha")
+            != value.get("candidate_universe_sha")
+            or candidate_binding.get("pair_store_source_candidate_universe_sha")
+            != value.get("candidate_universe_sha")
+            or candidate_binding.get("dbscan_native_candidate_universe_sha")
+            is not None
+            or candidate_binding.get(
+                "dbscan_transitively_bound_candidate_universe_sha"
+            )
+            != value.get("candidate_universe_sha")
+            or candidate_binding.get("dbscan_approximation_used") is not False
+        ):
+            failures.append("candidate_pair_dbscan_binding_receipt")
+    except (OSError, RuntimeError, ValueError) as exc:
+        failures.append(f"candidate_pair_dbscan_binding:{type(exc).__name__}")
+        candidate_binding_path = Path("/")
 
     try:
         payload_path = _physical_bound_file(
@@ -403,10 +448,13 @@ def _validate_historical_adoption(
         if (
             _SHA256_RE.fullmatch(str(pair_candidate_universe or "")) is None
             or value.get("candidate_universe_sha") != pair_candidate_universe
+            or value.get("source_native_candidate_universe_sha")
+            != pair_candidate_universe
             or value.get("pair_store_source_candidate_universe_sha")
             != pair_candidate_universe
-            or value.get("dbscan_source_candidate_universe_sha")
+            or value.get("dbscan_transitively_bound_candidate_universe_sha")
             != pair_candidate_universe
+            or value.get("dbscan_native_candidate_universe_sha") is not None
             or value.get("pair_candidate_graph_hashes_sha256")
             != pair_candidate_universe
         ):
@@ -422,6 +470,7 @@ def _validate_historical_adoption(
             failures.append("dbscan_native_candidate_universe_field_present")
         if (
             dbscan_manifest.get("run_complete") is not True
+            or dbscan_manifest.get("approximation_used") is not False
             or not isinstance(dbscan_identity, Mapping)
             or dbscan_identity.get("vectors_path") != pair_manifest.get("vectors_path")
             or dbscan_identity.get("vectors_sha256")
@@ -455,6 +504,7 @@ def _validate_historical_adoption(
         "source_common_recourse_manifest_path": str(common_manifest_path),
         "source_pair_store_manifest_path": str(pair_manifest_path),
         "source_dbscan_manifest_path": str(dbscan_manifest_path),
+        "candidate_pair_dbscan_binding_path": str(candidate_binding_path),
     }
 
 
@@ -753,11 +803,15 @@ def run(
                     "stop_reason": "HISTORICAL_FULL_50K_ARTIFACT_ADOPTION",
                     "candidate_capacity": 100_000,
                     "candidate_universe_sha": historical["candidate_universe_sha"],
+                    "source_native_candidate_universe_sha": historical[
+                        "source_native_candidate_universe_sha"
+                    ],
                     "pair_store_source_candidate_universe_sha": historical[
                         "pair_store_source_candidate_universe_sha"
                     ],
-                    "dbscan_source_candidate_universe_sha": historical[
-                        "dbscan_source_candidate_universe_sha"
+                    "dbscan_native_candidate_universe_sha": None,
+                    "dbscan_transitively_bound_candidate_universe_sha": historical[
+                        "dbscan_transitively_bound_candidate_universe_sha"
                     ],
                     "candidate_universe_binding_state": "PASS",
                     "transitive_binding_kind": TRANSITIVE_BINDING_KIND,

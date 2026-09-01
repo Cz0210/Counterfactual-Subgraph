@@ -14,6 +14,7 @@ from scripts.autodl.run_fast16_matrix_publisher_queue import (
     QUEUE_SCHEMA,
     run_queue,
 )
+from src.baselines.comrecgc.contracts import stable_json_sha256
 from src.eval.bace_frozen_cell_standardization import standardize_bace_frozen_cell
 from src.eval.fast16_matrix_authority_pointer import (
     MatrixAuthorityPointerError,
@@ -816,6 +817,7 @@ def _mut_fast_accurate_final_fixture(tmp_path: Path) -> dict[str, object]:
             pair_manifest,
             {
                 "status": "PASS",
+                "run_complete": True,
                 "kind": "historical-pair-store",
                 "vectors_path": str(vectors.resolve()),
                 "vectors_sha256": _sha(vectors),
@@ -828,6 +830,8 @@ def _mut_fast_accurate_final_fixture(tmp_path: Path) -> dict[str, object]:
             dbscan_manifest,
             {
                 "status": "PASS",
+                "run_complete": True,
+                "approximation_used": False,
                 "kind": "historical-dbscan",
                 "scientific_identity": {
                     "vectors_path": str(vectors.resolve()),
@@ -842,14 +846,34 @@ def _mut_fast_accurate_final_fixture(tmp_path: Path) -> dict[str, object]:
         (adoption_path, {"status": "PASS", "truthful_source": "trace-on-50k"}),
     ):
         _json(path, payload)
+    candidate_binding = evidence_root / "candidate_universe_binding.json"
+    candidate_binding_payload = {
+        "schema_version": "mut_candidate_pair_dbscan_binding_v1",
+        "status": "PASS",
+        "binding_kind": "transitive_generation_pair_store_vectors_dbscan_v1",
+        "source_native_candidate_universe_sha": universe,
+        "pair_store_source_candidate_universe_sha": universe,
+        "dbscan_native_candidate_universe_sha": None,
+        "dbscan_transitively_bound_candidate_universe_sha": universe,
+        "dbscan_approximation_used": False,
+    }
+    candidate_binding_payload["binding_sha256"] = stable_json_sha256(
+        candidate_binding_payload
+    )
+    _json(candidate_binding, candidate_binding_payload)
     historical = {
         "status": "PASS",
         "path": str(adoption_path.resolve()),
         "sha256": _sha(adoption_path),
         "common_root": str(common_root.resolve()),
         "candidate_universe_sha": universe,
+        "source_native_candidate_universe_sha": universe,
         "pair_store_source_candidate_universe_sha": universe,
-        "dbscan_source_candidate_universe_sha": universe,
+        "dbscan_native_candidate_universe_sha": None,
+        "dbscan_transitively_bound_candidate_universe_sha": universe,
+        "transitive_binding_kind": (
+            "transitive_generation_pair_store_vectors_dbscan_v1"
+        ),
         "pair_candidate_graph_hashes_sha256": universe,
         "dbscan_native_candidate_universe_field_present": False,
         "dbscan_universe_binding_via_pair_vectors": True,
@@ -859,6 +883,8 @@ def _mut_fast_accurate_final_fixture(tmp_path: Path) -> dict[str, object]:
         "source_dbscan_manifest_sha256": _sha(dbscan_manifest),
         "500_step_semantic_equivalence_receipt_path": str(equivalence.resolve()),
         "500_step_semantic_equivalence_receipt_sha256": _sha(equivalence),
+        "candidate_pair_dbscan_binding_path": str(candidate_binding.resolve()),
+        "candidate_pair_dbscan_binding_file_sha256": _sha(candidate_binding),
     }
     old_run = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
     run = {
@@ -878,11 +904,13 @@ def _mut_fast_accurate_final_fixture(tmp_path: Path) -> dict[str, object]:
         "stop_reason": "HISTORICAL_FULL_50K_ARTIFACT_ADOPTION",
         "candidate_capacity": 100_000,
         "candidate_universe_sha": universe,
+        "source_native_candidate_universe_sha": universe,
         "pair_store_source_candidate_universe_sha": universe,
-        "dbscan_source_candidate_universe_sha": universe,
+        "dbscan_native_candidate_universe_sha": None,
+        "dbscan_transitively_bound_candidate_universe_sha": universe,
         "candidate_universe_binding_state": "PASS",
         "transitive_binding_kind": (
-            "pair_candidate_universe_via_exact_generation_payload_and_dbscan_vectors"
+            "transitive_generation_pair_store_vectors_dbscan_v1"
         ),
         "pair_candidate_graph_hashes_sha256": universe,
         "dbscan_native_candidate_universe_field_present": False,
@@ -902,6 +930,8 @@ def _mut_fast_accurate_final_fixture(tmp_path: Path) -> dict[str, object]:
         "source_dbscan_manifest_sha256": _sha(dbscan_manifest),
         "500_step_semantic_equivalence_receipt_path": str(equivalence.resolve()),
         "500_step_semantic_equivalence_receipt_sha256": _sha(equivalence),
+        "candidate_pair_dbscan_binding_path": str(candidate_binding.resolve()),
+        "candidate_pair_dbscan_binding_file_sha256": _sha(candidate_binding),
         "standardized_output_root": str(standardized.resolve()),
     }
     _json(root / "historical_adoption_manifest.json", historical)

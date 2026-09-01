@@ -93,6 +93,7 @@ def _historical_adoption(tmp_path: Path) -> tuple[Path, Path]:
         dbscan_manifest,
         {
             "run_complete": True,
+            "approximation_used": False,
             "scientific_identity": {
                 "vectors_path": str(vectors.resolve()),
                 "vectors_sha256": vectors_sha,
@@ -119,6 +120,21 @@ def _historical_adoption(tmp_path: Path) -> tuple[Path, Path]:
     )
 
     universe = "b" * 64
+    candidate_binding = tmp_path / "evidence/candidate_universe_binding.json"
+    candidate_binding_payload = {
+        "schema_version": "mut_candidate_pair_dbscan_binding_v1",
+        "status": "PASS",
+        "binding_kind": standardizer.TRANSITIVE_BINDING_KIND,
+        "source_native_candidate_universe_sha": universe,
+        "pair_store_source_candidate_universe_sha": universe,
+        "dbscan_native_candidate_universe_sha": None,
+        "dbscan_transitively_bound_candidate_universe_sha": universe,
+        "dbscan_approximation_used": False,
+    }
+    candidate_binding_payload["binding_sha256"] = stable_json_sha256(
+        candidate_binding_payload
+    )
+    _json(candidate_binding, candidate_binding_payload)
     receipt = tmp_path / "historical-adoption.json"
     receipt_payload = {
             "schema_version": standardizer.HISTORICAL_ADOPTION_SCHEMA,
@@ -149,15 +165,19 @@ def _historical_adoption(tmp_path: Path) -> tuple[Path, Path]:
             "pair_store_recompute_performed": False,
             "dbscan_recompute_performed": False,
             "candidate_universe_sha": universe,
+            "source_native_candidate_universe_sha": universe,
             "pair_store_source_candidate_universe_sha": universe,
-            "dbscan_source_candidate_universe_sha": universe,
+            "dbscan_native_candidate_universe_sha": None,
+            "dbscan_transitively_bound_candidate_universe_sha": universe,
             "candidate_universe_binding_state": "PASS",
-            "transitive_binding_kind": (
-                "pair_candidate_universe_via_exact_generation_payload_and_dbscan_vectors"
-            ),
+            "transitive_binding_kind": standardizer.TRANSITIVE_BINDING_KIND,
             "pair_candidate_graph_hashes_sha256": universe,
             "dbscan_native_candidate_universe_field_present": False,
             "dbscan_universe_binding_via_pair_vectors": True,
+            "candidate_pair_dbscan_binding_path": str(candidate_binding.resolve()),
+            "candidate_pair_dbscan_binding_file_sha256": sha256_file(
+                candidate_binding
+            ),
             "source_generation_root": str(source.resolve()),
             "source_payload_path": str((source / "counterfactuals.pt").resolve()),
             "source_payload_sha256": standardizer.SOURCE_PAYLOAD_SHA256,
@@ -228,10 +248,12 @@ def test_historical_adoption_reopens_trace_on_50k_transitive_binding(
     assert reopened["trace_parity_passed"] is False
     assert reopened["generation_steps"] == 50_000
     assert reopened["M_EFFECTIVE"] == 50_000
-    assert reopened["transitive_binding_kind"] == (
-        "pair_candidate_universe_via_exact_generation_payload_and_dbscan_vectors"
-    )
+    assert reopened["transitive_binding_kind"] == standardizer.TRANSITIVE_BINDING_KIND
     assert reopened["candidate_universe_sha"] == "b" * 64
+    assert reopened["source_native_candidate_universe_sha"] == "b" * 64
+    assert reopened["pair_store_source_candidate_universe_sha"] == "b" * 64
+    assert reopened["dbscan_native_candidate_universe_sha"] is None
+    assert reopened["dbscan_transitively_bound_candidate_universe_sha"] == "b" * 64
     assert reopened["pair_candidate_graph_hashes_sha256"] == "b" * 64
     assert reopened["dbscan_native_candidate_universe_field_present"] is False
 
@@ -266,8 +288,9 @@ def test_historical_adoption_rejects_receipt_universe_not_in_pair_identity(
     payload = json.loads(receipt.read_text(encoding="utf-8"))
     for field in (
         "candidate_universe_sha",
+        "source_native_candidate_universe_sha",
         "pair_store_source_candidate_universe_sha",
-        "dbscan_source_candidate_universe_sha",
+        "dbscan_transitively_bound_candidate_universe_sha",
         "pair_candidate_graph_hashes_sha256",
     ):
         payload[field] = "e" * 64
