@@ -191,10 +191,25 @@ def test_bace_main_reference_is_evidence_driven_and_blocks_unmatched_sft(
     selector = _write(
         selector_root / "frozen_selection_manifest.json",
         {
-            "status": "PASS",
+            "status": "FROZEN",
+            "stage": "B12_SELECTOR",
+            "calibration_loaded": True,
+            "selector_fitted_on_calibration": True,
+            "selection_frozen": True,
+            "test_loaded": False,
             "K": 20,
+            "cf_mode": "strict_flip",
+            "classifier_type": "gnn",
+            "oracle_backend": "gnn",
+            "source_label": 1,
+            "num_classes": 2,
+            "ordered_rule_ids": [f"rule-{index}" for index in range(20)],
             "ordered_rule_ids_sha256": "3" * 64,
             "calibration_input_hash": "4" * 64,
+            "policy_checkpoint_hash": policy_hash,
+            "candidate_pool_hash": "2" * 64,
+            "oracle_checkpoint_hash": _sha(model),
+            "molclr_checkpoint_hash": _sha(molclr),
         },
     )
     _write(selector_root / "thresholds.json", {"values": []})
@@ -221,6 +236,27 @@ def test_bace_main_reference_is_evidence_driven_and_blocks_unmatched_sft(
     assert result["llm_variant_availability"]["CHEMLLM_SFT_PPO"]["status"] == "BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT"
     assert len(result["reference_contract_sha256"]) == 64
     assert result["proposal_contract"]["proposal_parent_count"] == 386
+
+    incomplete_selector = json.loads(selector.read_text(encoding="utf-8"))
+    incomplete_selector["selection_frozen"] = False
+    _write(selector, incomplete_selector)
+    with pytest.raises(ContractError, match="selector selection_frozen"):
+        build_bace_ours_main_reference(
+            BaceOursReferenceInputs(
+                matrix_authority_state=authority_state,
+                final_root=final,
+                oracle_root=oracle,
+                ppo_root=ppo,
+                train_parent_prep_manifest=prep,
+                base_pool_manifest=base,
+                high_temperature_pool_manifest=high,
+                merged_pool_manifest=merged,
+                verification_manifest=verification,
+                selector_manifest=selector,
+                molclr_checkpoint=molclr,
+            )
+        )
+    _write(selector, {**incomplete_selector, "selection_frozen": True})
 
     wrong_parent_count = deepcopy(result)
     wrong_parent_count["proposal_contract"]["proposal_parent_count"] = 3

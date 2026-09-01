@@ -56,6 +56,50 @@ def _require_pass(payload: Mapping[str, Any], *, name: str) -> None:
         raise ContractError(f"{name} is not PASS")
 
 
+def _require_frozen_selector(payload: Mapping[str, Any]) -> None:
+    """Accept only the exact terminal state emitted by the B12 selector.
+
+    The existing BACE/Ours selector predates the generic PASS convention.  Its
+    scientific terminal is ``FROZEN`` and is safe only when calibration was
+    loaded, fitting is explicitly calibration-only, the selection is frozen,
+    and held-out test was not opened.  Treating arbitrary non-failure statuses
+    as success would hide incomplete selectors, so keep this compatibility
+    rule deliberately narrow.
+    """
+
+    required = {
+        "status": "FROZEN",
+        "stage": "B12_SELECTOR",
+        "calibration_loaded": True,
+        "selector_fitted_on_calibration": True,
+        "selection_frozen": True,
+        "test_loaded": False,
+        "K": 20,
+        "cf_mode": "strict_flip",
+        "classifier_type": "gnn",
+        "oracle_backend": "gnn",
+        "source_label": 1,
+        "num_classes": 2,
+    }
+    for field, expected in required.items():
+        _same(payload.get(field), expected, field=f"selector {field}")
+    ordered = payload.get("ordered_rule_ids")
+    if not isinstance(ordered, list) or len(ordered) != 20:
+        raise ContractError("selector ordered_rule_ids must contain the frozen top 20")
+    if len(set(ordered)) != len(ordered) or any(
+        not isinstance(rule_id, str) or not rule_id for rule_id in ordered
+    ):
+        raise ContractError("selector ordered_rule_ids are invalid or duplicated")
+    require_sha256(
+        payload.get("ordered_rule_ids_sha256"),
+        field="selector.ordered_rule_ids_sha256",
+    )
+    require_sha256(
+        payload.get("calibration_input_hash"),
+        field="selector.calibration_input_hash",
+    )
+
+
 def _same(actual: Any, expected: Any, *, field: str) -> None:
     if actual != expected:
         raise ContractError(f"{field} mismatch: {actual!r} != {expected!r}")
@@ -133,9 +177,9 @@ def build_bace_ours_main_reference(
         ("high-temperature candidate pool", high_pool),
         ("merged candidate pool", merged_pool),
         ("verification", verification),
-        ("selector", selector),
     ):
         _require_pass(payload, name=name)
+    _require_frozen_selector(selector)
 
     _same(str(final_run.get("dataset", "")).lower(), "bace", field="dataset")
     _same(str(final_run.get("method", "")).lower(), "ours", field="method")
@@ -187,6 +231,22 @@ def build_bace_ours_main_reference(
     _same(base_pool.get("policy_checkpoint_hash"), policy_hash, field="base policy")
     _same(high_pool.get("policy_checkpoint_hash"), policy_hash, field="high-temp policy")
     _same(merged_pool.get("policy_checkpoint_hash"), policy_hash, field="merged policy")
+    _same(selector.get("policy_checkpoint_hash"), policy_hash, field="selector policy")
+    _same(
+        selector.get("candidate_pool_hash"),
+        merged_pool.get("candidate_pool_hash"),
+        field="selector candidate pool",
+    )
+    _same(
+        selector.get("oracle_checkpoint_hash"),
+        model["sha256"],
+        field="selector oracle",
+    )
+    _same(
+        selector.get("molclr_checkpoint_hash"),
+        molclr["sha256"],
+        field="selector MolCLR",
+    )
     policy_identity = base_pool.get("policy_identity", {})
     _same(
         policy_identity.get("adapter_weights", {}).get("sha256"),
