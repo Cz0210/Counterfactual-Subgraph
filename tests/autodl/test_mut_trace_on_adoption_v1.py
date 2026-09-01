@@ -1460,6 +1460,25 @@ def test_protected_baseline_accepts_alive_task_at_terminal(
     assert baseline["tasks"]["resource-capped"]["units_per_second"] is None
 
 
+def test_only_no_progress_baseline_failures_are_retryable() -> None:
+    assert worker._retryable_protected_baseline_failures(
+        [
+            "no_positive_baseline:taste_t14",
+            "no_positive_baseline:taste_t11",
+        ]
+    )
+    assert not worker._retryable_protected_baseline_failures([])
+    assert not worker._retryable_protected_baseline_failures(
+        ["protected_task_exited:taste_t14"]
+    )
+    assert not worker._retryable_protected_baseline_failures(
+        [
+            "no_positive_baseline:taste_t14",
+            "counter_regressed:taste_t11",
+        ]
+    )
+
+
 def test_protected_baseline_and_window_fail_closed_without_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

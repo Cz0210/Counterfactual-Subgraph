@@ -110,6 +110,13 @@ class MutTraceWorkerError(RuntimeError):
     """A one-shot adoption gate failed closed."""
 
 
+def _retryable_protected_baseline_failures(failures: Sequence[Any]) -> bool:
+    normalized = [str(item) for item in failures]
+    return bool(normalized) and all(
+        item.startswith("no_positive_baseline:") for item in normalized
+    )
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -2067,10 +2074,21 @@ def _run(args: argparse.Namespace) -> int:
                 )
                 atomic_json(output / "protected_throughput_baseline.json", baseline)
                 if baseline.get("status") != "PASS":
+                    failures = list(baseline.get("failures") or [])
+                    if _retryable_protected_baseline_failures(failures):
+                        heartbeat(
+                            "WAITING_FOR_MEASURABLE_PROTECTED_BASELINE",
+                            baseline_attempt=baseline_attempt,
+                            baseline_failures=[str(item) for item in failures],
+                            retry_seconds=HEADROOM_WAIT_SECONDS,
+                            gpu_lock_held=False,
+                        )
+                        time.sleep(HEADROOM_WAIT_SECONDS)
+                        continue
                     raise MutTraceWorkerError(
                         "Protected-task five-minute baseline failed: "
                         + ",".join(
-                            str(item) for item in baseline.get("failures", [])
+                            str(item) for item in failures
                         )
                     )
                 postbaseline_admission = _cgroup_snapshot(cgroup)
