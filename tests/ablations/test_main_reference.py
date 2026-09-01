@@ -175,6 +175,7 @@ def test_bace_main_reference_is_evidence_driven_and_blocks_unmatched_sft(
         tmp_path / "verification.json",
         {
             "status": "PASS",
+            "candidate_source_hash": "1" * 64,
             "distance_type": "node_wasserstein",
             "match_selection_policy": "minimum",
             "no_valid_strict_flip_semantics": "+inf",
@@ -207,11 +208,31 @@ def test_bace_main_reference_is_evidence_driven_and_blocks_unmatched_sft(
             "ordered_rule_ids_sha256": "3" * 64,
             "calibration_input_hash": "4" * 64,
             "policy_checkpoint_hash": policy_hash,
-            "candidate_pool_hash": "2" * 64,
+            "candidate_pool_hash": "1" * 64,
             "oracle_checkpoint_hash": _sha(model),
             "molclr_checkpoint_hash": _sha(molclr),
         },
     )
+    matrix_manifest = _write(
+        selector_root / "matrix_manifest.json",
+        {
+            "status": "PASS",
+            "stage": "B11_CROSS_PARENT_VERIFIED",
+            "calibration_loaded": True,
+            "test_loaded": False,
+            "candidate_universe_hash": "1" * 64,
+            "policy_checkpoint_hash": policy_hash,
+            "oracle_checkpoint_hash": _sha(model),
+            "molclr_checkpoint_hash": _sha(molclr),
+        },
+    )
+    selector_payload = json.loads(selector.read_text(encoding="utf-8"))
+    selector_payload["matrix_manifest_identity"] = {
+        "path": str(matrix_manifest),
+        "sha256": _sha(matrix_manifest),
+        "size": matrix_manifest.stat().st_size,
+    }
+    _write(selector, selector_payload)
     _write(selector_root / "thresholds.json", {"values": []})
     _write(selector_root / "variant_configs.json", {"fixed": True})
 

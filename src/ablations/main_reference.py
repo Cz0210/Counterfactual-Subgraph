@@ -232,10 +232,21 @@ def build_bace_ours_main_reference(
     _same(high_pool.get("policy_checkpoint_hash"), policy_hash, field="high-temp policy")
     _same(merged_pool.get("policy_checkpoint_hash"), policy_hash, field="merged policy")
     _same(selector.get("policy_checkpoint_hash"), policy_hash, field="selector policy")
+    candidate_universe_sha = require_sha256(
+        merged_pool.get("candidate_universe_hash"),
+        field="merged_pool.candidate_universe_hash",
+    )
+    # B10 records both a serialized-pool hash and the canonical scientific
+    # candidate-universe hash.  B11/B12 intentionally bind the latter.
+    _same(
+        verification.get("candidate_source_hash"),
+        candidate_universe_sha,
+        field="verification candidate universe",
+    )
     _same(
         selector.get("candidate_pool_hash"),
-        merged_pool.get("candidate_pool_hash"),
-        field="selector candidate pool",
+        candidate_universe_sha,
+        field="selector candidate universe",
     )
     _same(
         selector.get("oracle_checkpoint_hash"),
@@ -247,6 +258,28 @@ def build_bace_ours_main_reference(
         molclr["sha256"],
         field="selector MolCLR",
     )
+    selector_matrix_identity = selector.get("matrix_manifest_identity")
+    if not isinstance(selector_matrix_identity, Mapping):
+        raise ContractError("selector has no B11 matrix manifest identity")
+    selector_matrix_path = Path(str(selector_matrix_identity.get("path") or ""))
+    selector_matrix = _file_identity(selector_matrix_path)
+    _same(
+        selector_matrix["sha256"],
+        selector_matrix_identity.get("sha256"),
+        field="selector B11 matrix SHA",
+    )
+    matrix_manifest = _load(selector_matrix_path)
+    _require_pass(matrix_manifest, name="B11 merged matrix")
+    for field, expected in {
+        "stage": "B11_CROSS_PARENT_VERIFIED",
+        "calibration_loaded": True,
+        "test_loaded": False,
+        "candidate_universe_hash": candidate_universe_sha,
+        "policy_checkpoint_hash": policy_hash,
+        "oracle_checkpoint_hash": model["sha256"],
+        "molclr_checkpoint_hash": molclr["sha256"],
+    }.items():
+        _same(matrix_manifest.get(field), expected, field=f"B11 matrix {field}")
     policy_identity = base_pool.get("policy_identity", {})
     _same(
         policy_identity.get("adapter_weights", {}).get("sha256"),
@@ -375,12 +408,13 @@ def build_bace_ours_main_reference(
             "input_row_count": merged_pool.get("input_row_count"),
             "merged_row_count": merged_pool.get("merged_row_count"),
             "candidate_universe_count": merged_pool.get("candidate_universe_count"),
-            "candidate_universe_sha": merged_pool.get("candidate_universe_hash"),
+            "candidate_universe_sha": candidate_universe_sha,
             "pool_sha": merged_pool.get("candidate_pool_hash"),
         },
     }
     selector_contract = {
         "selector_manifest": selector_identity,
+        "verified_matrix_manifest": selector_matrix,
         "thresholds": thresholds_identity,
         "variant_configs": variant_configs_identity,
         "K": selector.get("K"),
