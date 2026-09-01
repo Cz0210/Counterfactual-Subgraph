@@ -14,6 +14,8 @@ CLI = ROOT / "scripts/autodl/salvage_tastemolnet_t8_branches_v1.py"
 ORCHESTRATOR = ROOT / "scripts/autodl/run_tastemolnet_t8_salvage_release_v1.sh"
 T13_RELAY = ROOT / "scripts/autodl/run_tastemolnet_t13_after_t8_salvage_v1.sh"
 SLURM = ROOT / "scripts/slurm/salvage_tastemolnet_t8_branches_v1.sh"
+RERUN_CLI = ROOT / "scripts/autodl/rerun_tastemolnet_t8_single_branch_v1.py"
+RERUN_SLURM = ROOT / "scripts/slurm/rerun_tastemolnet_t8_single_branch_v1.sh"
 
 
 def test_single_branch_failure_preserves_the_other_branch(tmp_path: Path) -> None:
@@ -96,7 +98,27 @@ def test_salvage_adopts_then_persists_t13_relay() -> None:
     assert "[TASTE_T8_SALVAGE_PASS]" in text
     assert "[TASTE_T8_GLOBALGCE_SMOKE_PASS]" in text
     assert "RUN_GNN_ABLATION" in text
+    assert "PYTHONDONTWRITEBYTECODE=1" in text
+    assert 'gpu-$GPU_UUID.coordination.lock' in text
+    assert "flock -n 8" in text
     assert "run_tastemolnet_t8_deadline.py" not in text
+
+
+def test_salvage_has_one_bounded_target_specific_recovery() -> None:
+    text = ORCHESTRATOR.read_text(encoding="utf-8")
+    assert "rerun_tastemolnet_t8_single_branch_v1.py" in text
+    assert "invalid_target_branches" in text
+    assert "len(x)==1" in text
+    assert "T8_SALVAGE_FAILED_NO_TARGET_SPECIFIC_RECOVERY" in text
+    assert "T8_SALVAGE_FAILED_NON_SINGLE_BRANCH" in text
+    assert "T8_SINGLE_BRANCH_RECOVERY_FAILED" in text
+    assert "T8_BOUNDED_SINGLE_BRANCH_RECOVERY_FAILED" in text
+    assert text.count("run_salvage_attempt") == 3  # declaration plus two calls
+    assert "while true" in text  # GPU admission only, never a science retry loop
+    recovery = RERUN_CLI.read_text(encoding="utf-8")
+    assert 'choices=(0, 2)' in recovery
+    assert "run_single_branch_recovery" in recovery
+    assert "[TASTE_T8_SINGLE_BRANCH_RECOVERY_PASS]" in recovery
 
 
 def test_t13_relay_has_no_unrelated_taste_dependencies() -> None:
@@ -109,20 +131,25 @@ def test_t13_relay_has_no_unrelated_taste_dependencies() -> None:
     assert "--mode validate" in text
     assert "[TASTE_T13_GLOBALGCE_FULL_LAUNCHED]" in text
     assert "uuid.uuid4()" in text
+    assert "PYTHONDONTWRITEBYTECODE=1" in text
+    assert 'gpu-$GPU_UUID.coordination.lock' in text
+    assert "flock -n 8" in text
 
 
 def test_paired_slurm_keeps_hpc_baseline_and_science_flags() -> None:
-    text = SLURM.read_text(encoding="utf-8")
-    for token in (
-        "#SBATCH --partition=A800",
-        "#SBATCH --gres=gpu:a800:1",
-        "#SBATCH --output=logs/%j.out",
-        "#SBATCH --error=logs/%j.err",
-        "source ~/.bashrc",
-        "conda activate smiles_pip118",
-        "cd /share/home/u20526/czx/counterfactual-subgraph",
-        "export PYTHONPATH=$PWD",
-        "--config configs/hpc.yaml",
-        "--set inference.fallback_to_heuristic=false",
-    ):
-        assert token in text
+    for path in (SLURM, RERUN_SLURM):
+        text = path.read_text(encoding="utf-8")
+        for token in (
+            "#SBATCH --partition=A800",
+            "#SBATCH --gres=gpu:a800:1",
+            "#SBATCH --output=logs/%j.out",
+            "#SBATCH --error=logs/%j.err",
+            "source ~/.bashrc",
+            "conda activate smiles_pip118",
+            "cd /share/home/u20526/czx/counterfactual-subgraph",
+            "export PYTHONPATH=$PWD",
+            "export PYTHONDONTWRITEBYTECODE=1",
+            "--config configs/hpc.yaml",
+            "--set inference.fallback_to_heuristic=false",
+        ):
+            assert token in text

@@ -35,6 +35,7 @@ flock -n 9 || { echo "another T8 salvage controller is active" >&2; exit 73; }
 cd "$T8_REPO_ROOT"
 export PYTHONPATH=$PWD
 export PYTHONHASHSEED=7
+export PYTHONDONTWRITEBYTECODE=1
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export CUDA_VISIBLE_DEVICES=$GPU_INDEX
 
@@ -48,7 +49,16 @@ printf '%s\n' "$$" > "$T8_SALVAGE_CONTROLLER_ROOT/controller.pid"
 write_heartbeat WAITING_FOR_SALVAGE_GPU 0
 while true; do
   gpu_processes=$(nvidia-smi -i "$GPU_INDEX" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | tr -d '[:space:]' || true)
-  [[ -z "$gpu_processes" ]] && break
+  if [[ -z "$gpu_processes" ]]; then
+    GPU_UUID=$(nvidia-smi -i "$GPU_INDEX" --query-gpu=uuid --format=csv,noheader,nounits | tr -d '[:space:]')
+    [[ "$GPU_UUID" =~ ^GPU-[A-Za-z0-9-]+$ ]] || { echo "T8 physical GPU UUID is invalid" >&2; exit 64; }
+    mkdir -p "$RUNTIME/locks"
+    exec 8>>"$RUNTIME/locks/gpu-$GPU_UUID.coordination.lock"
+    if flock -n 8; then
+      break
+    fi
+    exec 8>&-
+  fi
   sleep "$POLL_SECONDS"
   write_heartbeat WAITING_FOR_SALVAGE_GPU 0
 done
@@ -106,8 +116,15 @@ new_salvage_attempt
 FIRST_ATTEMPT_ID=$SALVAGE_ATTEMPT_ID
 FIRST_RERUN_REQUEST=$RERUN_REQUEST
 if ! run_salvage_attempt "$T8_SALVAGE_CONTROLLER_ROOT/salvage-attempt-1.log"; then
+  if [[ ! -s "$FIRST_RERUN_REQUEST" ]]; then
+    write_heartbeat T8_SALVAGE_FAILED_NO_TARGET_SPECIFIC_RECOVERY 0
+    exit 75
+  fi
+  if ! INVALID_TARGET=$($PY -c 'import json,sys; v=json.load(open(sys.argv[1])); x=v.get("invalid_target_branches"); assert isinstance(x,list) and len(x)==1 and x[0] in (0,2); print(x[0])' "$FIRST_RERUN_REQUEST"); then
+    write_heartbeat T8_SALVAGE_FAILED_NON_SINGLE_BRANCH 0
+    exit 75
+  fi
   write_heartbeat T8_SINGLE_BRANCH_RERUN_REQUIRED 0
-  INVALID_TARGET=$($PY -c 'import json,sys; v=json.load(open(sys.argv[1])); x=v.get("invalid_target_branches"); assert isinstance(x,list) and len(x)==1 and x[0] in (0,2); print(x[0])' "$FIRST_RERUN_REQUEST")
   BRANCH_ATTEMPT_ID=$($PY -c 'import uuid; print(uuid.uuid4())')
   BRANCH_BASE=$BASE/single-branch-$BRANCH_ATTEMPT_ID
   BRANCH_STATE=$BRANCH_BASE/state
@@ -120,20 +137,23 @@ if ! run_salvage_attempt "$T8_SALVAGE_CONTROLLER_ROOT/salvage-attempt-1.log"; th
     printf 'state_root=%s\n' "$BRANCH_STATE"
   } > "$T8_SALVAGE_CONTROLLER_ROOT/single-branch-recovery.env"
   write_heartbeat "T8_TARGET_${INVALID_TARGET}_FRESH_RECOVERY" 0
-  "$PY" scripts/autodl/rerun_tastemolnet_t8_single_branch_v1.py \
-    --config configs/hpc.yaml \
-    --set inference.fallback_to_heuristic=false \
-    --attempt-id "$BRANCH_ATTEMPT_ID" \
-    --source-attempt-id "$T8_SOURCE_ATTEMPT_ID" \
-    --target "$INVALID_TARGET" \
-    --t3-output "$TASTEMOLNET_T3_OUTPUT" \
-    --t4-output "$TASTEMOLNET_T4_OUTPUT" \
-    --gnn-checkpoint "$TASTEMOLNET_GNN_CHECKPOINT" \
-    --train-csv "$TASTEMOLNET_TRAIN_CSV" \
-    --official-root "$TASTEMOLNET_GLOBALGCE_OFFICIAL_ROOT" \
-    --state-root "$BRANCH_STATE" \
-    --gspan-scratch-root "$BRANCH_SCRATCH" \
-    --device cuda:0 > "$T8_SALVAGE_CONTROLLER_ROOT/single-branch-recovery.log" 2>&1
+  if ! "$PY" scripts/autodl/rerun_tastemolnet_t8_single_branch_v1.py \
+      --config configs/hpc.yaml \
+      --set inference.fallback_to_heuristic=false \
+      --attempt-id "$BRANCH_ATTEMPT_ID" \
+      --source-attempt-id "$T8_SOURCE_ATTEMPT_ID" \
+      --target "$INVALID_TARGET" \
+      --t3-output "$TASTEMOLNET_T3_OUTPUT" \
+      --t4-output "$TASTEMOLNET_T4_OUTPUT" \
+      --gnn-checkpoint "$TASTEMOLNET_GNN_CHECKPOINT" \
+      --train-csv "$TASTEMOLNET_TRAIN_CSV" \
+      --official-root "$TASTEMOLNET_GLOBALGCE_OFFICIAL_ROOT" \
+      --state-root "$BRANCH_STATE" \
+      --gspan-scratch-root "$BRANCH_SCRATCH" \
+      --device cuda:0 > "$T8_SALVAGE_CONTROLLER_ROOT/single-branch-recovery.log" 2>&1; then
+    write_heartbeat T8_SINGLE_BRANCH_RECOVERY_FAILED 0
+    exit 75
+  fi
   if [[ "$INVALID_TARGET" == "0" ]]; then
     T8_TARGET_0_ROOT=$BRANCH_STATE/target-0
   else

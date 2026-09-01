@@ -31,10 +31,15 @@ existing two-process managed-v2 adopter remains the only bridge to T13.
 
 - T12 no longer waits for an unrelated full Taste task and always uses a fresh
   GPU3 attempt.
-- One invalid T8 branch produces a receipt naming only that target; a valid
-  sibling is preserved and no automatic two-branch rerun occurs.
+- One invalid T8 branch produces a receipt naming only that target.  The relay
+  preserves the valid sibling, permits exactly one fresh 25-epoch rerun of the
+  named branch, and makes one new salvage attempt; it never reruns both branches
+  or enters an unbounded retry loop.
 - A passing managed T8 final immediately persists the T13 GPU1 relay.  That
   relay depends on T8 only and does not wait for any other Taste full cell.
+- T8 and T13 hold the existing UUID-scoped project GPU coordination lock for
+  their whole GPU-critical section and disable Python bytecode writes, so the
+  pinned official source checkout remains read-only.
 - No main-table success is claimed by these code changes; real AutoDL science
   and independent terminal verification are still required.
 

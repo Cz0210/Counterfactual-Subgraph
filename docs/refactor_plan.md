@@ -10,12 +10,13 @@
   model, rule, checkpoint, split, GINE, feature-schema, and exact-top-k bytes.
 - [x] Reapply retained native rules, merge/deduplicate canonically, and require
   original-order untargeted strict flips before managed-v2 adoption.
-- [x] Emit a target-specific rerun request on branch failure and retain every
-  passing sibling rather than rerunning both branches.
+- [x] Emit a target-specific rerun request on branch failure, retain every
+  passing sibling, and permit one bounded fresh rerun of only the failed branch
+  followed by exactly one new salvage attempt.
 - [x] Persist a GPU1 T13 relay released by typed T8 PASS alone.
-- [ ] Run focused tests in the project environment, deploy one immutable clean
-  checkout, launch T12 on newly free GPU3, then launch T8 salvage without
-  mutating the retained source attempt.
+- [x] Run focused T8/T13 tests plus compile/shell/static validation locally.
+- [ ] Deploy one immutable clean checkout, launch T12 on newly free GPU3, then
+  launch T8 salvage without mutating the retained source attempt.
 
 ## 2026-09-01: Execute the BACE ComRecGC resource-cap continuation
 

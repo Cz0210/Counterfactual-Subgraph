@@ -13,6 +13,7 @@ source ~/.bashrc
 conda activate smiles_pip118
 cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
+export PYTHONDONTWRITEBYTECODE=1
 
 echo "python=$(command -v python)"
 python --version

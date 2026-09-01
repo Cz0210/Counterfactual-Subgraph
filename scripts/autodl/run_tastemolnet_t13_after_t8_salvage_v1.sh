@@ -33,6 +33,7 @@ flock -n 9 || { echo "another T13 salvage relay is active" >&2; exit 73; }
 cd "$T13_REPO_ROOT"
 export PYTHONPATH=$PWD
 export PYTHONHASHSEED=7
+export PYTHONDONTWRITEBYTECODE=1
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export CUDA_VISIBLE_DEVICES=$GPU_INDEX
 
@@ -57,7 +58,16 @@ write_heartbeat VALIDATING_T8_TYPED_PASS 0
 write_heartbeat WAITING_FOR_GPU1 0
 while true; do
   gpu_processes=$(nvidia-smi -i "$GPU_INDEX" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | tr -d '[:space:]' || true)
-  [[ -z "$gpu_processes" ]] && break
+  if [[ -z "$gpu_processes" ]]; then
+    GPU_UUID=$(nvidia-smi -i "$GPU_INDEX" --query-gpu=uuid --format=csv,noheader,nounits | tr -d '[:space:]')
+    [[ "$GPU_UUID" =~ ^GPU-[A-Za-z0-9-]+$ ]] || { echo "T13 physical GPU UUID is invalid" >&2; exit 64; }
+    mkdir -p "$RUNTIME/locks"
+    exec 8>>"$RUNTIME/locks/gpu-$GPU_UUID.coordination.lock"
+    if flock -n 8; then
+      break
+    fi
+    exec 8>&-
+  fi
   sleep "$POLL_SECONDS"
   write_heartbeat WAITING_FOR_GPU1 0
 done
@@ -65,7 +75,6 @@ done
 ATTEMPT_ID=$($PY -c 'import uuid; print(uuid.uuid4())')
 OUTPUT_ROOT=$OUTPUT_BASE/attempt-$ATTEMPT_ID
 [[ ! -e "$OUTPUT_ROOT" && ! -L "$OUTPUT_ROOT" ]] || { echo "T13 output is not fresh" >&2; exit 74; }
-GPU_UUID=$(nvidia-smi -i "$GPU_INDEX" --query-gpu=uuid --format=csv,noheader,nounits | tr -d '[:space:]')
 WNODE_CACHE=${WNODE_CACHE_DB:-$RUNTIME/cache/tastemolnet/t13-globalgce-wnode.sqlite}
 NODE_CACHE=${NODE_EMBEDDING_CACHE_DIR:-$RUNTIME/cache/tastemolnet/t13-globalgce-molclr-nodes}
 mkdir -p "$(dirname "$WNODE_CACHE")" "$NODE_CACHE"
