@@ -1244,6 +1244,175 @@ def test_registry_promotes_only_exact_reconciled_zero_cost_mismatch() -> None:
     assert "MISSING_OR_EMPTY" in rejected["rerun_reason"]
 
 
+def _threshold_grid_row(
+    root: Path,
+    *,
+    dataset: str,
+    method: str,
+    threshold_hash: str,
+    thresholds: list[str],
+    coverages: list[str],
+) -> dict[str, object]:
+    _csv(
+        root / "figure4_coverage_vs_threshold.csv",
+        [
+            {
+                "method": method,
+                "threshold": threshold,
+                "close_cf_coverage": coverage,
+            }
+            for threshold, coverage in zip(thresholds, coverages, strict=True)
+        ],
+    )
+    return {
+        "dataset": dataset,
+        "method": method,
+        "standardized_output_root": str(root.resolve()),
+        "threshold_config_hash": threshold_hash,
+    }
+
+
+def test_aids_zero_threshold_grid_accepts_only_decimal_serialization_drift(
+    tmp_path: Path,
+) -> None:
+    target_hash = "a" * 64
+    reference_hash = "b" * 64
+    target = _threshold_grid_row(
+        tmp_path / "target",
+        dataset="AIDS",
+        method="ComRecGC",
+        threshold_hash=target_hash,
+        thresholds=[
+            "0",
+            "0.017833333333333333",
+            "0.035666666666666666",
+            "0.0535",
+        ],
+        coverages=["0", "0.0", "0.000", "0"],
+    )
+    reference = _threshold_grid_row(
+        tmp_path / "reference",
+        dataset="AIDS",
+        method="Ours",
+        threshold_hash=reference_hash,
+        thresholds=[
+            "0.0",
+            "0.0178333333333333",
+            "0.0356666666666667",
+            "0.0535",
+        ],
+        coverages=["0.2", "0.3", "0.4", "0.5"],
+    )
+
+    evidence = matrix._validate_aids_zero_threshold_grid_equivalence(
+        target, reference
+    )
+
+    assert evidence["status"] == "PASS"
+    assert evidence["same_start"] is True
+    assert evidence["same_end"] is True
+    assert evidence["same_count"] is True
+    assert evidence["both_canonical_equidistant"] is True
+    assert evidence["target_all_coverages_zero"] is True
+    assert evidence["target_threshold_config_hash_original"] == target_hash
+    assert evidence["reference_threshold_config_hash_original"] == reference_hash
+    assert evidence["hashes_rewritten"] is False
+
+
+def test_aids_zero_threshold_grid_rejects_real_grid_drift(tmp_path: Path) -> None:
+    target = _threshold_grid_row(
+        tmp_path / "target",
+        dataset="AIDS",
+        method="ComRecGC",
+        threshold_hash="a" * 64,
+        thresholds=["0", "0.017833333333333333", "0.035666666666666666", "0.0535"],
+        coverages=["0", "0", "0", "0"],
+    )
+    reference = _threshold_grid_row(
+        tmp_path / "reference",
+        dataset="AIDS",
+        method="Ours",
+        threshold_hash="b" * 64,
+        thresholds=["0", "0.0178333333333333", "0.0356663333333333", "0.0535"],
+        coverages=["0.2", "0.3", "0.4", "0.5"],
+    )
+
+    with pytest.raises(
+        matrix.NonTasteMatrixAppendError,
+        match="not the canonical equidistant grid",
+    ):
+        matrix._validate_aids_zero_threshold_grid_equivalence(target, reference)
+
+
+def test_aids_zero_threshold_hash_mismatch_requires_bound_grid_receipt() -> None:
+    terminal = {
+        "terminal_kind": "AIDS_ZERO_STRICT_FLIP_TERMINAL_RECONCILIATION",
+        "scientific_output_empty": True,
+        "strict_flip_status": "STRICT_FLIP_NOT_OBSERVED",
+        "coverage": 0.0,
+        "conditional_cost_available": False,
+        "numeric_imputation_used": False,
+        "registry_numeric_imputation_used": False,
+    }
+    target_hash = "a" * 64
+    reference_hash = "b" * 64
+    target = {
+        "dataset": "AIDS",
+        "method": "ComRecGC",
+        "status": registry.CellStatus.INCOMPLETE.value,
+        "k_max": 20,
+        "table2_k": 10,
+        "threshold_config_hash": target_hash,
+        "adoption_reason": "",
+        "rerun_reason": (
+            "EXPECTED_THRESHOLD_CONFIG_HASH_MISMATCH;"
+            "FIGURE3_INVALID:ValueError;TABLE2_INVALID:ValueError"
+        ),
+    }
+    assert matrix._reconcile_aids_zero_registry_row(
+        target, terminal=terminal
+    )["status"] == registry.CellStatus.INCOMPLETE.value
+
+    evidence = {
+        "schema_version": matrix._AIDS_ZERO_THRESHOLD_GRID_EQUIVALENCE_SCHEMA,
+        "status": "PASS",
+        "scope": "AIDS_COMRECGC_VALID_ZERO_RESULT_ONLY",
+        "target_all_coverages_zero": True,
+        "target_threshold_config_hash_original": target_hash,
+        "reference_threshold_config_hash_original": reference_hash,
+        "hashes_rewritten": False,
+    }
+    promoted = matrix._reconcile_aids_zero_registry_row(
+        target,
+        terminal=terminal,
+        threshold_equivalence=evidence,
+    )
+    assert promoted["status"] == registry.CellStatus.FROZEN_PASS.value
+    assert promoted["threshold_config_hash"] == target_hash
+
+    shared = {
+        field: f"value-{field}"
+        for field in matrix._RF_SHARED_FIELDS
+        if field != "threshold_config_hash"
+    }
+    compatibility = matrix._identity_compatibility(
+        dataset="AIDS",
+        target={**shared, "threshold_config_hash": target_hash},
+        reference={
+            **shared,
+            "threshold_config_hash": reference_hash,
+            "status": registry.CellStatus.FROZEN_PASS.value,
+        },
+        equivalent_mismatches={"threshold_config_hash": evidence},
+    )
+    assert compatibility["equivalent_mismatched_fields"] == [
+        "threshold_config_hash"
+    ]
+    assert compatibility["equivalent_mismatch_evidence"][
+        "threshold_config_hash"
+    ] == evidence
+
+
 def test_cli_and_slurm_keep_publication_on_shared_pointer() -> None:
     args = build_parser().parse_args(
         [

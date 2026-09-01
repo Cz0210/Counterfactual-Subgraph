@@ -9,7 +9,9 @@ standardization contracts are accepted.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import replace
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -105,6 +107,13 @@ _AIDS_ZERO_CONDITIONAL_COST_REGISTRY_REASONS = frozenset(
         "TABLE2_INVALID:ValueError",
     }
 )
+_AIDS_ZERO_THRESHOLD_GRID_REGISTRY_REASON = (
+    "EXPECTED_THRESHOLD_CONFIG_HASH_MISMATCH"
+)
+_AIDS_ZERO_THRESHOLD_GRID_EQUIVALENCE_SCHEMA = (
+    "aids_zero_threshold_grid_decimal_equivalence_v1"
+)
+_AIDS_ZERO_THRESHOLD_CANONICAL_QUANTUM = Decimal("1E-15")
 _BACE_SHARED_FIELDS = (
     "dataset_hash",
     "split_hash",
@@ -242,6 +251,171 @@ def _critical_inventory(root: Path, names: tuple[str, ...]) -> dict[str, dict[st
         path = _physical_file(root / name, label=f"terminal artifact {name}")
         result[name] = {"bytes": path.stat().st_size, "sha256": _sha(path)}
     return result
+
+
+def _aids_zero_figure4_grid(
+    row: Mapping[str, Any], *, role: str, require_zero_coverage: bool
+) -> tuple[Path, list[Decimal], bool]:
+    standardized = _physical_directory(
+        str(row.get("standardized_output_root") or ""),
+        label=f"AIDS {role} standardized root",
+    )
+    figure4 = _physical_file(
+        standardized / "figure4_coverage_vs_threshold.csv",
+        label=f"AIDS {role} Figure 4",
+    )
+    thresholds: list[Decimal] = []
+    all_zero = True
+    try:
+        with figure4.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = set(reader.fieldnames or ())
+            coverage_field = next(
+                (
+                    name
+                    for name in ("close_cf_coverage", "ccrcov", "coverage")
+                    if name in fieldnames
+                ),
+                None,
+            )
+            if "threshold" not in fieldnames or coverage_field is None:
+                raise NonTasteMatrixAppendError(
+                    f"AIDS {role} Figure 4 lacks threshold/coverage columns"
+                )
+            for index, raw in enumerate(reader):
+                try:
+                    threshold = Decimal(str(raw.get("threshold") or "").strip())
+                    coverage = Decimal(str(raw.get(coverage_field) or "").strip())
+                except InvalidOperation as exc:
+                    raise NonTasteMatrixAppendError(
+                        f"AIDS {role} Figure 4 has an invalid decimal at row {index}"
+                    ) from exc
+                if not threshold.is_finite() or not coverage.is_finite():
+                    raise NonTasteMatrixAppendError(
+                        f"AIDS {role} Figure 4 has a nonfinite decimal at row {index}"
+                    )
+                thresholds.append(threshold)
+                all_zero = all_zero and coverage == 0
+    except OSError as exc:
+        raise NonTasteMatrixAppendError(
+            f"AIDS {role} Figure 4 cannot be read: {figure4}"
+        ) from exc
+    if len(thresholds) < 2:
+        raise NonTasteMatrixAppendError(
+            f"AIDS {role} Figure 4 needs at least two threshold rows"
+        )
+    if any(right <= left for left, right in zip(thresholds, thresholds[1:])):
+        raise NonTasteMatrixAppendError(
+            f"AIDS {role} Figure 4 thresholds are not strictly increasing"
+        )
+    if require_zero_coverage and not all_zero:
+        raise NonTasteMatrixAppendError(
+            "AIDS ComRecGC threshold compatibility requires zero coverage at every row"
+        )
+    return figure4, thresholds, all_zero
+
+
+def _validate_aids_zero_threshold_grid_equivalence(
+    target: Mapping[str, Any], reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Prove one AIDS zero-result hash drift is decimal serialization only."""
+
+    if target.get("dataset") != "AIDS" or target.get("method") != "ComRecGC":
+        raise NonTasteMatrixAppendError(
+            "Threshold-grid compatibility is AIDS/ComRecGC-only"
+        )
+    if reference.get("dataset") != "AIDS" or reference.get("method") != "Ours":
+        raise NonTasteMatrixAppendError(
+            "Threshold-grid compatibility requires the AIDS/Ours authority reference"
+        )
+    target_hash = _valid_sha(
+        target.get("threshold_config_hash"),
+        label="AIDS target threshold_config_hash",
+    )
+    reference_hash = _valid_sha(
+        reference.get("threshold_config_hash"),
+        label="AIDS reference threshold_config_hash",
+    )
+    if target_hash == reference_hash:
+        raise NonTasteMatrixAppendError(
+            "AIDS threshold-grid compatibility requires distinct original hashes"
+        )
+    target_path, target_grid, target_all_zero = _aids_zero_figure4_grid(
+        target, role="ComRecGC", require_zero_coverage=True
+    )
+    reference_path, reference_grid, _ = _aids_zero_figure4_grid(
+        reference, role="Ours reference", require_zero_coverage=False
+    )
+    if len(target_grid) != len(reference_grid):
+        raise NonTasteMatrixAppendError("AIDS threshold grids have different row counts")
+    if target_grid[0] != reference_grid[0] or target_grid[-1] != reference_grid[-1]:
+        raise NonTasteMatrixAppendError("AIDS threshold grids have different endpoints")
+
+    with localcontext() as context:
+        context.prec = 80
+        denominator = Decimal(len(target_grid) - 1)
+        step = (target_grid[-1] - target_grid[0]) / denominator
+        nominal = [
+            target_grid[0] + step * Decimal(index)
+            for index in range(len(target_grid))
+        ]
+        canonical_nominal = [
+            value.quantize(
+                _AIDS_ZERO_THRESHOLD_CANONICAL_QUANTUM,
+                rounding=ROUND_HALF_EVEN,
+            )
+            for value in nominal
+        ]
+
+        def canonicalize(values: list[Decimal]) -> list[Decimal]:
+            return [
+                value.quantize(
+                    _AIDS_ZERO_THRESHOLD_CANONICAL_QUANTUM,
+                    rounding=ROUND_HALF_EVEN,
+                )
+                for value in values
+            ]
+
+        canonical_target = canonicalize(target_grid)
+        canonical_reference = canonicalize(reference_grid)
+        if canonical_target != canonical_nominal:
+            raise NonTasteMatrixAppendError(
+                "AIDS ComRecGC threshold grid is not the canonical equidistant grid"
+            )
+        if canonical_reference != canonical_nominal:
+            raise NonTasteMatrixAppendError(
+                "AIDS Ours threshold grid is not the canonical equidistant grid"
+            )
+        max_difference = max(
+            abs(observed - expected)
+            for observed, expected in zip(target_grid, reference_grid)
+        )
+        canonical_strings = [format(value, "f") for value in canonical_nominal]
+
+    return {
+        "schema_version": _AIDS_ZERO_THRESHOLD_GRID_EQUIVALENCE_SCHEMA,
+        "status": "PASS",
+        "scope": "AIDS_COMRECGC_VALID_ZERO_RESULT_ONLY",
+        "equivalence_kind": "CANONICAL_DECIMAL_EQUIDISTANT_GRID",
+        "canonical_quantum": str(_AIDS_ZERO_THRESHOLD_CANONICAL_QUANTUM),
+        "same_start": True,
+        "same_end": True,
+        "same_count": True,
+        "both_canonical_equidistant": True,
+        "threshold_count": len(target_grid),
+        "threshold_start": str(target_grid[0]),
+        "threshold_end": str(target_grid[-1]),
+        "canonical_grid_sha256": stable_json_sha256(canonical_strings),
+        "max_absolute_decimal_difference": str(max_difference),
+        "target_all_coverages_zero": target_all_zero,
+        "target_threshold_config_hash_original": target_hash,
+        "reference_threshold_config_hash_original": reference_hash,
+        "target_figure4_path": str(target_path),
+        "target_figure4_sha256": _sha(target_path),
+        "reference_figure4_path": str(reference_path),
+        "reference_figure4_sha256": _sha(reference_path),
+        "hashes_rewritten": False,
+    }
 
 
 def _validate_bace_terminal(
@@ -914,16 +1088,20 @@ def _validate_aids_terminal(
 
 
 def _reconcile_aids_zero_registry_row(
-    target: Mapping[str, Any], *, terminal: Mapping[str, Any]
+    target: Mapping[str, Any],
+    *,
+    terminal: Mapping[str, Any],
+    threshold_equivalence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Accept only the registry's known finite-conditional-cost mismatch.
+    """Accept only the registry's known AIDS valid-zero publication mismatch.
 
     The generic registry predates the explicit expected-empty ComRecGC
     contract and therefore tries to parse the blank conditional-cost column as
     finite before considering the separately reported fixed-capped metric.  A
     reconciliation terminal has already reopened every zero-result export and
-    proved that the conditional statistic is genuinely undefined.  No other
-    registry reason is waived here.
+    proved that the conditional statistic is genuinely undefined.  A distinct
+    threshold hash is accepted only with the separately bound canonical
+    Decimal-grid proof.  No other registry reason is waived here.
     """
 
     row = dict(target)
@@ -947,7 +1125,25 @@ def _reconcile_aids_zero_registry_row(
         for reason in str(row.get("rerun_reason") or "").split(";")
         if reason
     )
-    if reasons != _AIDS_ZERO_CONDITIONAL_COST_REGISTRY_REASONS:
+    allowed_reasons = _AIDS_ZERO_CONDITIONAL_COST_REGISTRY_REASONS
+    if _AIDS_ZERO_THRESHOLD_GRID_REGISTRY_REASON in reasons:
+        if (
+            threshold_equivalence is None
+            or threshold_equivalence.get("schema_version")
+            != _AIDS_ZERO_THRESHOLD_GRID_EQUIVALENCE_SCHEMA
+            or threshold_equivalence.get("status") != "PASS"
+            or threshold_equivalence.get("scope")
+            != "AIDS_COMRECGC_VALID_ZERO_RESULT_ONLY"
+            or threshold_equivalence.get("target_all_coverages_zero") is not True
+            or threshold_equivalence.get("hashes_rewritten") is not False
+            or threshold_equivalence.get("target_threshold_config_hash_original")
+            != row.get("threshold_config_hash")
+        ):
+            return row
+        allowed_reasons = allowed_reasons | {
+            _AIDS_ZERO_THRESHOLD_GRID_REGISTRY_REASON
+        }
+    if reasons != allowed_reasons:
         return row
     if (
         row.get("dataset") != "AIDS"
@@ -963,6 +1159,11 @@ def _reconcile_aids_zero_registry_row(
     row["adoption_reason"] = (
         "hash-closed strict-flip result is scientifically empty; conditional cost "
         "is unavailable and no numeric value was imputed"
+        + (
+            "; distinct threshold hashes retain one canonical Decimal-equivalent grid"
+            if threshold_equivalence is not None
+            else ""
+        )
     )
     row["rerun_reason"] = ""
     return row
@@ -1852,12 +2053,21 @@ def _identity_compatibility(
     dataset: str,
     target: Mapping[str, Any],
     reference: Mapping[str, Any],
+    equivalent_mismatches: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     fields = _BACE_SHARED_FIELDS if dataset == "BACE" else _RF_SHARED_FIELDS
+    allowed_equivalences = dict(equivalent_mismatches or {})
+    if allowed_equivalences and (
+        dataset != "AIDS" or set(allowed_equivalences) != {"threshold_config_hash"}
+    ):
+        raise NonTasteMatrixAppendError(
+            "Shared-identity equivalence is limited to the AIDS threshold grid"
+        )
     passing = {status.value for status in PASS_STATUSES}
     if str(reference.get("status") or "") not in passing:
         raise NonTasteMatrixAppendError(f"{dataset} append requires a passing Ours reference")
     unavailable: list[str] = []
+    equivalent: list[str] = []
     for field in fields:
         observed = target.get(field)
         expected = reference.get(field)
@@ -1866,9 +2076,21 @@ def _identity_compatibility(
         if expected in (None, ""):
             unavailable.append(field)
         elif observed != expected:
-            raise NonTasteMatrixAppendError(
-                f"{dataset} target differs from Ours identity: {field}"
-            )
+            evidence = allowed_equivalences.get(field)
+            if (
+                field != "threshold_config_hash"
+                or evidence is None
+                or evidence.get("schema_version")
+                != _AIDS_ZERO_THRESHOLD_GRID_EQUIVALENCE_SCHEMA
+                or evidence.get("status") != "PASS"
+                or evidence.get("target_threshold_config_hash_original") != observed
+                or evidence.get("reference_threshold_config_hash_original") != expected
+                or evidence.get("hashes_rewritten") is not False
+            ):
+                raise NonTasteMatrixAppendError(
+                    f"{dataset} target differs from Ours identity: {field}"
+                )
+            equivalent.append(field)
     if unavailable:
         approved_legacy = (
             dataset in {"AIDS", "Mutagenicity"}
@@ -1884,7 +2106,13 @@ def _identity_compatibility(
             )
     return {
         "fields": list(fields),
-        "matched_fields": [field for field in fields if field not in unavailable],
+        "matched_fields": [
+            field for field in fields if field not in unavailable and field not in equivalent
+        ],
+        "equivalent_mismatched_fields": equivalent,
+        "equivalent_mismatch_evidence": {
+            field: allowed_equivalences[field] for field in equivalent
+        },
         "reference_unavailable_fields": unavailable,
         "legacy_exception_used_for_missing_reference_identity": bool(unavailable),
     }
@@ -1993,8 +2221,22 @@ def append_non_taste_matrix_cell(
         for row in result.matrix_rows
     }
     target = proposed[key]
+    aids_zero_threshold_equivalence: dict[str, Any] | None = None
     if key == ("AIDS", "ComRecGC"):
-        target = _reconcile_aids_zero_registry_row(target, terminal=terminal)
+        registry_reasons = {
+            reason
+            for reason in str(target.get("rerun_reason") or "").split(";")
+            if reason
+        }
+        if _AIDS_ZERO_THRESHOLD_GRID_REGISTRY_REASON in registry_reasons:
+            aids_zero_threshold_equivalence = (
+                _validate_aids_zero_threshold_grid_equivalence(target, reference)
+            )
+        target = _reconcile_aids_zero_registry_row(
+            target,
+            terminal=terminal,
+            threshold_equivalence=aids_zero_threshold_equivalence,
+        )
         proposed[key] = target
     if (
         target.get("status") != CellStatus.FROZEN_PASS.value
@@ -2010,7 +2252,14 @@ def append_non_taste_matrix_cell(
             f"{target.get('rerun_reason')}"
         )
     compatibility = _identity_compatibility(
-        dataset=dataset, target=target, reference=reference
+        dataset=dataset,
+        target=target,
+        reference=reference,
+        equivalent_mismatches=(
+            {"threshold_config_hash": aids_zero_threshold_equivalence}
+            if aids_zero_threshold_equivalence is not None
+            else None
+        ),
     )
     # A strict append changes exactly one row.  The predecessor is already a
     # hash-closed authority; re-discovery differences cannot rewrite any of its
@@ -2057,6 +2306,7 @@ def append_non_taste_matrix_cell(
         },
         "reference_cell": dict(reference),
         "identity_compatibility": compatibility,
+        "aids_zero_threshold_grid_equivalence": aids_zero_threshold_equivalence,
         "unchanged_non_target_rows": True,
         "new_matrix_complete_cells": expected_complete,
         "new_matrix_total_cells": 16,
