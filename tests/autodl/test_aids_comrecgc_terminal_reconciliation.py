@@ -4,6 +4,7 @@ import csv
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -156,8 +157,21 @@ def _science_evidence(
         "posthoc_exact_adoption_sha256": controller[
             "posthoc_exact_adoption_sha256"
         ],
+        "adoption_checkpoint_path": controller["adoption_checkpoint_path"],
+        "adoption_checkpoint_sha256": controller["adoption_checkpoint_sha256"],
+        "adoption_checkpoint_progress_rows": controller[
+            "adoption_checkpoint_progress_rows"
+        ],
         "checkpoint_path": controller["checkpoint_path"],
         "checkpoint_sha256": controller["checkpoint_sha256"],
+        "checkpoint_progress_rows": controller["checkpoint_progress_rows"],
+        "checkpoint_identity_sha256": controller[
+            "checkpoint_identity_sha256"
+        ],
+        "checkpoint_vectors_sha256": controller["checkpoint_vectors_sha256"],
+        "checkpoint_monotonic_from_adoption": controller[
+            "checkpoint_monotonic_from_adoption"
+        ],
         "exact_receipt_path": controller["exact_receipt"]["path"],
         "exact_receipt_sha256": controller["exact_receipt"]["sha256"],
         "exact_dbscan_manifest_path": controller["exact_receipt"][
@@ -245,7 +259,7 @@ def _controller_fixture(
     proc.mkdir()
     checkpoint = tmp_path / "science/checkpoint.json"
     checkpoint.parent.mkdir()
-    checkpoint.write_text("checkpoint\n", encoding="utf-8")
+    checkpoint.write_text("adoption-time checkpoint\n", encoding="utf-8")
     exact_receipt = tmp_path / "science/exact_recovery_receipt.json"
     _json(exact_receipt, {"status": "PASS"})
     dbscan = tmp_path / "science/dbscan/run_manifest.json"
@@ -266,6 +280,7 @@ def _controller_fixture(
         "manifest_sha256": "a" * 64,
         "controller_root": str(controller.resolve()),
         "stages": stages,
+        "source_authority": {"source_vectors_sha256": "e" * 64},
     }
     exact_index = reconciliation.STAGE_ORDER.index(reconciliation.EXACT_STAGE)
     stage_states = {
@@ -295,10 +310,24 @@ def _controller_fixture(
         "startup_barrier": {"stage_id": reconciliation.EXACT_STAGE},
     }
     _json(controller / "state.json", state)
+    adopted_stat = checkpoint.stat()
     snapshot = {
         "path": str(checkpoint.resolve()),
         "sha256_at_observation": _sha(checkpoint),
+        "checkpoint_payload_sha256": "b" * 64,
+        "identity_sha256": "c" * 64,
+        "progress_ledgers_sha256": "d" * 64,
         "progress_rows": 123,
+        "vectors_sha256": "e" * 64,
+        "stat_identity_at_observation": {
+            "device": adopted_stat.st_dev,
+            "inode": adopted_stat.st_ino,
+            "mode": adopted_stat.st_mode,
+            "size": adopted_stat.st_size,
+            "mtime_ns": adopted_stat.st_mtime_ns,
+            "ctime_ns": adopted_stat.st_ctime_ns,
+            "nlink": adopted_stat.st_nlink,
+        },
     }
     adoption: dict[str, object] = {
         "schema_version": reconciliation.EXACT_CHECKPOINT_ADOPTION_SCHEMA,
@@ -318,8 +347,16 @@ def _controller_fixture(
         "verified_at": "2026-09-01T00:00:00+00:00",
     }
     adoption["receipt_sha256"] = reconciliation._stable_sha256(adoption)
-    adoption_path = controller / "gates/89_exact_checkpoint_adoption.json"
+    adoption_path = (
+        controller
+        / "gates"
+        / f"89_exact_checkpoint_adoption_{snapshot['sha256_at_observation'][:16]}.json"
+    )
     _json(adoption_path, adoption)
+    adoption_path.chmod(0o600)
+    final_checkpoint = checkpoint.with_suffix(".final.tmp")
+    final_checkpoint.write_text("completed exact checkpoint\n", encoding="utf-8")
+    os.replace(final_checkpoint, checkpoint)
     exact_evidence: dict[str, object] = {
         "status": "PASS",
         "path": str(exact_receipt.resolve()),
@@ -353,16 +390,25 @@ def _patch_controller_dependencies(
     monkeypatch.setattr(
         reconciliation, "load_bound_controller_manifest", lambda _path: manifest
     )
+    snapshot = adoption["checkpoint_snapshot"]
+    checkpoint = Path(snapshot["path"])
+    final_snapshot = {
+        "path": str(checkpoint.resolve()),
+        "sha256_at_observation": _sha(checkpoint),
+        "identity_sha256": snapshot["identity_sha256"],
+        "progress_rows": 456,
+        "vectors_sha256": snapshot["vectors_sha256"],
+    }
     monkeypatch.setattr(
         reconciliation,
-        "validate_exact_checkpoint_adoption_receipt",
-        lambda *_args, **_kwargs: {
-            "payload": adoption,
-            "artifact": {
-                "path": str(adoption_path.resolve()),
-                "content_sha256": _sha(adoption_path),
+        "_validated_exact_checkpoint_snapshot_and_artifact",
+        lambda _stage: (
+            dict(final_snapshot),
+            {
+                "path": str(checkpoint.resolve()),
+                "content_sha256": _sha(checkpoint),
             },
-        },
+        ),
     )
     monkeypatch.setattr(
         reconciliation,
@@ -413,6 +459,69 @@ def test_historical_blocked_controller_binds_posthoc_exact_authority(
     assert result["exact_worker_alive"] is False
     assert result["science_writer_absent"] is True
     assert result["old_state_modified"] is False
+    assert result["adoption_checkpoint_progress_rows"] == 123
+    assert result["checkpoint_progress_rows"] == 456
+    assert result["adoption_checkpoint_sha256"] != result["checkpoint_sha256"]
+    assert result["checkpoint_monotonic_from_adoption"] is True
+
+
+@pytest.mark.parametrize("failure", ["progress_regression", "identity_drift", "vector_drift"])
+def test_historical_checkpoint_continuation_fails_closed_on_science_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    (
+        manifest_path,
+        _controller,
+        proc,
+        manifest,
+        exact_receipt,
+        adoption_path,
+        adoption,
+        exact_evidence,
+    ) = _controller_fixture(tmp_path)
+    _patch_controller_dependencies(
+        monkeypatch,
+        manifest=manifest,
+        adoption_path=adoption_path,
+        adoption=adoption,
+        exact_evidence=exact_evidence,
+    )
+    adopted = adoption["checkpoint_snapshot"]
+    checkpoint = Path(adopted["path"])
+    final = {
+        "path": str(checkpoint.resolve()),
+        "sha256_at_observation": _sha(checkpoint),
+        "identity_sha256": adopted["identity_sha256"],
+        "progress_rows": 456,
+        "vectors_sha256": adopted["vectors_sha256"],
+    }
+    if failure == "progress_regression":
+        final["progress_rows"] = 122
+    elif failure == "identity_drift":
+        final["identity_sha256"] = "f" * 64
+    else:
+        final["vectors_sha256"] = "f" * 64
+    monkeypatch.setattr(
+        reconciliation,
+        "_validated_exact_checkpoint_snapshot_and_artifact",
+        lambda _stage: (
+            final,
+            {
+                "path": str(checkpoint.resolve()),
+                "content_sha256": _sha(checkpoint),
+            },
+        ),
+    )
+    with pytest.raises(
+        reconciliation.AIDSComRecGCTerminalReconciliationError,
+        match="regressed or changed scientific input",
+    ):
+        reconciliation.validate_historical_controller_exact_authority(
+            manifest_path,
+            exact_receipt_path=exact_receipt,
+            exact_adoption_gate_path=adoption_path,
+            proc_root=proc,
+        )
 
 
 def test_historical_exact_authority_rejects_relaxed_state_or_science_gate(
@@ -660,8 +769,15 @@ def test_posthoc_final_self_closure_binds_exact_receipt_without_stage_gates(
         "controller_manifest_sha256": "1" * 64,
         "posthoc_exact_adoption_path": "/control/adoption.json",
         "posthoc_exact_adoption_sha256": "2" * 64,
+        "adoption_checkpoint_path": "/science/checkpoint.json",
+        "adoption_checkpoint_sha256": "0" * 64,
+        "adoption_checkpoint_progress_rows": 123,
         "checkpoint_path": "/science/checkpoint.json",
         "checkpoint_sha256": "3" * 64,
+        "checkpoint_progress_rows": 456,
+        "checkpoint_identity_sha256": "6" * 64,
+        "checkpoint_vectors_sha256": "7" * 64,
+        "checkpoint_monotonic_from_adoption": True,
         "exact_receipt": {
             "status": "PASS",
             "path": "/science/exact_recovery_receipt.json",
@@ -740,8 +856,15 @@ def test_fresh_wrapper_is_hash_closed_and_detects_source_drift(
         "old_state_modified": False,
         "posthoc_exact_adoption_path": "/control/adoption.json",
         "posthoc_exact_adoption_sha256": "2" * 64,
+        "adoption_checkpoint_path": "/science/checkpoint.json",
+        "adoption_checkpoint_sha256": "0" * 64,
+        "adoption_checkpoint_progress_rows": 123,
         "checkpoint_path": "/science/checkpoint.json",
         "checkpoint_sha256": "3" * 64,
+        "checkpoint_progress_rows": 456,
+        "checkpoint_identity_sha256": "6" * 64,
+        "checkpoint_vectors_sha256": "7" * 64,
+        "checkpoint_monotonic_from_adoption": True,
         "exact_receipt": {
             "status": "PASS",
             "path": "/science/exact.json",

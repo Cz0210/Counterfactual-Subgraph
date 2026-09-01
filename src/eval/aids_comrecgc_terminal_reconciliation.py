@@ -40,8 +40,10 @@ from src.utils.autodl_aids_comrecgc_exact_recovery_controller_v1 import (
     STATE_SCHEMA,
     _frozen_stage_environment,
     _process_group_member_pids,
+    _read_handover_artifact,
+    _validate_checkpoint_observation_shape,
+    _validated_exact_checkpoint_snapshot_and_artifact,
     load_bound_controller_manifest,
-    validate_exact_checkpoint_adoption_receipt,
     validate_stage_terminal,
 )
 
@@ -627,17 +629,46 @@ def validate_historical_controller_exact_authority(
     adoption_path = _physical_file(
         exact_adoption_gate_path, label="AIDS posthoc exact checkpoint adoption"
     )
-    adoption_raw = _json(adoption_path, label="AIDS posthoc exact checkpoint adoption")
+    try:
+        adoption_raw, adoption_artifact = _read_handover_artifact(
+            adoption_path, label="AIDS posthoc exact checkpoint adoption"
+        )
+    except Exception as exc:
+        raise AIDSComRecGCTerminalReconciliationError(
+            f"AIDS posthoc exact checkpoint adoption reopen failed: {exc}"
+        ) from exc
     projected = dict(adoption_raw)
     receipt_sha = projected.pop("receipt_sha256", None)
     snapshot = adoption_raw.get("checkpoint_snapshot")
+    expected_adoption_fields = {
+        "schema_version",
+        "controller_manifest_sha256",
+        "stage_id",
+        "checkpoint_snapshot",
+        "expected_progress_rows",
+        "science_writer_absent",
+        "publication_sequence",
+        "signals_sent",
+        "verified_at",
+        "receipt_sha256",
+    }
     if (
-        adoption_raw.get("schema_version") != EXACT_CHECKPOINT_ADOPTION_SCHEMA
+        set(adoption_raw) != expected_adoption_fields
+        or adoption_raw.get("schema_version") != EXACT_CHECKPOINT_ADOPTION_SCHEMA
         or adoption_raw.get("controller_manifest_sha256")
         != manifest["manifest_sha256"]
         or adoption_raw.get("stage_id") != EXACT_STAGE
         or adoption_raw.get("science_writer_absent") is not True
+        or adoption_raw.get("publication_sequence")
+        != [
+            "producer_os_replace",
+            "producer_parent_fsync",
+            "verifier_o_nofollow_open",
+            "verifier_fstat",
+            "verifier_fd_sha256",
+        ]
         or adoption_raw.get("signals_sent") != []
+        or not isinstance(adoption_raw.get("verified_at"), str)
         or receipt_sha != _stable_sha256(projected)
         or not isinstance(snapshot, Mapping)
     ):
@@ -645,24 +676,25 @@ def validate_historical_controller_exact_authority(
             "AIDS posthoc exact checkpoint adoption contract changed"
         )
     try:
-        expected_progress = int(adoption_raw["expected_progress_rows"])
-        reopened = validate_exact_checkpoint_adoption_receipt(
-            manifest_path, expected_progress_rows=expected_progress
+        adoption_snapshot = _validate_checkpoint_observation_shape(
+            manifest=manifest, checkpoint=snapshot, require_positive=True
         )
+        expected_progress = int(adoption_raw["expected_progress_rows"])
     except Exception as exc:
         raise AIDSComRecGCTerminalReconciliationError(
-            f"AIDS posthoc exact checkpoint adoption reopen failed: {exc}"
+            f"AIDS posthoc adoption-time checkpoint closure failed: {exc}"
         ) from exc
     if (
-        reopened.get("payload") != adoption_raw
-        or Path(str(reopened.get("artifact", {}).get("path") or "")).resolve(
-            strict=True
-        )
-        != adoption_path
-        or reopened.get("artifact", {}).get("content_sha256") != _sha(adoption_path)
+        expected_progress != int(adoption_snapshot["progress_rows"])
+        or adoption_path.parent != controller_root / "gates"
+        or adoption_path.name
+        != "89_exact_checkpoint_adoption_"
+        f"{str(adoption_snapshot['sha256_at_observation'])[:16]}.json"
+        or adoption_artifact.get("path") != str(adoption_path)
+        or adoption_artifact.get("content_sha256") != _sha(adoption_path)
     ):
         raise AIDSComRecGCTerminalReconciliationError(
-            "AIDS posthoc exact checkpoint adoption identity changed"
+            "AIDS posthoc exact checkpoint adoption-time identity changed"
         )
     exact_stage = _stage_spec(manifest, EXACT_STAGE)
     exact_science_root = _physical_directory(
@@ -679,19 +711,36 @@ def validate_historical_controller_exact_authority(
             "AIDS exact recovery science root still has a live writer"
         )
     checkpoint_path = _physical_file(
-        str(snapshot.get("path") or ""), label="AIDS adopted exact checkpoint"
+        str(adoption_snapshot.get("path") or ""),
+        label="AIDS final exact checkpoint",
     )
-    if (
-        str(checkpoint_path) != exact_stage.get("progress_checkpoint_path")
-        or snapshot.get("sha256_at_observation") != _sha(checkpoint_path)
-    ):
-        raise AIDSComRecGCTerminalReconciliationError(
-            "AIDS posthoc adoption/checkpoint hash binding changed"
-        )
     exact_path = _physical_file(
         exact_receipt_path, label="AIDS exact recovery PASS receipt"
     )
     exact = _validate_exact_receipt(manifest=manifest, receipt_path=exact_path)
+    try:
+        final_snapshot, final_checkpoint_artifact = (
+            _validated_exact_checkpoint_snapshot_and_artifact(exact_stage)
+        )
+    except Exception as exc:
+        raise AIDSComRecGCTerminalReconciliationError(
+            f"AIDS final exact checkpoint reopen failed: {exc}"
+        ) from exc
+    if (
+        final_snapshot.get("path") != str(checkpoint_path)
+        or final_checkpoint_artifact.get("path") != str(checkpoint_path)
+        or final_checkpoint_artifact.get("content_sha256") != _sha(checkpoint_path)
+        or final_snapshot.get("sha256_at_observation")
+        != final_checkpoint_artifact.get("content_sha256")
+        or final_snapshot.get("identity_sha256")
+        != adoption_snapshot.get("identity_sha256")
+        or final_snapshot.get("vectors_sha256")
+        != adoption_snapshot.get("vectors_sha256")
+        or int(final_snapshot.get("progress_rows", -1)) < expected_progress
+    ):
+        raise AIDSComRecGCTerminalReconciliationError(
+            "AIDS exact checkpoint continuation regressed or changed scientific input"
+        )
     return {
         "status": "PASS",
         "controller_id": CONTROLLER_ID,
@@ -715,9 +764,17 @@ def validate_historical_controller_exact_authority(
         "exact_process_group_id": process_group_id,
         "posthoc_exact_adoption_path": str(adoption_path),
         "posthoc_exact_adoption_sha256": _sha(adoption_path),
+        "adoption_checkpoint_path": str(checkpoint_path),
+        "adoption_checkpoint_sha256": adoption_snapshot[
+            "sha256_at_observation"
+        ],
+        "adoption_checkpoint_progress_rows": expected_progress,
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_sha256": _sha(checkpoint_path),
-        "checkpoint_progress_rows": expected_progress,
+        "checkpoint_progress_rows": int(final_snapshot["progress_rows"]),
+        "checkpoint_identity_sha256": final_snapshot["identity_sha256"],
+        "checkpoint_vectors_sha256": final_snapshot["vectors_sha256"],
+        "checkpoint_monotonic_from_adoption": True,
         "science_writer_absent": True,
         "exact_receipt": exact,
         "old_state_modified": False,
@@ -882,8 +939,29 @@ def validate_reconciled_final_science(
         "posthoc_exact_adoption_sha256": controller_evidence[
             "posthoc_exact_adoption_sha256"
         ],
+        "adoption_checkpoint_path": controller_evidence[
+            "adoption_checkpoint_path"
+        ],
+        "adoption_checkpoint_sha256": controller_evidence[
+            "adoption_checkpoint_sha256"
+        ],
+        "adoption_checkpoint_progress_rows": controller_evidence[
+            "adoption_checkpoint_progress_rows"
+        ],
         "checkpoint_path": controller_evidence["checkpoint_path"],
         "checkpoint_sha256": controller_evidence["checkpoint_sha256"],
+        "checkpoint_progress_rows": controller_evidence[
+            "checkpoint_progress_rows"
+        ],
+        "checkpoint_identity_sha256": controller_evidence[
+            "checkpoint_identity_sha256"
+        ],
+        "checkpoint_vectors_sha256": controller_evidence[
+            "checkpoint_vectors_sha256"
+        ],
+        "checkpoint_monotonic_from_adoption": controller_evidence[
+            "checkpoint_monotonic_from_adoption"
+        ],
         "exact_receipt_path": exact["path"],
         "exact_receipt_sha256": exact["sha256"],
         "exact_dbscan_manifest_path": exact["dbscan_manifest_path"],
@@ -935,8 +1013,15 @@ def science_terminal_projection(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "controller_manifest_sha256",
         "posthoc_exact_adoption_path",
         "posthoc_exact_adoption_sha256",
+        "adoption_checkpoint_path",
+        "adoption_checkpoint_sha256",
+        "adoption_checkpoint_progress_rows",
         "checkpoint_path",
         "checkpoint_sha256",
+        "checkpoint_progress_rows",
+        "checkpoint_identity_sha256",
+        "checkpoint_vectors_sha256",
+        "checkpoint_monotonic_from_adoption",
         "exact_receipt_path",
         "exact_receipt_sha256",
         "exact_dbscan_manifest_path",
@@ -1023,10 +1108,23 @@ def publish_reconciliation(
         != controller_evidence.get("posthoc_exact_adoption_path")
         or science_projection.get("posthoc_exact_adoption_sha256")
         != controller_evidence.get("posthoc_exact_adoption_sha256")
+        or science_projection.get("adoption_checkpoint_path")
+        != controller_evidence.get("adoption_checkpoint_path")
+        or science_projection.get("adoption_checkpoint_sha256")
+        != controller_evidence.get("adoption_checkpoint_sha256")
+        or science_projection.get("adoption_checkpoint_progress_rows")
+        != controller_evidence.get("adoption_checkpoint_progress_rows")
         or science_projection.get("checkpoint_path")
         != controller_evidence.get("checkpoint_path")
         or science_projection.get("checkpoint_sha256")
         != controller_evidence.get("checkpoint_sha256")
+        or science_projection.get("checkpoint_progress_rows")
+        != controller_evidence.get("checkpoint_progress_rows")
+        or science_projection.get("checkpoint_identity_sha256")
+        != controller_evidence.get("checkpoint_identity_sha256")
+        or science_projection.get("checkpoint_vectors_sha256")
+        != controller_evidence.get("checkpoint_vectors_sha256")
+        or science_projection.get("checkpoint_monotonic_from_adoption") is not True
         or science_projection.get("exact_receipt_path") != exact.get("path")
         or science_projection.get("exact_receipt_sha256") != exact.get("sha256")
     ):
