@@ -15,6 +15,12 @@ source "$SCRIPT_DIR/common.sh"
 : "${MUT_TRACE_CONTROLLER_PID:?exact live successor PID required}"
 : "${MUT_TRACE_CONTROLLER_START_TICKS:?exact live successor start ticks required}"
 
+export MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS="${MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS:-900}"
+[[ "$MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS" == "900" ]] || {
+  echo "MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS is frozen to 900" >&2
+  exit 64
+}
+
 for mut_trace_path in \
   "$MUT_FAST_SPEC" \
   "$MUT_TRACE_PROTECTED_MANIFEST" \

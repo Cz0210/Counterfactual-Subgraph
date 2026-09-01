@@ -444,6 +444,98 @@ def test_generation_semantic_replay_accepts_bounded_cuda_roundoff(
         )
 
 
+def test_generation_semantic_replay_accepts_only_proven_symmetric_match_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ours, "canonicalize_smiles", lambda value: value or None)
+    monkeypatch.setattr(ours, "clean_generated_smiles", lambda value: value)
+    parent = ours.TrainParent("TRAIN0", "parent", 1, "train")
+    config = ours.GenerationConfig("base", 0.3, 0.9, 1, 7)
+
+    def symmetric_outcomes(
+        _parent: str, _fragment: str, *, parent_id: str, candidate_id: str
+    ) -> list[SimpleNamespace]:
+        residual = f"RESIDUAL::{parent_id}::{candidate_id}"
+        return [
+            SimpleNamespace(
+                valid=True,
+                residual_smiles=residual,
+                match_id=11,
+                match_atom_indices=(0,),
+            ),
+            SimpleNamespace(
+                valid=True,
+                residual_smiles=residual,
+                match_id=17,
+                match_atom_indices=(1,),
+            ),
+        ]
+
+    monkeypatch.setattr(
+        ours, "enumerate_connected_hard_deletions", symmetric_outcomes
+    )
+    saved = ours._score_generation(
+        parent=parent,
+        raw_outputs=["fragment"],
+        scorer=_FakeScorer(),
+        config=config,
+    )
+    assert saved[0]["selected_match_index"] == 11
+    saved[0]["selected_match_index"] = 17
+    ours._require_generation_semantic_replay(
+        saved,
+        parent=parent,
+        scorer=_FakeScorer(),
+        config=config,
+    )
+
+
+def test_generation_semantic_replay_rejects_match_index_with_other_residual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ours, "canonicalize_smiles", lambda value: value or None)
+    monkeypatch.setattr(ours, "clean_generated_smiles", lambda value: value)
+    parent = ours.TrainParent("TRAIN0", "parent", 1, "train")
+    config = ours.GenerationConfig("base", 0.3, 0.9, 1, 7)
+
+    def distinct_outcomes(
+        _parent: str, _fragment: str, *, parent_id: str, candidate_id: str
+    ) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(
+                valid=True,
+                residual_smiles=f"RESIDUAL::{parent_id}::{candidate_id}",
+                match_id=11,
+                match_atom_indices=(0,),
+            ),
+            SimpleNamespace(
+                valid=True,
+                residual_smiles=f"OTHER::{parent_id}::{candidate_id}",
+                match_id=17,
+                match_atom_indices=(1,),
+            ),
+        ]
+
+    monkeypatch.setattr(
+        ours, "enumerate_connected_hard_deletions", distinct_outcomes
+    )
+    saved = ours._score_generation(
+        parent=parent,
+        raw_outputs=["fragment"],
+        scorer=_FakeScorer(),
+        config=config,
+    )
+    assert saved[0]["selected_match_index"] == 11
+    saved[0]["selected_match_index"] = 17
+    with pytest.raises(ours.TasteOursFullError, match="frozen-GINE replay"):
+        ours._require_generation_semantic_replay(
+            saved,
+            parent=parent,
+            scorer=_FakeScorer(),
+            config=config,
+        )
+
+
 def test_generation_and_pair_semantic_replay_reject_forgery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

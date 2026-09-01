@@ -428,6 +428,135 @@ def test_pair_store_physical_adoption_is_hash_bound_read_only_and_resumable(
         proc_root=proc,
     )
     assert validated.pair_store.pairs_sha256 == source.pairs_sha256
+    assert validated.source_reopen_evidence["policy"] == "STRICT_ALL_STAT_FIELDS"
+    assert validated.source_reopen_evidence["remount_device_drift_detected"] is False
+    assert validated.source_reopen_evidence["hashes_verified"] is True
+
+
+def test_pair_store_terminal_reconciliation_explicitly_allows_only_device_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    adopted = adopt_external_pair_store_read_only(
+        source_manifest_path=source.manifest_path,
+        adoption_root=tmp_path / "remount-adoption",
+        expected_scientific_identity=identity,
+        proc_root=proc,
+    )
+    original_stat = external_recourse._file_stat_identity
+    source_paths = {
+        str(path.resolve())
+        for path in (source.manifest_path, source.pairs_path, source.vectors_path)
+    }
+
+    def remounted_stat(path: Path) -> dict[str, int]:
+        observed = original_stat(path)
+        if str(path.resolve()) in source_paths:
+            observed = {**observed, "device": observed["device"] + 50}
+        return observed
+
+    monkeypatch.setattr(external_recourse, "_file_stat_identity", remounted_stat)
+    with pytest.raises(Exception, match="stat drift"):
+        validate_adopted_pair_store_read_only(
+            adopted.adoption_manifest_path,
+            expected_scientific_identity=identity,
+            proc_root=proc,
+        )
+    reopened = validate_adopted_pair_store_read_only(
+        adopted.adoption_manifest_path,
+        expected_scientific_identity=identity,
+        proc_root=proc,
+        allow_remount_device_drift_for_terminal_reconciliation=True,
+    )
+    evidence = reopened.source_reopen_evidence
+    assert evidence["policy"] == (
+        "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
+    )
+    assert evidence["remount_device_drift_detected"] is True
+    assert evidence["allowed_drift_fields"] == ["device"]
+    assert evidence["hashes_verified"] is True
+    assert evidence["writer_scan_before_count"] == 0
+    assert evidence["writer_scan_after_count"] == 0
+    assert all(
+        row["device_changed"] is True
+        and row["stable_stat_fields_match"] is True
+        and row["recorded_stat"]["device"] != row["observed_stat"]["device"]
+        for row in evidence["source_files"].values()
+    )
+
+
+@pytest.mark.parametrize(
+    "drift_field", ["inode", "size", "mtime_ns", "ctime_ns", "mode"]
+)
+def test_pair_store_terminal_reconciliation_rejects_non_device_stat_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift_field: str
+) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    adopted = adopt_external_pair_store_read_only(
+        source_manifest_path=source.manifest_path,
+        adoption_root=tmp_path / f"non-device-{drift_field}",
+        expected_scientific_identity=identity,
+        proc_root=proc,
+    )
+    original_stat = external_recourse._file_stat_identity
+
+    def drifted_stat(path: Path) -> dict[str, int]:
+        observed = original_stat(path)
+        if path.resolve() == source.vectors_path.resolve():
+            observed = {
+                **observed,
+                "device": observed["device"] + 50,
+                drift_field: observed[drift_field] + 1,
+            }
+        return observed
+
+    monkeypatch.setattr(external_recourse, "_file_stat_identity", drifted_stat)
+    with pytest.raises(Exception, match="stat drift"):
+        validate_adopted_pair_store_read_only(
+            adopted.adoption_manifest_path,
+            expected_scientific_identity=identity,
+            proc_root=proc,
+            allow_remount_device_drift_for_terminal_reconciliation=True,
+        )
+
+
+def test_pair_store_terminal_reconciliation_keeps_live_writer_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    adopted = adopt_external_pair_store_read_only(
+        source_manifest_path=source.manifest_path,
+        adoption_root=tmp_path / "remount-writer",
+        expected_scientific_identity=identity,
+        proc_root=proc,
+    )
+    original_stat = external_recourse._file_stat_identity
+
+    def remounted_stat(path: Path) -> dict[str, int]:
+        observed = original_stat(path)
+        return {**observed, "device": observed["device"] + 50}
+
+    monkeypatch.setattr(external_recourse, "_file_stat_identity", remounted_stat)
+    monkeypatch.setattr(
+        external_recourse,
+        "_find_writable_process_references",
+        lambda *_args, **_kwargs: [
+            {"pid": 7, "kind": "fd", "fd": 3, "path": str(source.vectors_path)}
+        ],
+    )
+    with pytest.raises(Exception, match="LIVE_WRITER"):
+        validate_adopted_pair_store_read_only(
+            adopted.adoption_manifest_path,
+            expected_scientific_identity=identity,
+            proc_root=proc,
+            allow_remount_device_drift_for_terminal_reconciliation=True,
+        )
 
 
 def test_pair_store_adoption_rejects_identity_writer_and_stat_drift(

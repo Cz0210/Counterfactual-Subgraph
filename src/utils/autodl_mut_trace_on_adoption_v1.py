@@ -37,6 +37,12 @@ CANARY_RSS_STOP_GIB = 24
 CANARY_RSS_STOP_BYTES = CANARY_RSS_STOP_GIB * 1024**3
 CANARY_HEADROOM_STOP_GIB = 32
 CANARY_HEADROOM_STOP_BYTES = CANARY_HEADROOM_STOP_GIB * 1024**3
+PROTECTED_STEP_BASELINE_UNAVAILABLE_STATE = (
+    "ACTIVE_STEP_BASELINE_UNAVAILABLE"
+)
+PROTECTED_STEP_BASELINE_UNAVAILABLE_WARNING = (
+    "PROTECTED_STEP_BASELINE_UNAVAILABLE_DURING_CHECKPOINT"
+)
 
 _TRACE_TOKEN = re.compile(
     r"trace|trace_enabled|write_trace|trace_buffer|transition_trace|"
@@ -232,6 +238,30 @@ class ProtectedThroughputGate:
             raise MutTraceAuthorizationError(
                 "Protected throughput slowdown threshold must remain exactly 10%"
             )
+        self.step_baseline_unavailable: set[str] = set()
+        for task in self.tasks:
+            key = str(task["task_id"])
+            row = self.baseline.get(key)
+            if not isinstance(row, Mapping):
+                raise MutTraceAuthorizationError(
+                    f"Protected baseline task is absent: {key}"
+                )
+            if row.get("state") != PROTECTED_STEP_BASELINE_UNAVAILABLE_STATE:
+                continue
+            auxiliary = row.get("auxiliary_activity")
+            if (
+                row.get("units_per_second") is not None
+                or row.get("warning")
+                != PROTECTED_STEP_BASELINE_UNAVAILABLE_WARNING
+                or not isinstance(auxiliary, Mapping)
+                or auxiliary.get("status") != "PASS"
+                or not auxiliary.get("activity_kinds")
+                or float(row.get("elapsed_seconds", 0)) < 900
+            ):
+                raise MutTraceAuthorizationError(
+                    f"Protected activity-only baseline is incomplete: {key}"
+                )
+            self.step_baseline_unavailable.add(key)
         self.windows: dict[str, list[dict[str, Any]]] = {}
         self.checked_windows: list[dict[str, Any]] = []
         self.failures: list[str] = []
@@ -253,6 +283,12 @@ class ProtectedThroughputGate:
                 continue
             if current["completed"]:
                 self.completed_during_canary.add(key)
+                continue
+            if key in self.step_baseline_unavailable:
+                # The project owner authorized a bounded fallback for coarse
+                # checkpoint counters only after a 15-minute activity audit.
+                # Identity/liveness remain fail-closed here; the canary's RSS,
+                # headroom, failcnt and OOM gates remain fully enforced.
                 continue
             window = self.windows.setdefault(key, [])
             window.append(current)
@@ -314,6 +350,15 @@ class ProtectedThroughputGate:
             "completed_during_canary_task_ids": sorted(
                 self.completed_during_canary
             ),
+            "step_baseline_unavailable_task_ids": sorted(
+                self.step_baseline_unavailable
+            ),
+            "step_baseline_unavailable_warning": (
+                PROTECTED_STEP_BASELINE_UNAVAILABLE_WARNING
+                if self.step_baseline_unavailable
+                else None
+            ),
+            "strict_resource_gates_retained": True,
             "missing_complete_five_minute_windows": missing,
             "checked_windows": list(self.checked_windows),
             "failed_windows": failed,

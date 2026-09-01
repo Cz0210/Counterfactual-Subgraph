@@ -1052,6 +1052,62 @@ def _require_generation_semantic_replay(
             abs_tol=GENERATION_REPLAY_ABS_TOL,
         )
 
+    def symmetric_match_index_only(
+        saved: Mapping[str, Any], replayed: Mapping[str, Any]
+    ) -> bool:
+        """Prove that two match IDs encode the same exact deletion result."""
+
+        saved_index = saved.get("selected_match_index")
+        replayed_index = replayed.get("selected_match_index")
+        if saved_index == replayed_index:
+            return True
+        if type(saved_index) is not int or type(replayed_index) is not int:
+            return False
+        residual = saved.get("residual_smiles")
+        fragment = saved.get("canonical_fragment")
+        candidate_id = saved.get("candidate_id")
+        if (
+            type(residual) is not str
+            or not residual
+            or replayed.get("residual_smiles") != residual
+            or type(fragment) is not str
+            or not fragment
+            or replayed.get("canonical_fragment") != fragment
+            or type(candidate_id) is not str
+            or not candidate_id
+            or replayed.get("candidate_id") != candidate_id
+            or saved.get("parent_id") != parent.parent_id
+            or replayed.get("parent_id") != parent.parent_id
+            or saved.get("parent_smiles") != parent.smiles
+            or replayed.get("parent_smiles") != parent.smiles
+        ):
+            return False
+        outcomes = enumerate_connected_hard_deletions(
+            parent.smiles,
+            fragment,
+            parent_id=parent.parent_id,
+            candidate_id=candidate_id,
+        )
+        residuals_by_match: dict[int, str] = {}
+        for outcome in outcomes:
+            if (
+                not outcome.valid
+                or not outcome.residual_smiles
+                or type(outcome.match_id) is not int
+                or outcome.match_id in residuals_by_match
+            ):
+                if type(outcome.match_id) is int and outcome.match_id in {
+                    saved_index,
+                    replayed_index,
+                }:
+                    return False
+                continue
+            residuals_by_match[outcome.match_id] = str(outcome.residual_smiles)
+        return (
+            residuals_by_match.get(saved_index) == residual
+            and residuals_by_match.get(replayed_index) == residual
+        )
+
     def row_matches(saved: Mapping[str, Any], replayed: Mapping[str, Any]) -> bool:
         if set(saved) != set(replayed):
             return False
@@ -1073,7 +1129,15 @@ def _require_generation_semantic_replay(
             elif not close_float(left, right):
                 return False
         numeric = float_fields | vector_fields
-        return all(saved[field] == replayed[field] for field in set(saved) - numeric)
+        for field in set(saved) - numeric:
+            if saved[field] == replayed[field]:
+                continue
+            if field == "selected_match_index" and symmetric_match_index_only(
+                saved, replayed
+            ):
+                continue
+            return False
+        return True
 
     if len(rows) != len(replay_rows) or any(
         not row_matches(saved, replayed)

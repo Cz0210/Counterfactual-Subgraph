@@ -184,6 +184,7 @@ class AdoptedPairStoreResult:
     pair_store: PairStoreResult
     adoption_manifest_path: Path
     adoption_manifest_sha256: str
+    source_reopen_evidence: Mapping[str, Any]
 
 
 class ExternalPairStore:
@@ -576,6 +577,96 @@ def _file_stat_identity(path: Path) -> dict[str, int]:
     }
 
 
+_PAIR_STORE_STAT_IDENTITY_FIELDS = (
+    "device",
+    "inode",
+    "mode",
+    "size",
+    "mtime_ns",
+    "ctime_ns",
+)
+_PAIR_STORE_REMOUNT_STABLE_STAT_FIELDS = tuple(
+    field for field in _PAIR_STORE_STAT_IDENTITY_FIELDS if field != "device"
+)
+_PAIR_STORE_REOPEN_EVIDENCE_SCHEMA = "comrecgc_pair_store_reopen_evidence_v1"
+_PAIR_STORE_RECONCILIATION_POLICY = (
+    "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
+)
+
+
+def _validate_pair_store_reopen_stats(
+    *,
+    recorded: Mapping[str, Mapping[str, int]],
+    observed: Mapping[str, Mapping[str, int]],
+    allow_remount_device_drift_for_terminal_reconciliation: bool,
+) -> dict[str, Any]:
+    """Compare adopted source stats, with one explicit reboot-only exception.
+
+    The normal validator remains byte-for-byte strict.  AIDS terminal
+    reconciliation may explicitly tolerate only a changed ``st_dev`` after a
+    persistent-volume remount; inode, mode, size, mtime and ctime remain exact.
+    The returned evidence makes that exception visible to the publication
+    receipt instead of silently normalizing the recorded stat identity.
+    """
+
+    if set(recorded) != set(observed):
+        raise ExternalMemoryDBSCANError(
+            "pair-store adopted source stat file-set drift"
+        )
+    source_evidence: dict[str, dict[str, Any]] = {}
+    device_drift_detected = False
+    expected_fields = set(_PAIR_STORE_STAT_IDENTITY_FIELDS)
+    for path in sorted(recorded):
+        frozen = {str(key): int(value) for key, value in recorded[path].items()}
+        current = {str(key): int(value) for key, value in observed[path].items()}
+        if set(frozen) != expected_fields or set(current) != expected_fields:
+            raise ExternalMemoryDBSCANError(
+                "pair-store adopted source stat schema drift"
+            )
+        stable_mismatches = {
+            field: {
+                "recorded": frozen[field],
+                "observed": current[field],
+            }
+            for field in _PAIR_STORE_REMOUNT_STABLE_STAT_FIELDS
+            if frozen[field] != current[field]
+        }
+        device_changed = frozen["device"] != current["device"]
+        if stable_mismatches or (
+            device_changed
+            and not allow_remount_device_drift_for_terminal_reconciliation
+        ):
+            raise ExternalMemoryDBSCANError(
+                "pair-store adopted source stat drift"
+            )
+        device_drift_detected = device_drift_detected or device_changed
+        source_evidence[path] = {
+            "recorded_stat": frozen,
+            "observed_stat": current,
+            "device_changed": device_changed,
+            "stable_stat_fields_match": True,
+        }
+    return {
+        "schema_version": _PAIR_STORE_REOPEN_EVIDENCE_SCHEMA,
+        "policy": (
+            _PAIR_STORE_RECONCILIATION_POLICY
+            if allow_remount_device_drift_for_terminal_reconciliation
+            else "STRICT_ALL_STAT_FIELDS"
+        ),
+        "remount_device_drift_allowed": bool(
+            allow_remount_device_drift_for_terminal_reconciliation
+        ),
+        "remount_device_drift_detected": device_drift_detected,
+        "allowed_drift_fields": (
+            ["device"]
+            if allow_remount_device_drift_for_terminal_reconciliation
+            else []
+        ),
+        "strict_stat_fields": list(_PAIR_STORE_REMOUNT_STABLE_STAT_FIELDS),
+        "source_files": source_evidence,
+    }
+
+
 def _wait_for_promoted_stat_identity(
     path: Path,
     *,
@@ -788,6 +879,7 @@ def validate_adopted_pair_store_read_only(
     *,
     expected_scientific_identity: Mapping[str, Any] | None = None,
     proc_root: str | Path = "/proc",
+    allow_remount_device_drift_for_terminal_reconciliation: bool = False,
 ) -> AdoptedPairStoreResult:
     """Revalidate a physical-reference adoption without trusting its claims.
 
@@ -871,8 +963,13 @@ def validate_adopted_pair_store_read_only(
             str(key): int(value) for key, value in entry["stat"].items()
         }
     before = {str(path): _file_stat_identity(path) for path in sources}
-    if before != recorded_stats:
-        raise ExternalMemoryDBSCANError("pair-store adopted source stat drift")
+    reopen_evidence = _validate_pair_store_reopen_stats(
+        recorded=recorded_stats,
+        observed=before,
+        allow_remount_device_drift_for_terminal_reconciliation=(
+            allow_remount_device_drift_for_terminal_reconciliation
+        ),
+    )
 
     proc = Path(proc_root).expanduser().resolve(strict=True)
     writer_claim = adoption.get("source_writer_scan")
@@ -927,6 +1024,17 @@ def validate_adopted_pair_store_read_only(
         pair_store=_pair_store_result(source_path, source_manifest),
         adoption_manifest_path=adoption_path,
         adoption_manifest_sha256=_sha256_file(adoption_path),
+        source_reopen_evidence={
+            **reopen_evidence,
+            "adoption_manifest_path": str(adoption_path),
+            "adoption_manifest_sha256": _sha256_file(adoption_path),
+            "source_hashes": actual_hashes,
+            "hashes_verified": True,
+            "writer_scan_before_count": len(writers_before),
+            "writer_scan_after_count": len(writers_after),
+            "source_root_guard_verified": True,
+            "stat_stable_during_reopen": True,
+        },
     )
 
 

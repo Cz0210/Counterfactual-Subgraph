@@ -1,5 +1,37 @@
 # Decisions Log
 
+## [2026-09-01] Relay the recovered T14 generation into its paper terminal
+
+### Motivation
+
+AutoDL maintenance terminated the old process-only continuation, while the
+fresh current-semantics T14 generation now runs from an immutable worktree.
+The existing T14 postprocessor and verifier remain byte-identical across the
+generation and recovery revisions, but no checked-in follower targets the new
+generation root. Reusing the persistent old follower would target a failed
+attempt and a different execution commit.
+
+### Decision
+
+Add one dataset-specific relay. It binds the exact generation launcher and
+progress PIDs by start ticks and command/root identity and never signals them.
+It waits for the exact generation PASS, both writers to exit, a Linux procfs
+writable-FD audit, and the natural physical-GPU2 release. It then invokes the
+existing T14 postprocess/verifier in fresh UUID roots and atomically writes the
+standard fast16 TasteMolNet/ComRecGC root locator only after exact final PASS.
+
+### Consequences
+
+- Generation/checkpoints remain untouched and the old failed T14 attempt and
+  follower remain read-only evidence.
+- Calibration ordering, held-out test, standardized exports, and independent
+  final verification retain the existing scientific implementation.
+- The existing matrix publisher, not the relay, serializes the final append
+  through the unique fast16 authority.
+- GNN backbone ablation remains disabled before 16/16.
+
+---
+
 ## [2026-09-01] Recover Taste full routes at their verified maintenance boundaries
 
 ### Motivation
@@ -16307,3 +16339,132 @@ are never rewritten.
 ### Status
 
 Accepted and implemented locally; focused remount and tamper tests pass.
+
+---
+
+## [2026-09-01] Bound Mut protected-step baseline fallback to 15 minutes
+
+### Motivation
+
+The Mut trace-on adoption worker previously retried a five-minute
+step-throughput baseline without a deadline.  Long-running protected jobs such
+as Taste T14 publish their scientific step counter only at coarse committed
+checkpoint boundaries, so a healthy CPU/GPU-active process could show no JSON
+step change in several consecutive five-minute samples.  After the AutoDL
+maintenance restart this would waste an idle GPU and could block the already
+authorized 500-step equivalence route indefinitely.
+
+### Decision
+
+Freeze `MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS` to exactly `900`.  During that
+window, keep the ordinary monotonic step baseline unchanged.  If a protected
+step counter remains unmeasurable for the full 15 minutes, require an unchanged
+PID/start-ticks identity, no counter regression, and positive bounded
+auxiliary evidence from process CPU ticks, an active GPU process, a changed
+checkpoint/progress file, or direct output-byte growth.  Record
+`PROTECTED_STEP_BASELINE_UNAVAILABLE_DURING_CHECKPOINT` for each such task.
+
+Activity-only tasks remain subject to exact process liveness plus all canary
+RSS, parent-headroom, failcnt, OOM, and exclusive-GPU gates.  Tasks with a
+measurable 15-minute step delta retain the ordinary 10% slowdown gate.  The
+historical-vs-instrumented and trace-on-vs-trace-off 500-step semantic and
+checkpoint-reload gates are unchanged.
+
+### Consequences
+
+- A coarse protected checkpoint cadence cannot cause unbounded baseline
+  retries after 900 seconds.
+- No task with a dead/reused PID, regressed counter, or absent auxiliary
+  activity can use the fallback.
+- The fallback neither adopts science nor relaxes semantic equivalence,
+  checkpoint reload, candidate-universe, pair-store, or DBSCAN gates.
+
+### Status
+
+Accepted and implemented locally; focused Mut adoption tests pass.
+
+---
+
+## [2026-09-01] Permit device-only pair-store drift during AIDS terminal reconciliation
+
+### Motivation
+
+AutoDL maintenance remounted the persistent volume with Linux device number 76
+instead of the 126 recorded when the completed AIDS pair store was adopted.
+The absolute paths, inode, mode, size, nanosecond timestamps and SHA-256 values
+were unchanged, and no writer survived the restart.  The generic validator
+correctly failed its strict stat comparison, but rerunning 91,916,686 pairs for
+a kernel mount-session identifier would not change the science.
+
+### Decision
+
+Keep `validate_adopted_pair_store_read_only()` strict by default.  Add an
+explicit terminal-reconciliation flag used only by the AIDS completed-science
+reopen.  Under that policy, `device` is the sole permitted recorded-stat
+difference.  Inode, mode, size, mtime and ctime remain exact; the manifest,
+pairs and vectors are fully SHA-256 revalidated; source-root and procfs writer
+guards remain mandatory; and current stats must not change during the reopen.
+
+Return a structured `pair_store_reopen_evidence` object containing the policy,
+recorded and observed stats, device-drift decision, hashes and writer-scan
+results.  The non-Taste matrix append includes that object in its immutable
+terminal evidence.  Do not rewrite the historical adoption manifest and do
+not extend the exception to ordinary resume/adoption paths.
+
+### Consequences
+
+- A maintenance remount cannot force an expensive scientific rerun when only
+  `st_dev` changed.
+- Any other metadata, content, path, schema or writer change remains fail
+  closed, including when the reconciliation flag is enabled.
+- Publication records the device change rather than silently suppressing it.
+
+### Status
+
+Accepted and implemented locally; focused positive and negative tests pass.
+
+---
+
+## [2026-09-01] Treat only proven symmetric deletion-match IDs as replay-equivalent
+
+### Motivation
+
+After the AutoDL maintenance restart, T11 reopened 339 completed base-generation
+parent chunks under the same frozen GINE before stopping at parent position 339.
+The first rejected row retained the same generated fragment, candidate identity,
+canonical residual graph, predictions, flip state, and every other discrete
+field.  Its saved and replayed probability/derived-score differences were at
+most `3.114367430612219e-08`, below the existing `1e-7` restart round-off
+bound.  The only rejected field was `selected_match_index` (`17` versus `11`):
+two symmetric embeddings of the same fragment deleted to the exact same
+canonical residual, and low-bit CUDA score drift changed their ordering.
+
+### Decision
+
+Keep `GENERATION_REPLAY_ABS_TOL=1e-7` unchanged and keep every ordinary
+discrete replay field exact.  A changed `selected_match_index` is accepted only
+when replay validation independently enumerates the parent/fragment deletion
+outcomes again and proves that both the saved and replayed integer match IDs
+are present, valid, and map byte-exactly to the same non-empty residual SMILES
+already shared by the saved and replayed rows.  Candidate, parent, fragment,
+and residual identities must also match exactly.  A missing, duplicate,
+invalid, differently mapped, or non-integer match ID remains a hard failure.
+
+Do not quantize generation scores, change match ranking, rewrite completed
+chunks, or broaden the numerical tolerance.  The exception represents only a
+proven symmetry-equivalent embedding index; it does not admit a different
+graph edit or scientific result.
+
+### Consequences
+
+- Completed T11 chunks can survive a host restart when only a symmetric
+  substructure embedding index changes but the exact deletion result does not.
+- Any residual, candidate, graph, prediction, flip, lineage, schema, type, or
+  out-of-bound numerical change continues to fail closed.
+- The ordinary resumed worker still replays every remaining chunk; this
+  decision does not predeclare unscanned chunks valid or bypass their receipts.
+
+### Status
+
+Accepted and implemented locally; positive and negative focused replay tests
+pass, and a fresh immutable AutoDL deployment is required.

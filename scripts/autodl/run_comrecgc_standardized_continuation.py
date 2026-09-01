@@ -1453,8 +1453,11 @@ def _require_completed_stage_writer_quiescence(
 
 
 def _validate_common_recourse_completion(
-    *, marker: Path, terminal: Mapping[str, Any]
-) -> None:
+    *,
+    marker: Path,
+    terminal: Mapping[str, Any],
+    allow_pair_store_remount_device_drift_for_terminal_reconciliation: bool = False,
+) -> dict[str, Any]:
     """Close every large external-memory artifact before stage reconciliation."""
 
     root = marker.parent.resolve(strict=True)
@@ -1497,6 +1500,7 @@ def _validate_common_recourse_completion(
         raise ValueError("RESUME_COMMON_RUN_MANIFEST_MISMATCH")
     adopted_pair_store = external.get("pair_store_adopted_read_only") is True
     adopted_pair_chunks = external.get("pair_chunks_adopted_read_only") is True
+    pair_store_reopen_evidence: Mapping[str, Any] | None = None
     if adopted_pair_store and adopted_pair_chunks:
         raise ValueError("RESUME_COMMON_MULTIPLE_PAIR_ADOPTION_ROUTES")
     pair_closure_relative = (
@@ -1552,9 +1556,19 @@ def _validate_common_recourse_completion(
         ):
             raise ValueError("RESUME_COMMON_PAIR_ADOPTION_BINDING_MISMATCH")
         try:
-            adopted = validate_adopted_pair_store_read_only(adoption_manifest_path)
+            reopen_options = (
+                {
+                    "allow_remount_device_drift_for_terminal_reconciliation": True
+                }
+                if allow_pair_store_remount_device_drift_for_terminal_reconciliation
+                else {}
+            )
+            adopted = validate_adopted_pair_store_read_only(
+                adoption_manifest_path, **reopen_options
+            )
         except Exception as exc:
             raise ValueError("RESUME_COMMON_PAIR_ADOPTION_CLOSURE_MISMATCH") from exc
+        pair_store_reopen_evidence = adopted.source_reopen_evidence
         pair_manifest_path = adopted.pair_store.manifest_path
         physical_vectors_path = adopted.pair_store.vectors_path
         physical_vectors_sha256 = adopted.pair_store.vectors_sha256
@@ -1644,7 +1658,7 @@ def _validate_common_recourse_completion(
     if dbscan_manifest_raw is None:
         if int(manifest.get("theta_eligible_pair_count", -1)) != 0:
             raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_MISSING")
-        return
+        return {"pair_store_reopen_evidence": pair_store_reopen_evidence}
     adopted_dbscan = external.get("dbscan_adopted_read_only") is True
     if adopted_dbscan:
         relative = "external_memory/dbscan_adoption/run_manifest.json"
@@ -1894,6 +1908,7 @@ def _validate_common_recourse_completion(
             )
     elif component_summary_raw is not None or component_summary_sha is not None:
         raise ValueError("RESUME_COMMON_UNEXPECTED_COMPONENT_SUMMARY_MANIFEST")
+    return {"pair_store_reopen_evidence": pair_store_reopen_evidence}
 
 
 def _archive_previous_failure(output_root: Path) -> None:

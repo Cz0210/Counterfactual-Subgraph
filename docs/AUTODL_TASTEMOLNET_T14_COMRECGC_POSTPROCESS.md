@@ -13,6 +13,8 @@ The implementation lives in:
 - `src/baselines/tastemolnet_comrecgc_postprocess.py`
 - `scripts/run_tastemolnet_comrecgc_postprocess.py`
 - `scripts/autodl/run_tastemolnet_t14_comrecgc_postprocess.sh`
+- `scripts/autodl/run_tastemolnet_t14_postprocess_relay_v1.sh`
+- `scripts/autodl/launch_tastemolnet_t14_postprocess_relay_v1.sh`
 
 The paired `scripts/slurm/run_tastemolnet_comrecgc_postprocess.sh` preserves
 CLI documentation but refuses direct execution because this route consumes
@@ -77,3 +79,37 @@ scripts/autodl/run_tastemolnet_t14_comrecgc_postprocess.sh
 Set resume to `1` only for the same science root after it contains
 `postprocess_checkpoint.json`. The final root must always be absent.
 `RUN_GNN_ABLATION` remains `0` until the matrix is 16/16.
+
+## Durable generation-to-paper relay
+
+The narrow relay is appropriate when generation is already running from an
+immutable checkout. It does not launch, restart, resume, or signal generation.
+It reopens `launcher.json`, binds manager and science process generations by
+PID start ticks and exact output-root command tokens, and waits for the exact
+`[TASTE_T14_COMRECGC_FULL_GENERATION_PASS]` bytes. Before postprocess it waits
+for both bound processes to exit and requires a procfs writable-FD audit of the
+generation root. The ordinary postprocess wrapper then supplies the stable
+idle-GPU and project GPU-lock gates.
+
+Launch with the retained scientific inputs and one clean deployed checkout:
+
+```bash
+export T14_RELAY_REPO_ROOT=/absolute/immutable/worktree
+export T14_GENERATION_ROOT=/absolute/fresh/t14-generation-root
+export T14_GENERATION_LAUNCHER_JSON=/absolute/controller/launcher.json
+export T14_GENERATION_EXECUTION_COMMIT=40_character_generation_commit
+export TASTEMOLNET_CALIBRATION_CSV=/absolute/calibration.csv
+export TASTEMOLNET_TEST_CSV=/absolute/test.csv
+export TASTEMOLNET_T3_OUTPUT_ROOT=/absolute/t3-root
+export MOLCLR_ROOT=/absolute/molclr-source
+export MOLCLR_CHECKPOINT=/absolute/molclr-checkpoint.pth
+export TASTEMOLNET_WNODE_THRESHOLD_JSON=/absolute/tastemolnet.json
+export RUN_GNN_ABLATION=0
+bash scripts/autodl/launch_tastemolnet_t14_postprocess_relay_v1.sh
+```
+
+The launcher prints the fresh controller root. Its
+`cell_root_locator.json` appears only after the independent final verifier has
+published exact `[TASTE_COMRECGC_PASS]`; point the existing fast16 publisher
+queue's TasteMolNet/ComRecGC entry at that locator. The relay itself never
+edits the matrix authority.

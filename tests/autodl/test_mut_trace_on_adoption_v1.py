@@ -1479,6 +1479,179 @@ def test_only_no_progress_baseline_failures_are_retryable() -> None:
     )
 
 
+def _activity_snapshot(
+    *,
+    sampled_at: float,
+    counter: float = 7.0,
+    cpu_ticks: int = 100,
+    progress_sha: str = "a" * 64,
+    progress_mtime_ns: int = 1,
+    output_bytes: int = 100,
+    alive: bool = True,
+    completed: bool = False,
+) -> dict[str, Any]:
+    return {
+        "sampled_at_monotonic": sampled_at,
+        "sampled_at": "2026-09-01T00:00:00+00:00",
+        "tasks": {
+            "protected": {
+                "task_id": "protected",
+                "pid": 11,
+                "start_ticks": 22,
+                "alive": alive,
+                "completed": completed,
+                "counter": counter,
+                "progress_path": "/progress.json",
+                "progress_file_sha256": progress_sha,
+                "sampled_at_unix": sampled_at,
+                "aggregate_cpu_ticks": cpu_ticks,
+                "aggregate_rss_bytes": 1024,
+                "live_process_tree_pids": [11] if alive else [],
+                "gpu_process_rows": [],
+                "progress_size_bytes": 10,
+                "progress_mtime_ns": progress_mtime_ns,
+                "direct_output_bytes": output_bytes,
+                "direct_output_file_count": 1,
+            }
+        },
+    }
+
+
+def _protected_manifest() -> dict[str, Any]:
+    return {
+        "tasks": [
+            {
+                "task_id": "protected",
+                "pid": 11,
+                "start_ticks": 22,
+                "progress_path": "/progress.json",
+                "counter_field": "completed_step",
+                "terminal_value": 20_000,
+            }
+        ]
+    }
+
+
+def test_activity_fallback_accepts_cpu_active_coarse_checkpoint_after_900s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _protected_manifest()
+    baseline = worker._activity_fallback_baseline(
+        manifest,
+        [
+            _activity_snapshot(sampled_at=0.0, cpu_ticks=100),
+            _activity_snapshot(sampled_at=300.0, cpu_ticks=200),
+            _activity_snapshot(sampled_at=600.0, cpu_ticks=300),
+            _activity_snapshot(sampled_at=900.0, cpu_ticks=400),
+        ],
+        maximum_wait_seconds=900,
+    )
+
+    assert baseline["status"] == "PASS"
+    assert len(baseline["activity_snapshots"]) == 4
+    assert baseline["step_baseline_unavailable_task_ids"] == ["protected"]
+    assert baseline["warning"] == (
+        policy.PROTECTED_STEP_BASELINE_UNAVAILABLE_WARNING
+    )
+    row = baseline["tasks"]["protected"]
+    assert row["state"] == policy.PROTECTED_STEP_BASELINE_UNAVAILABLE_STATE
+    assert row["units_per_second"] is None
+    assert row["auxiliary_activity"]["activity_kinds"] == [
+        "PROCESS_CPU_TICKS_INCREASED"
+    ]
+
+    monkeypatch.setattr(
+        policy,
+        "read_protected_progress",
+        lambda task, *, proc_root: {
+            "task_id": task["task_id"],
+            "pid": task["pid"],
+            "start_ticks": task["start_ticks"],
+            "alive": True,
+            "completed": False,
+            "counter": 7.0,
+            "terminal_value": 20_000.0,
+            "progress_path": task["progress_path"],
+            "progress_file_sha256": "a" * 64,
+            "sampled_at_unix": 1.0,
+        },
+    )
+    gate = policy.ProtectedThroughputGate(
+        manifest,
+        baseline,
+        proc_root=Path("/proc"),
+    )
+    assert gate.sample()["status"] == "PASS"
+    receipt = gate.receipt()
+    assert receipt["status"] == "PASS"
+    assert receipt["missing_complete_five_minute_windows"] == []
+    assert receipt["step_baseline_unavailable_task_ids"] == ["protected"]
+    assert receipt["strict_resource_gates_retained"] is True
+
+
+@pytest.mark.parametrize(
+    ("snapshots", "failure"),
+    [
+        (
+            [
+                _activity_snapshot(sampled_at=0.0),
+                _activity_snapshot(sampled_at=899.0, cpu_ticks=200),
+            ],
+            "activity_window_lt_900_seconds",
+        ),
+        (
+            [
+                _activity_snapshot(sampled_at=0.0),
+                _activity_snapshot(sampled_at=900.0),
+            ],
+            "no_auxiliary_activity:protected",
+        ),
+        (
+            [
+                _activity_snapshot(sampled_at=0.0, counter=8.0),
+                _activity_snapshot(
+                    sampled_at=900.0, counter=7.0, cpu_ticks=200
+                ),
+            ],
+            "counter_regressed:protected",
+        ),
+    ],
+)
+def test_activity_fallback_fails_closed_without_stable_activity(
+    snapshots: list[dict[str, Any]], failure: str
+) -> None:
+    baseline = worker._activity_fallback_baseline(
+        _protected_manifest(),
+        snapshots,
+        maximum_wait_seconds=900,
+    )
+    assert baseline["status"] == "FAIL"
+    assert failure in baseline["failures"]
+
+
+def test_protected_baseline_wait_limit_is_frozen_to_900(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS", raising=False)
+    assert worker._protected_baseline_max_wait_seconds() == 900
+    monkeypatch.setenv("MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS", "899")
+    with pytest.raises(worker.MutTraceWorkerError, match="frozen to 900"):
+        worker._protected_baseline_max_wait_seconds()
+
+
+def test_mut_launchers_pin_the_authorized_900_second_wait() -> None:
+    project = Path(__file__).resolve().parents[2]
+    launcher = (
+        project / "scripts/autodl/launch_mut_trace_on_adoption_worker.sh"
+    ).read_text(encoding="utf-8")
+    slurm = (
+        project / "scripts/slurm/launch_mut_trace_on_adoption_worker.sh"
+    ).read_text(encoding="utf-8")
+    assert 'MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS:-900' in launcher
+    assert '== "900"' in launcher
+    assert "export MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS=900" in slurm
+
+
 def test_protected_baseline_and_window_fail_closed_without_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1592,6 +1765,80 @@ def test_memory_receipt_cannot_pass_with_incomplete_canary_evidence(
     }
     receipt["receipt_sha256"] = stable_json_sha256(receipt)
     path = tmp_path / f"memory-{missing}.json"
+    _write_json(path, receipt)
+    with pytest.raises(worker.MutTraceWorkerError, match="failed closed"):
+        worker._validate_memory_receipt(path)
+
+
+def test_memory_receipt_reopens_authorized_activity_fallback(
+    tmp_path: Path,
+) -> None:
+    phase_stats = {
+        phase: {
+            "sample_count": 1,
+            "peak_rss_bytes": 1024,
+            "minimum_parent_headroom_bytes": (
+                policy.CANARY_REQUIRED_HEADROOM_BYTES
+            ),
+        }
+        for phase in worker.REQUIRED_TRACE_PHASES
+    }
+    protected = {
+        "status": "PASS",
+        "missing_complete_five_minute_windows": [],
+        "step_baseline_unavailable_task_ids": ["protected"],
+        "step_baseline_unavailable_warning": (
+            policy.PROTECTED_STEP_BASELINE_UNAVAILABLE_WARNING
+        ),
+        "strict_resource_gates_retained": True,
+    }
+    baseline = {
+        "status": "PASS",
+        "measurement_mode": "BOUNDED_15_MINUTE_ACTIVITY_FALLBACK",
+        "maximum_wait_seconds": 900,
+        "baseline_seconds": 900,
+        "activity_snapshots": [{"sample": 0}, {"sample": 1}],
+        "step_baseline_unavailable_task_ids": ["protected"],
+        "warning": policy.PROTECTED_STEP_BASELINE_UNAVAILABLE_WARNING,
+        "strict_resource_gates_retained": True,
+        "semantic_equivalence_gates_unchanged": True,
+    }
+    receipt: dict[str, Any] = {
+        "schema_version": worker.MEMORY_SCHEMA,
+        "status": "PASS",
+        "failures": [],
+        "arms_sequential": True,
+        "max_concurrent_arms": 1,
+        "initial_parent_headroom_admission_pass": True,
+        "initial_parent_headroom_bytes": policy.CANARY_REQUIRED_HEADROOM_BYTES,
+        "initial_cgroup": {
+            "headroom_bytes": policy.CANARY_REQUIRED_HEADROOM_BYTES,
+            "under_oom": 0,
+        },
+        "process_rss_peak_bytes": 1024,
+        "parent_headroom_min_bytes": policy.CANARY_REQUIRED_HEADROOM_BYTES,
+        "phase_stats": phase_stats,
+        "phases": {
+            phase: {**row, "status": "PASS"}
+            for phase, row in phase_stats.items()
+        },
+        "protected_baseline": baseline,
+        "protected_throughput_gate": protected,
+        "cgroup_failcnt_delta": 0,
+        "cgroup_oom_delta": 0,
+        "cgroup_oom_kill_delta": 0,
+    }
+    receipt["summary_sha256"] = stable_json_sha256(receipt)
+    path = tmp_path / "memory-activity-fallback.json"
+    _write_json(path, receipt)
+    assert worker._validate_memory_receipt(path)["status"] == "PASS"
+
+    receipt["protected_baseline"][
+        "semantic_equivalence_gates_unchanged"
+    ] = False
+    receipt["summary_sha256"] = stable_json_sha256(
+        {key: value for key, value in receipt.items() if key != "summary_sha256"}
+    )
     _write_json(path, receipt)
     with pytest.raises(worker.MutTraceWorkerError, match="failed closed"):
         worker._validate_memory_receipt(path)

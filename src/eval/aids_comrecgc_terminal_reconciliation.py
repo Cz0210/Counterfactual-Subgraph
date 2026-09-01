@@ -862,11 +862,33 @@ def validate_reconciled_final_science(
     )
     common = _json(common_path, label="AIDS posthoc common-recourse terminal")
     try:
-        _validate_common_recourse_completion(marker=common_path, terminal=common)
+        common_validation = _validate_common_recourse_completion(
+            marker=common_path,
+            terminal=common,
+            allow_pair_store_remount_device_drift_for_terminal_reconciliation=True,
+        )
     except Exception as exc:
         raise AIDSComRecGCTerminalReconciliationError(
             f"AIDS posthoc common-recourse closure failed: {exc}"
         ) from exc
+    pair_store_reopen = common_validation.get("pair_store_reopen_evidence")
+    if (
+        not isinstance(pair_store_reopen, Mapping)
+        or pair_store_reopen.get("schema_version")
+        != "comrecgc_pair_store_reopen_evidence_v1"
+        or pair_store_reopen.get("policy")
+        != "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
+        or pair_store_reopen.get("remount_device_drift_allowed") is not True
+        or pair_store_reopen.get("allowed_drift_fields") != ["device"]
+        or pair_store_reopen.get("hashes_verified") is not True
+        or int(pair_store_reopen.get("writer_scan_before_count", -1)) != 0
+        or int(pair_store_reopen.get("writer_scan_after_count", -1)) != 0
+        or pair_store_reopen.get("source_root_guard_verified") is not True
+        or pair_store_reopen.get("stat_stable_during_reopen") is not True
+    ):
+        raise AIDSComRecGCTerminalReconciliationError(
+            "AIDS remount-safe pair-store reopen evidence is absent"
+        )
     expected_continuation = {
         "schema_version": 1,
         "status": "PASS",
@@ -1018,6 +1040,7 @@ def validate_reconciled_final_science(
         "source_integrity_final_sha256": _sha(source_integrity),
         "dbscan_adoption_manifest_path": str(adoption_path),
         "dbscan_adoption_manifest_sha256": _sha(adoption_path),
+        "pair_store_reopen_evidence": dict(pair_store_reopen),
         "zero_strict_flip_evidence": zero,
         "writer_audit": writer,
         "inventory": _critical_inventory(

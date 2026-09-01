@@ -13,6 +13,7 @@ source ~/.bashrc
 conda activate smiles_pip118
 cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
+export MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS=900
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'

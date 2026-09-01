@@ -1,5 +1,18 @@
 # Refactor Plan
 
+## 2026-09-01: Persist the maintenance-recovered T14 paper continuation
+
+- [x] Bind the relay to the exact fresh generation root, launcher commit,
+  manager PID/start ticks, progress PID/start ticks, and command lines.
+- [x] Wait for the exact generation marker, both generation processes to
+  close, a procfs no-writer audit, and the natural GPU2 release.
+- [x] Run the existing T14 calibration/test/export/verifier chain in fresh
+  science/final roots without signalling or modifying generation.
+- [x] Atomically emit a TasteMolNet/ComRecGC terminal locator for the existing
+  locked fast16 matrix publisher.
+- [ ] Deploy from a new clean immutable worktree and attach it to the active
+  post-maintenance T14 generation before returning to the long-run wait.
+
 ## 2026-09-01: Recover Taste routes after AutoDL maintenance
 
 - [x] Keep every T11 discrete generation field exact on resume and allow only
@@ -3572,6 +3585,20 @@ Mutagenicity roadmaps.
 - [ ] Run reconciliation against the immutable completed AutoDL root, then
   publish the AIDS/ComRecGC cell from the current shared authority pointer.
 
+## 2026-09-01: AIDS adopted pair-store remount-safe terminal reopen
+
+- [x] Keep the ordinary adopted pair-store validator strict by default.
+- [x] Add one explicit AIDS terminal-reconciliation policy that permits only a
+  changed source `st_dev`; retain exact path, inode, mode, size, mtime and ctime.
+- [x] Rehash the manifest, pairs and vectors and retain both procfs writer scans,
+  the source-owner guard and same-session before/after stat stability.
+- [x] Return recorded-versus-observed device evidence to the reconciled science
+  terminal so `append_authority.json` discloses the maintenance remount.
+- [x] Add positive device-only, default-strict, non-device drift and live-writer
+  regression tests.
+- [ ] Deploy the minimal patch, rerun only the existing reconciliation/publish
+  command, and verify the AIDS/ComRecGC atomic matrix append.
+
 ## 2026-09-01: BACE GlobalGCE calibration-only successor
 
 - [x] Reopen the old controller/task/gate and exact experiment-registry
@@ -3684,3 +3711,34 @@ Mutagenicity roadmaps.
   backbone ablations disabled.
 - [ ] Deploy from the clean immutable integration commit and launch on the
   naturally assigned GPU0 after the post-maintenance source preflight passes.
+
+## 2026-09-01: Mut bounded protected-baseline recovery
+
+- [x] Freeze the protected step-baseline wait at exactly 900 seconds.
+- [x] Retain the ordinary 10% slowdown comparison whenever a stable
+  15-minute step window is measurable.
+- [x] Permit an explicit activity-only record only for an exact live process
+  with a monotonic coarse counter and positive CPU/GPU/checkpoint/output
+  evidence.
+- [x] Keep PID/start-ticks liveness plus RSS, headroom, failcnt, OOM, GPU-lock,
+  500-step semantic-equivalence, and checkpoint-reload gates fail-closed.
+- [x] Add focused coverage for the authorized fallback, the frozen 900-second
+  setting, counter regression, insufficient duration, and absent activity.
+- [ ] Deploy from the next clean immutable AutoDL worktree and create a fresh
+  protected manifest from post-reboot task identities; never reuse the
+  pre-maintenance PID manifest.
+
+## 2026-09-01: T11 symmetric deletion-match replay recovery
+
+- [x] Reproduce the first post-maintenance mismatch without modifying the
+  science root and identify its first parent, row, field, and maximum numeric
+  drift.
+- [x] Keep the existing `1e-7` CUDA restart bound and all non-match discrete
+  fields unchanged.
+- [x] Permit a differing saved/replayed match index only after fresh deletion
+  enumeration proves both integer IDs are valid and map to the exact same
+  residual SMILES, parent, fragment, and candidate identity.
+- [x] Add a positive symmetric-embedding test and a negative different-residual
+  test.
+- [ ] Deploy from a fresh immutable checkout and resume the existing chunk
+  root; let the ordinary verifier scan every remaining chunk before reuse.

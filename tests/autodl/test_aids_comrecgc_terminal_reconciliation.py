@@ -925,8 +925,35 @@ def test_posthoc_final_self_closure_binds_exact_receipt_without_stage_gates(
         },
     }
     root, standardized = _posthoc_source(tmp_path, controller)
+    common_calls: list[dict[str, object]] = []
+
+    def validate_common(**kwargs: object) -> dict[str, object]:
+        common_calls.append(dict(kwargs))
+        return {
+            "pair_store_reopen_evidence": {
+                "schema_version": "comrecgc_pair_store_reopen_evidence_v1",
+                "policy": "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY",
+                "remount_device_drift_allowed": True,
+                "remount_device_drift_detected": True,
+                "allowed_drift_fields": ["device"],
+                "hashes_verified": True,
+                "writer_scan_before_count": 0,
+                "writer_scan_after_count": 0,
+                "source_root_guard_verified": True,
+                "stat_stable_during_reopen": True,
+                "source_files": {
+                    "/source/vectors.npy": {
+                        "recorded_stat": {"device": 126},
+                        "observed_stat": {"device": 76},
+                        "device_changed": True,
+                        "stable_stat_fields_match": True,
+                    }
+                },
+            }
+        }
+
     monkeypatch.setattr(
-        reconciliation, "_validate_common_recourse_completion", lambda **_kwargs: None
+        reconciliation, "_validate_common_recourse_completion", validate_common
     )
     monkeypatch.setattr(
         matrix, "_validate_aids_standardized", lambda _root: dict(standardized)
@@ -946,6 +973,12 @@ def test_posthoc_final_self_closure_binds_exact_receipt_without_stage_gates(
     assert result["terminal_kind"] == "AIDS_POSTHOC_SELF_CLOSED_SCIENCE_FINAL"
     assert result["exact_receipt_sha256"] == "4" * 64
     assert result["zero_strict_flip_evidence"]["scientific_output_empty"] is True
+    assert common_calls[0][
+        "allow_pair_store_remount_device_drift_for_terminal_reconciliation"
+    ] is True
+    assert result["pair_store_reopen_evidence"][
+        "remount_device_drift_detected"
+    ] is True
 
     adoption_path = Path(result["dbscan_adoption_manifest_path"])
     adoption = json.loads(adoption_path.read_text(encoding="utf-8"))

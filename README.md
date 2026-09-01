@@ -102,6 +102,10 @@ See:
   read-only adoption of the completed AIDS exact DBSCAN into streamed summary,
   WNode evaluation, paper CSVs, and standardized freeze; no DBSCAN/pair-store
   regeneration)
+- `docs/AUTODL_AIDS_COMRECGC_REMOUNT_REOPEN.md` (reconciliation-only reopen of
+  the immutable adopted pair store after an AutoDL remount; only `st_dev` may
+  drift, while paths, all other stat fields, hashes and no-writer checks remain
+  strict and the drift is recorded in matrix-publication evidence)
 - `docs/AUTODL_MUT_TRACEOFF_PARITY_V2_INDEPENDENT.md` (fresh seven-task Mut
   trace-off successor that removes only the artificial AIDS wait while keeping
   the pinned 500-step instrumentation gate, real trace-disabled 50k replay,
@@ -142,7 +146,8 @@ See:
   aggregate-only publication; no test, full run, or paper claim)
 - `docs/AUTODL_TASTEMOLNET_T14_COMRECGC_POSTPROCESS.md` (read-only adoption of
   the train-only T14 checkpoint, calibration-only top-20 freeze, post-freeze
-  held-out test, standardized exports, and no-replace terminal publication)
+  held-out test, standardized exports, no-replace terminal publication, and a
+  narrow durable generation-to-paper relay that emits the matrix root locator)
 - `docs/TASTE_GCF_NEUROSED_PROTOCOL.md` (Taste-specific, train-fit/
   validation-select NeuroSED auxiliary distance model, official GREED/GCF
   runner semantics, no calibration/test access, and managed-v2 publication)
