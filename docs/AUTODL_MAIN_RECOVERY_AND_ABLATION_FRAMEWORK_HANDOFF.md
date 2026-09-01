@@ -1,6 +1,6 @@
 # AutoDL Main Recovery and Ablation Framework Handoff
 
-Last live audit: 2026-09-02 01:27-01:31 CST.  This document records live
+Last live audit: 2026-09-02 02:35-02:40 CST.  This document records live
 execution facts separately from the post-main, config-only ablation design.
 It must not be used as a substitute for the matrix authority or terminal
 artifact receipts.
@@ -8,24 +8,34 @@ artifact receipts.
 ## 1. Main matrix authority
 
 - Authority pointer: `/autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json`
-- Live complete cells: `10 / 16`
-- Applied cells: AIDS/Ours, AIDS/GCFExplainer, AIDS/GlobalGCE;
+- Live complete cells: `11 / 16`
+- Applied cells: AIDS/Ours, AIDS/GCFExplainer, AIDS/GlobalGCE, AIDS/ComRecGC;
   Mutagenicity/Ours, Mutagenicity/GCFExplainer, Mutagenicity/GlobalGCE;
   BACE/Ours, BACE/GCFExplainer, BACE/GlobalGCE, BACE/ComRecGC.
-- Missing cells: AIDS/ComRecGC, Mutagenicity/ComRecGC, and all four
-  TasteMolNet methods.
+- Missing cells: Mutagenicity/ComRecGC and all four TasteMolNet methods.
+- The AIDS publication-only reconciliation completed without rerunning science.
+  Its authority root is
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/publication_reconciliation/aids_comrecgc_matrix_append_5c11c28_20260902T021000Z`.
 - No second matrix authority was created or modified by the framework build.
 
 ## 2. Live main-table workers
 
 | Line | PID | GPU | Live state / checkpoint | Root |
 |---|---:|---:|---|---|
-| AIDS ComRecGC publication-only reconciliation | 28985 | none | Existing science PASS; validating the large immutable artifact inventory before append | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/publication_reconciliation/aids_comrecgc_matrix_append_76a27fb_20260902T011500Z` |
-| Mut ComRecGC trace-on adoption | 22325 | waiting | Worker alive; code audit and protected-throughput baseline PASS; waits for a naturally free main-table GPU | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/mut_trace_on_adoption_20260901T154900Z` |
-| Taste T11 Ours | 15930 | 0 | `GENERATION_HIGH_TEMP`, 3699/3823 parents | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/ours/t11-full/science-attempt-b73f789d-3888-4ec8-8e07-0442e224df29` |
-| Taste T8 target-0 recovery (feeds T13) | 12751 | 1 | training epoch 19/25, best checkpoint and heartbeat present | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t8-dual-branch-recovery/target-0-attempt-3af51e32-8429-4b3e-8bae-71ba16df1683` |
-| Taste T14 ComRecGC | 7224 | 2 | generation 2100/20000, live progress writes | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/comrecgc/t14-full/attempt-f3b2e5f2-9f20-4c12-bd26-3d7cc8e0d9ab` |
+| AIDS ComRecGC publication | none | none | Published PASS; matrix append complete at 11/16 | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/publication_reconciliation/aids_comrecgc_matrix_append_5c11c28_20260902T021000Z` |
+| Mut ComRecGC trace-on adoption | 34081 | waiting | Fresh one-shot successor is running a protected baseline with `gpu_lock_held=false`; it waits for a naturally idle GPU | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/mut_trace_on_adoption_20260901T183543Z` |
+| Taste T11 Ours | 15930 | 0 | `GENERATION_HIGH_TEMP`, 3817/3823 parents at the audit | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/ours/t11-full/science-attempt-b73f789d-3888-4ec8-8e07-0442e224df29` |
+| Taste T8 target-2 recovery (feeds T13) | 33141 | 1 | target-0 finished and target-2 advanced into native gSpan/rule materialization | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t8-dual-branch-recovery/target-2-attempt-4a0651fa-5df4-43c0-a897-20f040f779d8` |
+| Taste T14 ComRecGC | 7224 | 2 | last ordinary progress was 2100/20000; a fresh 2500-step checkpoint was being serialized | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/comrecgc/t14-full/attempt-f3b2e5f2-9f20-4c12-bd26-3d7cc8e0d9ab` |
 | Taste T12 GCFExplainer | 21562 | 3 | science process alive; no early production checkpoint yet | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/gcfexplainer/t12-production/attempt-6616449a-6fa5-4502-8c8a-ae01b11366fb` |
+
+The previous Mut worker (PID 22325) correctly failed closed when an
+uncoordinated T8 process appeared on its exclusively locked GPU.  This was not
+a trace-equivalence failure: its receipt records
+`fallback_route_required=false`, and no fresh 50k generation was launched.
+PID 34081 was therefore attached from the original immutable main execution
+commit `a21f89d` with a fresh authorization and output root.  It does not hold a
+GPU while waiting.
 
 The T12/T13/T14 publisher and post-process relays had current heartbeats at
 the audit time.  T11, T8, T12 and T14 were not restarted, reconfigured or
@@ -34,9 +44,11 @@ or ablation GPU lock existed.
 
 ## 3. Main-table critical path
 
-T11 is close to the end of its current generation stage and T8 target-0 has
-six configured training epochs remaining, but both still require downstream
-verification/publication.  T14 had 17,900 configured generation steps left;
+T11 is within six parents of the end of its high-temperature generation stage,
+but still requires downstream verification/publication.  T8 target-0 has
+finished and target-2 is the remaining T8 prerequisite before T13.  T14 had
+roughly 17,500 configured generation steps left at its in-progress 2500-step
+checkpoint;
 its measured protected baseline was about 0.330 steps/second, corresponding to
 roughly 15 hours for generation alone if sustained.  T12 remains the largest
 uncertainty because its current implementation does not yet expose an early
@@ -58,6 +70,12 @@ Missing or mismatched provenance fails closed; values are not filled from
 memory.  Building this reference is allowed before 16/16 because it does not
 run science; the independent launch gate still requires final 16/16.  The
 reference records the real 386-parent, 4+4 proposal contract.
+
+The real contract was built on AutoDL and passed with reference SHA-256
+`808d1eb204e7ba285ac1d8aab8f4f2bffc0c2b9be004115303f25f3f40cebbe0`.
+The builder also proves that B10's serialized-pool hash and canonical
+candidate-universe hash are distinct identities, and binds B11/B12 to the
+canonical universe rather than conflating the two.
 
 The verified main policy lineage is ChemLLM base plus a fresh LoRA initializer
 plus PPO.  There is no independently matched BACE SFT checkpoint.  Therefore:
@@ -129,6 +147,12 @@ environment variable is not authorization.  Checked-in Slurm wrappers exist
 solely because repository policy requires a paired wrapper for Python
 entrypoints; they were not submitted and must not be submitted while
 main-table GPUs are occupied.
+
+Both deployed status commands independently reopened the live authority and
+reported `BLOCKED_WAITING_MAIN_MATRIX`, `main_matrix_complete_cells=11`,
+`science_started=false`, and `gpu_lock_acquired=false`.  The audit bundle is:
+
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/main_and_ablation_framework_20260901T184000Z/`
 
 ## 8. Paper staging
 
