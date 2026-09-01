@@ -1385,6 +1385,54 @@ def test_protected_baseline_is_measured_without_wall_clock_wait(
     assert read_count[0] >= 31
 
 
+def test_protected_baseline_accepts_alive_task_at_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(policy.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        policy.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    monkeypatch.setattr(
+        policy,
+        "read_protected_progress",
+        lambda task, *, proc_root: {
+            "task_id": task["task_id"],
+            "alive": True,
+            "completed": True,
+            "counter": 20_175.0,
+        },
+    )
+    manifest = {
+        "tasks": [
+            {
+                "task_id": "resource-capped",
+                "pid": 1,
+                "start_ticks": 2,
+                "progress_path": "/progress.json",
+                "counter_field": "completed_step",
+                "terminal_value": 20_000,
+            }
+        ]
+    }
+
+    baseline = policy.establish_protected_throughput_baseline(
+        manifest,
+        proc_root=Path("/proc"),
+        baseline_seconds=300,
+        poll_seconds=10,
+    )
+
+    assert baseline["status"] == "PASS"
+    assert baseline["failures"] == []
+    assert baseline["tasks"]["resource-capped"]["state"] == (
+        "COMPLETED_DURING_BASELINE"
+    )
+    assert baseline["tasks"]["resource-capped"]["units_per_second"] is None
+
+
 def test_protected_baseline_and_window_fail_closed_without_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -179,7 +179,7 @@ def establish_protected_throughput_baseline(
             failures.append(f"protected_task_exited:{key}")
             continue
         delta = after["counter"] - before["counter"]
-        if after["alive"] and delta <= 0:
+        if after["alive"] and not after["completed"] and delta <= 0:
             failures.append(f"no_positive_baseline:{key}")
             continue
         baselines[key] = {
