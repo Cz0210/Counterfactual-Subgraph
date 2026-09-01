@@ -1045,8 +1045,12 @@ def test_bridge_does_not_relax_semantics_for_same_identity_model_graph_drift() -
     )
     _importance, embeddings = bridge.call([_graph()], {})
     bridge.calculate_hash(embeddings[0])
-    with pytest.raises(TasteComRecGCSmokeError, match="changed GINE semantics"):
+    with pytest.raises(
+        TasteComRecGCSmokeError, match="changed GINE semantics"
+    ) as error:
         bridge.call([_graph()], {})
+    assert "model_graph_sha256" in str(error.value)
+    assert "model_graph_payload" in str(error.value)
 
 
 def test_bridge_reuses_invalid_unscored_identity_across_node_permutations() -> None:
@@ -1218,8 +1222,14 @@ def test_bridge_rejects_gross_same_prediction_rescore_drift(
     )
     _importance, embeddings = bridge.call([_graph()], {})
     bridge.calculate_hash(embeddings[0])
-    with pytest.raises(TasteComRecGCSmokeError, match="changed GINE semantics"):
+    with pytest.raises(
+        TasteComRecGCSmokeError, match="changed GINE semantics"
+    ) as error:
         bridge.call([_graph(source_index=1)], {})
+    expected_field = (
+        "probabilities" if drift_kind == "probabilities" else "embedding_values"
+    )
+    assert expected_field in str(error.value)
 
 
 def test_bridge_fails_if_parent_metadata_changes_same_graph_semantics() -> None:

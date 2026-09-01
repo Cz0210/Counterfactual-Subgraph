@@ -195,7 +195,9 @@ def _vrrw():
     )
 
 
-def test_stable_bridge_returns_structural_identity_not_embedding_hash(monkeypatch):
+def test_stable_bridge_returns_canonical_model_input_identity_not_embedding_hash(
+    monkeypatch,
+):
     collision = {
         "canonical_graph": "[C]",
         "num_nodes": 1,
@@ -209,12 +211,21 @@ def test_stable_bridge_returns_structural_identity_not_embedding_hash(monkeypatc
         collision_payload=lambda: collision,
     )
     monkeypatch.setattr(t12, "canonical_attributed_graph", lambda *_args, **_kwargs: identity)
+    model_payload = {"schema_version": "test_gine_model_graph_v1", "token": "C"}
+    expected_hash, _expected_collision = t12._t12_model_input_identity(
+        native_collision=collision,
+        supplied_identity=collision,
+        supplied_model=model_payload,
+        valid_fullgraph=True,
+    )
     adapter = _Adapter()
     adapter.score = lambda values: SimpleNamespace(
         probabilities=np.asarray([[0.1, 0.2, 0.7] for _ in values]),
         graph_embeddings=np.asarray([[1.0, 2.0] for _ in values], dtype=np.float32),
         valid_fullgraphs=tuple(True for _ in values),
         failure_reasons=tuple("" for _ in values),
+        identity_graph_payloads=tuple(collision for _ in values),
+        model_graph_payloads=tuple(model_payload for _ in values),
     )
     bridge = _bridge(adapter=adapter)
     graph = SimpleNamespace(
@@ -224,8 +235,8 @@ def test_stable_bridge_returns_structural_identity_not_embedding_hash(monkeypatc
     )
     parts, embeddings, _coverage = bridge.call([graph], {})
     assert parts.tolist() == [[0.8, 0.5]]
-    assert bridge.calculate_hash(embeddings[0]) == structural_hash
-    assert bridge.is_graph_counterfactual(structural_hash) is True
+    assert bridge.calculate_hash(embeddings[0]) == expected_hash
+    assert bridge.is_graph_counterfactual(expected_hash) is True
     report = bridge.report()
     assert report["graph_identity_contract"] == t12.GRAPH_IDENTITY_CONTRACT
     assert report["python_builtin_hash_used"] is False
@@ -233,6 +244,133 @@ def test_stable_bridge_returns_structural_identity_not_embedding_hash(monkeypatc
     restored = _bridge(adapter=adapter)
     restored.restore_checkpoint_state(bridge.checkpoint_state())
     assert restored.checkpoint_state() == bridge.checkpoint_state()
+
+
+def test_t12_model_input_identity_separates_parent_sidecar_decodes(monkeypatch):
+    """One raw native tensor identity may decode to two real molecules."""
+
+    native_collision = {
+        "canonical_graph": "[C]",
+        "num_nodes": 1,
+        "num_edges": 0,
+    }
+    from src.baselines.tastemolnet_comrecgc_smoke import _identity_graph_sha256
+
+    native_identity = SimpleNamespace(
+        graph_identity_sha256=_identity_graph_sha256(native_collision),
+        collision_payload=lambda: native_collision,
+    )
+    monkeypatch.setattr(
+        t12, "canonical_attributed_graph", lambda *_args, **_kwargs: native_identity
+    )
+
+    class _DecodedAdapter(_Adapter):
+        @staticmethod
+        def score(values):
+            token = int(values[0].gcf_origin_index[0])
+            decoded_identity = {
+                "canonical_graph": "C" if token == 0 else "C=O",
+                "num_nodes": 1 if token == 0 else 2,
+                "num_edges": 0 if token == 0 else 1,
+            }
+            return SimpleNamespace(
+                probabilities=np.asarray(
+                    [[0.1, 0.2, 0.7] if token == 0 else [0.7, 0.2, 0.1]]
+                ),
+                graph_embeddings=np.asarray(
+                    [[1.0, 2.0] if token == 0 else [3.0, 4.0]],
+                    dtype=np.float32,
+                ),
+                valid_fullgraphs=(True,),
+                failure_reasons=("",),
+                identity_graph_payloads=(decoded_identity,),
+                model_graph_payloads=(
+                    {
+                        "schema_version": "test_gine_model_graph_v1",
+                        "decoded": token,
+                    },
+                ),
+            )
+
+    bridge = _bridge(adapter=_DecodedAdapter())
+    hashes = []
+    for token in (0, 1):
+        graph = SimpleNamespace(
+            num_nodes=1,
+            gcf_origin_index=[token],
+            gcf_node_origin=[0],
+        )
+        _parts, rows, _coverage = bridge.call([graph], {})
+        hashes.append(bridge.calculate_hash(rows[0]))
+    assert hashes[0] != hashes[1]
+    assert len(bridge.records) == 2
+
+
+def test_t12_semantic_guard_names_embedding_drift_and_returns_canonical_row(
+    monkeypatch,
+):
+    collision = {"canonical_graph": "C", "num_nodes": 1, "num_edges": 0}
+    from src.baselines.tastemolnet_comrecgc_smoke import _identity_graph_sha256
+
+    identity = SimpleNamespace(
+        graph_identity_sha256=_identity_graph_sha256(collision),
+        collision_payload=lambda: collision,
+    )
+    monkeypatch.setattr(
+        t12, "canonical_attributed_graph", lambda *_args, **_kwargs: identity
+    )
+
+    class _ReplayAdapter(_Adapter):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def score(self, _values):
+            self.calls += 1
+            row = (
+                np.asarray([1.0, 2.0], dtype=np.float32)
+                if self.calls == 1
+                else np.nextafter(
+                    np.asarray([1.0, 2.0], dtype=np.float32),
+                    np.asarray([2.0, 3.0], dtype=np.float32),
+                )
+            )
+            return SimpleNamespace(
+                probabilities=np.asarray([[0.1, 0.2, 0.7]]),
+                graph_embeddings=np.stack([row]),
+                valid_fullgraphs=(True,),
+                failure_reasons=("",),
+                identity_graph_payloads=(collision,),
+                model_graph_payloads=(
+                    {"schema_version": "test_gine_model_graph_v1", "token": 0},
+                ),
+            )
+
+    graph = SimpleNamespace(
+        num_nodes=1, gcf_origin_index=[0], gcf_node_origin=[0]
+    )
+    bridge = _bridge(adapter=_ReplayAdapter())
+    _parts, first_rows, _coverage = bridge.call([graph], {})
+    bridge.calculate_hash(first_rows[0])
+    _parts, replay_rows, _coverage = bridge.call([graph], {})
+    assert np.array_equal(replay_rows, first_rows)
+    bridge.calculate_hash(replay_rows[0])
+
+    class _DriftAdapter(_ReplayAdapter):
+        def score(self, values):
+            result = super().score(values)
+            if self.calls == 2:
+                result.graph_embeddings[:] = np.asarray([[1.0e9, -1.0e9]])
+            return result
+
+    guarded = _bridge(adapter=_DriftAdapter())
+    _parts, rows, _coverage = guarded.call([graph], {})
+    guarded.calculate_hash(rows[0])
+    with pytest.raises(
+        t12.TasteGCFFullResumeError,
+        match=r'mismatch_fields.*embedding_values',
+    ):
+        guarded.call([graph], {})
 
 
 def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
@@ -275,6 +413,16 @@ def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
         ),
         valid_fullgraphs=tuple(True for _ in values),
         failure_reasons=tuple("" for _ in values),
+        identity_graph_payloads=tuple(
+            collisions[value.token] for value in values
+        ),
+        model_graph_payloads=tuple(
+            {
+                "schema_version": "test_gine_model_graph_v1",
+                "token": value.token,
+            }
+            for value in values
+        ),
     )
     bridge = _bridge(adapter=adapter, production_history=history)
     graphs = {

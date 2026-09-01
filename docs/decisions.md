@@ -15909,3 +15909,39 @@ training, gSpan, bridge, candidate-generation, or GNN-ablation task.
 ### Status
 
 Accepted; build and launch from a fresh immutable AutoDL checkout.
+
+---
+
+## [2026-09-01] Bind Taste full-run identities to exact frozen-GINE inputs
+
+### Motivation
+
+Taste T12 can restore bond, charge, aromatic, hydrogen, and stereo sidecars
+before frozen-GINE scoring, so its former native one-hot/edge identity could
+alias two different scientific model inputs.  Taste T14 already distinguished
+those inputs, but rescoring one byte-identical input in a different CUDA batch
+could introduce low-bit drift and fail its stable-identity guard.
+
+### Decision
+
+T12 identities now bind canonical decoded chemistry and the SHA-256 of the
+normalized model input actually sent to GINE.  Its official walk receives the
+first validated canonical embedding for repeated identities.  T14 evaluates
+the first exact model input normally and replays that row only for subsequent
+byte-identical inputs; checkpoint restore may prime this cache solely from
+fully validated bridge records.  Different inputs, hash collisions, malformed
+checkpoint rows, and material score changes still fail closed.  No numerical
+tolerance or candidate predicate is changed.
+
+### Consequences
+
+- The old T12 replay gate is not reusable because its identity contract was
+  weaker; a fresh short canary and fresh production root are required.
+- The existing T14 checkpoint schema remains compatible and may resume from
+  its last committed checkpoint after the focused reload tests pass.
+- Diagnostic failures now name the mismatched semantic fields and maximum
+  probability/embedding differences.
+
+### Status
+
+Accepted; focused tests pass and immutable AutoDL deployment is pending.

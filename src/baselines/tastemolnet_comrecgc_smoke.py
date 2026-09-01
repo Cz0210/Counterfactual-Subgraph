@@ -742,6 +742,78 @@ class TasteComRecGCRecord:
         }
 
 
+def _comrecgc_semantic_mismatch(
+    previous: TasteComRecGCRecord,
+    observed: TasteComRecGCRecord,
+    *,
+    observed_embedding: Any,
+) -> tuple[list[str], dict[str, float]]:
+    """Name every field that makes one stable identity scientifically differ.
+
+    The old compound predicate deliberately failed closed, but its one-line
+    exception made a model-input collision indistinguishable from ordinary
+    CUDA low-bit drift.  Keep every existing comparison and tolerance while
+    returning a compact, deterministic diagnosis for terminal logs.
+    """
+
+    import numpy as np
+
+    fields: list[str] = []
+    if previous.canonical_graph != observed.canonical_graph:
+        fields.append("canonical_graph")
+    if previous.model_graph_sha256 != observed.model_graph_sha256:
+        fields.append("model_graph_sha256")
+    if previous.model_graph_payload != observed.model_graph_payload:
+        fields.append("model_graph_payload")
+    if previous.valid_fullgraph is not observed.valid_fullgraph:
+        fields.append("valid_fullgraph")
+    if previous.prediction != observed.prediction:
+        fields.append("prediction")
+    if previous.candidate is not observed.candidate:
+        fields.append("candidate")
+    if previous.embedding_dtype != observed.embedding_dtype:
+        fields.append("embedding_dtype")
+    if len(previous.embedding_values) != len(observed.embedding_values):
+        fields.append("embedding_shape")
+
+    previous_probabilities = np.asarray(previous.probabilities, dtype=np.float64)
+    observed_probabilities = np.asarray(observed.probabilities, dtype=np.float64)
+    probability_delta = float(
+        np.max(np.abs(previous_probabilities - observed_probabilities))
+    )
+    if not np.allclose(
+        observed_probabilities,
+        previous_probabilities,
+        rtol=GINE_CANONICAL_REUSE_RTOL,
+        atol=GINE_CANONICAL_REUSE_ATOL,
+    ):
+        fields.append("probabilities")
+
+    details = {"probability_max_abs_difference": probability_delta}
+    if "embedding_shape" not in fields and "embedding_dtype" not in fields:
+        cached_embedding = np.asarray(
+            previous.embedding_values,
+            dtype=np.dtype(previous.embedding_dtype),
+        )
+        embedding_delta = float(
+            np.max(
+                np.abs(
+                    np.asarray(observed_embedding, dtype=np.float64)
+                    - np.asarray(cached_embedding, dtype=np.float64)
+                )
+            )
+        )
+        details["embedding_max_abs_difference"] = embedding_delta
+        if not np.allclose(
+            observed_embedding,
+            cached_embedding,
+            rtol=GINE_CANONICAL_REUSE_RTOL,
+            atol=GINE_CANONICAL_REUSE_ATOL,
+        ):
+            fields.append("embedding_values")
+    return fields, details
+
+
 class TasteComRecGCMulticlassBridge:
     """Serial bridge for the pinned stateful multi-head COMRECGC module."""
 
@@ -913,37 +985,20 @@ class TasteComRecGCMulticlassBridge:
                 # prevents one stable graph key from acquiring multiple
                 # recourse vectors without masking a genuinely different
                 # molecule/model result.
-                cached_embedding = np.asarray(
-                    previous.embedding_values,
-                    dtype=np.dtype(previous.embedding_dtype),
+                mismatch_fields, mismatch_details = _comrecgc_semantic_mismatch(
+                    previous,
+                    observed,
+                    observed_embedding=raw_embedding,
                 )
-                if (
-                    previous.canonical_graph != observed.canonical_graph
-                    or previous.model_graph_sha256
-                    != observed.model_graph_sha256
-                    or previous.model_graph_payload
-                    != observed.model_graph_payload
-                    or previous.valid_fullgraph is not observed.valid_fullgraph
-                    or previous.prediction != observed.prediction
-                    or previous.candidate is not observed.candidate
-                    or previous.embedding_dtype != observed.embedding_dtype
-                    or len(previous.embedding_values)
-                    != len(observed.embedding_values)
-                    or not np.allclose(
-                        np.asarray(observed.probabilities, dtype=np.float64),
-                        np.asarray(previous.probabilities, dtype=np.float64),
-                        rtol=GINE_CANONICAL_REUSE_RTOL,
-                        atol=GINE_CANONICAL_REUSE_ATOL,
-                    )
-                    or not np.allclose(
-                        raw_embedding,
-                        cached_embedding,
-                        rtol=GINE_CANONICAL_REUSE_RTOL,
-                        atol=GINE_CANONICAL_REUSE_ATOL,
-                    )
-                ):
+                if mismatch_fields:
+                    diagnostic = {
+                        "graph_identity_sha256": graph_identity_sha256,
+                        "mismatch_fields": mismatch_fields,
+                        **mismatch_details,
+                    }
                     raise TasteComRecGCSmokeError(
-                        "One parent-free graph identity changed GINE semantics"
+                        "One parent-free graph identity changed GINE semantics; "
+                        f"diagnostic={json.dumps(diagnostic, sort_keys=True)}"
                     )
                 record = previous
             canonical_embedding = np.asarray(
@@ -1218,6 +1273,13 @@ class TasteComRecGCMulticlassBridge:
             raise TasteComRecGCSmokeError(
                 "Taste COMRECGC checkpoint lost structural hash consumption"
             )
+        prime = getattr(self.adapter, "prime_canonical_replay_cache", None)
+        if callable(prime):
+            # The bridge payload above has already been schema-, hash-, and
+            # byte-validated.  Seeding the optional adapter cache here makes
+            # the first repeated model input after resume return the exact
+            # pre-checkpoint canonical row instead of a fresh CUDA reduction.
+            prime(self.records)
 
     def report(self) -> dict[str, Any]:
         self._assert_idle()

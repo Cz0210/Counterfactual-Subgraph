@@ -3534,3 +3534,17 @@ Mutagenicity roadmaps.
 - [x] Add a focused fail-closed test and paired Slurm CLI contract.
 - [ ] Deploy from a clean descendant of the expected-empty fix, launch the
   fresh controller, and record its PID, heartbeat, and output root.
+
+## 2026-09-01: Taste T12/T14 exact model-input identity recovery
+
+- [x] Strengthen T12 identity from the native graph proxy to canonical decoded
+  chemistry plus the normalized frozen-GINE model-input SHA-256.
+- [x] Return the first validated canonical T12 embedding for repeated exact
+  identities without changing official walk, edit, or NeuroSED semantics.
+- [x] Add an opt-in T14 exact-input replay cache and prime it only from fully
+  validated checkpoint bridge records.
+- [x] Preserve fail-closed behavior for different model inputs, hash
+  collisions, malformed checkpoint rows, and material GINE result changes.
+- [x] Add focused live, replay, checkpoint, collision, and diagnostic tests.
+- [ ] Deploy from an immutable worktree, run the fresh T12 canary, and resume
+  T14 from the existing committed 5k checkpoint on naturally available GPUs.

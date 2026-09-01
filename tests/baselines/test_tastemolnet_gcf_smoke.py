@@ -464,6 +464,97 @@ def test_native_adapter_rejects_non_integer_lineage_aliases(origin: object) -> N
         adapter._portable(graph, 0)
 
 
+def test_native_adapter_canonical_replay_uses_exact_model_input_bytes() -> None:
+    adapter = object.__new__(TasteFrozenGINENativeAdapter)
+    adapter._torch = torch
+    adapter.parameter = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32))
+    adapter.hidden_dim = 2
+    adapter.canonical_replay_cache_enabled = True
+    adapter._canonical_replay_cache = {}
+    adapter.canonical_replay_cache_hits = 0
+    adapter.canonical_replay_cache_misses = 0
+    scorer_calls = []
+
+    class _ReplayScorer:
+        @staticmethod
+        def score(graphs):
+            scorer_calls.append(len(graphs))
+            return SimpleNamespace(
+                project_logits=torch.log(
+                    torch.tensor([[0.2, 0.7, 0.1]], dtype=torch.float32)
+                ),
+                graph_hidden=torch.tensor([[1.0, 2.0]], dtype=torch.float32),
+            )
+
+    adapter.scorer = _ReplayScorer()
+    payload = {
+        "schema_version": "test_gine_model_graph_v1",
+        "canonical_smiles": "CO",
+        "node_features": [[1], [2]],
+    }
+    observed_probabilities, observed_embeddings = (
+        adapter._score_canonical_model_inputs(
+            portable=[object()],
+            valid_positions=[0],
+            model_graph_payloads=[payload],
+        )
+    )
+    first_probabilities = observed_probabilities.clone()
+    first_embeddings = observed_embeddings.clone()
+
+    canonical_probabilities, canonical_embeddings = (
+        adapter._score_canonical_model_inputs(
+            portable=[object()],
+            valid_positions=[0],
+            model_graph_payloads=[payload],
+        )
+    )
+    assert torch.equal(canonical_probabilities, first_probabilities)
+    assert torch.equal(canonical_embeddings, first_embeddings)
+    assert scorer_calls == [1]
+    assert adapter.canonical_replay_cache_hits == 1
+    assert adapter.canonical_replay_cache_misses == 1
+
+
+def test_native_adapter_primes_canonical_replay_from_validated_checkpoint() -> None:
+    adapter = object.__new__(TasteFrozenGINENativeAdapter)
+    adapter._torch = torch
+    adapter.parameter = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32))
+    adapter.hidden_dim = 2
+    adapter.canonical_replay_cache_enabled = True
+    adapter._canonical_replay_cache = {}
+    adapter.canonical_replay_cache_hits = 0
+    adapter.canonical_replay_cache_misses = 0
+    payload = {
+        "schema_version": "test_gine_model_graph_v1",
+        "canonical_smiles": "CO",
+    }
+    model_sha, _encoded = adapter._model_input_cache_key(payload)
+    record = SimpleNamespace(
+        valid_fullgraph=True,
+        model_graph_payload=payload,
+        model_graph_sha256=model_sha,
+        probabilities=(0.2, 0.7, 0.1),
+        embedding_values=(1.0, 2.0),
+        embedding_dtype="<f4",
+    )
+    assert adapter.prime_canonical_replay_cache({"identity": record}) == 1
+    adapter.scorer = SimpleNamespace(
+        score=lambda _graphs: pytest.fail("checkpointed model input was rescored")
+    )
+    probabilities, embeddings = adapter._score_canonical_model_inputs(
+        portable=[object()],
+        valid_positions=[0],
+        model_graph_payloads=[payload],
+    )
+    assert torch.equal(
+        probabilities, torch.tensor([[0.2, 0.7, 0.1]], dtype=torch.float32)
+    )
+    assert torch.equal(
+        embeddings, torch.tensor([[1.0, 2.0]], dtype=torch.float32)
+    )
+
+
 @pytest.mark.parametrize("source_label", (0, 2))
 def test_sweet_scoring_adapter_rejects_non_sweet_source_semantics(
     source_label: int,

@@ -46,24 +46,33 @@ The vendored official implementation uses
 `hash(graph_embedding.tobytes())`.  That integer changes between isolated
 Python processes and cannot identify a restored registry.  For T12 only, the
 project boundary replaces that registry key with
-`canonical_parent_free_attributed_graph_sha256_v1`:
+`canonical_parent_free_gine_model_input_sha256_v1`:
 
-- node attributes are exact atomic numbers decoded from the frozen one-hot
-  vocabulary;
-- edges are the exact symmetric, untyped official native edges;
-- RDKit supplies only canonical graph labelling;
+- the adapter first decodes the full molecule with the retained atom/bond
+  sidecars, then hashes its canonical chemistry identity and the exact
+  normalized node/edge tensors sent to frozen GINE;
+- the raw official one-hot/untyped-edge identity is retained only for an
+  invalid graph that was never sent to GINE;
 - source-parent metadata, raw embedding bytes, and Python's built-in hash are
   excluded;
 - a queued embedding digest still proves that each official hash request
   consumes the graph from the corresponding scorer call.
 
+The stronger model-input identity supersedes the earlier attributed-native
+identity after a real production attempt proved that identical raw tensors
+can decode differently from different retained parent sidecars.  Any replay
+gate or checkpoint carrying the earlier identity contract is therefore not a
+release authority for this implementation; run a fresh bounded three-process
+gate before a fresh production root.
+
 Official edit actions, teleportation, frequency reinforcement, GINE
 probabilities, candidate predicate (`pred != Sweet`), score (`1-p(Sweet)`),
-and NeuroSED coverage are unchanged.  When the same structural graph is
+and NeuroSED coverage are unchanged.  When the same exact model input is
 rescored with CUDA low-bit drift, T12 applies the already-reviewed Taste
-canonical-row envelope (`rtol=1e-5`, `atol=1e-7`) and reuses the first row;
-any discrete prediction, validity, candidate, coverage, or graph change is a
-failure.
+canonical-row envelope (`rtol=1e-5`, `atol=1e-7`) and returns the first row to
+the official walk.  Any model-input, discrete prediction, validity, candidate,
+coverage, or out-of-envelope numeric change is a failure with the exact
+mismatching fields named in the terminal exception.
 
 ## Persistent checkpoint contract
 

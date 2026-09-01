@@ -416,6 +416,7 @@ class TasteFrozenGINENativeAdapter:
         source_records: Sequence[Mapping[str, Any]],
         graph_schema: TasteGCFGraphSchema,
         device: str,
+        canonical_replay_cache: bool = False,
     ) -> None:
         records = tuple(source_records)
         if not records or any(
@@ -512,6 +513,242 @@ class TasteFrozenGINENativeAdapter:
         self.decode_success_count = 0
         self.empty_valid_batch_count = 0
         self.call_count = 0
+        # T14 can opt into an exact, model-input-keyed canonical replay layer.
+        # The first byte-identical input is evaluated by the frozen GINE and
+        # persisted; later occurrences are not rescored on CUDA.  This
+        # preserves first-observation science and removes batch-history drift
+        # without accepting a numerically different observation.
+        self.canonical_replay_cache_enabled = bool(canonical_replay_cache)
+        self._canonical_replay_cache: dict[
+            str, tuple[bytes, Any, Any]
+        ] = {}
+        self.canonical_replay_cache_hits = 0
+        self.canonical_replay_cache_misses = 0
+
+    @staticmethod
+    def _model_input_cache_key(payload: Mapping[str, Any]) -> tuple[str, bytes]:
+        try:
+            encoded = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise TasteGCFSmokeError(
+                "Taste canonical GINE model input is not serializable"
+            ) from exc
+        return hashlib.sha256(encoded).hexdigest(), encoded
+
+    def _score_canonical_model_inputs(
+        self,
+        *,
+        portable: Sequence[Any],
+        valid_positions: Sequence[int],
+        model_graph_payloads: Sequence[Mapping[str, Any] | None],
+    ) -> tuple[Any, Any]:
+        """Score each novel exact model input once, then replay its first row."""
+
+        torch = self._torch
+        probabilities = torch.empty(
+            (len(portable), NUM_CLASSES),
+            dtype=self.parameter.dtype,
+            device=self.parameter.device,
+        )
+        embeddings = torch.empty(
+            (len(portable), self.hidden_dim),
+            dtype=self.parameter.dtype,
+            device=self.parameter.device,
+        )
+        pending: dict[str, dict[str, Any]] = {}
+        for row_index, graph_index in enumerate(valid_positions):
+            payload = model_graph_payloads[graph_index]
+            if type(payload) is not dict:
+                raise TasteGCFSmokeError(
+                    "Taste canonical replay lacks exact GINE model input"
+                )
+            key, encoded = self._model_input_cache_key(payload)
+            cached = self._canonical_replay_cache.get(key)
+            if cached is not None:
+                cached_encoded, cached_probabilities, cached_embedding = cached
+                if cached_encoded != encoded:
+                    raise TasteGCFSmokeError(
+                        "Taste canonical GINE model-input SHA-256 collision detected"
+                    )
+                probabilities[row_index].copy_(
+                    cached_probabilities.to(
+                        device=probabilities.device, dtype=probabilities.dtype
+                    )
+                )
+                embeddings[row_index].copy_(
+                    cached_embedding.to(
+                        device=embeddings.device, dtype=embeddings.dtype
+                    )
+                )
+                self.canonical_replay_cache_hits += 1
+                continue
+            queued = pending.get(key)
+            if queued is None:
+                pending[key] = {
+                    "encoded": encoded,
+                    "portable": portable[row_index],
+                    "rows": [row_index],
+                }
+            elif queued["encoded"] == encoded:
+                queued["rows"].append(row_index)
+            else:
+                raise TasteGCFSmokeError(
+                    "Taste canonical GINE model-input SHA-256 collision detected"
+                )
+        if pending:
+            ordered = list(pending.items())
+            scored = self.scorer.score(
+                [entry["portable"] for _key, entry in ordered]
+            )
+            novel_probabilities = torch.softmax(scored.project_logits, dim=-1)
+            if (
+                tuple(novel_probabilities.shape)
+                != (len(ordered), NUM_CLASSES)
+                or tuple(scored.graph_hidden.shape)
+                != (len(ordered), self.hidden_dim)
+            ):
+                raise TasteGCFSmokeError(
+                    "Taste canonical GINE scorer returned malformed novel rows"
+                )
+            for novel_index, (key, entry) in enumerate(ordered):
+                probability_cpu = (
+                    novel_probabilities[novel_index]
+                    .detach()
+                    .cpu()
+                    .contiguous()
+                    .clone()
+                )
+                embedding_cpu = (
+                    scored.graph_hidden[novel_index]
+                    .detach()
+                    .cpu()
+                    .contiguous()
+                    .clone()
+                )
+                self._canonical_replay_cache[key] = (
+                    entry["encoded"], probability_cpu, embedding_cpu
+                )
+                self.canonical_replay_cache_misses += 1
+                for duplicate_index, row_index in enumerate(entry["rows"]):
+                    probabilities[row_index].copy_(
+                        probability_cpu.to(
+                            device=probabilities.device,
+                            dtype=probabilities.dtype,
+                        )
+                    )
+                    embeddings[row_index].copy_(
+                        embedding_cpu.to(
+                            device=embeddings.device, dtype=embeddings.dtype
+                        )
+                    )
+                    if duplicate_index > 0:
+                        self.canonical_replay_cache_hits += 1
+        return probabilities, embeddings
+
+    def prime_canonical_replay_cache(self, records: Mapping[str, Any]) -> int:
+        """Prime exact replay rows from an independently validated bridge state.
+
+        This is used after T14 checkpoint restore.  Invalid/unscored graphs are
+        excluded, and any duplicate model input with different canonical bytes
+        or score bytes remains a hard scientific failure.
+        """
+
+        if not self.canonical_replay_cache_enabled:
+            return 0
+        import numpy as np
+
+        primed = 0
+        for record in records.values():
+            valid = (
+                record.get("valid_fullgraph")
+                if isinstance(record, Mapping)
+                else getattr(record, "valid_fullgraph", None)
+            )
+            if valid is not True:
+                continue
+            payload = (
+                record.get("model_graph_payload")
+                if isinstance(record, Mapping)
+                else getattr(record, "model_graph_payload", None)
+            )
+            expected_sha = (
+                record.get("model_graph_sha256")
+                if isinstance(record, Mapping)
+                else getattr(record, "model_graph_sha256", None)
+            )
+            if type(payload) is not dict:
+                raise TasteGCFSmokeError(
+                    "Taste checkpoint canonical replay lacks model input"
+                )
+            key, encoded = self._model_input_cache_key(payload)
+            if expected_sha != key:
+                raise TasteGCFSmokeError(
+                    "Taste checkpoint canonical replay model SHA changed"
+                )
+            probabilities = (
+                record.get("probabilities")
+                if isinstance(record, Mapping)
+                else getattr(record, "probabilities", None)
+            )
+            embedding_values = (
+                record.get("embedding_values")
+                if isinstance(record, Mapping)
+                else getattr(record, "embedding_values", None)
+            )
+            embedding_dtype = (
+                record.get("embedding_dtype")
+                if isinstance(record, Mapping)
+                else getattr(record, "embedding_dtype", None)
+            )
+            try:
+                probability_row = self._torch.as_tensor(
+                    probabilities,
+                    dtype=self.parameter.dtype,
+                ).detach().cpu().contiguous()
+                embedding_array = np.asarray(
+                    embedding_values, dtype=np.dtype(embedding_dtype)
+                )
+                embedding_row = self._torch.from_numpy(
+                    np.ascontiguousarray(embedding_array)
+                ).detach().cpu().contiguous()
+            except (TypeError, ValueError) as exc:
+                raise TasteGCFSmokeError(
+                    "Taste checkpoint canonical replay row is malformed"
+                ) from exc
+            if (
+                tuple(probability_row.shape) != (NUM_CLASSES,)
+                or tuple(embedding_row.shape) != (self.hidden_dim,)
+                or not bool(self._torch.isfinite(probability_row).all().item())
+                or not bool(self._torch.isfinite(embedding_row).all().item())
+            ):
+                raise TasteGCFSmokeError(
+                    "Taste checkpoint canonical replay row shape changed"
+                )
+            cached = self._canonical_replay_cache.get(key)
+            if cached is not None:
+                cached_encoded, cached_probabilities, cached_embedding = cached
+                if (
+                    cached_encoded != encoded
+                    or not self._torch.equal(cached_probabilities, probability_row)
+                    or not self._torch.equal(cached_embedding, embedding_row)
+                ):
+                    raise TasteGCFSmokeError(
+                        "Taste checkpoint canonical replay has conflicting rows"
+                    )
+                continue
+            self._canonical_replay_cache[key] = (
+                encoded,
+                probability_row.clone(),
+                embedding_row.clone(),
+            )
+            primed += 1
+        return primed
 
     def _portable(self, graph: Any, index: int) -> Any:
         origin = getattr(graph, "gcf_origin_index", None)
@@ -651,13 +888,25 @@ class TasteFrozenGINENativeAdapter:
             device=self.parameter.device,
         )
         if portable:
-            scored = self.scorer.score(portable)
-            valid_probabilities = torch.softmax(scored.project_logits, dim=-1)
+            if self.canonical_replay_cache_enabled:
+                valid_probabilities, valid_embeddings = (
+                    self._score_canonical_model_inputs(
+                        portable=portable,
+                        valid_positions=valid_positions,
+                        model_graph_payloads=model_graph_payloads,
+                    )
+                )
+            else:
+                scored = self.scorer.score(portable)
+                valid_probabilities = torch.softmax(
+                    scored.project_logits, dim=-1
+                )
+                valid_embeddings = scored.graph_hidden
             positions = torch.tensor(
                 valid_positions, dtype=torch.long, device=self.parameter.device
             )
             probabilities.index_copy_(0, positions, valid_probabilities)
-            embeddings.index_copy_(0, positions, scored.graph_hidden)
+            embeddings.index_copy_(0, positions, valid_embeddings)
             self.decode_success_count += len(portable)
         else:
             self.empty_valid_batch_count += 1

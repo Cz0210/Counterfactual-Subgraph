@@ -751,6 +751,7 @@ def _initialize_full_source_graphs(
         source_records=records,
         graph_schema=graph_schema,
         device=device,
+        canonical_replay_cache=True,
     )
     predictions: list[int] = []
     identities: list[str] = []

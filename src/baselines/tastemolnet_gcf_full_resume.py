@@ -4,8 +4,10 @@ This module is deliberately dataset-specific.  It does not replace the
 official GCFExplainer walk, edit operators, transition weights, NeuroSED
 coverage, or three-class GINE scorer.  It changes only the process-local
 ``hash(embedding.tobytes())`` registry key at the project boundary: the T12
-registry key is the SHA-256 of the canonical, parent-free attributed graph
-already used by the TasteMolNet ComRecGC route.
+registry key is the SHA-256 of the canonical, parent-free chemistry identity
+plus the exact normalized GINE model-input digest.  This distinction matters
+because the native graph omits bond/charge/aromatic/stereo sidecars that the
+production decoder restores before frozen-GINE scoring.
 
 The second responsibility is a persistent, reopenable checkpoint for the
 complete official mutable walk and every RNG that can affect it.  Production
@@ -33,7 +35,13 @@ import sys
 from typing import Any, Iterator, Mapping, MutableMapping, Sequence
 import uuid
 
-from src.baselines.tastemolnet_comrecgc_smoke import canonical_attributed_graph
+from src.baselines.tastemolnet_comrecgc_smoke import (
+    _canonical_sha256,
+    _identity_graph_sha256,
+    _invalid_unscored_model_graph_payload,
+    _normalize_model_graph_payload,
+    canonical_attributed_graph,
+)
 from src.baselines.tastemolnet_gcf_smoke import (
     _VRRW_PROGRESS_STATE_FIELDS,
     _capture_rng_state,
@@ -69,7 +77,7 @@ SOURCE_LABEL = 1
 NUM_CLASSES = 3
 PRODUCTION_TOTAL_STEPS = 20_000
 PRODUCTION_CHECKPOINT_CURSORS = frozenset({10_000, 20_000})
-GRAPH_IDENTITY_CONTRACT = "canonical_parent_free_attributed_graph_sha256_v1"
+GRAPH_IDENTITY_CONTRACT = "canonical_parent_free_gine_model_input_sha256_v1"
 CHECKPOINT_SCHEMA = "tastemolnet_t12_vrrw_checkpoint_v1"
 CHECKPOINT_MANIFEST_SCHEMA = "tastemolnet_t12_vrrw_checkpoint_manifest_v1"
 BRIDGE_SCHEMA = "tastemolnet_t12_gcf_stable_bridge_v1"
@@ -137,6 +145,82 @@ def _pretty_bytes(value: Mapping[str, Any]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+T12_MODEL_INPUT_IDENTITY_SCHEMA = (
+    "tastemolnet_t12_gine_model_input_identity_v1"
+)
+
+
+def _t12_model_input_identity(
+    *,
+    native_collision: Mapping[str, Any],
+    supplied_identity: Mapping[str, Any] | None,
+    supplied_model: Mapping[str, Any] | None,
+    valid_fullgraph: bool,
+) -> tuple[str, dict[str, Any]]:
+    """Bind the official T12 key to the exact parent-free GINE input.
+
+    Native GCF tensors omit bond/charge/aromatic/stereo sidecars that the
+    production adapter restores from lineage before GINE scoring.  Therefore
+    two native attributed graphs may compare equal while their actual model
+    inputs differ.  The exact normalized model-input digest closes that alias;
+    lineage or parent IDs themselves remain outside the identity.
+    """
+
+    if valid_fullgraph:
+        if type(supplied_identity) is not dict or type(supplied_model) is not dict:
+            raise TasteGCFFullResumeError(
+                "T12 valid graph lacks canonical GINE model-input evidence"
+            )
+        identity_graph = dict(supplied_identity)
+        model_graph = _normalize_model_graph_payload(supplied_model)
+        frozen_gine_scored = True
+    else:
+        if supplied_identity is not None or supplied_model is not None:
+            raise TasteGCFFullResumeError(
+                "T12 invalid graph unexpectedly has GINE model-input evidence"
+            )
+        identity_graph = dict(native_collision)
+        model_graph = _invalid_unscored_model_graph_payload()
+        frozen_gine_scored = False
+    # Validate the shared canonical-chemistry payload independently before it
+    # becomes one component of the stronger T12 model-input identity.
+    _identity_graph_sha256(identity_graph)
+    collision = {
+        "schema_version": T12_MODEL_INPUT_IDENTITY_SCHEMA,
+        "canonical_identity_graph": identity_graph,
+        "model_graph_sha256": _canonical_sha256(model_graph),
+        "frozen_gine_scored": frozen_gine_scored,
+    }
+    return _canonical_sha256(collision), collision
+
+
+def _validate_t12_model_input_collision(
+    value: Any, *, expected_sha256: str
+) -> dict[str, Any]:
+    if (
+        type(value) is not dict
+        or set(value)
+        != {
+            "schema_version",
+            "canonical_identity_graph",
+            "model_graph_sha256",
+            "frozen_gine_scored",
+        }
+        or value.get("schema_version") != T12_MODEL_INPUT_IDENTITY_SCHEMA
+        or type(value.get("canonical_identity_graph")) is not dict
+        or type(value.get("model_graph_sha256")) is not str
+        or _SHA256.fullmatch(value["model_graph_sha256"]) is None
+        or type(value.get("frozen_gine_scored")) is not bool
+    ):
+        raise TasteGCFFullResumeError(
+            "T12 checkpoint model-input identity evidence is invalid"
+        )
+    _identity_graph_sha256(value["canonical_identity_graph"])
+    if _canonical_sha256(value) != expected_sha256:
+        raise TasteGCFFullResumeError("T12 bridge graph identity drifted")
+    return dict(value)
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -286,6 +370,92 @@ class T12StableGraphRecord:
             "canonical_embedding_values": list(self.canonical_embedding_values),
             "canonical_embedding_sha256": self.canonical_embedding_sha256,
         }
+
+
+def _t12_live_semantic_mismatch(
+    previous: T12StableGraphRecord,
+    observed: T12StableGraphRecord,
+    *,
+    observed_embedding: Any,
+) -> tuple[list[str], dict[str, float]]:
+    import numpy as np
+
+    mismatch: list[str] = []
+    previous_collision = dict(previous.collision_payload)
+    observed_collision = dict(observed.collision_payload)
+    if previous_collision.get("canonical_identity_graph") != (
+        observed_collision.get("canonical_identity_graph")
+    ):
+        mismatch.append("canonical_identity_graph")
+    if previous_collision.get("model_graph_sha256") != observed_collision.get(
+        "model_graph_sha256"
+    ):
+        mismatch.append("model_graph_sha256")
+    if previous_collision.get("frozen_gine_scored") is not observed_collision.get(
+        "frozen_gine_scored"
+    ):
+        mismatch.append("frozen_gine_scored")
+    if previous_collision != observed_collision and not mismatch:
+        mismatch.append("collision_payload")
+    for field in (
+        "prediction",
+        "candidate",
+        "valid_fullgraph",
+        "failure_reason",
+        "coverage_vector",
+        "canonical_embedding_dtype",
+    ):
+        previous_value = getattr(previous, field)
+        observed_value = getattr(observed, field)
+        if field in {"candidate", "valid_fullgraph"}:
+            changed = previous_value is not observed_value
+        else:
+            changed = previous_value != observed_value
+        if changed:
+            mismatch.append(field)
+    if len(previous.canonical_embedding_values) != len(
+        observed.canonical_embedding_values
+    ):
+        mismatch.append("embedding_shape")
+
+    previous_probabilities = np.asarray(previous.probabilities, dtype=np.float64)
+    observed_probabilities = np.asarray(observed.probabilities, dtype=np.float64)
+    probability_delta = float(
+        np.max(np.abs(previous_probabilities - observed_probabilities))
+    )
+    if not np.allclose(
+        previous_probabilities,
+        observed_probabilities,
+        rtol=GINE_CANONICAL_REUSE_RTOL,
+        atol=GINE_CANONICAL_REUSE_ATOL,
+    ):
+        mismatch.append("probabilities")
+    details = {"probability_max_abs_difference": probability_delta}
+    if (
+        "embedding_shape" not in mismatch
+        and "canonical_embedding_dtype" not in mismatch
+    ):
+        previous_embedding = np.asarray(
+            previous.canonical_embedding_values,
+            dtype=np.dtype(previous.canonical_embedding_dtype),
+        )
+        embedding_delta = float(
+            np.max(
+                np.abs(
+                    np.asarray(previous_embedding, dtype=np.float64)
+                    - np.asarray(observed_embedding, dtype=np.float64)
+                )
+            )
+        )
+        details["embedding_max_abs_difference"] = embedding_delta
+        if not np.allclose(
+            previous_embedding,
+            observed_embedding,
+            rtol=GINE_CANONICAL_REUSE_RTOL,
+            atol=GINE_CANONICAL_REUSE_ATOL,
+        ):
+            mismatch.append("embedding_values")
+    return mismatch, details
 
 
 class T12StableGCFBridge:
@@ -460,16 +630,33 @@ class T12StableGCFBridge:
         failures = tuple(batch.failure_reasons)
         if len(valid) != len(values) or len(failures) != len(values):
             raise TasteGCFFullResumeError("T12 adapter evidence is unaligned")
+        identity_payloads = tuple(
+            getattr(batch, "identity_graph_payloads", ()) or ()
+        )
+        model_payloads = tuple(
+            getattr(batch, "model_graph_payloads", ()) or ()
+        )
+        if (
+            len(identity_payloads) != len(values)
+            or len(model_payloads) != len(values)
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 adapter canonical model-input evidence is unaligned"
+            )
 
         canonical_parts: list[tuple[float, float]] = []
+        canonical_embeddings: list[Any] = []
         for index, graph in enumerate(values):
-            identity = canonical_attributed_graph(
+            native_identity = canonical_attributed_graph(
                 graph, feature_atomic_numbers=self.feature_atomic_numbers
             )
-            graph_hash = _stable_graph_hash(
-                identity.graph_identity_sha256, field="T12 graph identity"
+            graph_hash, collision = _t12_model_input_identity(
+                native_collision=native_identity.collision_payload(),
+                supplied_identity=identity_payloads[index],
+                supplied_model=model_payloads[index],
+                valid_fullgraph=bool(valid[index]),
             )
-            collision = identity.collision_payload()
+            graph_hash = _stable_graph_hash(graph_hash, field="T12 graph identity")
             row = tuple(float(value) for value in probabilities[index].tolist())
             score, prediction, candidate_condition = score_and_candidate(row)
             coverage_vector = tuple(
@@ -516,31 +703,67 @@ class T12StableGCFBridge:
                     failure_sha = _sha256_bytes(
                         str(failures[index]).encode("utf-8")
                     )
+                    mismatch_fields: list[str] = []
+                    if historical.prediction != observed.prediction:
+                        mismatch_fields.append("prediction")
+                    if historical.prediction != first_prediction:
+                        mismatch_fields.append("historical_prediction_replay")
+                    if historical.candidate is not observed.candidate:
+                        mismatch_fields.append("candidate")
                     if (
-                        historical.prediction != observed.prediction
-                        or historical.prediction != first_prediction
-                        or historical.candidate is not observed.candidate
-                        or historical.valid_fullgraph is not observed.valid_fullgraph
-                        or historical.candidate
-                        is not bool(historical.valid_fullgraph and first_condition)
-                        or historical.covered_parent_count != sum(coverage_vector)
-                        or historical.coverage_sha256 != coverage_sha
-                        or historical.failure_sha256 != failure_sha
-                        # Once a complete row has left RAM, the compact journal
-                        # retains only its embedding digest.  Re-entry is thus
-                        # stricter than live-row reuse: low-bit drift blocks
-                        # rather than silently choosing a new first row.
-                        or historical.embedding_sha256
-                        != observed.canonical_embedding_sha256
-                        or not np.allclose(
-                            np.asarray(historical.probabilities, dtype=np.float64),
-                            np.asarray(observed.probabilities, dtype=np.float64),
-                            rtol=GINE_CANONICAL_REUSE_RTOL,
-                            atol=GINE_CANONICAL_REUSE_ATOL,
-                        )
+                        historical.valid_fullgraph
+                        is not observed.valid_fullgraph
                     ):
+                        mismatch_fields.append("valid_fullgraph")
+                    if historical.candidate is not bool(
+                        historical.valid_fullgraph and first_condition
+                    ):
+                        mismatch_fields.append("historical_candidate_replay")
+                    if historical.covered_parent_count != sum(coverage_vector):
+                        mismatch_fields.append("covered_parent_count")
+                    if historical.coverage_sha256 != coverage_sha:
+                        mismatch_fields.append("coverage_vector")
+                    if historical.failure_sha256 != failure_sha:
+                        mismatch_fields.append("failure_reason")
+                    # Once a complete row has left RAM, the compact journal
+                    # retains only its embedding digest.  Re-entry is thus
+                    # stricter than live-row reuse: low-bit drift blocks
+                    # rather than silently choosing a new first row.
+                    if (
+                        historical.embedding_sha256
+                        != observed.canonical_embedding_sha256
+                    ):
+                        mismatch_fields.append("embedding_sha256")
+                    historical_probabilities = np.asarray(
+                        historical.probabilities, dtype=np.float64
+                    )
+                    observed_probabilities = np.asarray(
+                        observed.probabilities, dtype=np.float64
+                    )
+                    probability_delta = float(
+                        np.max(
+                            np.abs(
+                                historical_probabilities
+                                - observed_probabilities
+                            )
+                        )
+                    )
+                    if not np.allclose(
+                        historical_probabilities,
+                        observed_probabilities,
+                        rtol=GINE_CANONICAL_REUSE_RTOL,
+                        atol=GINE_CANONICAL_REUSE_ATOL,
+                    ):
+                        mismatch_fields.append("probabilities")
+                    if mismatch_fields:
+                        diagnostic = {
+                            "graph_identity_sha256": graph_hash,
+                            "mismatch_fields": mismatch_fields,
+                            "probability_max_abs_difference": probability_delta,
+                        }
                         raise TasteGCFFullResumeError(
-                            "one evicted T12 identity changed compact GINE/NeuroSED semantics"
+                            "one evicted T12 identity changed compact GINE/NeuroSED semantics; "
+                            f"diagnostic={json.dumps(diagnostic, sort_keys=True)}"
                         )
                     record = T12StableGraphRecord(
                         graph_identity_sha256=graph_hash,
@@ -566,39 +789,37 @@ class T12StableGCFBridge:
                     self.canonical_row_reuse_count += 1
                 self._remember_record(graph_hash, record)
             else:
-                previous_embedding = np.asarray(
-                    previous.canonical_embedding_values,
-                    dtype=np.dtype(previous.canonical_embedding_dtype),
+                mismatch_fields, mismatch_details = _t12_live_semantic_mismatch(
+                    previous,
+                    observed,
+                    observed_embedding=raw_embedding,
                 )
-                if (
-                    dict(previous.collision_payload) != collision
-                    or previous.prediction != observed.prediction
-                    or previous.candidate is not observed.candidate
-                    or previous.valid_fullgraph is not observed.valid_fullgraph
-                    or previous.failure_reason != observed.failure_reason
-                    or previous.coverage_vector != observed.coverage_vector
-                    or previous.canonical_embedding_dtype
-                    != observed.canonical_embedding_dtype
-                    or not np.allclose(
-                        np.asarray(previous.probabilities, dtype=np.float64),
-                        np.asarray(observed.probabilities, dtype=np.float64),
-                        rtol=GINE_CANONICAL_REUSE_RTOL,
-                        atol=GINE_CANONICAL_REUSE_ATOL,
-                    )
-                    or not np.allclose(
-                        previous_embedding,
-                        raw_embedding,
-                        rtol=GINE_CANONICAL_REUSE_RTOL,
-                        atol=GINE_CANONICAL_REUSE_ATOL,
-                    )
-                ):
+                if mismatch_fields:
+                    diagnostic = {
+                        "graph_identity_sha256": graph_hash,
+                        "mismatch_fields": mismatch_fields,
+                        **mismatch_details,
+                    }
                     raise TasteGCFFullResumeError(
-                        "one T12 structural identity changed GINE/NeuroSED semantics"
+                        "one T12 structural identity changed GINE/NeuroSED semantics; "
+                        f"diagnostic={json.dumps(diagnostic, sort_keys=True)}"
                     )
                 record = previous
                 self.canonical_row_reuse_count += 1
+            canonical_embedding = np.asarray(
+                record.canonical_embedding_values,
+                dtype=np.dtype(record.canonical_embedding_dtype),
+            )
+            if (
+                _embedding_sha256(canonical_embedding)
+                != record.canonical_embedding_sha256
+            ):
+                raise TasteGCFFullResumeError(
+                    "cached T12 canonical GINE embedding changed"
+                )
+            canonical_embeddings.append(canonical_embedding)
             self._pending_hashes.append(
-                (graph_hash, _embedding_sha256(raw_embedding))
+                (graph_hash, record.canonical_embedding_sha256)
             )
             lineage = _lineage_sha256(graph, graph_identity_sha256=graph_hash)
             if self.production_history is None:
@@ -628,7 +849,11 @@ class T12StableGCFBridge:
         self.evaluated_graph_count += len(values)
         if self.production_history is not None:
             self._live_domain_synced = False
-        return np.asarray(canonical_parts, dtype=float), embeddings, coverage
+        return (
+            np.asarray(canonical_parts, dtype=float),
+            np.stack(canonical_embeddings),
+            coverage,
+        )
 
     def calculate_hash(self, graph_embedding: Any) -> str:
         if not self._pending_hashes:
@@ -961,12 +1186,9 @@ class T12StableGCFBridge:
             collision = raw.get("collision_payload")
             if type(collision) is not dict:
                 raise TasteGCFFullResumeError("T12 bridge collision evidence is invalid")
-            # Reuse the already-reviewed identity payload contract directly;
-            # reconstruction of a PyG graph is neither required nor allowed.
-            from src.baselines.tastemolnet_comrecgc_smoke import _identity_graph_sha256
-
-            if _identity_graph_sha256(collision) != key:
-                raise TasteGCFFullResumeError("T12 bridge graph identity drifted")
+            collision = _validate_t12_model_input_collision(
+                collision, expected_sha256=key
+            )
             probabilities = raw.get("probabilities")
             score, prediction, candidate_condition = score_and_candidate(probabilities)
             coverage_vector_raw = raw.get("coverage_vector")
