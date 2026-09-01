@@ -461,11 +461,12 @@ def test_worker_waits_for_64g_without_holding_gpu(
     ]
 
 
-def test_worker_scopes_git_safe_directory_to_frozen_upstream(
+def test_worker_uses_explicit_git_dir_without_repository_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     upstream = tmp_path / "vendor-comrecgc"
     upstream.mkdir()
+    (upstream / ".git").mkdir()
     gnn = tmp_path / "gnn.pt"
     distance = tmp_path / "distance.pt"
     teacher = tmp_path / "teacher.pkl"
@@ -505,16 +506,20 @@ def test_worker_scopes_git_safe_directory_to_frozen_upstream(
         }
     )
 
-    safe_prefix = [
+    explicit_repository_prefix = [
         "git",
-        "-c",
-        f"safe.directory={upstream.resolve()}",
-        "-C",
-        str(upstream.resolve()),
+        "--no-optional-locks",
+        f"--git-dir={(upstream / '.git').resolve()}",
+        f"--work-tree={upstream.resolve()}",
     ]
     assert commands == [
-        [*safe_prefix, "rev-parse", "HEAD"],
-        [*safe_prefix, "status", "--porcelain", "--untracked-files=no"],
+        [*explicit_repository_prefix, "rev-parse", "HEAD"],
+        [
+            *explicit_repository_prefix,
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
     ]
     assert result["status"] == "PASS"
 

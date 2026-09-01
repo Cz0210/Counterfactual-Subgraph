@@ -269,12 +269,14 @@ def _validate_frozen_replay_contract(spec: Mapping[str, Any]) -> dict[str, Any]:
     if changed:
         raise MutTraceWorkerError(f"Frozen Mut replay settings changed: {changed}")
     upstream = _absolute(replay["upstream_root"], label="frozen COMRECGC checkout")
+    git_dir = _absolute(upstream / ".git", label="frozen COMRECGC git directory")
+    if not git_dir.is_dir():
+        raise MutTraceWorkerError("Frozen COMRECGC .git path is not a directory")
     git_prefix = [
         "git",
-        "-c",
-        f"safe.directory={upstream}",
-        "-C",
-        str(upstream),
+        "--no-optional-locks",
+        f"--git-dir={git_dir}",
+        f"--work-tree={upstream}",
     ]
     try:
         commit = subprocess.check_output(
