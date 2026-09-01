@@ -28,7 +28,9 @@ def test_cgroup_v1_read_only_mount_detection_is_exact() -> None:
     assert successor._mount_is_read_only(row, Path("/sys/fs/cgroup/memory"))
 
 
-def test_manifest_reuses_exclusive_controller_and_orders_successor(tmp_path: Path) -> None:
+def test_manifest_reuses_exclusive_controller_but_stops_before_unapproved_adoption(
+    tmp_path: Path,
+) -> None:
     runtime = Path("/fixture/counterfactual-subgraph-runtime")
     control = runtime / "control"
     threshold = Path("/fixture/thresholds.json")
@@ -53,6 +55,7 @@ def test_manifest_reuses_exclusive_controller_and_orders_successor(tmp_path: Pat
         "legacy_project_root": "/fixture/legacy",
         "instrumentation_project_root": "/fixture/instrumented",
         "historical_source_root": "/fixture/historical",
+        "allow_trace_on_historical_adoption": False,
         "replay": replay,
         "standardization": {
                 "dataset_csv": "/fixture/heldout.csv",
@@ -67,18 +70,17 @@ def test_manifest_reuses_exclusive_controller_and_orders_successor(tmp_path: Pat
     manifest = load_controller_manifest(path)
     assert [task.task_id for task in manifest.tasks] == [
         "mut_fast_equivalence_500",
-        "mut_fast_historical_binding",
-        "mut_fast_threshold_freeze",
-        "mut_fast_standardized",
     ]
     equivalence = manifest.by_id["mut_fast_equivalence_500"]
     assert equivalence.resource == "gpu"
     assert equivalence.gpu_lock_mode == "exclusive"
-    assert manifest.by_id["mut_fast_standardized"].depends_on == (
-        "mut_fast_historical_binding",
-        "mut_fast_threshold_freeze",
+    template = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "configs/autodl/mut_fast_accurate_v2.template.json"
+        ).read_text(encoding="utf-8")
     )
-    assert manifest.by_id["mut_fast_standardized"].data_splits == ("test",)
+    assert template["allow_trace_on_historical_adoption"] is False
 
 
 def test_stage_wrapper_never_stops_old_waiter_and_uses_monitored_runner() -> None:

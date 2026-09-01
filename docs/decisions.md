@@ -469,12 +469,15 @@ explicitly recorded 96 GiB parent-headroom fallback with exact process-session
 monitoring.  Derive any later full-run limit from the measured peak rather
 than from another static estimate.
 
-Allow the completed historical Mut generation to proceed through chemistry,
-WNode evaluation, freeze, and matrix publication only after that 500-step gate
-passes and an independent verifier reopens the complete lineage plus the exact
-generation-to-pair-store-to-DBSCAN binding.  Publish a new schema that states
-the source was trace-enabled and that neither a trace-off reference nor full
-50k parity rerun occurred.  Do not weaken or rewrite the old parity schema.
+Prepare a distinct verifier for the completed historical Mut generation, but
+keep automatic trace-on adoption disabled because the frozen Route-A launch
+contract requires `trace_enabled=false`.  The successor may run the separately
+authorized 500-step diagnostic; after PASS it remains in
+`WAITING_FOR_TRACE_ON_ADOPTION_AUTHORIZATION` and cannot enter chemistry,
+evaluation, freeze, or matrix publication.  If a later scientific decision
+allows the trace-enabled source, the verifier must reopen the complete lineage
+and exact generation-to-pair-store-to-DBSCAN binding, and the new schema must
+state that neither a trace-off reference nor full 50k parity rerun occurred.
 
 ### Consequences
 

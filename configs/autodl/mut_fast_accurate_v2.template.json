@@ -4,6 +4,7 @@
   "paper_frozen": true,
   "run_gnn_ablation": false,
   "allow_historical_adoption_without_full_50k_parity": true,
+  "allow_trace_on_historical_adoption": false,
   "historical_source_trace_enabled": true,
   "trace_parity_passed": false,
   "full_50k_rerun_performed": false,

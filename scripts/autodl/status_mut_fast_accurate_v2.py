@@ -49,6 +49,15 @@ def snapshot(spec_path: Path) -> dict[str, Any]:
         "successor_state": (sidecar or {}).get("state", "NOT_STARTED"),
         "successor_pid": (sidecar or {}).get("pid"),
         "successor_heartbeat": (sidecar or {}).get("heartbeat_at"),
+        "trace_on_historical_adoption_authorized": spec.get(
+            "allow_trace_on_historical_adoption", False
+        ),
+        "manual_intervention_required": (sidecar or {}).get(
+            "manual_intervention_required", False
+        ),
+        "manual_intervention_reason": (sidecar or {}).get(
+            "manual_intervention_reason"
+        ),
         "cgroup_version": observation.get("cgroup_version", 1),
         "cgroup_mount_read_only": observation.get("cgroup_mount_read_only", True),
         "child_cgroup_created": observation.get("child_cgroup_created", False),

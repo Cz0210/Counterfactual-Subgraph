@@ -3409,8 +3409,9 @@ Mutagenicity roadmaps.
 
 - [x] Supersede the unmeasured static 440 GiB gate without modifying its
   historical frozen contract.
-- [x] Define a distinct, truthful adoption schema for the completed
-  trace-enabled 50k generation; never call it trace-off parity.
+- [x] Define a distinct, truthful verifier schema for the completed
+  trace-enabled 50k generation; never call it trace-off parity, and keep its
+  automatic adoption disabled pending an explicit scientific decision.
 - [x] Require the pinned 500-step action/RNG/payload/checkpoint equivalence gate
   before adoption.
 - [x] Bind the exact generation payload transitively through the completed

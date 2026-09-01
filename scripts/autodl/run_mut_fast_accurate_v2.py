@@ -129,6 +129,11 @@ def load_spec(path: Path, *, require_inputs: bool = True) -> dict[str, Any]:
         "paper_frozen": True,
         "run_gnn_ablation": False,
         "allow_historical_adoption_without_full_50k_parity": True,
+        # The current historical 50k source is trace-enabled, while the user
+        # froze automatic Route-A adoption to trace-disabled artifacts.  The
+        # successor may run the explicitly authorized 500-step diagnostic but
+        # must not publish that source without a separate scientific decision.
+        "allow_trace_on_historical_adoption": False,
         "historical_source_trace_enabled": True,
         "trace_parity_passed": False,
         "full_50k_rerun_performed": False,
@@ -1260,6 +1265,8 @@ def build_controller_manifest(spec: Mapping[str, Any], output: Path) -> dict[str
             },
         },
     ]
+    if spec["allow_trace_on_historical_adoption"] is False:
+        tasks = [tasks[0]]
     manifest = {
         "schema_version": 1,
         "controller_id": spec["controller_id"],
@@ -1448,6 +1455,41 @@ def run_sidecar(spec: Mapping[str, Any]) -> None:
             },
         )
         if controller is not None and controller.get("state") == "PASS":
+            if spec["allow_trace_on_historical_adoption"] is False:
+                task_state = _json(
+                    controller_root / "tasks/mut_fast_equivalence_500/state.json",
+                    label="equivalence task state",
+                )
+                instance = (task_state.get("instances") or {}).get("main") or {}
+                equivalence_root = _absolute(
+                    instance.get("expected_output"),
+                    label="Mut equivalence terminal",
+                )
+                _atomic_json(
+                    heartbeat,
+                    {
+                        "schema_version": SCHEMA,
+                        "controller_id": spec["controller_id"],
+                        "pid": os.getpid(),
+                        "state": "WAITING_FOR_TRACE_ON_ADOPTION_AUTHORIZATION",
+                        "heartbeat_at": _utc_now(),
+                        "four_gpu_controller_root": str(controller_root),
+                        "equivalence_root": str(equivalence_root),
+                        "historical_source_trace_enabled": True,
+                        "traceoff_reference_rerun": False,
+                        "trace_on_historical_adoption_authorized": False,
+                        "matrix_publisher_submitted": False,
+                        "manual_intervention_required": True,
+                        "manual_intervention_reason": (
+                            "explicit approval is required to adopt a trace-enabled "
+                            "historical 50k source where the frozen automatic Route-A "
+                            "contract requires trace_enabled=false"
+                        ),
+                        "old_440_waiter_signaled_by_successor": False,
+                    },
+                )
+                time.sleep(int(spec["poll_seconds"]))
+                continue
             task_state = _json(
                 controller_root / "tasks/mut_fast_standardized/state.json",
                 label="standardization task state",

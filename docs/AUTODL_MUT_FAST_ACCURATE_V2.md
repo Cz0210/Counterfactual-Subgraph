@@ -9,8 +9,12 @@ authority.
 The preferred route reopens the completed historical 50,000-step generation
 read-only.  That source is a trace-enabled artifact; it must never be described
 as a trace-off replay or as a successful full trace-on/off parity experiment.
-It may be adopted only under the explicit
-`ALLOW_MUT_ARTIFACT_ADOPTION_WITHOUT_FULL_50K_PARITY_RERUN=1` authority after:
+The current launcher deliberately sets
+`allow_trace_on_historical_adoption=false`: the frozen automatic Route-A
+contract requires `trace_enabled=false`, so the successor can run the
+authorized 500-step diagnostic but cannot standardize or publish this
+trace-enabled source without a separate scientific decision.  If that decision
+is later granted, adoption must still satisfy all of the following:
 
 1. the pinned 500-step legacy/checkpointed behavioral-equivalence gate passes;
 2. checkpoint interruption, reload, action trace, RNG, candidate payload, and
