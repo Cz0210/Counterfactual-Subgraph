@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import gc
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import resource
@@ -22,6 +23,8 @@ import tempfile
 from typing import Any, Iterator, Mapping, Sequence
 
 from src.baselines.tastemolnet_comrecgc_smoke import (
+    GINE_CANONICAL_REUSE_ATOL,
+    GINE_CANONICAL_REUSE_RTOL,
     SOURCE_LABEL,
     TasteComRecGCMulticlassBridge,
     TasteComRecGCSmokeError,
@@ -53,6 +56,15 @@ RUNTIME_STATE_SCHEMA = "tastemolnet_t14_bounded_runtime_v1"
 CHECKPOINT_PROVENANCE_SCHEMA = "tastemolnet_t14_checkpoint_provenance_v1"
 TRANSITION_EXPANDED_CAPACITY = 5
 PROGRESS_INTERVAL = 100
+COHORT_RECONCILIATION_RECEIPT = "cohort_reconciliation_receipt.json"
+COHORT_RECONCILIATION_OBSERVATIONS = "cohort_reconciliation_observations"
+COHORT_RECONCILIATION_SCHEMA = "tastemolnet_t14_cohort_reconciliation_v2"
+COHORT_RECONCILIATION_OBSERVATION_SCHEMA = (
+    "tastemolnet_t14_cohort_reconciliation_observation_v1"
+)
+COHORT_RECONCILIATION_BINDING_SCHEMA = (
+    "tastemolnet_t14_cohort_reconciliation_binding_v1"
+)
 
 
 class TasteComRecGCFullError(TasteComRecGCSmokeError):
@@ -284,6 +296,499 @@ def build_full_train_correct_source_cohort(
         "result_conditioned_selection": False,
     }
     return selected, manifest, lines
+
+
+def reconcile_t14_resume_cohort(
+    *,
+    frozen_cohort_bytes: bytes,
+    frozen_manifest_bytes: bytes,
+    replayed_rows: Sequence[Mapping[str, Any]],
+    replayed_manifest: Mapping[str, Any],
+) -> tuple[
+    list[dict[str, Any]], dict[str, Any], dict[str, Any], dict[str, Any]
+]:
+    """Reopen one frozen cohort when only diagnostic probabilities drift.
+
+    The cohort membership decision is the discrete frozen-GINE prediction.
+    ``source_probability`` is retained only as post-selection diagnostics.
+    Resume preserves the original bytes after proving every discrete and
+    identity-bearing field still agrees and the numeric difference is within
+    the same low-bit replay tolerance used by the stable GINE bridge.
+    """
+
+    try:
+        frozen_rows = [
+            json.loads(line)
+            for line in frozen_cohort_bytes.decode("utf-8").splitlines()
+        ]
+        frozen_manifest = json.loads(frozen_manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TasteComRecGCFullError(
+            "Taste T14 frozen cohort reconciliation input is unreadable"
+        ) from exc
+    if (
+        not frozen_rows
+        or any(type(row) is not dict for row in frozen_rows)
+        or _cohort_lines(frozen_rows) != frozen_cohort_bytes
+        or type(frozen_manifest) is not dict
+        or _canonical_bytes(frozen_manifest) + b"\n" != frozen_manifest_bytes
+        or type(replayed_manifest) is not dict
+        or frozen_manifest.get("cohort_jsonl_sha256")
+        != _sha256_bytes(frozen_cohort_bytes)
+        or len(frozen_rows) != len(replayed_rows)
+    ):
+        raise TasteComRecGCFullError("Taste T14 frozen cohort closure changed")
+    try:
+        replayed_bytes = _cohort_lines(replayed_rows)
+    except (TypeError, ValueError) as exc:
+        raise TasteComRecGCFullError(
+            "Taste T14 replayed cohort is not canonical"
+        ) from exc
+
+    frozen_without_payload = {
+        key: value
+        for key, value in frozen_manifest.items()
+        if key != "cohort_jsonl_sha256"
+    }
+    replayed_without_payload = {
+        key: value
+        for key, value in replayed_manifest.items()
+        if key != "cohort_jsonl_sha256"
+    }
+    if (
+        set(frozen_manifest) != set(replayed_manifest)
+        or _canonical_bytes(frozen_without_payload)
+        != _canonical_bytes(replayed_without_payload)
+        or replayed_manifest.get("cohort_jsonl_sha256")
+        != _sha256_bytes(replayed_bytes)
+    ):
+        raise TasteComRecGCFullError("Taste T14 cohort changed on resume")
+
+    expected_fields = {
+        "parent_id",
+        "canonical_graph_hash",
+        "true_label",
+        "predicted_label",
+        "source_probability",
+        "split",
+    }
+    mismatch_parent_ids: list[str] = []
+    maximum_delta = 0.0
+    frozen_probability_hex: list[str] = []
+    replayed_probability_hex: list[str] = []
+    for frozen, replayed in zip(frozen_rows, replayed_rows, strict=True):
+        if set(frozen) != expected_fields or set(replayed) != expected_fields:
+            raise TasteComRecGCFullError("Taste T14 frozen cohort row changed")
+        frozen_identity = {
+            field: frozen[field]
+            for field in expected_fields - {"source_probability"}
+        }
+        replayed_identity = {
+            field: replayed[field]
+            for field in expected_fields - {"source_probability"}
+        }
+        if (
+            type(frozen["parent_id"]) is not str
+            or not frozen["parent_id"]
+            or type(frozen["canonical_graph_hash"]) is not str
+            or len(frozen["canonical_graph_hash"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in frozen["canonical_graph_hash"]
+            )
+            or type(frozen["true_label"]) is not int
+            or frozen["true_label"] != SOURCE_LABEL
+            or type(frozen["predicted_label"]) is not int
+            or frozen["predicted_label"] != SOURCE_LABEL
+            or frozen["split"] != "train"
+            or type(frozen["split"]) is not str
+            or _canonical_bytes(frozen_identity)
+            != _canonical_bytes(replayed_identity)
+        ):
+            raise TasteComRecGCFullError("Taste T14 cohort changed on resume")
+        frozen_probability = frozen["source_probability"]
+        replayed_probability = replayed["source_probability"]
+        if (
+            isinstance(frozen_probability, bool)
+            or not isinstance(frozen_probability, (int, float))
+            or isinstance(replayed_probability, bool)
+            or not isinstance(replayed_probability, (int, float))
+        ):
+            raise TasteComRecGCFullError(
+                "Taste T14 source probability reconciliation is malformed"
+            )
+        frozen_value = float(frozen_probability)
+        replayed_value = float(replayed_probability)
+        if (
+            not math.isfinite(frozen_value)
+            or not math.isfinite(replayed_value)
+            or not 0.0 <= frozen_value <= 1.0
+            or not 0.0 <= replayed_value <= 1.0
+        ):
+            raise TasteComRecGCFullError(
+                "Taste T14 source probability reconciliation is invalid"
+            )
+        delta = abs(frozen_value - replayed_value)
+        tolerance = GINE_CANONICAL_REUSE_ATOL + (
+            GINE_CANONICAL_REUSE_RTOL * abs(frozen_value)
+        )
+        if delta > tolerance:
+            raise TasteComRecGCFullError(
+                "Taste T14 source probability changed beyond low-bit replay"
+            )
+        maximum_delta = max(maximum_delta, delta)
+        if frozen_value != replayed_value:
+            mismatch_parent_ids.append(str(frozen["parent_id"]))
+        frozen_probability_hex.append(frozen_value.hex())
+        replayed_probability_hex.append(replayed_value.hex())
+
+    primary_receipt = {
+        "schema_version": COHORT_RECONCILIATION_SCHEMA,
+        "status": "PASS",
+        "policy": "SOURCE_PROBABILITY_LOW_BIT_ONLY",
+        "frozen_cohort_sha256": _sha256_bytes(frozen_cohort_bytes),
+        "frozen_manifest_sha256": _sha256_bytes(frozen_manifest_bytes),
+        "cohort_count": len(frozen_rows),
+        "relative_tolerance_hex": GINE_CANONICAL_REUSE_RTOL.hex(),
+        "absolute_tolerance_hex": GINE_CANONICAL_REUSE_ATOL.hex(),
+        "tolerance_formula": "delta <= atol + rtol * abs(frozen_reference)",
+        "observation_schema": COHORT_RECONCILIATION_OBSERVATION_SCHEMA,
+        "observation_directory": COHORT_RECONCILIATION_OBSERVATIONS,
+        "required_identity_and_discrete_fields_exact": True,
+        "frozen_cohort_preserved": True,
+        "frozen_cohort_rewritten": False,
+    }
+    primary_sha256 = _sha256_bytes(
+        _canonical_bytes(primary_receipt) + b"\n"
+    )
+    observation = {
+        "schema_version": COHORT_RECONCILIATION_OBSERVATION_SCHEMA,
+        "status": "PASS",
+        "primary_receipt_sha256": primary_sha256,
+        "frozen_cohort_sha256": primary_receipt["frozen_cohort_sha256"],
+        "frozen_manifest_sha256": primary_receipt["frozen_manifest_sha256"],
+        "current_replayed_cohort_sha256": _sha256_bytes(replayed_bytes),
+        "current_replayed_manifest_sha256": _sha256_bytes(
+            _canonical_bytes(dict(replayed_manifest)) + b"\n"
+        ),
+        "cohort_count": len(frozen_rows),
+        "source_probability_mismatch_count": len(mismatch_parent_ids),
+        "source_probability_max_abs_delta": maximum_delta,
+        "source_probability_max_abs_delta_hex": maximum_delta.hex(),
+        "frozen_source_probabilities_sha256": _sha256_bytes(
+            _canonical_bytes(frozen_probability_hex)
+        ),
+        "current_source_probabilities_sha256": _sha256_bytes(
+            _canonical_bytes(replayed_probability_hex)
+        ),
+        "mismatch_parent_ids_sha256": _sha256_bytes(
+            _canonical_bytes(mismatch_parent_ids)
+        ),
+        "relative_tolerance_hex": GINE_CANONICAL_REUSE_RTOL.hex(),
+        "absolute_tolerance_hex": GINE_CANONICAL_REUSE_ATOL.hex(),
+        "tolerance_formula": "delta <= atol + rtol * abs(frozen_reference)",
+        "identity_and_discrete_fields_exact": True,
+        "cohort_order_exact": True,
+        "manifest_except_cohort_sha_exact": True,
+        "frozen_cohort_preserved": True,
+        "frozen_cohort_rewritten": False,
+    }
+    return (
+        [dict(row) for row in frozen_rows],
+        dict(frozen_manifest),
+        primary_receipt,
+        observation,
+    )
+
+
+def _persist_cohort_reconciliation_evidence(
+    root: Path,
+    *,
+    primary_receipt: Mapping[str, Any],
+    observation: Mapping[str, Any],
+) -> None:
+    primary_path = root / COHORT_RECONCILIATION_RECEIPT
+    observation_root = root / COHORT_RECONCILIATION_OBSERVATIONS
+    primary_exists = os.path.lexists(primary_path)
+    observations_exist = os.path.lexists(observation_root)
+    if primary_exists != observations_exist:
+        raise TasteComRecGCFullError(
+            "Taste T14 cohort reconciliation evidence is incomplete"
+        )
+    primary_payload = _canonical_bytes(dict(primary_receipt)) + b"\n"
+    if primary_exists:
+        if primary_path.is_symlink() or primary_path.read_bytes() != primary_payload:
+            raise TasteComRecGCFullError(
+                "Taste T14 cohort reconciliation receipt changed on resume"
+            )
+    else:
+        _atomic_write(primary_path, primary_payload)
+
+    if observations_exist:
+        if (
+            not observation_root.is_dir()
+            or observation_root.is_symlink()
+            or observation_root.resolve(strict=True) != observation_root
+        ):
+            raise TasteComRecGCFullError(
+                "Taste T14 cohort reconciliation observations are aliased"
+            )
+    else:
+        observation_root.mkdir(mode=0o700)
+        _fsync_dir(root)
+    replay_sha = observation.get("current_replayed_cohort_sha256")
+    if (
+        type(replay_sha) is not str
+        or len(replay_sha) != 64
+        or any(character not in "0123456789abcdef" for character in replay_sha)
+    ):
+        raise TasteComRecGCFullError(
+            "Taste T14 reconciliation observation replay SHA is invalid"
+        )
+    observation_path = observation_root / f"{replay_sha}.json"
+    observation_payload = _canonical_bytes(dict(observation)) + b"\n"
+    if observation_path.exists():
+        if observation_path.is_symlink() or observation_path.read_bytes() != (
+            observation_payload
+        ):
+            raise TasteComRecGCFullError(
+                "Taste T14 cohort reconciliation observation conflicts"
+            )
+        return
+    _atomic_write(observation_path, observation_payload)
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _read_canonical_evidence_json(
+    path: Path,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], bytes]:
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise TasteComRecGCFullError(f"Taste T14 {label} is missing") from exc
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise TasteComRecGCFullError(
+            f"Taste T14 {label} is not a physical regular file"
+        )
+    payload = path.read_bytes()
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TasteComRecGCFullError(f"Taste T14 {label} is unreadable") from exc
+    if type(value) is not dict or _canonical_bytes(value) + b"\n" != payload:
+        raise TasteComRecGCFullError(f"Taste T14 {label} is not canonical")
+    return value, payload
+
+
+def _validate_cohort_reconciliation_evidence(
+    root: Path,
+    *,
+    frozen_cohort_bytes: bytes,
+    frozen_manifest_bytes: bytes,
+) -> dict[str, Any] | None:
+    """Reopen and bind optional immutable resume-reconciliation evidence."""
+
+    primary_path = root / COHORT_RECONCILIATION_RECEIPT
+    observation_root = root / COHORT_RECONCILIATION_OBSERVATIONS
+    primary_exists = os.path.lexists(primary_path)
+    observations_exist = os.path.lexists(observation_root)
+    if not primary_exists and not observations_exist:
+        return None
+    if primary_exists != observations_exist:
+        raise TasteComRecGCFullError(
+            "Taste T14 cohort reconciliation evidence is incomplete"
+        )
+    primary, primary_payload = _read_canonical_evidence_json(
+        primary_path,
+        label="cohort reconciliation receipt",
+    )
+    try:
+        frozen_rows = [
+            json.loads(line)
+            for line in frozen_cohort_bytes.decode("utf-8").splitlines()
+        ]
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TasteComRecGCFullError(
+            "Taste T14 frozen reconciliation cohort is unreadable"
+        ) from exc
+    expected_primary_fields = {
+        "schema_version",
+        "status",
+        "policy",
+        "frozen_cohort_sha256",
+        "frozen_manifest_sha256",
+        "cohort_count",
+        "relative_tolerance_hex",
+        "absolute_tolerance_hex",
+        "tolerance_formula",
+        "observation_schema",
+        "observation_directory",
+        "required_identity_and_discrete_fields_exact",
+        "frozen_cohort_preserved",
+        "frozen_cohort_rewritten",
+    }
+    if (
+        set(primary) != expected_primary_fields
+        or primary.get("schema_version") != COHORT_RECONCILIATION_SCHEMA
+        or primary.get("status") != "PASS"
+        or primary.get("policy") != "SOURCE_PROBABILITY_LOW_BIT_ONLY"
+        or primary.get("frozen_cohort_sha256")
+        != _sha256_bytes(frozen_cohort_bytes)
+        or primary.get("frozen_manifest_sha256")
+        != _sha256_bytes(frozen_manifest_bytes)
+        or type(primary.get("cohort_count")) is not int
+        or primary["cohort_count"] <= 0
+        or len(frozen_rows) != primary["cohort_count"]
+        or any(type(row) is not dict for row in frozen_rows)
+        or _cohort_lines(frozen_rows) != frozen_cohort_bytes
+        or primary.get("relative_tolerance_hex")
+        != GINE_CANONICAL_REUSE_RTOL.hex()
+        or primary.get("absolute_tolerance_hex")
+        != GINE_CANONICAL_REUSE_ATOL.hex()
+        or primary.get("tolerance_formula")
+        != "delta <= atol + rtol * abs(frozen_reference)"
+        or primary.get("observation_schema")
+        != COHORT_RECONCILIATION_OBSERVATION_SCHEMA
+        or primary.get("observation_directory")
+        != COHORT_RECONCILIATION_OBSERVATIONS
+        or primary.get("required_identity_and_discrete_fields_exact") is not True
+        or primary.get("frozen_cohort_preserved") is not True
+        or primary.get("frozen_cohort_rewritten") is not False
+    ):
+        raise TasteComRecGCFullError(
+            "Taste T14 cohort reconciliation receipt changed"
+        )
+    try:
+        observation_info = observation_root.lstat()
+        resolved_observation_root = observation_root.resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise TasteComRecGCFullError(
+            "Taste T14 cohort reconciliation observations are unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(observation_info.st_mode)
+        or stat.S_ISLNK(observation_info.st_mode)
+        or resolved_observation_root != observation_root
+    ):
+        raise TasteComRecGCFullError(
+            "Taste T14 cohort reconciliation observations are aliased"
+        )
+    observation_paths = sorted(observation_root.iterdir())
+    if not observation_paths:
+        raise TasteComRecGCFullError(
+            "Taste T14 cohort reconciliation has no observations"
+        )
+    primary_sha256 = _sha256_bytes(primary_payload)
+    expected_observation_fields = {
+        "schema_version",
+        "status",
+        "primary_receipt_sha256",
+        "frozen_cohort_sha256",
+        "frozen_manifest_sha256",
+        "current_replayed_cohort_sha256",
+        "current_replayed_manifest_sha256",
+        "cohort_count",
+        "source_probability_mismatch_count",
+        "source_probability_max_abs_delta",
+        "source_probability_max_abs_delta_hex",
+        "frozen_source_probabilities_sha256",
+        "current_source_probabilities_sha256",
+        "mismatch_parent_ids_sha256",
+        "relative_tolerance_hex",
+        "absolute_tolerance_hex",
+        "tolerance_formula",
+        "identity_and_discrete_fields_exact",
+        "cohort_order_exact",
+        "manifest_except_cohort_sha_exact",
+        "frozen_cohort_preserved",
+        "frozen_cohort_rewritten",
+    }
+    inventory: list[dict[str, str]] = []
+    for path in observation_paths:
+        if path.suffix != ".json" or not _is_sha256(path.stem):
+            raise TasteComRecGCFullError(
+                "Taste T14 cohort reconciliation observation name changed"
+            )
+        observation, payload = _read_canonical_evidence_json(
+            path,
+            label="cohort reconciliation observation",
+        )
+        maximum_delta = observation.get("source_probability_max_abs_delta")
+        maximum_delta_hex = observation.get(
+            "source_probability_max_abs_delta_hex"
+        )
+        mismatch_count = observation.get("source_probability_mismatch_count")
+        try:
+            decoded_maximum_delta = float.fromhex(maximum_delta_hex)
+        except (TypeError, ValueError):
+            decoded_maximum_delta = math.nan
+        if (
+            set(observation) != expected_observation_fields
+            or observation.get("schema_version")
+            != COHORT_RECONCILIATION_OBSERVATION_SCHEMA
+            or observation.get("status") != "PASS"
+            or observation.get("primary_receipt_sha256") != primary_sha256
+            or observation.get("frozen_cohort_sha256")
+            != primary["frozen_cohort_sha256"]
+            or observation.get("frozen_manifest_sha256")
+            != primary["frozen_manifest_sha256"]
+            or observation.get("current_replayed_cohort_sha256") != path.stem
+            or not _is_sha256(observation.get("current_replayed_manifest_sha256"))
+            or observation.get("cohort_count") != primary["cohort_count"]
+            or type(mismatch_count) is not int
+            or not 0 <= mismatch_count <= primary["cohort_count"]
+            or type(maximum_delta) is not float
+            or not math.isfinite(maximum_delta)
+            or maximum_delta < 0.0
+            or maximum_delta
+            > GINE_CANONICAL_REUSE_ATOL + GINE_CANONICAL_REUSE_RTOL
+            or decoded_maximum_delta != maximum_delta
+            or maximum_delta_hex != maximum_delta.hex()
+            or not _is_sha256(
+                observation.get("frozen_source_probabilities_sha256")
+            )
+            or not _is_sha256(
+                observation.get("current_source_probabilities_sha256")
+            )
+            or not _is_sha256(observation.get("mismatch_parent_ids_sha256"))
+            or observation.get("relative_tolerance_hex")
+            != GINE_CANONICAL_REUSE_RTOL.hex()
+            or observation.get("absolute_tolerance_hex")
+            != GINE_CANONICAL_REUSE_ATOL.hex()
+            or observation.get("tolerance_formula")
+            != "delta <= atol + rtol * abs(frozen_reference)"
+            or observation.get("identity_and_discrete_fields_exact") is not True
+            or observation.get("cohort_order_exact") is not True
+            or observation.get("manifest_except_cohort_sha_exact") is not True
+            or observation.get("frozen_cohort_preserved") is not True
+            or observation.get("frozen_cohort_rewritten") is not False
+        ):
+            raise TasteComRecGCFullError(
+                "Taste T14 cohort reconciliation observation changed"
+            )
+        inventory.append({"name": path.name, "sha256": _sha256_bytes(payload)})
+    return {
+        "schema_version": COHORT_RECONCILIATION_BINDING_SCHEMA,
+        "status": "BOUND",
+        "primary_receipt_sha256": primary_sha256,
+        "observation_count": len(inventory),
+        "observation_inventory_sha256": _sha256_bytes(
+            _canonical_bytes(inventory)
+        ),
+        "frozen_cohort_sha256": primary["frozen_cohort_sha256"],
+        "frozen_manifest_sha256": primary["frozen_manifest_sha256"],
+        "identity_and_discrete_fields_exact": True,
+        "frozen_cohort_rewritten": False,
+    }
 
 
 def count_train_side_valid_unique(bridge: TasteComRecGCMulticlassBridge) -> dict[str, Any]:
@@ -883,13 +1388,41 @@ def run_t14_full(
     )
     existing_cohort = root / "cohort.jsonl"
     existing_manifest = root / "cohort_manifest.json"
+    cohort_reconciliation_binding: dict[str, Any] | None = None
     if existing_cohort.exists() or existing_manifest.exists():
         if (
-            existing_cohort.read_bytes() != cohort_bytes
-            or json.loads(existing_manifest.read_text(encoding="utf-8"))
-            != cohort_manifest
+            not existing_cohort.is_file()
+            or existing_cohort.is_symlink()
+            or not existing_manifest.is_file()
+            or existing_manifest.is_symlink()
         ):
-            raise TasteComRecGCFullError("Taste T14 cohort changed on resume")
+            raise TasteComRecGCFullError(
+                "Taste T14 frozen cohort files are incomplete or aliased"
+            )
+        frozen_cohort_bytes = existing_cohort.read_bytes()
+        frozen_manifest_bytes = existing_manifest.read_bytes()
+        (
+            cohort,
+            cohort_manifest,
+            reconciliation_primary,
+            reconciliation_observation,
+        ) = reconcile_t14_resume_cohort(
+            frozen_cohort_bytes=frozen_cohort_bytes,
+            frozen_manifest_bytes=frozen_manifest_bytes,
+            replayed_rows=cohort,
+            replayed_manifest=cohort_manifest,
+        )
+        cohort_bytes = frozen_cohort_bytes
+        _persist_cohort_reconciliation_evidence(
+            root,
+            primary_receipt=reconciliation_primary,
+            observation=reconciliation_observation,
+        )
+        cohort_reconciliation_binding = _validate_cohort_reconciliation_evidence(
+            root,
+            frozen_cohort_bytes=frozen_cohort_bytes,
+            frozen_manifest_bytes=frozen_manifest_bytes,
+        )
     else:
         _atomic_write(existing_cohort, cohort_bytes)
         _atomic_json(existing_manifest, cohort_manifest)
@@ -1202,6 +1735,8 @@ def run_t14_full(
         "method_cell_pass": False,
         "completed_at": _utc_now(),
     }
+    if cohort_reconciliation_binding is not None:
+        final["cohort_reconciliation"] = cohort_reconciliation_binding
     _atomic_json(root / "generation_manifest.json", final)
     _atomic_write(
         root / "GENERATION_PASS",
@@ -1262,6 +1797,12 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         (root / "checkpoint_identity.json").read_text("utf-8")
     )
     cohort_bytes = (root / "cohort.jsonl").read_bytes()
+    cohort_manifest_bytes = (root / "cohort_manifest.json").read_bytes()
+    reconciliation_binding = _validate_cohort_reconciliation_evidence(
+        root,
+        frozen_cohort_bytes=cohort_bytes,
+        frozen_manifest_bytes=cohort_manifest_bytes,
+    )
     effective = resource.get("m_effective") if type(resource) is dict else None
     latest = (
         root / "checkpoints" / f"step-{effective:012d}"
@@ -1314,6 +1855,7 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         or manifest.get("method_cell_pass") is not False
         or manifest.get("cohort_manifest_sha256") != _sha256_file(root / "cohort_manifest.json")
         or manifest.get("cohort_jsonl_sha256") != _sha256_bytes(cohort_bytes)
+        or manifest.get("cohort_reconciliation") != reconciliation_binding
         or manifest.get("resource_cap") != resource
         or manifest.get("valid_unique") != valid
         or type(bounded_runtime) is not dict

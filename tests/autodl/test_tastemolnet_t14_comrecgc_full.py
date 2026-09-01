@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from contextlib import contextmanager
 import hashlib
 import inspect
 import json
+import math
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from src.baselines import tastemolnet_comrecgc_full as t14
@@ -79,6 +82,248 @@ def test_full_cohort_rejects_non_sweet_input_even_if_prediction_is_sweet() -> No
             canonical_graph_hashes=["a" * 64],
             train_csv_sha256="b" * 64,
             checkpoint_id="c" * 64,
+        )
+
+
+def _reconciliation_fixture() -> tuple[
+    list[dict[str, object]], dict[str, object], bytes, bytes
+]:
+    rows, manifest, cohort_bytes = build_full_train_correct_source_cohort(
+        true_sweet_rows=[_Row("a"), _Row("b")],
+        predictions=[1, 1],
+        source_probabilities=[0.75, 0.625],
+        canonical_graph_hashes=["a" * 64, "b" * 64],
+        train_csv_sha256="c" * 64,
+        checkpoint_id="d" * 64,
+    )
+    manifest_bytes = t14._canonical_bytes(manifest) + b"\n"
+    return rows, manifest, cohort_bytes, manifest_bytes
+
+
+def test_t14_reconciles_only_low_bit_probability_and_preserves_frozen_bytes(
+    tmp_path: Path,
+) -> None:
+    frozen_rows, frozen_manifest, frozen_bytes, manifest_bytes = (
+        _reconciliation_fixture()
+    )
+    replayed = deepcopy(frozen_rows)
+    replayed[0]["source_probability"] = 0.75000002
+    replayed[1]["source_probability"] = 0.62499998
+    replayed_manifest = {
+        **frozen_manifest,
+        "cohort_jsonl_sha256": _sha(t14._cohort_lines(replayed)),
+    }
+
+    adopted, adopted_manifest, primary, observation = (
+        t14.reconcile_t14_resume_cohort(
+            frozen_cohort_bytes=frozen_bytes,
+            frozen_manifest_bytes=manifest_bytes,
+            replayed_rows=replayed,
+            replayed_manifest=replayed_manifest,
+        )
+    )
+    assert adopted == frozen_rows
+    assert adopted_manifest == frozen_manifest
+    assert t14._cohort_lines(adopted) == frozen_bytes
+    assert observation["source_probability_mismatch_count"] == 2
+    assert observation["source_probability_max_abs_delta"] == pytest.approx(2e-8)
+    assert primary["frozen_cohort_sha256"] == _sha(frozen_bytes)
+    assert observation["current_replayed_cohort_sha256"] == _sha(
+        t14._cohort_lines(replayed)
+    )
+    assert observation["identity_and_discrete_fields_exact"] is True
+    assert observation["frozen_cohort_rewritten"] is False
+
+    frozen_path = tmp_path / "cohort.jsonl"
+    manifest_path = tmp_path / "cohort_manifest.json"
+    frozen_path.write_bytes(frozen_bytes)
+    manifest_path.write_bytes(manifest_bytes)
+    t14._persist_cohort_reconciliation_evidence(
+        tmp_path,
+        primary_receipt=primary,
+        observation=observation,
+    )
+    primary_path = tmp_path / t14.COHORT_RECONCILIATION_RECEIPT
+    first_primary = primary_path.read_bytes()
+    first_observation_path = (
+        tmp_path
+        / t14.COHORT_RECONCILIATION_OBSERVATIONS
+        / f'{observation["current_replayed_cohort_sha256"]}.json'
+    )
+    first_observation = first_observation_path.read_bytes()
+    t14._persist_cohort_reconciliation_evidence(
+        tmp_path,
+        primary_receipt=primary,
+        observation=observation,
+    )
+    assert primary_path.read_bytes() == first_primary
+    assert first_observation_path.read_bytes() == first_observation
+
+    replayed_again = deepcopy(frozen_rows)
+    replayed_again[0]["source_probability"] = 0.75000003
+    replayed_again_manifest = {
+        **frozen_manifest,
+        "cohort_jsonl_sha256": _sha(t14._cohort_lines(replayed_again)),
+    }
+    _, _, second_primary, second_observation = t14.reconcile_t14_resume_cohort(
+        frozen_cohort_bytes=frozen_bytes,
+        frozen_manifest_bytes=manifest_bytes,
+        replayed_rows=replayed_again,
+        replayed_manifest=replayed_again_manifest,
+    )
+    assert second_primary == primary
+    assert (
+        second_observation["current_replayed_cohort_sha256"]
+        != observation["current_replayed_cohort_sha256"]
+    )
+    t14._persist_cohort_reconciliation_evidence(
+        tmp_path,
+        primary_receipt=second_primary,
+        observation=second_observation,
+    )
+    binding = t14._validate_cohort_reconciliation_evidence(
+        tmp_path,
+        frozen_cohort_bytes=frozen_bytes,
+        frozen_manifest_bytes=manifest_bytes,
+    )
+    assert binding is not None
+    assert binding["observation_count"] == 2
+    assert frozen_path.read_bytes() == frozen_bytes
+    assert manifest_path.read_bytes() == manifest_bytes
+
+    changed_observation = {
+        **observation,
+        "source_probability_mismatch_count": 1,
+    }
+    with pytest.raises(
+        TasteComRecGCFullError, match="observation conflicts"
+    ):
+        t14._persist_cohort_reconciliation_evidence(
+            tmp_path,
+            primary_receipt=primary,
+            observation=changed_observation,
+        )
+
+
+def test_t14_reconciliation_uses_frozen_reference_allclose_boundary() -> None:
+    rows, manifest, cohort_bytes, manifest_bytes = _reconciliation_fixture()
+    frozen = float(rows[0]["source_probability"])
+    limit = t14.GINE_CANONICAL_REUSE_ATOL + (
+        t14.GINE_CANONICAL_REUSE_RTOL * abs(frozen)
+    )
+    inside = math.nextafter(frozen + limit, frozen)
+    outside = math.nextafter(frozen + limit, math.inf)
+    assert np.allclose(
+        np.asarray([inside]),
+        np.asarray([frozen]),
+        rtol=t14.GINE_CANONICAL_REUSE_RTOL,
+        atol=t14.GINE_CANONICAL_REUSE_ATOL,
+    )
+    assert not np.allclose(
+        np.asarray([outside]),
+        np.asarray([frozen]),
+        rtol=t14.GINE_CANONICAL_REUSE_RTOL,
+        atol=t14.GINE_CANONICAL_REUSE_ATOL,
+    )
+
+    accepted = deepcopy(rows)
+    accepted[0]["source_probability"] = inside
+    accepted_manifest = {
+        **manifest,
+        "cohort_jsonl_sha256": _sha(t14._cohort_lines(accepted)),
+    }
+    t14.reconcile_t14_resume_cohort(
+        frozen_cohort_bytes=cohort_bytes,
+        frozen_manifest_bytes=manifest_bytes,
+        replayed_rows=accepted,
+        replayed_manifest=accepted_manifest,
+    )
+
+    rejected = deepcopy(rows)
+    rejected[0]["source_probability"] = outside
+    rejected_manifest = {
+        **manifest,
+        "cohort_jsonl_sha256": _sha(t14._cohort_lines(rejected)),
+    }
+    with pytest.raises(TasteComRecGCFullError, match="beyond low-bit replay"):
+        t14.reconcile_t14_resume_cohort(
+            frozen_cohort_bytes=cohort_bytes,
+            frozen_manifest_bytes=manifest_bytes,
+            replayed_rows=rejected,
+            replayed_manifest=rejected_manifest,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("parent_id", "changed"),
+        ("canonical_graph_hash", "f" * 64),
+        ("true_label", 0),
+        ("predicted_label", 2),
+        ("split", "validation"),
+    ),
+)
+def test_t14_reconciliation_rejects_identity_or_discrete_drift(
+    field: str, value: object
+) -> None:
+    rows, manifest, cohort_bytes, manifest_bytes = _reconciliation_fixture()
+    replayed = deepcopy(rows)
+    replayed[0][field] = value
+    replayed_manifest = {
+        **manifest,
+        "cohort_jsonl_sha256": _sha(t14._cohort_lines(replayed)),
+    }
+    with pytest.raises(TasteComRecGCFullError, match="cohort changed on resume"):
+        t14.reconcile_t14_resume_cohort(
+            frozen_cohort_bytes=cohort_bytes,
+            frozen_manifest_bytes=manifest_bytes,
+            replayed_rows=replayed,
+            replayed_manifest=replayed_manifest,
+        )
+
+
+def test_t14_reconciliation_rejects_order_manifest_and_non_low_bit_drift() -> None:
+    rows, manifest, cohort_bytes, manifest_bytes = _reconciliation_fixture()
+    cases = []
+    reordered = list(reversed(deepcopy(rows)))
+    cases.append(
+        (
+            reordered,
+            {**manifest, "cohort_jsonl_sha256": _sha(t14._cohort_lines(reordered))},
+        )
+    )
+    large_delta = deepcopy(rows)
+    large_delta[0]["source_probability"] = 0.5
+    cases.append(
+        (
+            large_delta,
+            {
+                **manifest,
+                "cohort_jsonl_sha256": _sha(t14._cohort_lines(large_delta)),
+            },
+        )
+    )
+    changed_manifest = {**manifest, "selection": "changed"}
+    cases.append((deepcopy(rows), changed_manifest))
+    for replayed, replayed_manifest in cases:
+        with pytest.raises(TasteComRecGCFullError):
+            t14.reconcile_t14_resume_cohort(
+                frozen_cohort_bytes=cohort_bytes,
+                frozen_manifest_bytes=manifest_bytes,
+                replayed_rows=replayed,
+                replayed_manifest=replayed_manifest,
+            )
+
+    nonfinite = deepcopy(rows)
+    nonfinite[0]["source_probability"] = float("nan")
+    nonfinite_manifest = {**manifest, "cohort_jsonl_sha256": "0" * 64}
+    with pytest.raises(TasteComRecGCFullError):
+        t14.reconcile_t14_resume_cohort(
+            frozen_cohort_bytes=cohort_bytes,
+            frozen_manifest_bytes=manifest_bytes,
+            replayed_rows=nonfinite,
+            replayed_manifest=nonfinite_manifest,
         )
 
 
@@ -235,14 +480,25 @@ def test_independent_terminal_verifier_reopens_bounded_train_only_closure(
     root = tmp_path / "t14"
     checkpoint_root = root / "checkpoints"
     checkpoint_root.mkdir(parents=True)
-    cohort = b'{"parent_id":"x"}\n'
+    cohort_rows = [
+        {
+            "canonical_graph_hash": "f" * 64,
+            "parent_id": "x",
+            "predicted_label": 1,
+            "source_probability": 0.75,
+            "split": "train",
+            "true_label": 1,
+        }
+    ]
+    cohort = t14._cohort_lines(cohort_rows)
     (root / "cohort.jsonl").write_bytes(cohort)
     cohort_manifest = {
         "status": "PASS",
         "policy": "FULL_TRAIN_CORRECT_SOURCE",
         "cohort_jsonl_sha256": _sha(cohort),
     }
-    (root / "cohort_manifest.json").write_text(json.dumps(cohort_manifest))
+    cohort_manifest_bytes = t14._canonical_bytes(cohort_manifest) + b"\n"
+    (root / "cohort_manifest.json").write_bytes(cohort_manifest_bytes)
     valid = {"valid_unique_rule_count": 10}
     resource = {"state": "STOP_AND_POSTPROCESS", "m_effective": M_MAX}
     (root / "valid_unique.json").write_text(json.dumps(valid))
@@ -353,6 +609,56 @@ def test_independent_terminal_verifier_reopens_bounded_train_only_closure(
     assert receipt["m_effective"] == M_MAX
     assert receipt["test_loaded"] is False
     assert receipt["method_cell_pass"] is False
+
+    replayed_rows = deepcopy(cohort_rows)
+    replayed_rows[0]["source_probability"] = 0.75000002
+    replayed_manifest = {
+        **cohort_manifest,
+        "cohort_jsonl_sha256": _sha(t14._cohort_lines(replayed_rows)),
+    }
+    _, _, primary, observation = t14.reconcile_t14_resume_cohort(
+        frozen_cohort_bytes=cohort,
+        frozen_manifest_bytes=cohort_manifest_bytes,
+        replayed_rows=replayed_rows,
+        replayed_manifest=replayed_manifest,
+    )
+    t14._persist_cohort_reconciliation_evidence(
+        root,
+        primary_receipt=primary,
+        observation=observation,
+    )
+    binding = t14._validate_cohort_reconciliation_evidence(
+        root,
+        frozen_cohort_bytes=cohort,
+        frozen_manifest_bytes=cohort_manifest_bytes,
+    )
+    manifest["cohort_reconciliation"] = binding
+    (root / "generation_manifest.json").write_text(json.dumps(manifest))
+    assert validate_t14_full_output(root)["status"] == "PASS"
+
+    observation_path = (
+        root
+        / t14.COHORT_RECONCILIATION_OBSERVATIONS
+        / f'{observation["current_replayed_cohort_sha256"]}.json'
+    )
+    observation_bytes = observation_path.read_bytes()
+    observation_path.unlink()
+    with pytest.raises(TasteComRecGCFullError, match="has no observations"):
+        validate_t14_full_output(root)
+    observation_path.write_bytes(observation_bytes)
+    tampered = {**observation, "status": "FAIL"}
+    observation_path.write_bytes(t14._canonical_bytes(tampered) + b"\n")
+    with pytest.raises(TasteComRecGCFullError, match="observation changed"):
+        validate_t14_full_output(root)
+    observation_path.write_bytes(observation_bytes)
+    primary_path = root / t14.COHORT_RECONCILIATION_RECEIPT
+    primary_bytes = primary_path.read_bytes()
+    primary_path.write_bytes(
+        t14._canonical_bytes({**primary, "status": "FAIL"}) + b"\n"
+    )
+    with pytest.raises(TasteComRecGCFullError, match="receipt changed"):
+        validate_t14_full_output(root)
+    primary_path.write_bytes(primary_bytes)
 
     manifest["test_loaded"] = True
     (root / "generation_manifest.json").write_text(json.dumps(manifest))
