@@ -1,6 +1,6 @@
 # AutoDL Main Recovery and Ablation Framework Handoff
 
-Last live audit: 2026-09-02 02:35-02:40 CST.  This document records live
+Last live audit: 2026-09-02 02:55-03:05 CST.  This document records live
 execution facts separately from the post-main, config-only ablation design.
 It must not be used as a substitute for the matrix authority or terminal
 artifact receipts.
@@ -23,10 +23,10 @@ artifact receipts.
 | Line | PID | GPU | Live state / checkpoint | Root |
 |---|---:|---:|---|---|
 | AIDS ComRecGC publication | none | none | Published PASS; matrix append complete at 11/16 | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/publication_reconciliation/aids_comrecgc_matrix_append_5c11c28_20260902T021000Z` |
-| Mut ComRecGC trace-on adoption | 34081 | waiting | Fresh one-shot successor is running a protected baseline with `gpu_lock_held=false`; it waits for a naturally idle GPU | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/mut_trace_on_adoption_20260901T183543Z` |
-| Taste T11 Ours | 15930 | 0 | `GENERATION_HIGH_TEMP`, 3817/3823 parents at the audit | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/ours/t11-full/science-attempt-b73f789d-3888-4ec8-8e07-0442e224df29` |
-| Taste T8 target-2 recovery (feeds T13) | 33141 | 1 | target-0 finished and target-2 advanced into native gSpan/rule materialization | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t8-dual-branch-recovery/target-2-attempt-4a0651fa-5df4-43c0-a897-20f040f779d8` |
-| Taste T14 ComRecGC | 7224 | 2 | last ordinary progress was 2100/20000; a fresh 2500-step checkpoint was being serialized | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/comrecgc/t14-full/attempt-f3b2e5f2-9f20-4c12-bd26-3d7cc8e0d9ab` |
+| Mut ComRecGC trace-on adoption | 34081 (compute 35789) | 0 | `CANARY_RUNNING`; it owns the exact UUID lock for the sequential instrumentation-equivalence arm; fresh-50k and pair/DBSCAN recomputation remain false | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/mut_trace_on_adoption_20260901T183543Z` |
+| Taste T11 Ours | relay below | waiting for GPU 0 | Generation completed durably.  The old run failed in calibration because one cache-context version field was absent; checkpoint is `CALIBRATION_RUNNING`, 1/468 parents.  Commit `7fcf9ba` fixes only that context binding, and the one-shot relay resumes the existing science root after Mut releases GPU 0. | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/ours/t11-full/science-attempt-b73f789d-3888-4ec8-8e07-0442e224df29` |
+| Taste T8 target-2 recovery (feeds T13) | 33141 | 1 | target-0 finished; target-2 is in native training/materialization with a durable training checkpoint and T13 correctly remains gated | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t8-dual-branch-recovery/target-2-attempt-4a0651fa-5df4-43c0-a897-20f040f779d8` |
+| Taste T14 ComRecGC | 7224 | 2 | committed checkpoint 2500/20000; 29,240 valid unique rules at the audit | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/comrecgc/t14-full/attempt-f3b2e5f2-9f20-4c12-bd26-3d7cc8e0d9ab` |
 | Taste T12 GCFExplainer | 21562 | 3 | science process alive; no early production checkpoint yet | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/gcfexplainer/t12-production/attempt-6616449a-6fa5-4502-8c8a-ae01b11366fb` |
 
 The previous Mut worker (PID 22325) correctly failed closed when an
@@ -34,20 +34,34 @@ uncoordinated T8 process appeared on its exclusively locked GPU.  This was not
 a trace-equivalence failure: its receipt records
 `fallback_route_required=false`, and no fresh 50k generation was launched.
 PID 34081 was therefore attached from the original immutable main execution
-commit `a21f89d` with a fresh authorization and output root.  It does not hold a
-GPU while waiting.
+commit `a21f89d` with a fresh authorization and output root.  It acquired GPU 0
+only after the protected baseline gate and now runs the bounded sequential
+canary.
+
+T11's costly generation output was not lost.  Its first calibration parent is
+committed in `raw/calibration_pair_chunks/00000000.jsonl`; the checkpoint and
+chunk reload cleanly.  The failure was exactly
+`distance_implementation_version` missing from the action-aware WNode cache
+context.  The isolated repair worktree is
+`/root/autodl-tmp/worktrees/t11-wnode-cache-fix-7fcf9ba-20260902T025000Z`.
+Focused T11 tests passed both locally and on AutoDL.  A first managed launch
+attempt safely failed with exit 125 because Mut won the GPU 0 lock; it started
+no child.  The narrow one-shot resume relay is persisted under
+`/autodl-fs/data/counterfactual-subgraph-runtime/control/` and waits without a
+GPU lock.  It is the only T11 successor and will run the exact existing
+checkpoint once the same physical UUID is naturally free.
 
 The T12/T13/T14 publisher and post-process relays had current heartbeats at
-the audit time.  T11, T8, T12 and T14 were not restarted, reconfigured or
-preempted.  All four GPUs were owned by these main-table jobs; no ablation PID
-or ablation GPU lock existed.
+the audit time.  T8, T12 and T14 were not restarted, reconfigured or
+preempted.  GPU 0 was used by Mut; GPUs 1/2/3 remained assigned to T8/T14/T12.
+No ablation PID or ablation GPU lock existed.
 
 ## 3. Main-table critical path
 
-T11 is within six parents of the end of its high-temperature generation stage,
-but still requires downstream verification/publication.  T8 target-0 has
-finished and target-2 is the remaining T8 prerequisite before T13.  T14 had
-roughly 17,500 configured generation steps left at its in-progress 2500-step
+T11's generation is complete and only calibration/test/publication remain;
+its resume waits behind the bounded Mut canary on GPU 0.  T8 target-0 has
+finished and target-2 is the remaining T8 prerequisite before T13.  T14 has
+roughly 17,500 configured generation steps left after its committed 2500-step
 checkpoint;
 its measured protected baseline was about 0.330 steps/second, corresponding to
 roughly 15 hours for generation alone if sustained.  T12 remains the largest
