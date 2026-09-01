@@ -33,6 +33,7 @@ def test_release_relay_is_fresh_gpu3_science() -> None:
     assert "checkpoint-00020000.manifest.json" in text
     assert "[TASTE_T12_GCF_FULL_LAUNCHED]" in text
     assert "RUN_GNN_ABLATION" in text
+    assert "export PYTHONDONTWRITEBYTECODE=1" in text
     assert 'PYTHONPATH="$T12_RELEASE_VALIDATOR_ROOT"' in text
 
 
