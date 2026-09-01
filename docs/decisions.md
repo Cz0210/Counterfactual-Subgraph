@@ -1,5 +1,40 @@
 # Decisions Log
 
+## [2026-09-01] Preserve a validated T14 cohort across probability low-bit drift
+
+### Motivation
+
+The committed T14 5k cohort replayed the same ordered parents, graph hashes,
+labels, splits, and discrete frozen-GINE predictions, but a new CUDA process
+changed diagnostic Sweet probabilities at low bits.  Exact file comparison
+therefore rejected a scientifically unchanged cohort before checkpoint load.
+
+### Decision
+
+On resume, reopen the frozen cohort and manifest without rewriting them.  They
+may be retained only when every non-probability row field, row order, and every
+manifest field except the cohort payload hash matches the current replay
+exactly.  Both frozen and replayed probabilities must be finite, within
+`[0,1]`, and within the pinned stable-GINE replay tolerance, evaluated in the
+same direction as the bridge: `delta <= atol + rtol * abs(frozen_reference)`.
+Persist one stable primary receipt for the frozen cohort plus immutable
+observation receipts named by each current replay SHA.  Repeating the same SHA
+is idempotent; a different legal low-bit replay adds an observation without
+changing the primary receipt.  The terminal manifest binds the primary receipt
+and the complete observation inventory.
+
+### Consequences
+
+- Previously committed checkpoint provenance continues to reference the exact
+  original cohort bytes.
+- A changed member, order, graph/parent identity, discrete prediction, split,
+  manifest authority, or material probability remains a hard failure.
+- The receipts are evidence only and cannot select or modify the cohort.
+- Missing, renamed, aliased, or modified reconciliation evidence invalidates a
+  bound terminal result; fresh exact cohorts remain valid without receipts.
+
+---
+
 ## [2026-09-01] Replay exact T12 coverage and preserve the T14 cohort boundary
 
 ### Motivation
@@ -403,10 +438,11 @@ change.
 Add a Taste-T12-only production bridge mode.  Keep complete first-row records
 only for the official live `graph_map`/ordered-candidate/current domain, whose
 20k upper bound is `min(k, M+1)=20001`, plus at most one 10k neighbour batch as
-transient state.  Every scored observation instead enters a fixed 272-byte,
+transient state.  Every scored observation instead enters a fixed 304-byte,
 append-only SHA-256 chain.  The compact record contains graph and semantic
-digests, three probabilities, discrete outcome flags, covered-parent count and
-a lineage digest; it contains no historical graph payload, embedding values,
+digests, the raw NeuroSED query SHA, three probabilities, discrete outcome
+flags, covered-parent count and a lineage digest; it contains no historical
+graph payload, embedding values,
 coverage vector or lineage payload.  A bounded-page-cache SQLite index is
 derived from the journal and rebuilt from the authenticated committed prefix
 after restart.  It is never authority.  Re-entry of an evicted graph requires
@@ -415,7 +451,7 @@ drift blocks rather than choosing a new first row.
 
 Bind the resource proof and checkpoint identity to the official 10k/100k
 parameters and 10k/20k cursors.  The worst scored-row count is
-`1 + 20000*10000 = 200000001`; the journal prefix bound is 54,400,008,488
+`1 + 20000*10000 = 200000001`; the journal prefix bound is 60,800,008,520
 bytes under a 64-GiB cap.  With explicit 512-KiB deep/256-KiB serialized
 per-live-row gates, the bridge RAM formula is 15,863,382,016 bytes under
 16 GiB and its checkpoint component formula is 5,310,251,008 bytes under
@@ -16062,3 +16098,57 @@ the relay sends no termination signal to any process.
 
 Accepted and implemented locally; AutoDL launch remains pending natural GPU1
 availability.
+
+---
+
+## [2026-09-01] Canonicalize permutation-equivalent T12 NeuroSED queries
+
+### Motivation
+
+A real T12 canary observed one canonical graph identity with two different raw
+NeuroSED query-tensor SHA-256 values.  The tensors differed only by node/edge
+ordering.  Treating raw bytes as a second scientific identity failed closed,
+but retaining coverage only in live records would not solve production:
+transition-only records can be evicted and later reconstructed during the 20k
+walk.
+
+### Decision
+
+Strengthen the T12 collision payload to bind the canonical parent-free
+NeuroSED graph alongside the exact frozen-GINE input.  Rebuild the NeuroSED
+query deterministically from canonical SMILES, frozen one-hot vocabulary, and
+sorted symmetric edges before evaluation.  Raw query SHA values remain
+non-silent encoding evidence: the first observation is representative, a
+same-identity batch performs one distance evaluation, and canary/non-production
+checkpoints retain the ordered unique variant list.  Production deliberately
+keeps only the representative in its live record and counts later variant
+observations, so an unbounded number of permutations cannot grow a live row
+past its resource limit.  Production re-entry reconstructs identical canonical
+query bytes and the existing compact-history coverage digest remains the final
+fail-closed check.  The fixed compact row adds one raw-query SHA-256 (304 bytes
+total); this preserves the representative SHA through eviction/restart and
+authenticates every raw observation in the checkpoint-bound journal for
+offline audit while remaining below the existing 64-GiB cap.
+
+### Consequences
+
+- Node/edge permutations of the same exact canonical/collision payload cannot
+  create a new NeuroSED coverage row or a boundary-bit race.
+- Different canonical graphs, collision payloads, model inputs, target cohorts,
+  or thresholds never share coverage; collision inconsistency fails before
+  reuse.
+- The bridge, production bridge, and graph-identity schemas advance, so the
+  interrupted canary/checkpoints must not be resumed under this contract.
+- Checkpoints and reports state whether their in-record variant list is
+  complete (canary) or representative-only with complete evidence in compact
+  history (production).
+- The independent replay gate advances to v3 and binds both the graph identity
+  and canonical NeuroSED permutation contracts.  Production rejects stale v2
+  and any contract-tampered v3 receipt before starting the walk.
+- NeuroSED direction, architecture, learned parameters, normalization,
+  threshold, and binary comparison are unchanged.
+
+### Status
+
+Accepted and implemented locally; focused CPU tests pass and a fresh real-GPU
+three-process canary is required before production release.

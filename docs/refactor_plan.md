@@ -1,5 +1,20 @@
 # Refactor Plan
 
+## 2026-09-01: Reconcile T14 frozen cohort probability diagnostics
+
+- [x] Preserve the committed cohort bytes when replay matches every member,
+  order, parent/graph identity, discrete label, split, and manifest authority.
+- [x] Permit only finite in-range low-bit drift in the post-selection
+  `source_probability` diagnostic under the pinned GINE replay tolerance.
+- [x] Persist a stable frozen-cohort receipt plus immutable per-replay-SHA
+  observations with mismatch count, maximum delta, and no-rewrite evidence.
+- [x] Bind the primary receipt and full observation inventory into terminal
+  validation while retaining compatibility with fresh exact cohorts.
+- [x] Match the bridge's `np.allclose(current, frozen)` tolerance direction
+  exactly: `delta <= atol + rtol * abs(frozen_reference)`.
+- [x] Keep all membership, order, identity, prediction, split, manifest, and
+  non-low-bit numeric changes fail-closed.
+
 ## 2026-09-01: Stabilize exact Taste T12 coverage and T14 resume
 
 - [x] Reuse the first verified generated-to-fixed-original NeuroSED coverage
@@ -3561,6 +3576,26 @@ Mutagenicity roadmaps.
 - [x] Add focused live, replay, checkpoint, collision, and diagnostic tests.
 - [ ] Deploy from an immutable worktree, run the fresh T12 canary, and resume
   T14 from the existing committed 5k checkpoint on naturally available GPUs.
+
+## 2026-09-01: Canonicalize permutation-equivalent T12 NeuroSED queries
+
+- [x] Bind the T12 identity collision payload to both the exact frozen-GINE
+  model input and the canonical parent-free graph consumed by NeuroSED.
+- [x] Canonically rebuild NeuroSED node/edge ordering from the bound canonical
+  graph so production eviction/re-entry cannot reintroduce raw ordering drift.
+- [x] Keep the first raw query SHA as representative; retain the ordered unique
+  variant list in canary/non-production checkpoints and reports, while keeping
+  production live records representative-only and authenticating every raw
+  observation in compact-history v2 with an explicit variant counter/scope.
+- [x] Deduplicate permutation-equivalent queries within one batch and reuse
+  the first verified binary coverage row while collision, cohort, and threshold
+  changes remain fail-closed.
+- [x] Cover permutation, batch deduplication, collision refusal, checkpoint
+  restore, and compact-history eviction/re-entry with focused tests.
+- [x] Advance the replay gate to v3, embed both new identity contracts, and
+  make the production loader reject stale or contract-tampered gates.
+- [ ] Run a fresh three-process T12 GPU replay gate; older identity/checkpoint
+  schemas are intentionally not release authorities.
 
 ## 2026-09-01: BACE merge and zero-calibration closeout
 

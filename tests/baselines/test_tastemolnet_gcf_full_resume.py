@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 from pathlib import Path
 import pickle
@@ -128,7 +129,9 @@ def _native_graph(**values):
     return SimpleNamespace(**defaults)
 
 
-def _bridge(*, adapter=None, production_history=None):
+def _bridge(
+    *, adapter=None, production_history=None, feature_atomic_numbers=(6,)
+):
     return t12.T12StableGCFBridge(
         adapter=adapter or _Adapter(),
         vrrw=SimpleNamespace(
@@ -146,7 +149,7 @@ def _bridge(*, adapter=None, production_history=None):
         original_graph_element_counts=np.asarray([1.0, 2.0], dtype=np.float32),
         distance_threshold=0.125,
         parent_count=2,
-        feature_atomic_numbers=(6,),
+        feature_atomic_numbers=feature_atomic_numbers,
         production_history=production_history,
     )
 
@@ -254,6 +257,11 @@ def test_stable_bridge_returns_canonical_model_input_identity_not_embedding_hash
     assert bridge.calculate_hash(embeddings[0]) == expected_hash
     assert bridge.is_graph_counterfactual(expected_hash) is True
     report = bridge.report()
+    assert report["neurosed_query_full_variants_retained"] is True
+    assert report["neurosed_query_variant_report_complete"] is True
+    assert report["neurosed_query_variant_evidence_scope"] == (
+        "bridge_records_all_observations"
+    )
     assert report["graph_identity_contract"] == t12.GRAPH_IDENTITY_CONTRACT
     assert report["python_builtin_hash_used"] is False
     assert report["embedding_identity_used"] is False
@@ -386,15 +394,34 @@ def test_t12_semantic_guard_names_embedding_drift_and_returns_canonical_row(
         guarded.call([graph], {})
 
 
-def test_t12_canary_reuses_first_verified_neurosed_coverage_for_exact_query(
+def test_t12_canary_reuses_first_coverage_for_raw_tensor_permutations(
     monkeypatch,
 ):
-    collision = {"canonical_graph": "C", "num_nodes": 1, "num_edges": 0}
-    from src.baselines.tastemolnet_comrecgc_smoke import _identity_graph_sha256
-
-    identity = SimpleNamespace(
-        graph_identity_sha256=_identity_graph_sha256(collision),
-        collision_payload=lambda: collision,
+    graph = _native_graph(
+        x=np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        edge_index=np.asarray([[0, 1], [1, 0]], dtype=np.int64),
+        num_nodes=2,
+        num_edges=2,
+        gcf_origin_index=[0],
+        gcf_node_origin=[0, 1],
+    )
+    permuted = _native_graph(
+        x=np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+        edge_index=np.asarray([[1, 0], [0, 1]], dtype=np.int64),
+        num_nodes=2,
+        num_edges=2,
+        gcf_origin_index=[0],
+        gcf_node_origin=[1, 0],
+    )
+    identity = t12.canonical_attributed_graph(
+        graph, feature_atomic_numbers=(6, 7)
+    )
+    collision = identity.collision_payload()
+    assert (
+        t12.canonical_attributed_graph(
+            permuted, feature_atomic_numbers=(6, 7)
+        ).collision_payload()
+        == collision
     )
     monkeypatch.setattr(
         t12, "canonical_attributed_graph", lambda *_args, **_kwargs: identity
@@ -412,45 +439,88 @@ def test_t12_canary_reuses_first_verified_neurosed_coverage_for_exact_query(
         model_graph_payloads=tuple(model_payload for _ in values),
     )
     calls = []
+    canonical_query_hashes = []
 
     def drifting_coverage(_model, values, _counts, _threshold):
         calls.append(len(values))
+        canonical_query_hashes.extend(
+            t12._t12_neurosed_query_sha256(value) for value in values
+        )
         return _Array([[1, 0]] if len(calls) == 1 else [[0, 1]])
 
-    bridge = _bridge(adapter=adapter)
+    bridge = _bridge(adapter=adapter, feature_atomic_numbers=(6, 7))
     bridge.importance.neurosed_threshold_coverage_estimation = drifting_coverage
-    graph = _native_graph(gcf_origin_index=[0], gcf_node_origin=[0])
-    first_parts, first_embeddings, first_coverage = bridge.call([graph], {})
-    bridge.calculate_hash(first_embeddings[0])
-    replay_parts, replay_embeddings, replay_coverage = bridge.call([graph], {})
-    bridge.calculate_hash(replay_embeddings[0])
+    raw_hashes = [
+        t12._t12_neurosed_query_sha256(value) for value in (graph, permuted)
+    ]
+    assert raw_hashes[0] != raw_hashes[1]
+    canonical_hashes = [
+        t12._t12_neurosed_query_sha256(
+            t12._t12_canonical_neurosed_query(
+                value,
+                canonical_graph=collision,
+                feature_atomic_numbers=(6, 7),
+            )
+        )
+        for value in (graph, permuted)
+    ]
+    assert canonical_hashes[0] == canonical_hashes[1]
+    first_parts, first_embeddings, first_coverage = bridge.call(
+        [graph, permuted], {}
+    )
+    first_graph_hash = bridge.calculate_hash(first_embeddings[0])
+    assert bridge.calculate_hash(first_embeddings[1]) == first_graph_hash
 
     assert calls == [1]
-    assert first_coverage.tolist() == [[1, 0]]
-    assert replay_coverage.tolist() == [[1, 0]]
-    assert replay_parts.tolist() == first_parts.tolist()
+    assert first_coverage.tolist() == [[1, 0], [1, 0]]
+    assert first_parts.tolist() == [[0.8, 0.5], [0.8, 0.5]]
     assert bridge.distance_call_count == 1
     assert bridge.distance_evaluated_graph_count == 1
+    record = bridge.records[first_graph_hash]
+    assert record.neurosed_query_sha256 == raw_hashes[0]
+    assert record.neurosed_query_sha256_variants == tuple(raw_hashes)
+    assert record.neurosed_canonical_query_sha256 == canonical_query_hashes[0]
+    report = bridge.report()
+    assert report["neurosed_query_variant_observation_count"] == 1
+    assert report["neurosed_query_variant_graph_count"] == 1
+    assert report["neurosed_query_distinct_raw_sha256_count"] == 2
+    assert report["neurosed_query_variants_by_graph"][first_graph_hash][
+        "raw_query_sha256_variants"
+    ] == raw_hashes
 
-    restored = _bridge(adapter=adapter)
+    restored = _bridge(adapter=adapter, feature_atomic_numbers=(6, 7))
     restored.importance.neurosed_threshold_coverage_estimation = (
         lambda *_args: pytest.fail("validated exact query coverage was recomputed")
     )
     restored.restore_checkpoint_state(bridge.checkpoint_state())
-    _parts, embeddings, coverage = restored.call([graph], {})
+    assert restored.records[first_graph_hash].neurosed_query_sha256 == raw_hashes[0]
+    assert (
+        restored.records[first_graph_hash].neurosed_query_sha256_variants
+        == tuple(raw_hashes)
+    )
+    _parts, embeddings, coverage = restored.call([permuted], {})
     restored.calculate_hash(embeddings[0])
     assert coverage.tolist() == [[1, 0]]
+    assert restored.records[first_graph_hash].neurosed_query_sha256 == raw_hashes[0]
+    assert restored.neurosed_query_variant_observation_count == 2
 
-    changed_query = _native_graph(
-        x=np.asarray([[2.0]], dtype=np.float32),
-        gcf_origin_index=[0],
-        gcf_node_origin=[0],
-    )
+    tampered_collision = dict(restored.records[first_graph_hash].collision_payload)
+    tampered_collision["canonical_neurosed_graph"] = {
+        "canonical_graph": "[C].[N]",
+        "num_nodes": 2,
+        "num_edges": 0,
+    }
     with pytest.raises(
         t12.TasteGCFFullResumeError,
-        match=r'mismatch_fields.*neurosed_query_sha256',
+        match="graph identity drifted",
     ):
-        restored.call([changed_query], {})
+        restored._coverage_for_exact_queries(
+            graphs=[permuted],
+            graph_hashes=[first_graph_hash],
+            collisions=[tampered_collision],
+            canonical_query_hashes=[canonical_query_hashes[0]],
+            query_hashes=[raw_hashes[1]],
+        )
 
 
 def test_t12_coverage_cache_fails_closed_if_threshold_changes(monkeypatch):
@@ -476,13 +546,30 @@ def test_t12_coverage_cache_fails_closed_if_threshold_changes(monkeypatch):
     )
     bridge = _bridge(adapter=adapter)
     bridge.distance_threshold = 0.5
+    graph = _native_graph(gcf_origin_index=[0], gcf_node_origin=[0])
     with pytest.raises(
         t12.TasteGCFFullResumeError,
         match="target cohort or threshold changed",
     ):
-        bridge.call(
-            [_native_graph(gcf_origin_index=[0], gcf_node_origin=[0])], {}
-        )
+        bridge.call([graph], {})
+
+    changed_counts = _bridge(adapter=adapter)
+    changed_counts.original_graph_element_counts = np.asarray(
+        [2.0, 2.0], dtype=np.float32
+    )
+    with pytest.raises(
+        t12.TasteGCFFullResumeError,
+        match="target cohort or threshold changed",
+    ):
+        changed_counts.call([graph], {})
+
+    changed_targets = _bridge(adapter=adapter)
+    changed_targets.neurosed_model.target_emb[0, 0] = 0.5
+    with pytest.raises(
+        t12.TasteGCFFullResumeError,
+        match="target cohort or threshold changed",
+    ):
+        changed_targets.call([graph], {})
 
 
 def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
@@ -492,7 +579,7 @@ def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
 
     collisions = {
         "a": {"canonical_graph": "[C]", "num_nodes": 1, "num_edges": 0},
-        "b": {"canonical_graph": "[N]", "num_nodes": 1, "num_edges": 0},
+        "b": {"canonical_graph": "[C][N]", "num_nodes": 2, "num_edges": 1},
     }
     identities = {
         key: SimpleNamespace(
@@ -536,12 +623,41 @@ def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
             for value in values
         ),
     )
-    bridge = _bridge(adapter=adapter, production_history=history)
+    bridge = _bridge(
+        adapter=adapter,
+        production_history=history,
+        feature_atomic_numbers=(6, 7),
+    )
+    canonical_query_hashes = []
+
+    def record_canonical_queries(_model, values, _counts, _threshold):
+        canonical_query_hashes.extend(
+            t12._t12_neurosed_query_sha256(value) for value in values
+        )
+        return _Array([[1, 0] for _value in values])
+
+    bridge.importance.neurosed_threshold_coverage_estimation = (
+        record_canonical_queries
+    )
     graphs = {
         key: _native_graph(
+            x=np.asarray(
+                (
+                    [[1.0, 0.0]]
+                    if key == "a"
+                    else [[1.0, 0.0], [0.0, 1.0]]
+                ),
+                dtype=np.float32,
+            ),
+            edge_index=np.asarray(
+                [[], []] if key == "a" else [[0, 1], [1, 0]],
+                dtype=np.int64,
+            ),
+            num_nodes=1 if key == "a" else 2,
+            num_edges=0 if key == "a" else 2,
             token=key,
             gcf_origin_index=[0],
-            gcf_node_origin=[0],
+            gcf_node_origin=[0] if key == "a" else [0, 1],
         )
         for key in ("a", "b")
     }
@@ -574,9 +690,41 @@ def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
     assert audit["evicted_this_boundary"] == 1
     assert set(bridge.records) == {hashes["a"]}
     assert bridge.is_graph_counterfactual(hashes["b"]) is True
+    # A transition-only identity can leave the bounded live domain.  Its
+    # deterministic canonical query is reconstructed identically on re-entry,
+    # and the compact history still fail-closes on the recomputed coverage SHA.
+    b_variant = _native_graph(
+        x=np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+        edge_index=np.asarray([[1, 0], [0, 1]], dtype=np.int64),
+        num_nodes=2,
+        num_edges=2,
+        token="b",
+        gcf_origin_index=[0],
+        gcf_node_origin=[1, 0],
+    )
+    first_b_query = t12._t12_neurosed_query_sha256(graphs["b"])
+    variant_b_query = t12._t12_neurosed_query_sha256(b_variant)
+    assert first_b_query != variant_b_query
+    _parts, rows, _coverage = bridge.call([b_variant], {})
+    assert bridge.calculate_hash(rows[0]) == hashes["b"]
+    assert canonical_query_hashes[1] == canonical_query_hashes[2]
+    assert bridge.records[hashes["b"]].neurosed_query_sha256 == first_b_query
+    assert bridge.records[
+        hashes["b"]
+    ].neurosed_query_sha256_variants == (first_b_query,)
+    second_audit = bridge.retain_official_live_domain(
+        vrrw=bridge.vrrw, current_graph_identity=hashes["a"]
+    )
+    assert second_audit["evicted_this_boundary"] == 1
     state = bridge.checkpoint_state()
     assert state["complete_records_are_live_domain_only"] is True
-    assert state["history"]["observation_count"] == 2
+    assert state["neurosed_query_full_variants_retained"] is False
+    assert state["neurosed_query_variant_evidence_scope"] == (
+        "compact_history_authenticated_observations"
+    )
+    assert state["history"]["observation_count"] == 3
+    production_report = bridge.report()
+    assert production_report["neurosed_query_variant_report_complete"] is False
     history.close()
 
     reopened_history = production.T12CompactHistoryJournal(
@@ -588,11 +736,110 @@ def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
         generation_token="f" * 64,
         resume_snapshot=state["history"],
     )
-    restored = _bridge(production_history=reopened_history)
+    restored = _bridge(
+        adapter=adapter,
+        production_history=reopened_history,
+        feature_atomic_numbers=(6, 7),
+    )
     restored.restore_checkpoint_state(state)
     assert set(restored.records) == {hashes["a"]}
     assert restored.is_graph_counterfactual(hashes["b"]) is True
+    assert (
+        reopened_history.lookup_first(hashes["b"]).neurosed_query_sha256
+        == first_b_query
+    )
+    _parts, restored_rows, restored_coverage = restored.call([b_variant], {})
+    assert restored.calculate_hash(restored_rows[0]) == hashes["b"]
+    assert restored_coverage.tolist() == [[1, 0]]
+    assert restored.records[hashes["b"]].neurosed_query_sha256 == first_b_query
+    assert restored.records[
+        hashes["b"]
+    ].neurosed_query_sha256_variants == (first_b_query,)
     reopened_history.close()
+
+
+def test_production_raw_query_variants_are_journaled_without_live_tuple_growth(
+    tmp_path,
+):
+    bounds = production.T12ProductionBounds.pinned(parent_count=2)
+    history = production.T12CompactHistoryJournal(
+        root=(tmp_path / "variant-history").resolve(),
+        index_root=(tmp_path / "variant-index").resolve(),
+        bounds=bounds,
+        contract_sha256="1" * 64,
+        attempt_id=str(uuid.uuid4()),
+        generation_token="2" * 64,
+    )
+    directed_edges = (
+        (0, 1),
+        (1, 0),
+        (1, 2),
+        (2, 1),
+        (2, 3),
+        (3, 2),
+        (3, 4),
+        (4, 3),
+    )
+
+    def graph_for(order):
+        return _native_graph(
+            x=np.ones((5, 1), dtype=np.float32),
+            edge_index=np.asarray(order, dtype=np.int64).T,
+            num_nodes=5,
+            num_edges=8,
+            gcf_origin_index=[0],
+            gcf_node_origin=[0, 1, 2, 3, 4],
+        )
+
+    first_graph = graph_for(directed_edges)
+    collision = t12.canonical_attributed_graph(
+        first_graph, feature_atomic_numbers=(6,)
+    ).collision_payload()
+    model_payload = {"schema_version": "test_gine_model_graph_v1", "token": 0}
+    adapter = _Adapter()
+    adapter.score = lambda values: SimpleNamespace(
+        probabilities=np.asarray([[0.1, 0.2, 0.7] for _value in values]),
+        graph_embeddings=np.asarray(
+            [[1.0, 2.0] for _value in values], dtype=np.float32
+        ),
+        valid_fullgraphs=tuple(True for _value in values),
+        failure_reasons=tuple("" for _value in values),
+        identity_graph_payloads=tuple(collision for _value in values),
+        model_graph_payloads=tuple(model_payload for _value in values),
+    )
+    bridge = _bridge(adapter=adapter, production_history=history)
+    first_query_sha = None
+    last_query_sha = None
+    graph_hash = None
+    first_record_size = None
+    observation_count = 4_101
+    for index, order in enumerate(
+        itertools.islice(itertools.permutations(directed_edges), observation_count)
+    ):
+        graph = graph_for(order)
+        last_query_sha = t12._t12_neurosed_query_sha256(graph)
+        _parts, rows, _coverage = bridge.call([graph], {})
+        observed_hash = bridge.calculate_hash(rows[0])
+        if index == 0:
+            graph_hash = observed_hash
+            first_query_sha = last_query_sha
+            first_record_size = bridge._record_serialized_bytes[graph_hash]
+        else:
+            assert observed_hash == graph_hash
+
+    assert last_query_sha != first_query_sha
+    record = bridge.records[graph_hash]
+    assert record.neurosed_query_sha256 == first_query_sha
+    assert record.neurosed_query_sha256_variants == (first_query_sha,)
+    assert bridge._record_serialized_bytes[graph_hash] == first_record_size
+    assert bridge.neurosed_query_variant_observation_count == observation_count - 1
+    assert bridge.distance_evaluated_graph_count == 1
+    snapshot = history.checkpoint_state()
+    assert snapshot["observation_count"] == observation_count
+    assert snapshot["historical_neurosed_query_sha256_retained"] is True
+    segment = history.root / snapshot["segments"][-1]["segment_file"]
+    assert bytes.fromhex(last_query_sha) in segment.read_bytes()
+    history.close()
 
 
 def test_production_identity_allows_only_10k_and_20k():
@@ -759,6 +1006,11 @@ def test_canary_gate_requires_new_process_and_exact_scientific_state(tmp_path):
     output = tmp_path.resolve() / "gate.json"
     gate = t12.write_canary_gate(output, uninterrupted, resumed, prefix)
     assert gate["status"] == "PASS"
+    assert gate["schema_version"] == t12.CANARY_GATE_SCHEMA
+    assert gate["graph_identity_contract"] == t12.GRAPH_IDENTITY_CONTRACT
+    assert gate["neurosed_query_permutation_contract"] == (
+        t12.NEUROSED_QUERY_PERMUTATION_CONTRACT
+    )
     assert gate["exact_equality"] is True
     assert gate["exact_equality_scope"] == "canonical_scientific_state"
     assert gate["scientific_exact_equality"] is True
@@ -785,6 +1037,39 @@ def test_canary_gate_requires_new_process_and_exact_scientific_state(tmp_path):
     same_process = dict(resumed, process_identity=same_process_identity)
     with pytest.raises(t12.TasteGCFFullResumeError, match="process boundary"):
         t12.compare_canary_observations(uninterrupted, same_process, prefix)
+
+
+def test_production_loader_requires_contract_bound_v3_canary_gate(tmp_path):
+    from src.baselines import tastemolnet_gcf_full as full
+
+    prefix = _prefix_receipt(tmp_path)
+    gate = t12.compare_canary_observations(
+        _observation("uninterrupted", 100),
+        _observation("cross_process_resumed", 200, prefix=prefix),
+        prefix,
+    )
+    valid_path = tmp_path.resolve() / "gate-v3.json"
+    valid_path.write_text(json.dumps(gate), encoding="utf-8")
+    loaded, loaded_sha = full._load_replay_gate(valid_path)
+    assert loaded == gate
+    assert loaded_sha == hashlib.sha256(valid_path.read_bytes()).hexdigest()
+
+    invalid_gates = {
+        "stale-v2": {**gate, "schema_version": "tastemolnet_t12_gpu_replay_gate_v2"},
+        "graph-contract": {**gate, "graph_identity_contract": "stale"},
+        "permutation-contract": {
+            **gate,
+            "neurosed_query_permutation_contract": "stale",
+        },
+    }
+    for name, invalid in invalid_gates.items():
+        path = tmp_path.resolve() / f"{name}.json"
+        path.write_text(json.dumps(invalid), encoding="utf-8")
+        with pytest.raises(
+            t12.TasteGCFFullResumeError,
+            match="contract-bound cross-process replay gate v3",
+        ):
+            full._load_replay_gate(path)
 
 
 def test_canary_gate_classifies_raw_archive_drift_as_nonsemantic(tmp_path):

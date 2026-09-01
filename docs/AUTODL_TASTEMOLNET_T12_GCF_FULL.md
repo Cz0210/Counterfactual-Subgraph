@@ -46,13 +46,14 @@ The vendored official implementation uses
 `hash(graph_embedding.tobytes())`.  That integer changes between isolated
 Python processes and cannot identify a restored registry.  For T12 only, the
 project boundary replaces that registry key with
-`canonical_parent_free_gine_model_input_sha256_v1`:
+`canonical_parent_free_gine_and_neurosed_graph_sha256_v2`:
 
 - the adapter first decodes the full molecule with the retained atom/bond
   sidecars, then hashes its canonical chemistry identity and the exact
   normalized node/edge tensors sent to frozen GINE;
-- the raw official one-hot/untyped-edge identity is retained only for an
-  invalid graph that was never sent to GINE;
+- the same key also binds the canonical parent-free one-hot/untyped-edge graph
+  used as the generated NeuroSED query, including canonical SMILES and exact
+  node/undirected-edge counts;
 - source-parent metadata, raw embedding bytes, and Python's built-in hash are
   excluded;
 - a queued embedding digest still proves that each official hash request
@@ -73,6 +74,39 @@ canonical-row envelope (`rtol=1e-5`, `atol=1e-7`) and returns the first row to
 the official walk.  Any model-input, discrete prediction, validity, candidate,
 coverage, or out-of-envelope numeric change is a failure with the exact
 mismatching fields named in the terminal exception.
+
+### Canonical NeuroSED query ordering
+
+The official walk may emit two raw `x`/`edge_index` tensors for the same
+canonical attributed graph with different node or directed-edge ordering.
+Those raw byte hashes are encoding evidence, not distinct molecular queries.
+T12 records the first raw SHA-256 as the representative.  Canary and other
+non-production bridges retain every ordered unique raw SHA-256 variant in the
+bridge checkpoint and report.  The production bridge instead keeps only the
+representative in each live record, counts later variant observations, and
+authenticates every observed raw SHA-256 in compact-history v2.  This keeps the
+live record constant-sized even if one canonical graph is observed through an
+unbounded number of permutations.  A batch containing multiple encodings of
+the same exact canonical identity and collision payload performs one NeuroSED
+evaluation and reuses its binary coverage row.
+
+Before NeuroSED, T12 reparses the already-bound canonical attributed-graph
+SMILES, reconstructs the frozen one-hot features, and sorts both directions of
+every edge.  The resulting deterministic tensor bytes are separately hashed.
+This makes an evicted production identity reconstruct the same mathematical
+query after restart.  Each compact observation also retains its raw query SHA,
+so the first observation is recovered exactly by the rebuilt disk index while
+the checkpoint hash chain binds every later encoding observation for offline
+audit.  Production checkpoint/report metadata explicitly marks the live
+variant list as representative-only and the journal as the complete variant
+evidence; canary metadata marks the in-record list as complete.  The existing
+historical coverage SHA/count comparison still fails closed if a recomputed
+coverage row changes.  A different canonical graph, collision
+payload, feature vocabulary, target cohort, or threshold cannot reuse the
+row.  Hash/collision inconsistency is rejected before any cached coverage is
+returned.  This changes only tensor ordering at the permutation-invariant
+NeuroSED boundary; generated-to-original direction and threshold math remain
+unchanged.
 
 ## Persistent checkpoint contract
 
@@ -98,11 +132,11 @@ state and RNG digests.
 Production does not use the canary's 128/512 resource values.  It binds the
 pinned official `sample_size=10000` and `candidate_capacity=100000`.  Complete
 bridge rows are limited to the live official graph/candidate/current domain;
-historical observations use a fixed 272-byte append-only hash chain and a
+historical observations use a fixed 304-byte append-only hash chain and a
 rebuildable, non-authoritative disk index.  For the 3,778-parent production
 cohort the checked bridge proof is:
 
-- at most 200,000,001 scored observations and a 54,400,008,488-byte journal
+- at most 200,000,001 scored observations and a 60,800,008,520-byte journal
   prefix under the 64-GiB disk cap;
 - at most 20,001 complete live rows plus one 10,000-row transient batch;
 - a 15,863,382,016-byte bridge RAM formula under 16 GiB;
@@ -243,9 +277,11 @@ sequence/tensor order, tensor dtype/shape and scalar values are exact, with no
 `allclose`.  Raw `torch.save` SHA-256 values remain separate serialization
 evidence.  Attempt `91b` produced equal canonical native-result SHA-256
 (`4c6d4df28e9435905bd22c95bb55abcc9f7e367b762f425024a24d8758da9f10`)
-but unequal raw archive SHA-256 values; gate v2 records this as
+but unequal raw archive SHA-256 values; gate v3 records this as
 `NON_SEMANTIC_SERIALIZATION_REPRESENTATION_ONLY`.  A canonical difference is
-still a hard scientific replay failure.
+still a hard scientific replay failure.  Gate v3 also records the exact graph
+identity and NeuroSED permutation contracts; production rejects a stale v2
+receipt even when its earlier exact-replay fields are otherwise PASS.
 
 No real A800 timing is fabricated here.  For scheduling only, the conservative
 pre-measurement envelope is 6--12 GiB peak VRAM and 20--70 minutes total for
@@ -256,7 +292,7 @@ and cluster load can vary.
 ## Direct 10k -> 20k production and generation verification
 
 Use one fresh UUID/root and one generation token across two distinct science
-processes. `T12_EXACT_REPLAY_GATE` must name the existing real-A800 gate-v2
+processes. `T12_EXACT_REPLAY_GATE` must name a fresh real-A800 gate-v3
 JSON, not only its marker file. The other paths are the adopted T7/T3
 authorities already used by that canary.
 

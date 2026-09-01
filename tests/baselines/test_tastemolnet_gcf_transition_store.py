@@ -132,6 +132,7 @@ def test_generation_verifier_independently_reopens_compact_history(tmp_path):
         embedding_sha256="9" * 64,
         failure_reason="",
         lineage_sha256="6" * 64,
+        neurosed_query_sha256="5" * 64,
     )
     snapshot = history.checkpoint_state()
     history.close()

@@ -29,6 +29,7 @@ from src.baselines.tastemolnet_gcf_full_resume import (
     CANARY_GATE_SCHEMA,
     CANARY_PASS_MARKER,
     GRAPH_IDENTITY_CONTRACT,
+    NEUROSED_QUERY_PERMUTATION_CONTRACT,
     PINNED_CANDIDATE_CAPACITY,
     PINNED_SAMPLE_SIZE,
     PRODUCTION_TOTAL_STEPS,
@@ -136,6 +137,9 @@ def _load_replay_gate(path: str | Path) -> tuple[dict[str, Any], str]:
         or gate.get("status") != "PASS"
         or gate.get("marker") != CANARY_PASS_MARKER
         or gate.get("stage") != STAGE
+        or gate.get("graph_identity_contract") != GRAPH_IDENTITY_CONTRACT
+        or gate.get("neurosed_query_permutation_contract")
+        != NEUROSED_QUERY_PERMUTATION_CONTRACT
         or gate.get("cross_process") is not True
         or gate.get("cuda_used") is not True
         or gate.get("exact_equality") is not True
@@ -145,7 +149,7 @@ def _load_replay_gate(path: str | Path) -> tuple[dict[str, Any], str]:
         or gate.get("production_released") is not False
     ):
         raise TasteGCFFullResumeError(
-            "T12 production requires the exact cross-process replay gate v2"
+            "T12 production requires the contract-bound cross-process replay gate v3"
         )
     return gate, _sha256_file(gate_path)
 

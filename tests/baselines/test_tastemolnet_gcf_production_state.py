@@ -41,6 +41,7 @@ def _append(journal, *, graph: str, lineage: str, embedding: str = "d" * 64):
         embedding_sha256=embedding,
         failure_reason="",
         lineage_sha256=lineage,
+        neurosed_query_sha256="e" * 64,
     )
 
 
@@ -56,6 +57,8 @@ def test_pinned_bounds_bind_official_parameters_and_finite_20k_caps():
     assert bounds.max_transient_full_records == 30_001
     assert proof["bound_pass"] is True
     assert proof["history_payload_retained"] is False
+    assert proof["history_neurosed_query_sha256_retained"] is True
+    assert proof["history_record_bytes"] == 304
     transition = resume.production_transition_bound_report(bounds=bounds)
     assert transition["official_in_memory_transition_dict_allowed"] is False
     assert transition["production_launch_ready"] is False

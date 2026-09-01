@@ -31,11 +31,11 @@ from typing import Any, Mapping, Sequence
 import uuid
 
 
-HISTORY_SCHEMA = "tastemolnet_t12_compact_history_v1"
-HISTORY_SEGMENT_SCHEMA = "tastemolnet_t12_compact_history_segment_v1"
-HISTORY_SNAPSHOT_SCHEMA = "tastemolnet_t12_compact_history_snapshot_v1"
-BOUNDS_SCHEMA = "tastemolnet_t12_bounded_production_limits_v1"
-HISTORY_MAGIC = b"T12HST1\n"
+HISTORY_SCHEMA = "tastemolnet_t12_compact_history_v2"
+HISTORY_SEGMENT_SCHEMA = "tastemolnet_t12_compact_history_segment_v2"
+HISTORY_SNAPSHOT_SCHEMA = "tastemolnet_t12_compact_history_snapshot_v2"
+BOUNDS_SCHEMA = "tastemolnet_t12_bounded_production_limits_v2"
+HISTORY_MAGIC = b"T12HST2\n"
 HISTORY_HEADER_LIMIT_BYTES = 4096
 HISTORY_MAX_SEGMENTS = 2
 HISTORY_INDEX_CACHE_KIB = 64 * 1024
@@ -45,10 +45,10 @@ PINNED_CHECKPOINT_CURSORS = (10_000, 20_000)
 PINNED_SAMPLE_SIZE = 10_000
 PINNED_CANDIDATE_CAPACITY = 100_000
 
-# sequence, graph/semantic/embedding/coverage/failure digests, three
-# probabilities, prediction, flags, padding, covered-parent count, lineage
+# Sequence; graph/semantic/embedding/coverage/failure/raw-query digests; three
+# probabilities; prediction; flags; padding; covered-parent count; and lineage
 # digest.  The resulting chain head follows as a final 32-byte field.
-_OBSERVATION_BODY = struct.Struct(">Q32s32s32s32s32sdddBB6xQ32s")
+_OBSERVATION_BODY = struct.Struct(">Q32s32s32s32s32s32sdddBB6xQ32s")
 HISTORY_RECORD_BYTES = _OBSERVATION_BODY.size + 32
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -296,6 +296,7 @@ class T12ProductionBounds:
             "history_payload_retained": False,
             "history_embedding_values_retained": False,
             "history_lineage_payload_retained": False,
+            "history_neurosed_query_sha256_retained": True,
             "bound_pass": (
                 formula_history <= self.max_history_bytes
                 and formula_ram <= self.max_bridge_ram_bytes
@@ -316,6 +317,7 @@ class CompactFirstObservation:
     embedding_sha256: str
     coverage_sha256: str
     failure_sha256: str
+    neurosed_query_sha256: str
 
 
 def compact_semantic_sha256(
@@ -418,7 +420,8 @@ class T12CompactHistoryJournal:
                 covered_parent_count INTEGER NOT NULL,
                 embedding_sha256 TEXT NOT NULL,
                 coverage_sha256 TEXT NOT NULL,
-                failure_sha256 TEXT NOT NULL
+                failure_sha256 TEXT NOT NULL,
+                neurosed_query_sha256 TEXT NOT NULL
             );
             CREATE TABLE lineage_identity (
                 graph_hash TEXT NOT NULL,
@@ -500,7 +503,7 @@ class T12CompactHistoryJournal:
             """
             SELECT p0,p1,p2,prediction,candidate,valid_fullgraph,
                    covered_parent_count,embedding_sha256,coverage_sha256,
-                   failure_sha256
+                   failure_sha256,neurosed_query_sha256
             FROM first_observation WHERE graph_hash=?
             """,
             (graph_hash,),
@@ -516,6 +519,7 @@ class T12CompactHistoryJournal:
             embedding_sha256=str(row[7]),
             coverage_sha256=str(row[8]),
             failure_sha256=str(row[9]),
+            neurosed_query_sha256=str(row[10]),
         )
 
     def lookup_first(self, graph_identity_sha256: str) -> CompactFirstObservation | None:
@@ -536,6 +540,7 @@ class T12CompactHistoryJournal:
         embedding_sha256: str,
         failure_reason: str,
         lineage_sha256: str,
+        neurosed_query_sha256: str,
     ) -> CompactFirstObservation:
         if self._active_stream is None or self._active_prefix_digest is None:
             raise TasteT12ProductionStateError("T12 history writer is closed")
@@ -547,6 +552,9 @@ class T12CompactHistoryJournal:
         )
         lineage_hash = _require_sha256(
             lineage_sha256, field="T12 history lineage digest"
+        )
+        query_hash = _require_sha256(
+            neurosed_query_sha256, field="T12 history NeuroSED query digest"
         )
         if (
             type(probabilities) not in (list, tuple)
@@ -597,6 +605,7 @@ class T12CompactHistoryJournal:
             bytes.fromhex(embedding_hash),
             bytes.fromhex(coverage_hash),
             bytes.fromhex(failure_hash),
+            bytes.fromhex(query_hash),
             *probability_row,
             prediction,
             flags,
@@ -629,7 +638,7 @@ class T12CompactHistoryJournal:
         inserted = self._connection.execute(
             """
             INSERT OR IGNORE INTO first_observation
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 graph_hash,
@@ -641,6 +650,7 @@ class T12CompactHistoryJournal:
                 embedding_hash,
                 coverage_hash,
                 failure_hash,
+                query_hash,
             ),
         ).rowcount
         if inserted:
@@ -714,6 +724,7 @@ class T12CompactHistoryJournal:
             "historical_payload_retained": False,
             "historical_embedding_values_retained": False,
             "historical_lineage_payload_retained": False,
+            "historical_neurosed_query_sha256_retained": True,
             "sqlite_index_authoritative": False,
             "append_only_hash_chain": True,
         }
@@ -806,7 +817,7 @@ class T12CompactHistoryJournal:
                     raise TasteT12ProductionStateError("T12 history hash chain changed")
                 (
                     _, graph_raw, semantic_raw, embedding_raw, coverage_raw,
-                    failure_raw, p0, p1, p2, prediction, flags, covered,
+                    failure_raw, query_raw, p0, p1, p2, prediction, flags, covered,
                     lineage_raw,
                 ) = unpacked
                 graph_hash = graph_raw.hex()
@@ -832,11 +843,12 @@ class T12CompactHistoryJournal:
                         "T12 history compact semantics changed"
                     )
                 inserted = self._connection.execute(
-                    "INSERT OR IGNORE INTO first_observation VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO first_observation VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         graph_hash, p0, p1, p2, prediction, int(candidate),
                         int(valid_fullgraph), covered, embedding_raw.hex(),
                         coverage_raw.hex(), failure_raw.hex(),
+                        query_raw.hex(),
                     ),
                 ).rowcount
                 if inserted:
@@ -877,7 +889,9 @@ class T12CompactHistoryJournal:
             "first_seen_lineage_count", "candidate_first_seen_count",
             "destination_first_seen_counts", "historical_payload_retained",
             "historical_embedding_values_retained",
-            "historical_lineage_payload_retained", "sqlite_index_authoritative",
+            "historical_lineage_payload_retained",
+            "historical_neurosed_query_sha256_retained",
+            "sqlite_index_authoritative",
             "append_only_hash_chain",
         }
         if type(value) is not dict or set(value) != expected:
@@ -893,6 +907,7 @@ class T12CompactHistoryJournal:
             or value.get("historical_payload_retained") is not False
             or value.get("historical_embedding_values_retained") is not False
             or value.get("historical_lineage_payload_retained") is not False
+            or value.get("historical_neurosed_query_sha256_retained") is not True
             or value.get("sqlite_index_authoritative") is not False
             or value.get("append_only_hash_chain") is not True
         ):
