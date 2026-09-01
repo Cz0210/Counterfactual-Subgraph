@@ -3,12 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from contextlib import contextmanager
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
 import pytest
+
+from src.baselines import tastemolnet_comrecgc_full as t14
 
 from src.baselines.tastemolnet_comrecgc_full import (
     M_FALLBACK_MAX,
@@ -77,6 +80,79 @@ def test_full_cohort_rejects_non_sweet_input_even_if_prediction_is_sweet() -> No
             train_csv_sha256="b" * 64,
             checkpoint_id="c" * 64,
         )
+
+
+def test_t14_old_checkpoint_cohort_replay_stays_uncached_until_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_modes: list[bool] = []
+
+    class _Clone:
+        def clone(self):
+            return self
+
+    class _Adapter:
+        def __init__(self, *_args: object, canonical_replay_cache: bool = False, **_kwargs: object):
+            self.canonical_replay_cache_enabled = canonical_replay_cache
+            self._canonical_replay_cache = {}
+
+        def score(self, graphs: object) -> SimpleNamespace:
+            cache_modes.append(self.canonical_replay_cache_enabled)
+            count = len(graphs)  # type: ignore[arg-type]
+            return SimpleNamespace(
+                valid_fullgraphs=(True,) * count,
+                predictions=(1,) * count,
+            )
+
+        def enable_canonical_replay_cache(self) -> None:
+            assert self.canonical_replay_cache_enabled is False
+            assert self._canonical_replay_cache == {}
+            self.canonical_replay_cache_enabled = True
+
+    monkeypatch.setattr(
+        t14,
+        "encode_taste_source_graph",
+        lambda row, _schema: {"source_label": row.label},
+    )
+    monkeypatch.setattr(
+        t14,
+        "taste_record_to_pyg",
+        lambda _record, origin_index: SimpleNamespace(
+            gcf_node_origin=_Clone(), num_nodes=1, origin_index=origin_index
+        ),
+    )
+    monkeypatch.setattr(t14, "TasteFrozenGINENativeAdapter", _Adapter)
+    monkeypatch.setattr(
+        t14,
+        "canonical_attributed_graph",
+        lambda graph, **_kwargs: SimpleNamespace(
+            graph_identity_sha256=hashlib.sha256(
+                str(graph.origin_index).encode("ascii")
+            ).hexdigest()
+        ),
+    )
+    schema = SimpleNamespace(feature_atomic_numbers=(6,))
+    graphs, _records, adapter, evidence = t14._initialize_full_source_graphs(
+        checkpoint_payloads={},
+        source_rows=[_Row("old-a"), _Row("old-b")],
+        graph_schema=schema,
+        device="cpu",
+    )
+    assert len(graphs) == 2
+    assert cache_modes == [False]
+    assert adapter.canonical_replay_cache_enabled is False
+    assert evidence["source_count"] == 2
+
+    adapter.enable_canonical_replay_cache()
+    assert adapter.canonical_replay_cache_enabled is True
+
+    # Keep this ordering explicit: the existing 5k cohort is reproduced with
+    # old uncached semantics, then bridge restore primes generation records.
+    source = inspect.getsource(t14.run_t14_full)
+    initialize_at = source.index("_initialize_full_source_graphs(")
+    enable_at = source.index("adapter.enable_canonical_replay_cache()")
+    restore_at = source.index("_restore_checkpoint_state(")
+    assert initialize_at < enable_at < restore_at
 
 
 def test_resource_cap_uses_20k_then_one_25k_fallback() -> None:

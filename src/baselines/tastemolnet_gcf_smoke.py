@@ -525,6 +525,26 @@ class TasteFrozenGINENativeAdapter:
         self.canonical_replay_cache_hits = 0
         self.canonical_replay_cache_misses = 0
 
+    def enable_canonical_replay_cache(self) -> None:
+        """Enable exact replay only at a generation bridge boundary.
+
+        Source-cohort selection/replay must keep the historical uncached GINE
+        batching semantics so a pre-existing T14 cohort remains byte-for-byte
+        reproducible.  The generation adapter is switched on only after that
+        source evidence has passed; a restored bridge may then prime this
+        empty cache from its already validated checkpoint records.
+        """
+
+        if self.canonical_replay_cache_enabled:
+            raise TasteGCFSmokeError(
+                "Taste canonical replay cache was enabled before generation"
+            )
+        if self._canonical_replay_cache:
+            raise TasteGCFSmokeError(
+                "Taste canonical replay cache was nonempty before generation"
+            )
+        self.canonical_replay_cache_enabled = True
+
     @staticmethod
     def _model_input_cache_key(payload: Mapping[str, Any]) -> tuple[str, bytes]:
         try:

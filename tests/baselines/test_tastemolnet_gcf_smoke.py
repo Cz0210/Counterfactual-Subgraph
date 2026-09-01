@@ -555,6 +555,16 @@ def test_native_adapter_primes_canonical_replay_from_validated_checkpoint() -> N
     )
 
 
+def test_native_adapter_enables_replay_only_at_generation_boundary() -> None:
+    adapter = object.__new__(TasteFrozenGINENativeAdapter)
+    adapter.canonical_replay_cache_enabled = False
+    adapter._canonical_replay_cache = {}
+    adapter.enable_canonical_replay_cache()
+    assert adapter.canonical_replay_cache_enabled is True
+    with pytest.raises(TasteGCFSmokeError, match="enabled before generation"):
+        adapter.enable_canonical_replay_cache()
+
+
 @pytest.mark.parametrize("source_label", (0, 2))
 def test_sweet_scoring_adapter_rejects_non_sweet_source_semantics(
     source_label: int,

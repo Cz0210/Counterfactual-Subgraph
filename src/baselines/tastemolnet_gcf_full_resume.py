@@ -342,6 +342,7 @@ def _deep_size_bytes(value: Any) -> int:
 class T12StableGraphRecord:
     graph_identity_sha256: str
     collision_payload: Mapping[str, Any]
+    neurosed_query_sha256: str
     probabilities: tuple[float, float, float]
     prediction: int
     score: float
@@ -358,6 +359,7 @@ class T12StableGraphRecord:
         return {
             "graph_identity_sha256": self.graph_identity_sha256,
             "collision_payload": dict(self.collision_payload),
+            "neurosed_query_sha256": self.neurosed_query_sha256,
             "probabilities": list(self.probabilities),
             "prediction": self.prediction,
             "score": self.score,
@@ -370,6 +372,86 @@ class T12StableGraphRecord:
             "canonical_embedding_values": list(self.canonical_embedding_values),
             "canonical_embedding_sha256": self.canonical_embedding_sha256,
         }
+
+
+def _t12_neurosed_query_sha256(graph: Any) -> str:
+    """Hash exactly the generated query bytes consumed by NeuroSED.
+
+    The official auxiliary model reads only ``x`` and ``edge_index`` while
+    its normalization also reads the node/edge counts.  Lineage and parent
+    metadata are deliberately absent: they are not NeuroSED model input.
+    Tensor dtype, shape, order, and bytes are bound by ``_semantic_sha256``.
+    """
+
+    x = getattr(graph, "x", None)
+    edge_index = getattr(graph, "edge_index", None)
+    num_nodes = getattr(graph, "num_nodes", None)
+    num_edges = getattr(graph, "num_edges", None)
+    if (
+        x is None
+        or edge_index is None
+        or type(num_nodes) is not int
+        or num_nodes < 0
+        or type(num_edges) is not int
+        or num_edges < 0
+    ):
+        raise TasteGCFFullResumeError(
+            "T12 NeuroSED query lacks exact x/edge_index/count evidence"
+        )
+    return _semantic_sha256(
+        {
+            "schema_version": "tastemolnet_t12_neurosed_query_bytes_v1",
+            "x": x,
+            "edge_index": edge_index,
+            "num_nodes": num_nodes,
+            "num_edges": num_edges,
+        }
+    )
+
+
+def _t12_neurosed_context_sha256(
+    *,
+    neurosed_model: Any,
+    original_graph_element_counts: Any,
+    distance_threshold: float,
+    parent_count: int,
+) -> str:
+    """Bind cached coverage to fixed target sizes and the exact threshold.
+
+    The enclosing T12 checkpoint identity already binds the ordered source
+    cohort and NeuroSED checkpoint.  Do not persist a digest of freshly
+    recomputed CUDA target embeddings here: that would reintroduce the same
+    low-bit cross-process instability this cache removes.  Their live tensor
+    is still guarded against mutation/replacement within one process.
+    """
+
+    return _semantic_sha256(
+        {
+            "schema_version": "tastemolnet_t12_neurosed_context_v1",
+            "target_embeddings_initialized": (
+                getattr(neurosed_model, "target_emb", None) is not None
+            ),
+            "original_graph_element_counts": original_graph_element_counts,
+            "distance_threshold_hex": distance_threshold.hex(),
+            "parent_count": parent_count,
+        }
+    )
+
+
+def _t12_runtime_value_guard(value: Any) -> Any:
+    """Cheaply detect mutation/replacement of a fixed NeuroSED tensor."""
+
+    if hasattr(value, "detach") and hasattr(value, "dtype"):
+        data_ptr = getattr(value, "data_ptr", None)
+        return (
+            id(value),
+            int(data_ptr()) if callable(data_ptr) else None,
+            int(getattr(value, "_version", 0)),
+            str(value.dtype),
+            tuple(value.shape),
+            str(getattr(value, "device", "")),
+        )
+    return _semantic_sha256(value)
 
 
 def _t12_live_semantic_mismatch(
@@ -398,6 +480,7 @@ def _t12_live_semantic_mismatch(
     if previous_collision != observed_collision and not mismatch:
         mismatch.append("collision_payload")
     for field in (
+        "neurosed_query_sha256",
         "prediction",
         "candidate",
         "valid_fullgraph",
@@ -518,6 +601,19 @@ class T12StableGCFBridge:
             raise TasteGCFFullResumeError(
                 "T12 feature atomic-number vocabulary must be unique"
             )
+        self.coverage_context_sha256 = _t12_neurosed_context_sha256(
+            neurosed_model=self.neurosed_model,
+            original_graph_element_counts=self.original_graph_element_counts,
+            distance_threshold=self.distance_threshold,
+            parent_count=self.parent_count,
+        )
+        self._coverage_threshold_hex = self.distance_threshold.hex()
+        self._coverage_counts_guard = _t12_runtime_value_guard(
+            self.original_graph_element_counts
+        )
+        self._coverage_targets_guard = _t12_runtime_value_guard(
+            getattr(self.neurosed_model, "target_emb", None)
+        )
         self.records: dict[str, T12StableGraphRecord] = {}
         self.lineage_occurrences: dict[str, Counter[str]] = {}
         self._pending_hashes: deque[tuple[str, str]] = deque()
@@ -590,6 +686,104 @@ class T12StableGCFBridge:
                 "official GCF did not consume every queued structural identity"
             )
 
+    def _assert_coverage_context_unchanged(self) -> None:
+        if (
+            self.distance_threshold.hex() != self._coverage_threshold_hex
+            or _t12_runtime_value_guard(self.original_graph_element_counts)
+            != self._coverage_counts_guard
+            or _t12_runtime_value_guard(
+                getattr(self.neurosed_model, "target_emb", None)
+            )
+            != self._coverage_targets_guard
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 NeuroSED target cohort or threshold changed during replay"
+            )
+
+    def _coverage_for_exact_queries(
+        self,
+        *,
+        graphs: Sequence[Any],
+        graph_hashes: Sequence[str],
+        query_hashes: Sequence[str],
+    ) -> tuple[Any, list[tuple[int, ...]]]:
+        """Evaluate each novel query once and replay its first verified row."""
+
+        self._assert_coverage_context_unchanged()
+        rows: list[tuple[int, ...] | None] = [None] * len(graphs)
+        pending: dict[tuple[str, str], dict[str, Any]] = {}
+        for index, (graph_hash, query_hash) in enumerate(
+            zip(graph_hashes, query_hashes, strict=True)
+        ):
+            previous = self.records.get(graph_hash)
+            if previous is not None:
+                if previous.neurosed_query_sha256 != query_hash:
+                    diagnostic = {
+                        "graph_identity_sha256": graph_hash,
+                        "mismatch_fields": ["neurosed_query_sha256"],
+                        "first_neurosed_query_sha256": (
+                            previous.neurosed_query_sha256
+                        ),
+                        "observed_neurosed_query_sha256": query_hash,
+                    }
+                    raise TasteGCFFullResumeError(
+                        "one T12 model identity changed exact NeuroSED input; "
+                        f"diagnostic={json.dumps(diagnostic, sort_keys=True)}"
+                    )
+                rows[index] = previous.coverage_vector
+                continue
+            key = (graph_hash, query_hash)
+            queued = pending.get(key)
+            if queued is None:
+                pending[key] = {"graph": graphs[index], "rows": [index]}
+            else:
+                queued["rows"].append(index)
+
+        if pending:
+            ordered = list(pending.values())
+            observed = self.importance.neurosed_threshold_coverage_estimation(
+                self.neurosed_model,
+                [entry["graph"] for entry in ordered],
+                self.original_graph_element_counts,
+                self.distance_threshold,
+            )
+            self.distance_call_count += 1
+            self.distance_evaluated_graph_count += len(ordered)
+            if (
+                tuple(observed.shape) != (len(ordered), self.parent_count)
+                or not bool(self.vrrw.torch.isfinite(observed).all().item())
+                or not bool(((observed == 0) | (observed == 1)).all().item())
+            ):
+                raise TasteGCFFullResumeError(
+                    "T12 official generated-to-original NeuroSED coverage changed"
+                )
+            dense = (
+                observed.to_dense()
+                if getattr(observed, "is_sparse", False)
+                else observed
+            ).cpu()
+            for observed_index, entry in enumerate(ordered):
+                vector = tuple(int(value) for value in dense[observed_index].tolist())
+                if (
+                    len(vector) != self.parent_count
+                    or any(value not in (0, 1) for value in vector)
+                ):
+                    raise TasteGCFFullResumeError(
+                        "T12 NeuroSED coverage is not binary"
+                    )
+                for row_index in entry["rows"]:
+                    rows[row_index] = vector
+
+        if any(row is None for row in rows):
+            raise TasteGCFFullResumeError("T12 coverage replay lost an input row")
+        complete_rows = [tuple(row) for row in rows if row is not None]
+        tensor_kwargs: dict[str, Any] = {}
+        float32 = getattr(self.vrrw.torch, "float32", None)
+        if float32 is not None:
+            tensor_kwargs["dtype"] = float32
+        coverage = self.vrrw.torch.tensor(complete_rows, **tensor_kwargs)
+        return coverage, complete_rows
+
     def call(
         self,
         graphs: Sequence[Any],
@@ -608,24 +802,6 @@ class T12StableGCFBridge:
             raise TasteGCFFullResumeError("T12 GINE probabilities are not three-class")
         if embeddings.ndim != 2 or embeddings.shape[0] != len(values):
             raise TasteGCFFullResumeError("T12 GINE embeddings are unaligned")
-        coverage = self.importance.neurosed_threshold_coverage_estimation(
-            self.neurosed_model,
-            values,
-            self.original_graph_element_counts,
-            self.distance_threshold,
-        )
-        self.distance_call_count += 1
-        self.distance_evaluated_graph_count += len(values)
-        if (
-            tuple(coverage.shape) != (len(values), self.parent_count)
-            or not bool(self.vrrw.torch.isfinite(coverage).all().item())
-            or not bool(((coverage == 0) | (coverage == 1)).all().item())
-        ):
-            raise TasteGCFFullResumeError(
-                "T12 official generated-to-original NeuroSED coverage changed"
-            )
-        dense_coverage = coverage.to_dense() if getattr(coverage, "is_sparse", False) else coverage
-        dense_coverage = dense_coverage.cpu()
         valid = tuple(batch.valid_fullgraphs)
         failures = tuple(batch.failure_reasons)
         if len(valid) != len(values) or len(failures) != len(values):
@@ -644,8 +820,9 @@ class T12StableGCFBridge:
                 "T12 adapter canonical model-input evidence is unaligned"
             )
 
-        canonical_parts: list[tuple[float, float]] = []
-        canonical_embeddings: list[Any] = []
+        graph_hashes: list[str] = []
+        collisions: list[dict[str, Any]] = []
+        query_hashes: list[str] = []
         for index, graph in enumerate(values):
             native_identity = canonical_attributed_graph(
                 graph, feature_atomic_numbers=self.feature_atomic_numbers
@@ -656,12 +833,26 @@ class T12StableGCFBridge:
                 supplied_model=model_payloads[index],
                 valid_fullgraph=bool(valid[index]),
             )
-            graph_hash = _stable_graph_hash(graph_hash, field="T12 graph identity")
+            graph_hashes.append(
+                _stable_graph_hash(graph_hash, field="T12 graph identity")
+            )
+            collisions.append(collision)
+            query_hashes.append(_t12_neurosed_query_sha256(graph))
+        coverage, coverage_rows = self._coverage_for_exact_queries(
+            graphs=values,
+            graph_hashes=graph_hashes,
+            query_hashes=query_hashes,
+        )
+
+        canonical_parts: list[tuple[float, float]] = []
+        canonical_embeddings: list[Any] = []
+        for index, graph in enumerate(values):
+            graph_hash = graph_hashes[index]
+            collision = collisions[index]
+            query_hash = query_hashes[index]
             row = tuple(float(value) for value in probabilities[index].tolist())
             score, prediction, candidate_condition = score_and_candidate(row)
-            coverage_vector = tuple(
-                int(value) for value in dense_coverage[index].tolist()
-            )
+            coverage_vector = coverage_rows[index]
             if (
                 len(coverage_vector) != self.parent_count
                 or any(value not in (0, 1) for value in coverage_vector)
@@ -674,6 +865,7 @@ class T12StableGCFBridge:
             observed = T12StableGraphRecord(
                 graph_identity_sha256=graph_hash,
                 collision_payload=collision,
+                neurosed_query_sha256=query_hash,
                 probabilities=row,
                 prediction=prediction,
                 score=score,
@@ -768,6 +960,7 @@ class T12StableGCFBridge:
                     record = T12StableGraphRecord(
                         graph_identity_sha256=graph_hash,
                         collision_payload=collision,
+                        neurosed_query_sha256=query_hash,
                         probabilities=historical.probabilities,
                         prediction=historical.prediction,
                         score=first_score,
@@ -1053,6 +1246,7 @@ class T12StableGCFBridge:
             "canonical_row_reuse_count": self.canonical_row_reuse_count,
             "parent_count": self.parent_count,
             "distance_threshold_hex": self.distance_threshold.hex(),
+            "coverage_context_sha256": self.coverage_context_sha256,
             "feature_atomic_numbers": list(self.feature_atomic_numbers),
             "graph_identity_contract": GRAPH_IDENTITY_CONTRACT,
             "generated_to_original_neurosed": True,
@@ -1096,6 +1290,7 @@ class T12StableGCFBridge:
             "calculate_hash_count", "distance_call_count",
             "distance_evaluated_graph_count", "canonical_row_reuse_count",
             "parent_count", "distance_threshold_hex", "feature_atomic_numbers",
+            "coverage_context_sha256",
             "graph_identity_contract", "generated_to_original_neurosed",
             "python_builtin_hash_used", "embedding_identity_used",
             "coverage_runtime",
@@ -1120,6 +1315,8 @@ class T12StableGCFBridge:
             != (PRODUCTION_BRIDGE_SCHEMA if production_payload else BRIDGE_SCHEMA)
             or payload.get("parent_count") != self.parent_count
             or payload.get("distance_threshold_hex") != self.distance_threshold.hex()
+            or payload.get("coverage_context_sha256")
+            != self.coverage_context_sha256
             or payload.get("feature_atomic_numbers") != list(self.feature_atomic_numbers)
             or payload.get("graph_identity_contract") != GRAPH_IDENTITY_CONTRACT
             or payload.get("generated_to_original_neurosed") is not True
@@ -1170,6 +1367,7 @@ class T12StableGCFBridge:
             if type(raw) is not dict or set(raw) != set(T12StableGraphRecord(
                 graph_identity_sha256=key,
                 collision_payload={},
+                neurosed_query_sha256="0" * 64,
                 probabilities=(0.0, 0.0, 1.0),
                 prediction=2,
                 score=1.0,
@@ -1195,6 +1393,7 @@ class T12StableGCFBridge:
             embedding_values = raw.get("canonical_embedding_values")
             if (
                 raw.get("graph_identity_sha256") != key
+                or _SHA256.fullmatch(str(raw.get("neurosed_query_sha256"))) is None
                 or type(coverage_vector_raw) is not list
                 or len(coverage_vector_raw) != self.parent_count
                 or any(type(value) is not int or value not in (0, 1) for value in coverage_vector_raw)
@@ -1230,6 +1429,7 @@ class T12StableGCFBridge:
             records[key] = T12StableGraphRecord(
                 graph_identity_sha256=key,
                 collision_payload=dict(collision),
+                neurosed_query_sha256=str(raw["neurosed_query_sha256"]),
                 probabilities=tuple(float(value) for value in probabilities),
                 prediction=prediction,
                 score=score,
@@ -1314,7 +1514,12 @@ class T12StableGCFBridge:
             self._live_domain_synced = True
         if (
             self.evaluated_graph_count != self.calculate_hash_count
-            or self.distance_evaluated_graph_count != self.evaluated_graph_count
+            or self.distance_evaluated_graph_count > self.evaluated_graph_count
+            or (
+                self.evaluated_graph_count > 0
+                and self.distance_evaluated_graph_count == 0
+            )
+            or self.distance_call_count > self.call_count
             or (
                 not production_payload
                 and sum(

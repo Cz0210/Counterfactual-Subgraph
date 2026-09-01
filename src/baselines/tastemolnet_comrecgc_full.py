@@ -286,6 +286,79 @@ def build_full_train_correct_source_cohort(
     return selected, manifest, lines
 
 
+def _reopen_existing_resume_cohort(
+    *,
+    cohort_bytes: bytes,
+    cohort_manifest: Mapping[str, Any],
+    replay_rows: Sequence[Mapping[str, Any]],
+    replay_manifest: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any], bytes]:
+    """Keep a validated pre-checkpoint cohort while replaying its membership.
+
+    ``source_probability`` is diagnostic once the discrete frozen-GINE source
+    membership has been selected.  A new CUDA process may reproduce that
+    probability with low-bit drift.  Resume therefore retains the committed
+    bytes only when every scientific/discrete field and row order replays
+    exactly; any member, graph, label, split, or authority change still fails.
+    """
+
+    try:
+        rows = [
+            json.loads(line)
+            for line in cohort_bytes.decode("utf-8").splitlines()
+            if line
+        ]
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TasteComRecGCFullError("Taste T14 frozen cohort is unreadable") from exc
+    if (
+        not rows
+        or any(type(row) is not dict for row in rows)
+        or _cohort_lines(rows) != cohort_bytes
+        or type(cohort_manifest) is not dict
+        or set(cohort_manifest) != set(replay_manifest)
+        or cohort_manifest.get("cohort_jsonl_sha256")
+        != _sha256_bytes(cohort_bytes)
+    ):
+        raise TasteComRecGCFullError("Taste T14 frozen cohort closure changed")
+    manifest_without_payload = {
+        key: value
+        for key, value in cohort_manifest.items()
+        if key != "cohort_jsonl_sha256"
+    }
+    replay_without_payload = {
+        key: value
+        for key, value in replay_manifest.items()
+        if key != "cohort_jsonl_sha256"
+    }
+    if manifest_without_payload != replay_without_payload or len(rows) != len(
+        replay_rows
+    ):
+        raise TasteComRecGCFullError("Taste T14 cohort changed on resume")
+    expected_fields = {
+        "parent_id",
+        "canonical_graph_hash",
+        "true_label",
+        "predicted_label",
+        "source_probability",
+        "split",
+    }
+    for frozen, replay in zip(rows, replay_rows, strict=True):
+        if set(frozen) != expected_fields or set(replay) != expected_fields:
+            raise TasteComRecGCFullError("Taste T14 frozen cohort row changed")
+        frozen_probability = frozen.get("source_probability")
+        if (
+            isinstance(frozen_probability, bool)
+            or not isinstance(frozen_probability, (int, float))
+            or not 0.0 <= float(frozen_probability) <= 1.0
+            or any(
+                frozen[field] != replay[field]
+                for field in expected_fields - {"source_probability"}
+            )
+        ):
+            raise TasteComRecGCFullError("Taste T14 cohort changed on resume")
+    return rows, dict(cohort_manifest), cohort_bytes
+
+
 def count_train_side_valid_unique(bridge: TasteComRecGCMulticlassBridge) -> dict[str, Any]:
     """Apply the fixed canonical/train-side strict-flip retention policy."""
 
@@ -751,7 +824,6 @@ def _initialize_full_source_graphs(
         source_records=records,
         graph_schema=graph_schema,
         device=device,
-        canonical_replay_cache=True,
     )
     predictions: list[int] = []
     identities: list[str] = []
@@ -952,6 +1024,10 @@ def run_t14_full(
         graph_schema=loaded_train.schema,
         device="cuda:0",
     )
+    # Preserve the exact historical source-cohort replay used by already
+    # committed T14 checkpoints.  Canonical row replay begins only at the
+    # generation bridge; restore below primes it from validated bridge rows.
+    adapter.enable_canonical_replay_cache()
     dataset = GraphRecordDataset(
         source_graphs, num_features=len(loaded_train.schema.feature_atomic_numbers)
     )

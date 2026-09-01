@@ -72,6 +72,10 @@ class _FakeTorch:
         raw = value.value if isinstance(value, _Array) else value
         return _Array(np.isfinite(raw))
 
+    @staticmethod
+    def tensor(value, **_kwargs):
+        return _Array(value)
+
     @classmethod
     def get_rng_state(cls):
         return cls._cpu
@@ -113,6 +117,17 @@ class _Adapter:
         self.call_count = 0
 
 
+def _native_graph(**values):
+    defaults = {
+        "x": np.asarray([[1.0]], dtype=np.float32),
+        "edge_index": np.empty((2, 0), dtype=np.int64),
+        "num_nodes": 1,
+        "num_edges": 0,
+    }
+    defaults.update(values)
+    return SimpleNamespace(**defaults)
+
+
 def _bridge(*, adapter=None, production_history=None):
     return t12.T12StableGCFBridge(
         adapter=adapter or _Adapter(),
@@ -125,8 +140,10 @@ def _bridge(*, adapter=None, production_history=None):
             call=lambda *_args: None,
             neurosed_threshold_coverage_estimation=lambda *_args: _Array([[1, 0]]),
         ),
-        neurosed_model=object(),
-        original_graph_element_counts=object(),
+        neurosed_model=SimpleNamespace(
+            target_emb=np.asarray([[0.25, 0.75]], dtype=np.float32)
+        ),
+        original_graph_element_counts=np.asarray([1.0, 2.0], dtype=np.float32),
         distance_threshold=0.125,
         parent_count=2,
         feature_atomic_numbers=(6,),
@@ -228,8 +245,7 @@ def test_stable_bridge_returns_canonical_model_input_identity_not_embedding_hash
         model_graph_payloads=tuple(model_payload for _ in values),
     )
     bridge = _bridge(adapter=adapter)
-    graph = SimpleNamespace(
-        num_nodes=1,
+    graph = _native_graph(
         gcf_origin_index=[0],
         gcf_node_origin=[0],
     )
@@ -295,8 +311,7 @@ def test_t12_model_input_identity_separates_parent_sidecar_decodes(monkeypatch):
     bridge = _bridge(adapter=_DecodedAdapter())
     hashes = []
     for token in (0, 1):
-        graph = SimpleNamespace(
-            num_nodes=1,
+        graph = _native_graph(
             gcf_origin_index=[token],
             gcf_node_origin=[0],
         )
@@ -346,9 +361,7 @@ def test_t12_semantic_guard_names_embedding_drift_and_returns_canonical_row(
                 ),
             )
 
-    graph = SimpleNamespace(
-        num_nodes=1, gcf_origin_index=[0], gcf_node_origin=[0]
-    )
+    graph = _native_graph(gcf_origin_index=[0], gcf_node_origin=[0])
     bridge = _bridge(adapter=_ReplayAdapter())
     _parts, first_rows, _coverage = bridge.call([graph], {})
     bridge.calculate_hash(first_rows[0])
@@ -371,6 +384,105 @@ def test_t12_semantic_guard_names_embedding_drift_and_returns_canonical_row(
         match=r'mismatch_fields.*embedding_values',
     ):
         guarded.call([graph], {})
+
+
+def test_t12_canary_reuses_first_verified_neurosed_coverage_for_exact_query(
+    monkeypatch,
+):
+    collision = {"canonical_graph": "C", "num_nodes": 1, "num_edges": 0}
+    from src.baselines.tastemolnet_comrecgc_smoke import _identity_graph_sha256
+
+    identity = SimpleNamespace(
+        graph_identity_sha256=_identity_graph_sha256(collision),
+        collision_payload=lambda: collision,
+    )
+    monkeypatch.setattr(
+        t12, "canonical_attributed_graph", lambda *_args, **_kwargs: identity
+    )
+    model_payload = {"schema_version": "test_gine_model_graph_v1", "token": 0}
+    adapter = _Adapter()
+    adapter.score = lambda values: SimpleNamespace(
+        probabilities=np.asarray([[0.1, 0.2, 0.7] for _ in values]),
+        graph_embeddings=np.asarray(
+            [[1.0, 2.0] for _ in values], dtype=np.float32
+        ),
+        valid_fullgraphs=tuple(True for _ in values),
+        failure_reasons=tuple("" for _ in values),
+        identity_graph_payloads=tuple(collision for _ in values),
+        model_graph_payloads=tuple(model_payload for _ in values),
+    )
+    calls = []
+
+    def drifting_coverage(_model, values, _counts, _threshold):
+        calls.append(len(values))
+        return _Array([[1, 0]] if len(calls) == 1 else [[0, 1]])
+
+    bridge = _bridge(adapter=adapter)
+    bridge.importance.neurosed_threshold_coverage_estimation = drifting_coverage
+    graph = _native_graph(gcf_origin_index=[0], gcf_node_origin=[0])
+    first_parts, first_embeddings, first_coverage = bridge.call([graph], {})
+    bridge.calculate_hash(first_embeddings[0])
+    replay_parts, replay_embeddings, replay_coverage = bridge.call([graph], {})
+    bridge.calculate_hash(replay_embeddings[0])
+
+    assert calls == [1]
+    assert first_coverage.tolist() == [[1, 0]]
+    assert replay_coverage.tolist() == [[1, 0]]
+    assert replay_parts.tolist() == first_parts.tolist()
+    assert bridge.distance_call_count == 1
+    assert bridge.distance_evaluated_graph_count == 1
+
+    restored = _bridge(adapter=adapter)
+    restored.importance.neurosed_threshold_coverage_estimation = (
+        lambda *_args: pytest.fail("validated exact query coverage was recomputed")
+    )
+    restored.restore_checkpoint_state(bridge.checkpoint_state())
+    _parts, embeddings, coverage = restored.call([graph], {})
+    restored.calculate_hash(embeddings[0])
+    assert coverage.tolist() == [[1, 0]]
+
+    changed_query = _native_graph(
+        x=np.asarray([[2.0]], dtype=np.float32),
+        gcf_origin_index=[0],
+        gcf_node_origin=[0],
+    )
+    with pytest.raises(
+        t12.TasteGCFFullResumeError,
+        match=r'mismatch_fields.*neurosed_query_sha256',
+    ):
+        restored.call([changed_query], {})
+
+
+def test_t12_coverage_cache_fails_closed_if_threshold_changes(monkeypatch):
+    collision = {"canonical_graph": "C", "num_nodes": 1, "num_edges": 0}
+    monkeypatch.setattr(
+        t12,
+        "canonical_attributed_graph",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            collision_payload=lambda: collision
+        ),
+    )
+    adapter = _Adapter()
+    adapter.score = lambda values: SimpleNamespace(
+        probabilities=np.asarray([[0.1, 0.2, 0.7] for _ in values]),
+        graph_embeddings=np.asarray([[1.0, 2.0] for _ in values]),
+        valid_fullgraphs=tuple(True for _ in values),
+        failure_reasons=tuple("" for _ in values),
+        identity_graph_payloads=tuple(collision for _ in values),
+        model_graph_payloads=tuple(
+            {"schema_version": "test_gine_model_graph_v1", "token": 0}
+            for _ in values
+        ),
+    )
+    bridge = _bridge(adapter=adapter)
+    bridge.distance_threshold = 0.5
+    with pytest.raises(
+        t12.TasteGCFFullResumeError,
+        match="target cohort or threshold changed",
+    ):
+        bridge.call(
+            [_native_graph(gcf_origin_index=[0], gcf_node_origin=[0])], {}
+        )
 
 
 def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
@@ -426,9 +538,8 @@ def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
     )
     bridge = _bridge(adapter=adapter, production_history=history)
     graphs = {
-        key: SimpleNamespace(
+        key: _native_graph(
             token=key,
-            num_nodes=1,
             gcf_origin_index=[0],
             gcf_node_origin=[0],
         )
