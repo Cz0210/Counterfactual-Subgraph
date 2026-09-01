@@ -29,7 +29,9 @@ from scripts.autodl.run_comrecgc_standardized_continuation import (
     _validate_common_recourse_completion,
 )
 from scripts.autodl.run_mut_comrecgc_parity_standardization import (
+    FAST_ACCURATE_RUN_SCHEMA as MUT_FAST_ACCURATE_RUN_SCHEMA,
     _validate_common_adoption as validate_mut_parity_common_adoption,
+    _validate_historical_adoption as validate_mut_historical_adoption,
     _validate_parity as validate_mut_parity_standardization,
 )
 from src.baselines.comrecgc.contracts import (
@@ -1044,6 +1046,283 @@ def _validate_mut_parity_terminal(
     }
 
 
+def _validate_mut_fast_accurate_terminal(
+    root_like: str | Path,
+    *,
+    proc_root: str | Path,
+    require_writer_audit: bool,
+) -> dict[str, Any]:
+    """Reopen the historical trace-on 50k adoption terminal truthfully."""
+
+    root = _physical_directory(root_like, label="Mut fast-accurate standardization root")
+    if any((root / name).exists() for name in ("FAILED", "FAILED.json", "FAIL.json")):
+        raise NonTasteMatrixAppendError(
+            "Mut fast-accurate standardization root contains a failure sentinel"
+        )
+    if _physical_file(root / "PASS", label="Mut fast-accurate PASS").read_bytes() != PASS_BYTES:
+        raise NonTasteMatrixAppendError("Mut fast-accurate PASS bytes changed")
+    payloads = {
+        name: _json(_physical_file(root / name, label=f"Mut {name}"), label=f"Mut {name}")
+        for name in (
+            "run_manifest.json",
+            "final_gate.json",
+            "_RUN_COMPLETE.json",
+            "generation_adoption_manifest.json",
+            "historical_adoption_manifest.json",
+            "source_integrity_final.json",
+        )
+    }
+    run = payloads["run_manifest.json"]
+    final_gate = payloads["final_gate.json"]
+    complete = payloads["_RUN_COMPLETE.json"]
+    generation = payloads["generation_adoption_manifest.json"]
+    historical = payloads["historical_adoption_manifest.json"]
+    source_integrity_final = payloads["source_integrity_final.json"]
+    if final_gate != run or complete != {**run, "run_complete": True}:
+        raise NonTasteMatrixAppendError(
+            "Mut fast-accurate outer terminal manifests diverged"
+        )
+    truthful_contract = {
+        "schema_version": MUT_FAST_ACCURATE_RUN_SCHEMA,
+        "status": "PASS",
+        "dataset": "mutagenicity",
+        "method": "COMRECGC",
+        "oracle_backend": "rf",
+        "classifier_family": "random_forest",
+        "rf_oracle_used": True,
+        "cf_mode": "strict_flip",
+        "distance_line": "MolCLR-Node-Wasserstein",
+        "generation_adopted": True,
+        "generation_rerun": False,
+        "historical_artifact_adopted": True,
+        "historical_source_trace_enabled": True,
+        "full_50k_rerun_performed": False,
+        "traceoff_reference_rerun": False,
+        "trace_parity_passed": False,
+        "500_step_semantic_equivalence_passed": True,
+        "adoption_without_full_50k_parity_rerun_authorized": True,
+        "trace_fields_stripped": False,
+        "common_recourse_adopted": True,
+        "common_recourse_rerun": False,
+        "pair_store_reused": True,
+        "dbscan_reused": True,
+        "pair_store_rerun": False,
+        "dbscan_rerun": False,
+        "chemistry_rerun": True,
+        "evaluation_rerun": True,
+        "generation_steps": 50_000,
+        "M_MAX": 50_000,
+        "M_EFFECTIVE": 50_000,
+        "early_stop_used": False,
+        "stop_reason": "HISTORICAL_FULL_50K_ARTIFACT_ADOPTION",
+        "candidate_capacity": 100_000,
+        "candidate_universe_binding_state": "PASS",
+        "transitive_binding_kind": (
+            "pair_candidate_universe_via_exact_generation_payload_and_dbscan_vectors"
+        ),
+        "dbscan_native_candidate_universe_field_present": False,
+        "dbscan_universe_binding_via_pair_vectors": True,
+        "source_payload_sha256": MUT_SOURCE_PAYLOAD_SHA256,
+        "trace_parity_path": None,
+        "trace_parity_sha256": None,
+        "standardized_output_root": str(root / "standardized"),
+        "calibration_loaded": False,
+        "test_loaded_only_in_unified_evaluation": True,
+    }
+    _require_fields(run, truthful_contract, label="Mut fast-accurate run terminal")
+    if re.fullmatch(r"[0-9a-f]{40}", str(run.get("project_commit") or "")) is None:
+        raise NonTasteMatrixAppendError("Mut fast-accurate execution commit is invalid")
+    universe = run.get("candidate_universe_sha")
+    if (
+        _SHA256_RE.fullmatch(str(universe or "")) is None
+        or run.get("pair_store_source_candidate_universe_sha") != universe
+        or run.get("dbscan_source_candidate_universe_sha") != universe
+    ):
+        raise NonTasteMatrixAppendError(
+            "Mut fast-accurate candidate-universe binding changed"
+        )
+
+    source_root = _physical_directory(
+        run.get("source_generation_root", ""),
+        label="Mut fast-accurate frozen generation root",
+    )
+    if generation.get("source_generation_root") != str(source_root):
+        raise NonTasteMatrixAppendError(
+            "Mut fast-accurate generation root binding changed"
+        )
+    adoption_path = _physical_file(
+        run.get("historical_adoption_path", ""),
+        label="Mut historical adoption source receipt",
+    )
+    try:
+        reopened_historical = validate_mut_historical_adoption(
+            adoption_path,
+            source_root=source_root,
+        )
+    except Exception as exc:
+        raise NonTasteMatrixAppendError(
+            f"Mut historical adoption reopen failed: {exc}"
+        ) from exc
+    if (
+        historical != reopened_historical
+        or run.get("historical_adoption_sha256") != _sha(adoption_path)
+        or historical.get("sha256") != _sha(adoption_path)
+        or historical.get("candidate_universe_sha") != universe
+        or historical.get("pair_store_source_candidate_universe_sha") != universe
+        or historical.get("dbscan_source_candidate_universe_sha") != universe
+        or historical.get("pair_candidate_graph_hashes_sha256") != universe
+        or run.get("pair_candidate_graph_hashes_sha256") != universe
+        or historical.get("dbscan_native_candidate_universe_field_present")
+        is not False
+        or historical.get("dbscan_universe_binding_via_pair_vectors") is not True
+    ):
+        raise NonTasteMatrixAppendError(
+            "Mut historical adoption receipt or universe binding changed"
+        )
+    common_root = _physical_directory(
+        reopened_historical.get("common_root", ""),
+        label="Mut adopted common-recourse root",
+    )
+    if run.get("source_common_recourse_root") != str(common_root):
+        raise NonTasteMatrixAppendError(
+            "Mut fast-accurate common-recourse root binding changed"
+        )
+    for run_path_field, run_sha_field, adoption_path_field, adoption_sha_field in (
+        (
+            "source_pair_store_manifest_path",
+            "source_pair_store_manifest_sha256",
+            "source_pair_store_manifest_path",
+            "source_pair_store_manifest_sha256",
+        ),
+        (
+            "source_dbscan_manifest_path",
+            "source_dbscan_manifest_sha256",
+            "source_dbscan_manifest_path",
+            "source_dbscan_manifest_sha256",
+        ),
+        (
+            "500_step_semantic_equivalence_receipt_path",
+            "500_step_semantic_equivalence_receipt_sha256",
+            "500_step_semantic_equivalence_receipt_path",
+            "500_step_semantic_equivalence_receipt_sha256",
+        ),
+    ):
+        evidence_path = _physical_file(
+            reopened_historical.get(adoption_path_field, ""),
+            label=f"Mut {adoption_path_field}",
+        )
+        if (
+            run.get(run_path_field) != str(evidence_path)
+            or run.get(run_sha_field) != _sha(evidence_path)
+            or reopened_historical.get(adoption_sha_field) != _sha(evidence_path)
+        ):
+            raise NonTasteMatrixAppendError(
+                f"Mut fast-accurate evidence binding changed: {run_path_field}"
+            )
+
+    pair_manifest = _json(
+        _physical_file(
+            run.get("source_pair_store_manifest_path", ""),
+            label="Mut historical pair-store manifest",
+        ),
+        label="Mut historical pair-store manifest",
+    )
+    dbscan_manifest = _json(
+        _physical_file(
+            run.get("source_dbscan_manifest_path", ""),
+            label="Mut historical DBSCAN manifest",
+        ),
+        label="Mut historical DBSCAN manifest",
+    )
+    pair_identity = pair_manifest.get("scientific_identity")
+    dbscan_identity = dbscan_manifest.get("scientific_identity")
+    if (
+        not isinstance(pair_identity, Mapping)
+        or pair_identity.get("candidate_graph_hashes_sha256") != universe
+    ):
+        raise NonTasteMatrixAppendError(
+            "Mut fast-accurate universe is not the pair-store strict-flip universe"
+        )
+    native_universe_fields = (
+        "source_candidate_universe_sha256",
+        "candidate_universe_sha256",
+    )
+    if any(field in dbscan_manifest for field in native_universe_fields) or (
+        isinstance(dbscan_identity, Mapping)
+        and any(field in dbscan_identity for field in native_universe_fields)
+    ):
+        raise NonTasteMatrixAppendError(
+            "Mut historical DBSCAN unexpectedly claims a native candidate universe"
+        )
+    if (
+        not isinstance(dbscan_identity, Mapping)
+        or dbscan_identity.get("vectors_path") != pair_manifest.get("vectors_path")
+        or dbscan_identity.get("vectors_sha256")
+        != pair_manifest.get("vectors_sha256")
+    ):
+        raise NonTasteMatrixAppendError(
+            "Mut historical DBSCAN is not transitively bound through pair vectors"
+        )
+
+    standardized = _validate_rf_standardized(
+        root, dataset="Mutagenicity", dataset_key="mutagenicity"
+    )
+    if (
+        run.get("standardized_run_manifest_sha256")
+        != standardized["run_manifest_sha256"]
+        or run.get("freeze_manifest_sha256")
+        != standardized["freeze_manifest_sha256"]
+        or run.get("teacher_sha256") != standardized["identities"]["oracle_hash"]
+    ):
+        raise NonTasteMatrixAppendError(
+            "Mut fast-accurate outer/standardized identities changed"
+        )
+    source_integrity = _validate_mut_parity_source_integrity(
+        generation,
+        source_integrity_final,
+        source_root=source_root,
+    )
+    source_integrity["final_integrity_sha256"] = _sha(
+        root / "source_integrity_final.json"
+    )
+    upstream = _validate_mut_upstream_checkout(root)
+    writer = _writer_audit(root, proc_root=proc_root, required=require_writer_audit)
+    common_writer = _writer_audit(
+        common_root, proc_root=proc_root, required=require_writer_audit
+    )
+    return {
+        "terminal_kind": "MUT_FAST_ACCURATE_STANDARDIZATION_FINAL",
+        "root": str(root),
+        "run_manifest_sha256": _sha(root / "run_manifest.json"),
+        "final_gate_sha256": _sha(root / "final_gate.json"),
+        "run_complete_sha256": _sha(root / "_RUN_COMPLETE.json"),
+        "standardized": standardized,
+        "historical_adoption_sha256": _sha(adoption_path),
+        "candidate_universe_sha": str(universe),
+        "source_integrity": source_integrity,
+        "upstream_checkout": upstream,
+        "writer_audit": writer,
+        "common_writer_audit": common_writer,
+        "inventory": _critical_inventory(
+            root,
+            (
+                "PASS",
+                "run_manifest.json",
+                "final_gate.json",
+                "_RUN_COMPLETE.json",
+                "generation_adoption_manifest.json",
+                "historical_adoption_manifest.json",
+                "source_integrity_final.json",
+                "upstream_checkout_audit.json",
+                "standardized/run_manifest.json",
+                "standardized/final_artifact_audit.json",
+                "standardized/freeze_manifest.json",
+                "standardized/_FINALIZED.json",
+            ),
+        ),
+    }
+
+
 def _validate_mut_exact_terminal(
     root_like: str | Path,
     *,
@@ -1333,7 +1612,7 @@ def _validate_mut_terminal(
     proc_root: str | Path,
     require_writer_audit: bool,
 ) -> dict[str, Any]:
-    """Dispatch only between the two explicit Mut production terminals."""
+    """Dispatch only between the explicit Mut production terminals."""
 
     root = _physical_directory(root_like, label="Mut terminal root")
     run = _json(
@@ -1343,6 +1622,12 @@ def _validate_mut_terminal(
     schema = run.get("schema_version")
     if schema == _MUT_PARITY_RUN_SCHEMA:
         return _validate_mut_parity_terminal(
+            root,
+            proc_root=proc_root,
+            require_writer_audit=require_writer_audit,
+        )
+    if schema == MUT_FAST_ACCURATE_RUN_SCHEMA:
+        return _validate_mut_fast_accurate_terminal(
             root,
             proc_root=proc_root,
             require_writer_audit=require_writer_audit,

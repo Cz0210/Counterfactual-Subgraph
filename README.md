@@ -102,6 +102,10 @@ See:
   trace-off successor that removes only the artificial AIDS wait while keeping
   the pinned 500-step instrumentation gate, real trace-disabled 50k replay,
   mirrored resume, and normalized parity assertion)
+- `docs/AUTODL_MUT_FAST_ACCURATE_V2.md` (truthful historical-50k adoption
+  successor gated by 500-step semantic equivalence, empirical cgroup memory
+  admission, exact pair/DBSCAN source binding, and the single shared matrix
+  authority; the old static 440 GiB gate is superseded)
 - `docs/AUTODL_TASTEMOLNET_T6_OURS_PPO.md` (typed release contract for the real
   bounded three-class TasteMolNet Ours PPO smoke, direct managed-T5 clean-base
   adoption, and its separate strict terminal verifier)

@@ -3404,3 +3404,20 @@ Mutagenicity roadmaps.
   directory as the Mutagenicity/ComRecGC cell.
 - [ ] Let the existing parity-v2 controller produce that fixed terminal; no
   science or alternate exact receipt is synthesized by publication code.
+
+## 2026-09-01: Mut empirical-admission historical-50k successor
+
+- [x] Supersede the unmeasured static 440 GiB gate without modifying its
+  historical frozen contract.
+- [x] Define a distinct, truthful adoption schema for the completed
+  trace-enabled 50k generation; never call it trace-off parity.
+- [x] Require the pinned 500-step action/RNG/payload/checkpoint equivalence gate
+  before adoption.
+- [x] Bind the exact generation payload transitively through the completed
+  pair-store and DBSCAN manifests and prohibit recomputation.
+- [x] Add explicit cgroup-v1 no-child evidence for the audited AutoDL runtime,
+  measured memory admission, and exact-session graceful watchdog semantics;
+  shared evidence helpers retain fail-closed cgroup-v2 parsing for other hosts.
+- [ ] Deploy the immutable successor, verify its heartbeat, then retire only
+  the exact old pure waiter.  The successor may wait for a real idle GPU and
+  96 GiB parent headroom without keeping an interactive Codex session alive.

@@ -795,6 +795,122 @@ def _mut_parity_final_fixture(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def _mut_fast_accurate_final_fixture(tmp_path: Path) -> dict[str, object]:
+    fixture = _mut_parity_final_fixture(tmp_path)
+    root = Path(fixture["root"])
+    standardized = Path(fixture["standardized"])
+    source_root = Path(fixture["source_root"])
+    common_root = root / "exact-common"
+    common_root.mkdir(exist_ok=True)
+    evidence_root = root / "historical-evidence"
+    pair_manifest = evidence_root / "pair-store.json"
+    dbscan_manifest = evidence_root / "dbscan.json"
+    equivalence = evidence_root / "semantic-equivalence.json"
+    adoption_path = evidence_root / "historical-adoption.json"
+    vectors = evidence_root / "vectors.npy"
+    vectors.parent.mkdir(parents=True, exist_ok=True)
+    vectors.write_bytes(b"vectors\n")
+    universe = "d" * 64
+    for path, payload in (
+        (
+            pair_manifest,
+            {
+                "status": "PASS",
+                "kind": "historical-pair-store",
+                "vectors_path": str(vectors.resolve()),
+                "vectors_sha256": _sha(vectors),
+                "scientific_identity": {
+                    "candidate_graph_hashes_sha256": universe,
+                },
+            },
+        ),
+        (
+            dbscan_manifest,
+            {
+                "status": "PASS",
+                "kind": "historical-dbscan",
+                "scientific_identity": {
+                    "vectors_path": str(vectors.resolve()),
+                    "vectors_sha256": _sha(vectors),
+                },
+            },
+        ),
+        (
+            equivalence,
+            {"status": "PASS", "steps": 500, "paper_eligible": False},
+        ),
+        (adoption_path, {"status": "PASS", "truthful_source": "trace-on-50k"}),
+    ):
+        _json(path, payload)
+    historical = {
+        "status": "PASS",
+        "path": str(adoption_path.resolve()),
+        "sha256": _sha(adoption_path),
+        "common_root": str(common_root.resolve()),
+        "candidate_universe_sha": universe,
+        "pair_store_source_candidate_universe_sha": universe,
+        "dbscan_source_candidate_universe_sha": universe,
+        "pair_candidate_graph_hashes_sha256": universe,
+        "dbscan_native_candidate_universe_field_present": False,
+        "dbscan_universe_binding_via_pair_vectors": True,
+        "source_pair_store_manifest_path": str(pair_manifest.resolve()),
+        "source_pair_store_manifest_sha256": _sha(pair_manifest),
+        "source_dbscan_manifest_path": str(dbscan_manifest.resolve()),
+        "source_dbscan_manifest_sha256": _sha(dbscan_manifest),
+        "500_step_semantic_equivalence_receipt_path": str(equivalence.resolve()),
+        "500_step_semantic_equivalence_receipt_sha256": _sha(equivalence),
+    }
+    old_run = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
+    run = {
+        **old_run,
+        "schema_version": append_module.MUT_FAST_ACCURATE_RUN_SCHEMA,
+        "historical_artifact_adopted": True,
+        "historical_source_trace_enabled": True,
+        "full_50k_rerun_performed": False,
+        "traceoff_reference_rerun": False,
+        "trace_parity_passed": False,
+        "500_step_semantic_equivalence_passed": True,
+        "adoption_without_full_50k_parity_rerun_authorized": True,
+        "generation_steps": 50_000,
+        "M_MAX": 50_000,
+        "M_EFFECTIVE": 50_000,
+        "early_stop_used": False,
+        "stop_reason": "HISTORICAL_FULL_50K_ARTIFACT_ADOPTION",
+        "candidate_capacity": 100_000,
+        "candidate_universe_sha": universe,
+        "pair_store_source_candidate_universe_sha": universe,
+        "dbscan_source_candidate_universe_sha": universe,
+        "candidate_universe_binding_state": "PASS",
+        "transitive_binding_kind": (
+            "pair_candidate_universe_via_exact_generation_payload_and_dbscan_vectors"
+        ),
+        "pair_candidate_graph_hashes_sha256": universe,
+        "dbscan_native_candidate_universe_field_present": False,
+        "dbscan_universe_binding_via_pair_vectors": True,
+        "pair_store_reused": True,
+        "dbscan_reused": True,
+        "pair_store_rerun": False,
+        "dbscan_rerun": False,
+        "source_common_recourse_root": str(common_root.resolve()),
+        "trace_parity_path": None,
+        "trace_parity_sha256": None,
+        "historical_adoption_path": str(adoption_path.resolve()),
+        "historical_adoption_sha256": _sha(adoption_path),
+        "source_pair_store_manifest_path": str(pair_manifest.resolve()),
+        "source_pair_store_manifest_sha256": _sha(pair_manifest),
+        "source_dbscan_manifest_path": str(dbscan_manifest.resolve()),
+        "source_dbscan_manifest_sha256": _sha(dbscan_manifest),
+        "500_step_semantic_equivalence_receipt_path": str(equivalence.resolve()),
+        "500_step_semantic_equivalence_receipt_sha256": _sha(equivalence),
+        "standardized_output_root": str(standardized.resolve()),
+    }
+    _json(root / "historical_adoption_manifest.json", historical)
+    _json(root / "run_manifest.json", run)
+    _json(root / "final_gate.json", run)
+    _json(root / "_RUN_COMPLETE.json", {**run, "run_complete": True})
+    return {**fixture, "historical": historical, "run": run}
+
+
 def test_mut_parity_standardization_is_a_strict_terminal_without_exact_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -825,6 +941,89 @@ def test_mut_parity_standardization_is_a_strict_terminal_without_exact_receipt(
     )
     assert "original_matrix_authority_root" not in evidence
     assert evidence["source_integrity"]["source_payload_sha256_recomputed"] is False
+
+
+def test_mut_fast_accurate_standardization_is_explicit_truthful_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _mut_fast_accurate_final_fixture(tmp_path)
+    monkeypatch.setattr(
+        append_module,
+        "validate_mut_historical_adoption",
+        lambda _path, *, source_root: fixture["historical"],
+    )
+    monkeypatch.setattr(
+        append_module,
+        "verify_mut_adopted_generation_integrity",
+        lambda _generation: fixture["reopened_integrity"],
+    )
+
+    evidence = _validate_mut_terminal(
+        fixture["root"],
+        proc_root=tmp_path / "proc",
+        require_writer_audit=False,
+    )
+
+    assert evidence["terminal_kind"] == "MUT_FAST_ACCURATE_STANDARDIZATION_FINAL"
+    assert evidence["candidate_universe_sha"] == "d" * 64
+    assert evidence["standardized"]["root"] == str(
+        Path(fixture["standardized"]).resolve()
+    )
+
+
+def test_mut_fast_accurate_terminal_rejects_false_trace_parity_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _mut_fast_accurate_final_fixture(tmp_path)
+    root = Path(fixture["root"])
+    run = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
+    run["trace_parity_passed"] = True
+    _json(root / "run_manifest.json", run)
+    _json(root / "final_gate.json", run)
+    _json(root / "_RUN_COMPLETE.json", {**run, "run_complete": True})
+    monkeypatch.setattr(
+        append_module,
+        "validate_mut_historical_adoption",
+        lambda _path, *, source_root: fixture["historical"],
+    )
+
+    with pytest.raises(NonTasteMatrixAppendError, match="terminal contract changed"):
+        _validate_mut_terminal(
+            root,
+            proc_root=tmp_path / "proc",
+            require_writer_audit=False,
+        )
+
+
+def test_mut_fast_accurate_terminal_rejects_pair_universe_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _mut_fast_accurate_final_fixture(tmp_path)
+    root = Path(fixture["root"])
+    historical = dict(fixture["historical"])
+    pair_path = Path(historical["source_pair_store_manifest_path"])
+    pair = json.loads(pair_path.read_text(encoding="utf-8"))
+    pair["scientific_identity"]["candidate_graph_hashes_sha256"] = "e" * 64
+    _json(pair_path, pair)
+    historical["source_pair_store_manifest_sha256"] = _sha(pair_path)
+    _json(root / "historical_adoption_manifest.json", historical)
+    run = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
+    run["source_pair_store_manifest_sha256"] = _sha(pair_path)
+    _json(root / "run_manifest.json", run)
+    _json(root / "final_gate.json", run)
+    _json(root / "_RUN_COMPLETE.json", {**run, "run_complete": True})
+    monkeypatch.setattr(
+        append_module,
+        "validate_mut_historical_adoption",
+        lambda _path, *, source_root: historical,
+    )
+
+    with pytest.raises(NonTasteMatrixAppendError, match="strict-flip universe"):
+        _validate_mut_terminal(
+            root,
+            proc_root=tmp_path / "proc",
+            require_writer_audit=False,
+        )
 
 
 def test_mut_parity_terminal_rejects_frozen_source_snapshot_drift(
