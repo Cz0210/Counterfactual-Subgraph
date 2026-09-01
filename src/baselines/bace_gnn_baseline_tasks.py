@@ -59,17 +59,15 @@ def build_bace_baseline_controller_fragment(
     molclr_project = _absolute(molclr_root, field="molclr_root")
     molclr_ckpt = _absolute(molclr_checkpoint, field="molclr_checkpoint")
     neurosed = _absolute(neurosed_checkpoint, field="neurosed_checkpoint")
-    if spec.method_id == "gcfexplainer":
-        if thresholds_json is None:
-            raise ValueError(
-                "GCFExplainer task fragment requires frozen Ours B12 thresholds_json"
-            )
+    if thresholds_json is not None:
         frozen_thresholds = _absolute(
             thresholds_json, field="thresholds_json"
         )
     else:
-        if thresholds_json is not None:
-            raise ValueError("thresholds_json is only supported for GCFExplainer")
+        if spec.method_id == "gcfexplainer":
+            raise ValueError(
+                "GCFExplainer task fragment requires frozen Ours B12 thresholds_json"
+            )
         frozen_thresholds = None
     prefix = f"bace_{spec.method_id}"
     common_env = {
@@ -581,7 +579,7 @@ def build_bace_baseline_controller_fragment(
         argv=merge_argv,
         output=calibration_merge_out,
         markers=["PASS"],
-        dependencies=calibration_ids,
+        dependencies=[*calibration_ids, candidate_id],
         inputs=[f"{root}/calibration/shard-{shard}" for shard in range(NUM_SHARDS)],
     )
     selection_id = f"{prefix}_selection"
@@ -675,7 +673,7 @@ def build_bace_baseline_controller_fragment(
         argv=test_merge_argv,
         output=test_merge_out,
         markers=["PASS"],
-        dependencies=test_ids,
+        dependencies=[*test_ids, selection_id],
         inputs=[f"{root}/test/shard-{shard}" for shard in range(NUM_SHARDS)],
     )
     final_id = f"{prefix}_final_freeze"

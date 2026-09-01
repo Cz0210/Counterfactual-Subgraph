@@ -1284,7 +1284,7 @@ def _load_ours_b12_thresholds(
         thresholds_path, ("bace", "ours", "b12-selector")
     ):
         raise ValueError(
-            "GCFExplainer thresholds must come from bace/ours/b12-selector"
+            "BACE baseline thresholds must come from bace/ours/b12-selector"
         )
     source_manifest_path = thresholds_path.parent / "frozen_selection_manifest.json"
     if source_manifest_path.is_symlink() or not source_manifest_path.is_file():
@@ -1331,7 +1331,7 @@ def _load_ours_b12_thresholds(
     for field in ("oracle_checkpoint_hash", "molclr_checkpoint_hash"):
         if source_manifest.get(field) != matrix_manifest.get(field):
             raise ValueError(
-                f"Ours B12/GCF calibration identity mismatch: {field}"
+                f"Ours B12/baseline calibration identity mismatch: {field}"
             )
 
     b11_path = _verify_declared_file_identity(
@@ -1417,20 +1417,18 @@ def run_native_baseline_selector(
     frozen_thresholds: ThresholdBundle | None = None
     threshold_payload: dict[str, Any] | None = None
     threshold_provenance: dict[str, Any] | None = None
-    if method_id == "gcfexplainer":
-        if thresholds_json is None:
-            raise ValueError(
-                "GCFExplainer selection requires explicit --thresholds-json "
-                "from the frozen Ours B12 selector"
-            )
+    if thresholds_json is not None:
         frozen_thresholds, threshold_payload, threshold_provenance = (
             _load_ours_b12_thresholds(
                 thresholds_json,
                 matrix_manifest=matrix_manifest,
             )
         )
-    elif thresholds_json is not None:
-        raise ValueError("--thresholds-json is only supported for GCFExplainer")
+    elif method_id == "gcfexplainer":
+        raise ValueError(
+            "GCFExplainer selection requires explicit --thresholds-json "
+            "from the frozen Ours B12 selector"
+        )
     run_mutagenicity_wnode_selector(
         matrix_run_dir=matrix_root,
         output_dir=output,

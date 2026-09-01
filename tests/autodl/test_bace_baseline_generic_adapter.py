@@ -128,6 +128,56 @@ def test_generic_adapter_binds_attempt_roots_and_every_dependency(
     assert test_shard["read_only_test"] is True
 
 
+@pytest.mark.parametrize("method", ["GCFExplainer", "ComRecGC", "GlobalGCE"])
+def test_merge_predecessors_are_direct_dependency_outputs(
+    tmp_path: Path, method: str
+) -> None:
+    fragment = _generic(tmp_path, method)
+    method_id = method.lower()
+    tasks = {task["id"]: task for task in fragment["tasks"]}
+
+    calibration_merge = tasks[f"bace_{method_id}_calibration_merge"]
+    candidate_id = f"bace_{method_id}_train_candidates"
+    candidate_token = f"{{dep_{candidate_id}_output}}"
+    assert candidate_id in calibration_merge["depends_on"]
+    predecessor_index = calibration_merge["command"].index("--predecessor-output")
+    assert calibration_merge["command"][predecessor_index + 1] == candidate_token
+    assert "_native_aux" not in json.dumps(calibration_merge, sort_keys=True)
+
+    test_merge = tasks[f"bace_{method_id}_test_merge"]
+    selection_id = f"bace_{method_id}_selection"
+    selection_token = f"{{dep_{selection_id}_output}}"
+    assert selection_id in test_merge["depends_on"]
+    predecessor_index = test_merge["command"].index("--predecessor-output")
+    assert test_merge["command"][predecessor_index + 1] == selection_token
+    assert "_native_aux" not in json.dumps(test_merge, sort_keys=True)
+
+
+@pytest.mark.parametrize("method", ["ComRecGC", "GlobalGCE"])
+def test_non_gcf_baselines_can_adopt_the_frozen_ours_threshold_grid(
+    tmp_path: Path, method: str
+) -> None:
+    paths = _paths(tmp_path, method)
+    thresholds = (
+        paths["output_root"].parent
+        / "shared-authority/bace/ours/b12-selector/thresholds.json"
+    )
+    fragment = build_bace_baseline_generic_controller_fragment(
+        method=method,
+        thresholds_json=thresholds,
+        **paths,
+    )
+    method_id = method.lower()
+    task = next(
+        row
+        for row in fragment["tasks"]
+        if row["id"] == f"bace_{method_id}_selection"
+    )
+    assert task["command"][task["command"].index("--thresholds-json") + 1] == str(
+        thresholds
+    )
+
+
 def test_all_three_native_routes_pass_production_loader(
     tmp_path: Path,
 ) -> None:
