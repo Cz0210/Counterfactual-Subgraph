@@ -92,6 +92,103 @@ def validate_chemistry_trace_evidence(
 
     source = Path(path).expanduser().resolve()
     payload = _load(source)
+    if payload.get("schema_version") == "mut_comrecgc_historical50k_adoption_v2":
+        if dataset != "mutagenicity":
+            raise ValueError(
+                "Historical Mut chemistry adoption evidence is dataset-specific."
+            )
+        expected = {
+            "status": "PASS",
+            "dataset": "mutagenicity",
+            "method": "COMRECGC",
+            "historical_artifact_adopted": True,
+            "historical_source_trace_enabled": True,
+            "traceoff_reference_rerun": False,
+            "trace_parity_passed": False,
+            "500_step_semantic_equivalence_passed": True,
+            "adoption_without_full_50k_parity_rerun_authorized": True,
+            "generation_complete": True,
+            "generation_steps": 50_000,
+            "M_EFFECTIVE": 50_000,
+            "candidate_capacity": 100_000,
+            "lineage_pass": True,
+            "candidate_freeze_pass": True,
+            "checkpoint_reload_pass": True,
+            "no_test_leakage": True,
+            "calibration_loaded": False,
+            "test_loaded": False,
+        }
+        failures = [
+            key for key, expected_value in expected.items() if payload.get(key) != expected_value
+        ]
+        candidate_count = payload.get("candidate_count")
+        if type(candidate_count) is not int or int(candidate_count) <= 0:
+            failures.append("candidate_count")
+        lineage = Path(str(payload.get("source_lineage_path") or "")).expanduser()
+        equivalence = Path(
+            str(payload.get("500_step_semantic_equivalence_receipt_path") or "")
+        ).expanduser()
+        for evidence_path, field, label in (
+            (lineage, "source_lineage_sha256", "source_lineage"),
+            (
+                equivalence,
+                "500_step_semantic_equivalence_receipt_sha256",
+                "500_step_semantic_equivalence_receipt",
+            ),
+        ):
+            if (
+                not evidence_path.is_absolute()
+                or evidence_path.is_symlink()
+                or not evidence_path.is_file()
+                or sha256_file(evidence_path) != payload.get(field)
+            ):
+                failures.append(label)
+        if not failures:
+            equivalence_payload = _load(equivalence)
+            equivalence_expected = {
+                "schema_version": "mut_checkpoint_instrumentation_equivalence_v1",
+                "status": "PASS",
+                "paper_eligible": False,
+                "dataset": "mutagenicity",
+                "steps": 500,
+                "step_action_trace_exact": True,
+                "rng_state_exact": True,
+                "checkpoint_mirror_verified": True,
+                "checkpoint_resume_exercised": True,
+                "calibration_loaded": False,
+                "test_loaded": False,
+            }
+            failures.extend(
+                f"semantic_equivalence.{key}"
+                for key, expected_value in equivalence_expected.items()
+                if equivalence_payload.get(key) != expected_value
+            )
+        if failures:
+            raise ValueError(
+                "Historical Mut chemistry adoption evidence is incomplete: "
+                + ", ".join(sorted(set(failures)))
+            )
+        return {
+            "trace_evidence_kind": (
+                "historical_trace_on_50k_with_500_step_semantic_equivalence"
+            ),
+            "trace_parity_required": False,
+            "trace_parity_passed": False,
+            "trace_integrity_passed": True,
+            "historical_source_trace_enabled": True,
+            "traceoff_reference_rerun": False,
+            "500_step_semantic_equivalence_passed": True,
+            "adoption_without_full_50k_parity_rerun_authorized": True,
+            "candidate_count": candidate_count,
+            "source_lineage_path": str(lineage.resolve(strict=True)),
+            "source_lineage_sha256": payload["source_lineage_sha256"],
+            "500_step_semantic_equivalence_receipt_path": str(
+                equivalence.resolve(strict=True)
+            ),
+            "500_step_semantic_equivalence_receipt_sha256": payload[
+                "500_step_semantic_equivalence_receipt_sha256"
+            ],
+        }
     if payload.get("trace_parity_passed") is True:
         return {
             "trace_evidence_kind": "trace_on_off_parity",
@@ -308,6 +405,24 @@ def write_mutagenicity_chem_repair_preregistration(
             "trace_parity_required": trace_evidence["trace_parity_required"],
             "trace_parity_passed": trace_evidence["trace_parity_passed"],
             "trace_integrity_passed": trace_evidence["trace_integrity_passed"],
+            "historical_source_trace_enabled": trace_evidence.get(
+                "historical_source_trace_enabled"
+            ),
+            "traceoff_reference_rerun": trace_evidence.get(
+                "traceoff_reference_rerun"
+            ),
+            "500_step_semantic_equivalence_passed": trace_evidence.get(
+                "500_step_semantic_equivalence_passed"
+            ),
+            "adoption_without_full_50k_parity_rerun_authorized": trace_evidence.get(
+                "adoption_without_full_50k_parity_rerun_authorized"
+            ),
+            "500_step_semantic_equivalence_receipt_path": trace_evidence.get(
+                "500_step_semantic_equivalence_receipt_path"
+            ),
+            "500_step_semantic_equivalence_receipt_sha256": trace_evidence.get(
+                "500_step_semantic_equivalence_receipt_sha256"
+            ),
             "trace_rng_evidence_kind": trace_evidence.get(
                 "trace_rng_evidence_kind"
             ),

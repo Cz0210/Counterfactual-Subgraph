@@ -79,6 +79,104 @@ def test_mutagenicity_chemistry_requires_true_trace_parity(tmp_path: Path) -> No
         validate_chemistry_trace_evidence(evidence, dataset="mutagenicity")
 
 
+def _historical_mut_adoption_evidence(tmp_path: Path) -> Path:
+    lineage = tmp_path / "candidate_action_lineage.json"
+    write_json(lineage, {"candidate_count": 2, "lineage_pass": True})
+    equivalence = tmp_path / "equivalence.json"
+    write_json(
+        equivalence,
+        {
+            "schema_version": "mut_checkpoint_instrumentation_equivalence_v1",
+            "status": "PASS",
+            "paper_eligible": False,
+            "dataset": "mutagenicity",
+            "steps": 500,
+            "step_action_trace_exact": True,
+            "rng_state_exact": True,
+            "checkpoint_mirror_verified": True,
+            "checkpoint_resume_exercised": True,
+            "calibration_loaded": False,
+            "test_loaded": False,
+        },
+    )
+    evidence = tmp_path / "historical_adoption.json"
+    write_json(
+        evidence,
+        {
+            "schema_version": "mut_comrecgc_historical50k_adoption_v2",
+            "status": "PASS",
+            "dataset": "mutagenicity",
+            "method": "COMRECGC",
+            "historical_artifact_adopted": True,
+            "historical_source_trace_enabled": True,
+            "traceoff_reference_rerun": False,
+            "trace_parity_passed": False,
+            "500_step_semantic_equivalence_passed": True,
+            "adoption_without_full_50k_parity_rerun_authorized": True,
+            "generation_complete": True,
+            "generation_steps": 50_000,
+            "M_EFFECTIVE": 50_000,
+            "candidate_capacity": 100_000,
+            "candidate_count": 2,
+            "lineage_pass": True,
+            "candidate_freeze_pass": True,
+            "checkpoint_reload_pass": True,
+            "no_test_leakage": True,
+            "calibration_loaded": False,
+            "test_loaded": False,
+            "source_lineage_path": str(lineage.resolve()),
+            "source_lineage_sha256": sha256_file(lineage),
+            "500_step_semantic_equivalence_receipt_path": str(
+                equivalence.resolve()
+            ),
+            "500_step_semantic_equivalence_receipt_sha256": sha256_file(
+                equivalence
+            ),
+        },
+    )
+    return evidence
+
+
+def test_mutagenicity_chemistry_accepts_truthful_historical_trace_on_adoption(
+    tmp_path: Path,
+) -> None:
+    evidence = _historical_mut_adoption_evidence(tmp_path)
+
+    result = validate_chemistry_trace_evidence(evidence, dataset="mutagenicity")
+
+    assert result["trace_integrity_passed"] is True
+    assert result["trace_parity_required"] is False
+    assert result["trace_parity_passed"] is False
+    assert result["historical_source_trace_enabled"] is True
+    assert result["traceoff_reference_rerun"] is False
+    assert result["500_step_semantic_equivalence_passed"] is True
+    assert result["adoption_without_full_50k_parity_rerun_authorized"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("historical_source_trace_enabled", False),
+        ("traceoff_reference_rerun", True),
+        ("trace_parity_passed", True),
+        ("500_step_semantic_equivalence_passed", False),
+        ("adoption_without_full_50k_parity_rerun_authorized", False),
+    ),
+)
+def test_mutagenicity_historical_adoption_rejects_false_provenance_claims(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    evidence = _historical_mut_adoption_evidence(tmp_path)
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    payload[field] = value
+    write_json(evidence, payload)
+
+    with pytest.raises(ValueError, match=field):
+        validate_chemistry_trace_evidence(evidence, dataset="mutagenicity")
+
+
 def test_aids_chemistry_accepts_complete_streamed_trace_without_claiming_parity(
     tmp_path: Path,
 ) -> None:
