@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from src.ablations.llm import (
     AVAILABLE,
@@ -180,10 +181,10 @@ def test_artifact_pin_recomputes_file_and_directory_hashes(tmp_path: Path) -> No
 
 
 def test_current_sft_variants_are_explicitly_blocked_without_matched_sft() -> None:
-    config = json.loads(
+    config = yaml.safe_load(
         (
             REPO_ROOT
-            / "configs/ablations/llm/llm_proposer_ablation_v1.template.json"
+            / "configs/ablations/llm/bace_ours_proposer_ablation_v1.yaml"
         ).read_text(encoding="utf-8")
     )
     for variant in ("CHEMLLM_SFT", "CHEMLLM_SFT_PPO"):
@@ -623,9 +624,9 @@ def _bound_framework_fixture(
     reference["reference_contract_sha256"] = canonical_json_sha256(reference)
     reference_path = _write_json(tmp_path / "bace_main_reference.json", reference)
 
-    config = json.loads(
+    config = yaml.safe_load(
         (
-            REPO_ROOT / "configs/ablations/llm/llm_proposer_ablation_v1.template.json"
+            REPO_ROOT / "configs/ablations/llm/bace_ours_proposer_ablation_v1.yaml"
         ).read_text(encoding="utf-8")
     )
     config["main_reference"] = {
@@ -749,9 +750,9 @@ def test_builder_rejects_non_source_label_one_parent_cohort(tmp_path: Path) -> N
 
 def test_config_and_paired_slurm_freeze_main_contract() -> None:
     config_path = (
-        REPO_ROOT / "configs/ablations/llm/llm_proposer_ablation_v1.template.json"
+        REPO_ROOT / "configs/ablations/llm/bace_ours_proposer_ablation_v1.yaml"
     )
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert config["main_reference"] == {"path": None, "sha256": None}
     assert config["main_proposal_reference"] == {
         "policy_lineage": "CHEMLLM_BASE_PLUS_FRESH_LORA_PLUS_PPO",

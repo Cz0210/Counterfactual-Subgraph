@@ -19,6 +19,8 @@ import sys
 import uuid
 from typing import Any, Mapping
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
@@ -49,7 +51,7 @@ DEFAULT_SPEC = (
     / "configs"
     / "ablations"
     / "llm"
-    / "llm_proposer_ablation_v1.template.json"
+    / "bace_ours_proposer_ablation_v1.yaml"
 )
 
 FROZEN_ATTEMPT_BUDGET = {
@@ -93,10 +95,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _load_json(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+def _load_document(path: Path) -> dict[str, Any]:
+    try:
+        if path.suffix.lower() in {".yaml", ".yml"}:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        else:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise LLMAblationContractError(f"invalid ablation document: {path}") from exc
     if not isinstance(payload, dict):
-        raise LLMAblationContractError(f"expected JSON object: {path}")
+        raise LLMAblationContractError(f"expected ablation mapping: {path}")
     return payload
 
 
@@ -149,7 +157,7 @@ def _load_bace_main_reference(
     spec: Mapping[str, Any],
 ) -> tuple[dict[str, Any], ArtifactPin]:
     pin = ArtifactPin.from_mapping(spec, role="bace_main_reference")
-    payload = _load_json(Path(pin.resolved_path))
+    payload = _load_document(Path(pin.resolved_path))
     if payload.get("schema_version") != "bace_ours_main_reference_v1":
         raise LLMAblationContractError("unsupported BACE main reference schema")
     if payload.get("status") != "PASS":
@@ -656,7 +664,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     runtime_config = Path(args.config).expanduser().resolve(strict=True)
     spec_path = Path(args.ablation_spec).expanduser().resolve(strict=True)
-    spec = _load_json(spec_path)
+    spec = _load_document(spec_path)
     payloads = build_framework_payloads(
         spec=spec,
         spec_path=spec_path,
