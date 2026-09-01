@@ -15593,3 +15593,55 @@ the frozen Mut/Ours cell.
 ### Status
 
 Accepted
+
+---
+
+## [2026-09-01] Conditionally adopt the completed Mut trace-on 50k generation
+
+### Motivation
+
+The historical Mutagenicity ComRecGC random walk completed all 50,000 steps and
+froze its candidate payload with tracing enabled.  The subsequent post-walk
+trace materialization failed, and a later recovery replay resolved all recorded
+lineages without changing the frozen candidate order or payload.  This is not a
+completed trace-off reproduction: no full 50k trace-on/off parity run exists,
+and the final recovery receipt does not itself record an exact recovery-code
+commit.  Treating those gaps as proof of equivalence would overstate the
+available provenance.
+
+### Decision
+
+Allow this one trace-on artifact to become a Mut cell input only after every
+dataset-specific gate passes: an exact-source static trace-branch audit; a
+sequential, same-code 500-step trace-on/off comparison; independent
+checkpoint/reload reproduction through steps 501--510; a measured parent-memory
+and protected-task-throughput canary; lineage closure; and exact binding of the
+candidate universe through the adopted pair store and DBSCAN artifacts.  The
+64 GiB admission applies only to the sequential 500-step canary.  Unknown trace
+branches, any semantic divergence, missing five-minute throughput evidence, or
+any universe/hash mismatch fails closed.  Pair store and DBSCAN are read-only
+and must not be recomputed after a successful adoption.
+
+The historical DBSCAN manifest does not contain a native candidate-universe
+identity.  Adoption therefore reconstructs the generation-native ordered
+universe, verifies every pair-store candidate slice and consolidated vector
+byte stream, and binds DBSCAN transitively to those exact vectors.  Its native
+candidate-universe SHA remains explicitly `null`; no direct three-way identity
+is fabricated.
+
+### Consequences
+
+- The final manifest must disclose `source_trace_enabled=true`,
+  `trace_off_full_rerun_performed=false`, and
+  `full_trace_on_off_parity_claimed=false`.
+- The 500-step result establishes only the authorized bounded observational
+  equivalence gate; it is not described as full 50k parity.
+- The missing exact recovery-code commit remains an explicit provenance gap and
+  cannot be filled by inference from the original generation commit.
+- A failed gate selects the fresh trace-off Route B; it never silently adopts
+  the historical artifact or reuses mismatched pair/DBSCAN science.
+- GNN backbone ablations remain disabled until the main matrix reaches 16/16.
+
+### Status
+
+Accepted as policy; scientific adoption remains pending all gates.
