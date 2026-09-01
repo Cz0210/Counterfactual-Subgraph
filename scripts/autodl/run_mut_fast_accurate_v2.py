@@ -46,6 +46,15 @@ from src.utils.autodl_mut_fast_accurate_v2 import (  # noqa: E402
     derive_empirical_memory_admission,
     read_cgroup_snapshot,
 )
+from src.utils.autodl_mut_trace_on_adoption_v1 import (  # noqa: E402
+    AUDIT_SCHEMA as TRACE_AUDIT_SCHEMA,
+    CANARY_HEADROOM_STOP_BYTES,
+    CANARY_REQUIRED_HEADROOM_BYTES,
+    CANARY_RSS_STOP_BYTES,
+    EXPECTED_CANDIDATE_UNIVERSE_SHA256,
+    validate_authorization_receipt,
+    verify_mut_candidate_pair_dbscan_binding,
+)
 from src.utils.autodl_runtime import (  # noqa: E402
     FOUR_GPU_RECOVERY_LIMIT,
     gpu_lock_available,
@@ -56,8 +65,15 @@ from src.utils.autodl_runtime import (  # noqa: E402
 SCHEMA = "mut_fast_accurate_v2"
 ADOPTION_SCHEMA = "mut_comrecgc_historical50k_adoption_v2"
 LOCATOR_SCHEMA = "fast16_matrix_cell_root_locator_v1"
+# The original 96-GiB no-child threshold remains the frozen legacy route.  The
+# separately authorized trace-mode one-shot uses CANARY_REQUIRED_HEADROOM_BYTES
+# and never changes the full-generation admission formula.
 MINIMUM_HEADROOM_BYTES = 96 * 1024**3
 HEX64 = re.compile(r"[0-9a-f]{64}")
+MUT_UPSTREAM_COMMIT = "122f9341a360e9f06bb58a2f5823bb596021f6bf"
+MUT_GNN_SHA256 = "22045e5a6a833d6ed980cef9834859859136a1e2f644d19d78bd63345585f239"
+MUT_DISTANCE_SHA256 = "bc64c16340c9170388ff1b3951d2ee4cb9a372456b09691ecd6bb2a881f17648"
+MUT_RF_ORACLE_SHA256 = "af213aa766626decaf99876b43ede725412a355adf37f1aa0d56233d8653e204"
 
 
 class MutFastError(RuntimeError):
@@ -323,7 +339,21 @@ def _require_bound(document: Mapping[str, Any], value: str, *, label: str) -> No
 def publish_adoption(
     *, spec: Mapping[str, Any], inventory_gate: Path,
     equivalence_gate: Path, output_dir: Path,
+    authorization_receipt: Path | None = None,
+    trace_code_audit: Path | None = None,
+    instrumentation_equivalence_gate: Path | None = None,
+    canary_memory_receipt: Path | None = None,
 ) -> dict[str, Any]:
+    if (
+        authorization_receipt is None
+        or trace_code_audit is None
+        or instrumentation_equivalence_gate is None
+        or canary_memory_receipt is None
+    ):
+        raise MutFastError(
+            "Trace-on source adoption requires both authorization and static "
+            "audit, plus historical/instrumented equivalence and memory gates"
+        )
     inventory_path = _absolute(inventory_gate, label="inventory gate")
     inventory = _json(inventory_path, label="inventory gate")
     if (
@@ -333,13 +363,302 @@ def publish_adoption(
     ):
         raise MutFastError("Historical inventory gate is invalid")
     equivalence_path = _absolute(equivalence_gate, label="equivalence gate")
-    equivalence = validate_instrumentation_equivalence_gate(
-        gate_path=equivalence_path,
-        expected_legacy_inventory_sha256=LEGACY_SOURCE_INVENTORY_SHA256,
-        expected_instrumentation_inventory_sha256=(
-            INSTRUMENTATION_SOURCE_INVENTORY_SHA256
-        ),
-    )
+    authorization: dict[str, Any] | None = None
+    authorization_file_sha256: str | None = None
+    audit: dict[str, Any] | None = None
+    audit_path: Path | None = None
+    instrumentation_equivalence: dict[str, Any] | None = None
+    instrumentation_equivalence_path: Path | None = None
+    memory: dict[str, Any] | None = None
+    memory_path: Path | None = None
+    if authorization_receipt is not None or trace_code_audit is not None:
+        if (
+            authorization_receipt is None
+            or trace_code_audit is None
+            or instrumentation_equivalence_gate is None
+            or canary_memory_receipt is None
+        ):
+            raise MutFastError(
+                "Trace-on adoption requires authorization, static audit, "
+                "historical/instrumented equivalence, and memory gates"
+            )
+        authorization_path = _absolute(
+            authorization_receipt, label="trace-on authorization"
+        )
+        authorization, authorization_file_sha256 = validate_authorization_receipt(
+            authorization_path,
+            expected_controller_id=str(spec["controller_id"]),
+            expected_source_root=_absolute(
+                spec["historical_source_root"], label="historical source"
+            ),
+        )
+        audit_path = _absolute(trace_code_audit, label="trace code audit")
+        audit = _json(audit_path, label="trace code audit")
+        audit_unhashed = {
+            key: value for key, value in audit.items() if key != "audit_sha256"
+        }
+        audit_trees_valid = True
+        for tree_key, expected_commit in (
+            ("historical", SOURCE_PROJECT_COMMIT),
+            ("instrumentation", INSTRUMENTATION_PROJECT_COMMIT),
+        ):
+            tree = audit.get(tree_key)
+            branches = tree.get("branches") if isinstance(tree, Mapping) else None
+            assertions = (
+                tree.get("scientific_assertions")
+                if isinstance(tree, Mapping)
+                else None
+            )
+            audit_trees_valid = audit_trees_valid and bool(
+                isinstance(tree, Mapping)
+                and tree.get("status") == "PASS"
+                and tree.get("commit") == expected_commit
+                and tree.get("unknown_branches") == []
+                and tree.get("failed_scientific_assertions") == []
+                and isinstance(assertions, Mapping)
+                and assertions
+                and all(value is True for value in assertions.values())
+                and isinstance(branches, list)
+                and branches
+                and all(
+                    isinstance(row, Mapping)
+                    and row.get("classification")
+                    in {
+                        "OBSERVATIONAL_WRITE_ONLY",
+                        "CHECKPOINT_SERIALIZATION_ONLY",
+                    }
+                    for row in branches
+                )
+            )
+        if (
+            audit.get("schema_version") != TRACE_AUDIT_SCHEMA
+            or audit.get("status") != "PASS"
+            or audit.get("trace_is_observational") is not True
+            or audit.get("trace_rng_mutation_found") is not False
+            or audit.get("trace_algorithm_state_mutation_found") is not False
+            or audit.get("trace_control_flow_mutation_found") is not False
+            or audit.get("trace_candidate_selection_is_observational") is not True
+            or audit.get("trace_operational_side_effects_found") is not True
+            or audit.get("trace_post_walk_payload_serialization_mutation_found")
+            is not True
+            or audit.get("trace_post_walk_graph_closure_only") is not True
+            or audit.get("static_audit_sufficient_for_adoption") is not False
+            or audit.get("dynamic_500_step_equivalence_required") is not True
+            or audit.get("full_trace_on_off_parity_claimed") is not False
+            or audit.get("audit_sha256") != stable_json_sha256(audit_unhashed)
+            or not audit_trees_valid
+        ):
+            raise MutFastError("Trace code audit is not one valid observational PASS")
+        instrumentation_equivalence_path = _absolute(
+            instrumentation_equivalence_gate,
+            label="checkpoint-instrumentation equivalence gate",
+        )
+        instrumentation_equivalence = validate_instrumentation_equivalence_gate(
+            gate_path=instrumentation_equivalence_path,
+            expected_legacy_inventory_sha256=LEGACY_SOURCE_INVENTORY_SHA256,
+            expected_instrumentation_inventory_sha256=(
+                INSTRUMENTATION_SOURCE_INVENTORY_SHA256
+            ),
+        )
+        equivalence = _json(equivalence_path, label="trace-mode equivalence gate")
+        if (
+            equivalence.get("schema_version")
+            != "mut_trace_on_off_500_step_equivalence_v1"
+            or equivalence.get("status") != "PASS"
+            or equivalence.get("trace_on_off_stepwise_exact") is not True
+            or equivalence.get("first_semantic_divergence_step") is not None
+            or equivalence.get("trace_on_checkpoint_reload_pass") is not True
+            or equivalence.get("trace_off_checkpoint_reload_pass") is not True
+            or equivalence.get("post_reload_trace_mode_equivalence_pass") is not True
+            or equivalence.get("trace_on_trace_enabled") is not True
+            or equivalence.get("trace_off_trace_enabled") is not False
+            or equivalence.get(
+                "trace_only_files_excluded_from_scientific_digest"
+            )
+            is not True
+            or equivalence.get("step_action_trace_exact") is not True
+            or equivalence.get("rng_state_exact") is not True
+            or equivalence.get("classifier_probability_trace_exact") is not True
+            or equivalence.get("step_semantic_fields_present") is not True
+            or equivalence.get(
+                "step500_checkpoint_serialized_candidate_records_exact"
+            )
+            is not True
+            or equivalence.get("step500_checkpoint_candidate_universe_exact")
+            is not True
+            or equivalence.get("checkpoint_algorithm_scientific_state_exact")
+            is not True
+            or equivalence.get("checkpoint_rng_state_exact") is not True
+            or equivalence.get("checkpoint_sqlite_logical_state_exact") is not True
+            or equivalence.get("checkpoint_graph_registry_exact") is not True
+            or equivalence.get("resolved_config_scientific_binding_exact")
+            is not True
+            or equivalence.get("post_walk_prefix_finalization_performed") is not False
+            or equivalence.get(
+                "post_walk_candidate_semantics_bound_by_static_audit"
+            )
+            is not True
+            or equivalence.get("full_50k_trace_on_off_parity_claimed") is not False
+            or equivalence.get("arms_overlapped") is not False
+            or int(equivalence.get("max_concurrent_arms", -1)) != 1
+            or int(equivalence.get("steps_compared", -1)) != 500
+            or int(equivalence.get("post_reload_steps_compared", -1)) != 10
+            or equivalence.get("calibration_loaded") is not False
+            or equivalence.get("test_loaded") is not False
+            or not isinstance(equivalence.get("checkpoint_gates"), Mapping)
+            or not equivalence["checkpoint_gates"]
+            or any(
+                value is not True
+                for value in equivalence["checkpoint_gates"].values()
+            )
+        ):
+            raise MutFastError("Trace-on/off 500-step equivalence gate is invalid")
+        expected_equivalence_sha = equivalence.get("summary_sha256")
+        equivalence_unhashed = {
+            key: value for key, value in equivalence.items() if key != "summary_sha256"
+        }
+        if expected_equivalence_sha != stable_json_sha256(equivalence_unhashed):
+            raise MutFastError("Trace-mode equivalence self hash changed")
+        input_manifest_path = _absolute(
+            equivalence.get("input_manifest"),
+            label="trace-mode equivalence input manifest",
+        )
+        input_manifest = _json(
+            input_manifest_path, label="trace-mode equivalence input manifest"
+        )
+        input_unhashed = {
+            key: value
+            for key, value in input_manifest.items()
+            if key != "manifest_sha256"
+        }
+        rf_binding = input_manifest.get("rf_oracle")
+        input_files = input_manifest.get("input_files")
+        gnn_binding = (
+            input_files.get("gnn_checkpoint")
+            if isinstance(input_files, Mapping)
+            else None
+        )
+        distance_binding = (
+            input_files.get("distance_checkpoint")
+            if isinstance(input_files, Mapping)
+            else None
+        )
+        if (
+            sha256_file(input_manifest_path)
+            != equivalence.get("input_manifest_sha256")
+            or input_manifest.get("schema_version")
+            != "mut_trace_equivalence_input_manifest_v1"
+            or input_manifest.get("manifest_sha256")
+            != stable_json_sha256(input_unhashed)
+            or input_manifest.get("source_algorithm_commit")
+            != SOURCE_PROJECT_COMMIT
+            or input_manifest.get("execution_commit")
+            != INSTRUMENTATION_PROJECT_COMMIT
+            or input_manifest.get("upstream_commit") != MUT_UPSTREAM_COMMIT
+            or int(input_manifest.get("formal_M_MAX", -1)) != 50_000
+            or int(input_manifest.get("candidate_capacity", -1)) != 100_000
+            or int(input_manifest.get("seed", -1)) != 0
+            or int(input_manifest.get("parent_limit", -1)) != 1448
+            or int(input_manifest.get("batch_size", -1)) != 128
+            or input_manifest.get("device") != "cuda:0"
+            or input_manifest.get("pythonhashseed") != "0"
+            or input_manifest.get("algorithm_registry_identity")
+            != "pinned_upstream_embedding_bytes_python_hash_seed0"
+            or input_manifest.get("audit_graph_identity")
+            != "stable_untyped_graph_sha256"
+            or input_manifest.get("dataset_sha256") != SOURCE_DATASET_SHA256
+            or input_manifest.get("split_source_cohort_sha256")
+            != SOURCE_PARENT_ORDER_SHA256
+            or input_manifest.get("calibration_loaded") is not False
+            or input_manifest.get("test_loaded") is not False
+            or input_manifest.get("historical_artifact_root")
+            != str(
+                _absolute(
+                    spec["historical_source_root"], label="historical source"
+                )
+            )
+            or not isinstance(rf_binding, Mapping)
+            or rf_binding.get("loaded_by_generation_canary")
+            is not False
+            or rf_binding.get("sha256") != MUT_RF_ORACLE_SHA256
+            or not isinstance(gnn_binding, Mapping)
+            or gnn_binding.get("sha256") != MUT_GNN_SHA256
+            or not isinstance(distance_binding, Mapping)
+            or distance_binding.get("sha256") != MUT_DISTANCE_SHA256
+        ):
+            raise MutFastError("Trace-mode frozen input manifest is invalid")
+        memory_path = _absolute(
+            canary_memory_receipt, label="trace-mode canary memory receipt"
+        )
+        memory = _json(memory_path, label="trace-mode canary memory receipt")
+        memory_unhashed = {
+            key: value for key, value in memory.items() if key != "summary_sha256"
+        }
+        phases = memory.get("phases")
+        required_phases = {
+            "trace_on_continuous",
+            "trace_on_reload",
+            "trace_off_continuous",
+            "trace_off_reload",
+        }
+        if (
+            memory.get("schema_version") != "mut_trace_mode_canary_memory_v1"
+            or memory.get("status") != "PASS"
+            or int(memory.get("initial_parent_headroom_bytes", -1))
+            < CANARY_REQUIRED_HEADROOM_BYTES
+            or int(memory.get("process_rss_peak_bytes", -1))
+            > CANARY_RSS_STOP_BYTES
+            or int(memory.get("parent_headroom_min_bytes", -1))
+            < CANARY_HEADROOM_STOP_BYTES
+            or int(memory.get("cgroup_failcnt_delta", -1)) != 0
+            or int(memory.get("cgroup_oom_delta", -1)) != 0
+            or int(memory.get("cgroup_oom_kill_delta", -1)) != 0
+            or not isinstance(phases, Mapping)
+            or not required_phases.issubset(phases)
+            or any(
+                not isinstance(phases[name], Mapping)
+                or phases[name].get("status") != "PASS"
+                or int(phases[name].get("sample_count", 0)) <= 0
+                or int(phases[name].get("peak_rss_bytes", -1))
+                > CANARY_RSS_STOP_BYTES
+                or int(phases[name].get("minimum_parent_headroom_bytes", -1))
+                < CANARY_HEADROOM_STOP_BYTES
+                for name in required_phases
+            )
+            or not isinstance(memory.get("protected_throughput_gate"), Mapping)
+            or memory["protected_throughput_gate"].get("status") != "PASS"
+            or memory["protected_throughput_gate"].get(
+                "missing_complete_five_minute_windows"
+            )
+            not in ([], None)
+            or memory.get("summary_sha256")
+            != stable_json_sha256(memory_unhashed)
+        ):
+            raise MutFastError("Trace-mode canary memory/throughput gate is invalid")
+        equivalence = {
+            **equivalence,
+            "sha256": sha256_file(equivalence_path),
+            "checkpoint_resume_exercised": bool(
+                equivalence.get("trace_on_checkpoint_reload_pass") is True
+                and equivalence.get("trace_off_checkpoint_reload_pass") is True
+            ),
+            "checkpoint_mirror_verified": bool(
+                isinstance(
+                    equivalence.get("trace_on_checkpoint_state_audit"), Mapping
+                )
+                and isinstance(
+                    equivalence.get("trace_off_checkpoint_state_audit"), Mapping
+                )
+            ),
+        }
+    else:
+        equivalence = validate_instrumentation_equivalence_gate(
+            gate_path=equivalence_path,
+            expected_legacy_inventory_sha256=LEGACY_SOURCE_INVENTORY_SHA256,
+            expected_instrumentation_inventory_sha256=(
+                INSTRUMENTATION_SOURCE_INVENTORY_SHA256
+            ),
+        )
     source_root = _absolute(spec["historical_source_root"], label="historical source")
     common_root = _absolute(spec["completed_common_root"], label="completed common")
     source_manifest_path = source_root / "run_manifest.json"
@@ -391,6 +710,8 @@ def publish_adoption(
     candidate_universe = str(scientific.get("candidate_graph_hashes_sha256") or "")
     if HEX64.fullmatch(candidate_universe) is None:
         failures.append("candidate_universe_sha256")
+    if authorization is not None and candidate_universe != EXPECTED_CANDIDATE_UNIVERSE_SHA256:
+        failures.append("authorized_candidate_universe_sha256")
     if int(scientific.get("candidate_count", -1)) != 50_620:
         failures.append("pair_candidate_count")
     source_pair_manifest = pair_manifest_path
@@ -402,7 +723,7 @@ def publish_adoption(
         failures.append("source_pair_store_manifest_sha256")
     if dbscan_manifest.get("run_complete") is not True:
         failures.append("dbscan_complete")
-    if dbscan_manifest.get("approximation_used") not in {False, None}:
+    if dbscan_manifest.get("approximation_used") is not False:
         failures.append("dbscan_approximation")
     external = common_manifest.get("external_memory_artifacts")
     dbscan_identity = dbscan_manifest.get("scientific_identity")
@@ -426,8 +747,52 @@ def publish_adoption(
         != pair_manifest.get("vectors_sha256")
     ):
         failures.append("dbscan_pair_store_vector_binding")
+    dbscan_native_universe_fields = {
+        "source_candidate_universe_sha256",
+        "candidate_universe_sha256",
+        "candidate_graph_hashes_sha256",
+    }
+    if any(key in dbscan_manifest for key in dbscan_native_universe_fields) or (
+        isinstance(dbscan_identity, Mapping)
+        and any(key in dbscan_identity for key in dbscan_native_universe_fields)
+    ):
+        failures.append("dbscan_native_candidate_universe_field_present")
     if failures:
         raise MutFastError(f"Historical/common binding failed: {failures}")
+    try:
+        universe_binding = verify_mut_candidate_pair_dbscan_binding(
+            source_payload_path=source_payload_path,
+            pair_manifest_path=pair_manifest_path,
+            dbscan_manifest_path=dbscan_manifest_path,
+            expected_candidate_universe_sha256=(
+                EXPECTED_CANDIDATE_UNIVERSE_SHA256
+            ),
+            expected_source_payload_sha256=SOURCE_PAYLOAD_SHA256,
+            expected_candidate_count=50_620,
+            candidate_capacity=100_000,
+        )
+    except Exception as exc:
+        raise MutFastError(
+            f"Historical candidate/pair/DBSCAN transitive binding failed: {exc}"
+        ) from exc
+    if (
+        universe_binding.get("status") != "PASS"
+        or universe_binding.get("source_native_candidate_universe_sha")
+        != candidate_universe
+        or universe_binding.get("pair_store_source_candidate_universe_sha")
+        != candidate_universe
+        or universe_binding.get("dbscan_native_candidate_universe_sha") is not None
+        or universe_binding.get(
+            "dbscan_transitively_bound_candidate_universe_sha"
+        )
+        != candidate_universe
+        or universe_binding.get("dbscan_approximation_used") is not False
+        or universe_binding.get("binding_kind")
+        != "transitive_generation_pair_store_vectors_dbscan_v1"
+    ):
+        raise MutFastError(
+            "Historical candidate/pair/DBSCAN binding receipt is inconsistent"
+        )
     # Require the completed common manifest to mention both exact subordinate
     # identities.  Field names may differ across the already-frozen producer.
     _require_bound(common_manifest, pair_manifest_sha, label="pair-store manifest SHA")
@@ -444,10 +809,29 @@ def publish_adoption(
             equivalence.get("status") == "PASS"
             and equivalence.get("step_action_trace_exact") is True
             and equivalence.get("rng_state_exact") is True
+            and (
+                authorization is None
+                or (
+                    instrumentation_equivalence is not None
+                    and instrumentation_equivalence.get("status") == "PASS"
+                    and instrumentation_equivalence.get(
+                        "step_action_trace_exact"
+                    )
+                    is True
+                    and instrumentation_equivalence.get("rng_state_exact")
+                    is True
+                )
+            )
         ),
         "checkpoint_reload": (
-            equivalence.get("checkpoint_resume_exercised") is True
-            and equivalence.get("checkpoint_mirror_verified") is True
+            instrumentation_equivalence is not None
+            and instrumentation_equivalence.get("checkpoint_resume_exercised")
+            is True
+            and instrumentation_equivalence.get("checkpoint_mirror_verified")
+            is True
+            and equivalence.get("trace_on_checkpoint_reload_pass") is True
+            and equivalence.get("trace_off_checkpoint_reload_pass") is True
+            and equivalence.get("post_reload_trace_mode_equivalence_pass") is True
         ),
         "generation_complete": (
             isinstance(source_evidence, Mapping)
@@ -513,13 +897,22 @@ def publish_adoption(
         "trace_parity_passed": False,
         "traceoff_reference_rerun": False,
         "full_50k_rerun_performed": False,
+        "source_trace_enabled": True,
+        "target_default_trace_mode": False,
+        "trace_is_observational": authorization is not None,
+        "trace_on_off_500_step_equivalence_pass": authorization is not None,
+        "trace_off_full_rerun_performed": False,
+        "full_trace_on_off_parity_claimed": False,
         "500_step_semantic_equivalence_passed": verified_contract[
             "semantic_equivalence"
         ],
         "adoption_without_full_50k_parity_rerun_authorized": spec[
             "allow_historical_adoption_without_full_50k_parity"
         ],
-        "checkpoint_instrumentation_equivalence_passed": True,
+        "checkpoint_instrumentation_equivalence_passed": (
+            instrumentation_equivalence is not None
+            or authorization is None
+        ),
         "checkpoint_instrumentation_equivalence_steps": 500,
         "generation_complete": verified_contract["generation_complete"],
         "generation_steps": generation_steps,
@@ -578,14 +971,18 @@ def publish_adoption(
         "source_dbscan_manifest_path": str(dbscan_manifest_path),
         "source_dbscan_manifest_sha256": dbscan_manifest_sha,
         "candidate_universe_sha": candidate_universe,
+        "source_native_candidate_universe_sha": candidate_universe,
         "pair_store_source_candidate_universe_sha": candidate_universe,
-        "dbscan_source_candidate_universe_sha": candidate_universe,
+        "dbscan_native_candidate_universe_sha": None,
+        "dbscan_transitively_bound_candidate_universe_sha": candidate_universe,
         "candidate_universe_binding_state": "PASS",
-        "transitive_binding_kind": (
-            "pair_candidate_universe_via_exact_generation_payload_and_dbscan_vectors"
-        ),
+        "transitive_binding_kind": universe_binding["binding_kind"],
         "dbscan_native_candidate_universe_field_present": False,
         "dbscan_universe_binding_via_pair_vectors": True,
+        "candidate_pair_dbscan_binding_receipt": universe_binding,
+        "candidate_pair_dbscan_binding_sha256": universe_binding[
+            "binding_sha256"
+        ],
         "pair_candidate_graph_hashes_sha256": candidate_universe,
         "candidate_universe_binding": (
             "generation_payload_to_pair_store_scientific_identity_to_exact_dbscan"
@@ -596,13 +993,52 @@ def publish_adoption(
         "equivalence_sha256": equivalence["sha256"],
         "500_step_semantic_equivalence_receipt_path": str(equivalence_path),
         "500_step_semantic_equivalence_receipt_sha256": equivalence["sha256"],
+        "trace_on_adoption_authorization_path": (
+            str(_absolute(authorization_receipt, label="trace-on authorization"))
+            if authorization_receipt is not None
+            else None
+        ),
+        "trace_on_adoption_authorization_file_sha256": authorization_file_sha256,
+        "trace_code_observational_audit_path": str(audit_path) if audit_path else None,
+        "trace_code_observational_audit_sha256": (
+            sha256_file(audit_path) if audit_path else None
+        ),
+        "trace_mode_equivalence_path": str(equivalence_path),
+        "trace_mode_equivalence_sha256": sha256_file(equivalence_path),
+        "checkpoint_instrumentation_equivalence_path": (
+            str(instrumentation_equivalence_path)
+            if instrumentation_equivalence_path
+            else str(equivalence_path)
+        ),
+        "checkpoint_instrumentation_equivalence_sha256": (
+            sha256_file(instrumentation_equivalence_path)
+            if instrumentation_equivalence_path
+            else equivalence["sha256"]
+        ),
+        "trace_mode_canary_memory_receipt_path": (
+            str(memory_path) if memory_path else None
+        ),
+        "trace_mode_canary_memory_receipt_sha256": (
+            sha256_file(memory_path) if memory_path else None
+        ),
+        "trace_operational_side_effects_disclosed": authorization is not None,
+        "historical_random_walk_complete": True,
+        "historical_post_walk_trace_freeze_failed": authorization is not None,
+        "freeze_only_recovery_performed": authorization is not None,
+        "freeze_only_recovery_code_commit_attested": False,
         "source_live_writer_audit": source_writer,
         "common_live_writer_audit": common_writer,
         "pair_store_live_writer_audit": pair_writer,
         "published_at": _utc_now(),
     }
-    payload["binding_sha256"] = stable_json_sha256(payload)
     output.mkdir(parents=True)
+    universe_binding_path = output / "candidate_universe_binding.json"
+    _atomic_json(universe_binding_path, universe_binding)
+    payload["candidate_pair_dbscan_binding_path"] = str(universe_binding_path)
+    payload["candidate_pair_dbscan_binding_file_sha256"] = sha256_file(
+        universe_binding_path
+    )
+    payload["binding_sha256"] = stable_json_sha256(payload)
     _atomic_json(output / "historical_adoption.json", payload)
     _write_pass(output / "PASS")
     return payload
@@ -1561,6 +1997,12 @@ def build_parser() -> argparse.ArgumentParser:
     binding.add_argument("--spec", type=Path, required=True)
     binding.add_argument("--inventory-gate", type=Path, required=True)
     binding.add_argument("--equivalence-gate", type=Path, required=True)
+    binding.add_argument("--authorization-receipt", type=Path, required=True)
+    binding.add_argument("--trace-code-audit", type=Path, required=True)
+    binding.add_argument(
+        "--instrumentation-equivalence-gate", type=Path, required=True
+    )
+    binding.add_argument("--canary-memory-receipt", type=Path, required=True)
     binding.add_argument("--output-dir", type=Path, required=True)
     manifest = commands.add_parser("build-manifest")
     manifest.add_argument("--spec", type=Path, required=True)
@@ -1602,6 +2044,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = publish_adoption(
                 spec=spec, inventory_gate=args.inventory_gate,
                 equivalence_gate=args.equivalence_gate, output_dir=args.output_dir,
+                authorization_receipt=args.authorization_receipt,
+                trace_code_audit=args.trace_code_audit,
+                instrumentation_equivalence_gate=(
+                    args.instrumentation_equivalence_gate
+                ),
+                canary_memory_receipt=args.canary_memory_receipt,
             )
         elif args.action == "build-manifest":
             result = build_controller_manifest(spec, args.output)
