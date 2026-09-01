@@ -143,20 +143,37 @@ def _zero_source(tmp_path: Path) -> Path:
     return root
 
 
-def _science_projection(source: Path) -> dict[str, object]:
+def _science_evidence(
+    source: Path, controller: dict[str, object]
+) -> dict[str, object]:
     standardized = source / "standardized"
     return {
+        "terminal_kind": "AIDS_POSTHOC_SELF_CLOSED_SCIENCE_FINAL",
         "root": str(source.resolve()),
-        "controller_manifest_path": "/control/controller.manifest.json",
-        "controller_manifest_sha256": "1" * 64,
-        "exact_stage_receipt_path": "/science/exact.json",
-        "exact_stage_receipt_sha256": "2" * 64,
-        "final_stage_receipt_path": "/science/final.json",
-        "final_stage_receipt_sha256": "3" * 64,
+        "controller_manifest_path": controller["controller_manifest_path"],
+        "controller_manifest_sha256": controller["controller_manifest_sha256"],
+        "posthoc_exact_adoption_path": controller["posthoc_exact_adoption_path"],
+        "posthoc_exact_adoption_sha256": controller[
+            "posthoc_exact_adoption_sha256"
+        ],
+        "checkpoint_path": controller["checkpoint_path"],
+        "checkpoint_sha256": controller["checkpoint_sha256"],
+        "exact_receipt_path": controller["exact_receipt"]["path"],
+        "exact_receipt_sha256": controller["exact_receipt"]["sha256"],
+        "exact_dbscan_manifest_path": controller["exact_receipt"][
+            "dbscan_manifest_path"
+        ],
+        "exact_dbscan_manifest_sha256": controller["exact_receipt"][
+            "dbscan_manifest_sha256"
+        ],
         "continuation_terminal_sha256": "4" * 64,
         "common_terminal_sha256": "5" * 64,
+        "run_manifest_sha256": "6" * 64,
+        "final_gate_sha256": "7" * 64,
         "source_generation_root": "/science/generation",
-        "source_integrity_final_sha256": "6" * 64,
+        "source_integrity_final_sha256": "8" * 64,
+        "dbscan_adoption_manifest_path": "/science/dbscan_adoption.json",
+        "dbscan_adoption_manifest_sha256": "9" * 64,
         "standardized": {
             "root": str(standardized.resolve()),
             "source_evaluation_root": "/science/unified_eval",
@@ -165,9 +182,14 @@ def _science_projection(source: Path) -> dict[str, object]:
                 standardized / "final_artifact_audit.json"
             ),
             "freeze_manifest_sha256": _sha(standardized / "freeze_manifest.json"),
-            "identities": {"oracle_hash": "7" * 64},
+            "identities": {"oracle_hash": "a" * 64},
         },
-        "inventory": {"PASS": {"bytes": 5, "sha256": "8" * 64}},
+        "zero_strict_flip_evidence": reconciliation.validate_zero_strict_flip_science(
+            source
+        ),
+        "inventory": reconciliation.validate_zero_strict_flip_science(source)[
+            "source_inventory"
+        ],
     }
 
 
@@ -202,7 +224,18 @@ def test_zero_reconciliation_rejects_nonzero_or_imputed_exports(
         reconciliation.validate_zero_strict_flip_science(source)
 
 
-def _controller_fixture(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, object]]:
+def _controller_fixture(
+    tmp_path: Path,
+) -> tuple[
+    Path,
+    Path,
+    Path,
+    dict[str, object],
+    Path,
+    Path,
+    dict[str, object],
+    dict[str, object],
+]:
     manifest_path = tmp_path / "controller.manifest.json"
     manifest_path.write_text("{}\n", encoding="utf-8")
     controller = tmp_path / "controller"
@@ -210,93 +243,131 @@ def _controller_fixture(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, obj
     (controller / ".controller.lock").write_text("{}\n", encoding="utf-8")
     proc = tmp_path / "proc"
     proc.mkdir()
-    manifest = {
+    checkpoint = tmp_path / "science/checkpoint.json"
+    checkpoint.parent.mkdir()
+    checkpoint.write_text("checkpoint\n", encoding="utf-8")
+    exact_receipt = tmp_path / "science/exact_recovery_receipt.json"
+    _json(exact_receipt, {"status": "PASS"})
+    dbscan = tmp_path / "science/dbscan/run_manifest.json"
+    _json(dbscan, {"status": "PASS"})
+    stages = [{"stage_id": stage} for stage in reconciliation.STAGE_ORDER]
+    exact_stage = next(
+        row for row in stages if row["stage_id"] == reconciliation.EXACT_STAGE
+    )
+    exact_stage.update(
+        {
+            "output_dir": str(checkpoint.parent.resolve()),
+            "terminal_path": str(exact_receipt.resolve()),
+            "progress_checkpoint_path": str(checkpoint.resolve()),
+        }
+    )
+    manifest: dict[str, object] = {
         "manifest_path": str(manifest_path.resolve()),
         "manifest_sha256": "a" * 64,
         "controller_root": str(controller.resolve()),
+        "stages": stages,
+    }
+    exact_index = reconciliation.STAGE_ORDER.index(reconciliation.EXACT_STAGE)
+    stage_states = {
+        stage: (
+            "PASS"
+            if index < exact_index
+            else "BLOCKED"
+            if index == exact_index
+            else "PENDING"
+        )
+        for index, stage in enumerate(reconciliation.STAGE_ORDER)
     }
     state = {
         "schema_version": reconciliation.STATE_SCHEMA,
         "controller_id": reconciliation.CONTROLLER_ID,
         "controller_manifest_sha256": manifest["manifest_sha256"],
-        "status": "RUNNING",
-        "current_stage": None,
-        "stages": {stage: "PASS" for stage in reconciliation.STAGE_ORDER},
+        "status": "BLOCKED",
+        "current_stage": reconciliation.EXACT_STAGE,
+        "stages": stage_states,
         "controller_process": {"pid": 321, "start_ticks": 456},
-        "worker": None,
-        "startup_barrier": None,
+        "worker": {
+            "stage_id": reconciliation.EXACT_STAGE,
+            "pid": 654,
+            "start_ticks": 987,
+            "process_group_id": 654,
+        },
+        "startup_barrier": {"stage_id": reconciliation.EXACT_STAGE},
     }
     _json(controller / "state.json", state)
-    for index, stage in enumerate(reconciliation.STAGE_ORDER, start=1):
-        _json(controller / f"gates/{index:02d}_{stage}.json", {"gate_sha256": stage})
-    return manifest_path, controller, proc, manifest
+    snapshot = {
+        "path": str(checkpoint.resolve()),
+        "sha256_at_observation": _sha(checkpoint),
+        "progress_rows": 123,
+    }
+    adoption: dict[str, object] = {
+        "schema_version": reconciliation.EXACT_CHECKPOINT_ADOPTION_SCHEMA,
+        "controller_manifest_sha256": manifest["manifest_sha256"],
+        "stage_id": reconciliation.EXACT_STAGE,
+        "checkpoint_snapshot": snapshot,
+        "expected_progress_rows": 123,
+        "science_writer_absent": True,
+        "publication_sequence": [
+            "producer_os_replace",
+            "producer_parent_fsync",
+            "verifier_o_nofollow_open",
+            "verifier_fstat",
+            "verifier_fd_sha256",
+        ],
+        "signals_sent": [],
+        "verified_at": "2026-09-01T00:00:00+00:00",
+    }
+    adoption["receipt_sha256"] = reconciliation._stable_sha256(adoption)
+    adoption_path = controller / "gates/89_exact_checkpoint_adoption.json"
+    _json(adoption_path, adoption)
+    exact_evidence: dict[str, object] = {
+        "status": "PASS",
+        "path": str(exact_receipt.resolve()),
+        "sha256": _sha(exact_receipt),
+        "dbscan_manifest_path": str(dbscan.resolve()),
+        "dbscan_manifest_sha256": _sha(dbscan),
+        "proof_path": str((tmp_path / "science/proof.json").resolve()),
+        "proof_sha256": "b" * 64,
+        "linked_artifacts": {},
+    }
+    return (
+        manifest_path,
+        controller,
+        proc,
+        manifest,
+        exact_receipt,
+        adoption_path,
+        adoption,
+        exact_evidence,
+    )
 
 
-def test_missing_controller_terminal_requires_all_pass_and_quiescence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _patch_controller_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    manifest: dict[str, object],
+    adoption_path: Path,
+    adoption: dict[str, object],
+    exact_evidence: dict[str, object],
 ) -> None:
-    manifest_path, controller, proc, manifest = _controller_fixture(tmp_path)
-    monkeypatch.setattr(reconciliation, "load_bound_controller_manifest", lambda _path: manifest)
     monkeypatch.setattr(
-        reconciliation,
-        "open_typed_recovery_gate",
-        lambda _manifest, stage: {"gate_sha256": stage},
+        reconciliation, "load_bound_controller_manifest", lambda _path: manifest
     )
     monkeypatch.setattr(
         reconciliation,
-        "scan_live_writers",
+        "validate_exact_checkpoint_adoption_receipt",
         lambda *_args, **_kwargs: {
-            "procfs_verified": True,
-            "writable_fd_count": 0,
-            "writers": [],
-        },
-    )
-    result = reconciliation.validate_missing_controller_terminal(
-        manifest_path, proc_root=proc
-    )
-    assert result["all_typed_stages_pass"] is True
-    assert result["controller_terminal_present"] is False
-    assert result["controller_restart_performed"] is False
-
-    state_path = controller / "state.json"
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    state["stages"][reconciliation.STAGE_ORDER[-1]] = "RUNNING"
-    _json(state_path, state)
-    with pytest.raises(
-        reconciliation.AIDSComRecGCTerminalReconciliationError,
-        match="terminal-publication gap",
-    ):
-        reconciliation.validate_missing_controller_terminal(
-            manifest_path, proc_root=proc
-        )
-
-
-def test_missing_controller_terminal_accepts_final_publication_failure_after_all_gates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest_path, controller, proc, manifest = _controller_fixture(tmp_path)
-    state_path = controller / "state.json"
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    state.update(
-        {
-            "status": "BLOCKED",
-            "current_stage": reconciliation.STAGE_ORDER[-1],
-            "last_error": {
-                "error_class": "FileExistsError",
-                "message": "terminal publication interrupted",
-                "recorded_at": "2026-09-01T00:00:00+00:00",
+            "payload": adoption,
+            "artifact": {
+                "path": str(adoption_path.resolve()),
+                "content_sha256": _sha(adoption_path),
             },
-        }
-    )
-    state["stages"][reconciliation.STAGE_ORDER[-1]] = "BLOCKED"
-    _json(state_path, state)
-    monkeypatch.setattr(
-        reconciliation, "load_bound_controller_manifest", lambda _path: manifest
+        },
     )
     monkeypatch.setattr(
         reconciliation,
-        "open_typed_recovery_gate",
-        lambda _manifest, stage: {"gate_sha256": stage},
+        "_validate_exact_receipt",
+        lambda **_kwargs: dict(exact_evidence),
     )
     monkeypatch.setattr(
         reconciliation,
@@ -307,69 +378,177 @@ def test_missing_controller_terminal_accepts_final_publication_failure_after_all
             "writers": [],
         },
     )
-    result = reconciliation.validate_missing_controller_terminal(
-        manifest_path, proc_root=proc
-    )
-    assert result["all_typed_stages_pass"] is True
-    assert (
-        result["mutable_state_projection"]
-        == "FINAL_PUBLICATION_FAILURE_AFTER_TYPED_PASS"
-    )
 
 
-def test_missing_controller_terminal_rejects_pre_final_blocked_state(
+def test_historical_blocked_controller_binds_posthoc_exact_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest_path, controller, proc, manifest = _controller_fixture(tmp_path)
+    (
+        manifest_path,
+        _controller,
+        proc,
+        manifest,
+        exact_receipt,
+        adoption_path,
+        adoption,
+        exact_evidence,
+    ) = _controller_fixture(tmp_path)
+    _patch_controller_dependencies(
+        monkeypatch,
+        manifest=manifest,
+        adoption_path=adoption_path,
+        adoption=adoption,
+        exact_evidence=exact_evidence,
+    )
+    result = reconciliation.validate_historical_controller_exact_authority(
+        manifest_path,
+        exact_receipt_path=exact_receipt,
+        exact_adoption_gate_path=adoption_path,
+        proc_root=proc,
+    )
+    assert result["historical_state"] == "BLOCKED_EXACT_COMPONENT_RECOVERY"
+    assert result["stale_worker_projection_preserved"] is True
+    assert result["stale_startup_barrier_preserved"] is True
+    assert result["controller_process_alive"] is False
+    assert result["exact_worker_alive"] is False
+    assert result["science_writer_absent"] is True
+    assert result["old_state_modified"] is False
+
+
+def test_historical_exact_authority_rejects_relaxed_state_or_science_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (
+        manifest_path,
+        controller,
+        proc,
+        manifest,
+        exact_receipt,
+        adoption_path,
+        adoption,
+        exact_evidence,
+    ) = _controller_fixture(tmp_path)
+    _patch_controller_dependencies(
+        monkeypatch,
+        manifest=manifest,
+        adoption_path=adoption_path,
+        adoption=adoption,
+        exact_evidence=exact_evidence,
+    )
     state_path = controller / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    state.update(
-        {
-            "status": "BLOCKED",
-            "current_stage": reconciliation.STAGE_ORDER[-2],
-            "last_error": {"message": "science stage failed"},
-        }
-    )
-    state["stages"][reconciliation.STAGE_ORDER[-2]] = "BLOCKED"
+    state["status"] = "RUNNING"
     _json(state_path, state)
-    monkeypatch.setattr(
-        reconciliation, "load_bound_controller_manifest", lambda _path: manifest
-    )
     with pytest.raises(
         reconciliation.AIDSComRecGCTerminalReconciliationError,
-        match="terminal-publication gap",
+        match="historical BLOCKED-exact projection",
     ):
-        reconciliation.validate_missing_controller_terminal(
-            manifest_path, proc_root=proc
+        reconciliation.validate_historical_controller_exact_authority(
+            manifest_path,
+            exact_receipt_path=exact_receipt,
+            exact_adoption_gate_path=adoption_path,
+            proc_root=proc,
+        )
+
+    state["status"] = "BLOCKED"
+    _json(state_path, state)
+    monkeypatch.setattr(
+        reconciliation,
+        "_validate_exact_receipt",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("DBSCAN proof failed")),
+    )
+    with pytest.raises(ValueError, match="DBSCAN proof failed"):
+        reconciliation.validate_historical_controller_exact_authority(
+            manifest_path,
+            exact_receipt_path=exact_receipt,
+            exact_adoption_gate_path=adoption_path,
+            proc_root=proc,
         )
 
 
-def test_missing_controller_terminal_rejects_ordinary_terminal_and_held_lock(
+def test_historical_exact_authority_rejects_live_process_and_gate_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest_path, controller, proc, manifest = _controller_fixture(tmp_path)
-    monkeypatch.setattr(reconciliation, "load_bound_controller_manifest", lambda _path: manifest)
-    monkeypatch.setattr(
-        reconciliation,
-        "open_typed_recovery_gate",
-        lambda _manifest, stage: {"gate_sha256": stage},
+    (
+        manifest_path,
+        _controller,
+        proc,
+        manifest,
+        exact_receipt,
+        adoption_path,
+        adoption,
+        exact_evidence,
+    ) = _controller_fixture(tmp_path)
+    _patch_controller_dependencies(
+        monkeypatch,
+        manifest=manifest,
+        adoption_path=adoption_path,
+        adoption=adoption,
+        exact_evidence=exact_evidence,
     )
     monkeypatch.setattr(
         reconciliation,
-        "scan_live_writers",
-        lambda *_args, **_kwargs: {
-            "procfs_verified": True,
-            "writable_fd_count": 0,
-            "writers": [],
-        },
+        "_proc_start_ticks",
+        lambda _proc, pid: 456 if pid == 321 else None,
+    )
+    with pytest.raises(
+        reconciliation.AIDSComRecGCTerminalReconciliationError,
+        match="controller is still alive",
+    ):
+        reconciliation.validate_historical_controller_exact_authority(
+            manifest_path,
+            exact_receipt_path=exact_receipt,
+            exact_adoption_gate_path=adoption_path,
+            proc_root=proc,
+        )
+    monkeypatch.setattr(reconciliation, "_proc_start_ticks", lambda *_args: None)
+    adoption["science_writer_absent"] = False
+    adoption["receipt_sha256"] = reconciliation._stable_sha256(
+        {key: value for key, value in adoption.items() if key != "receipt_sha256"}
+    )
+    _json(adoption_path, adoption)
+    with pytest.raises(
+        reconciliation.AIDSComRecGCTerminalReconciliationError,
+        match="adoption contract changed",
+    ):
+        reconciliation.validate_historical_controller_exact_authority(
+            manifest_path,
+            exact_receipt_path=exact_receipt,
+            exact_adoption_gate_path=adoption_path,
+            proc_root=proc,
+        )
+
+
+def test_historical_exact_authority_rejects_ordinary_terminal_and_held_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (
+        manifest_path,
+        controller,
+        proc,
+        manifest,
+        exact_receipt,
+        adoption_path,
+        adoption,
+        exact_evidence,
+    ) = _controller_fixture(tmp_path)
+    _patch_controller_dependencies(
+        monkeypatch,
+        manifest=manifest,
+        adoption_path=adoption_path,
+        adoption=adoption,
+        exact_evidence=exact_evidence,
     )
     (controller / "terminal.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(
         reconciliation.AIDSComRecGCTerminalReconciliationError,
         match="ordinary AIDS controller terminal exists",
     ):
-        reconciliation.validate_missing_controller_terminal(
-            manifest_path, proc_root=proc
+        reconciliation.validate_historical_controller_exact_authority(
+            manifest_path,
+            exact_receipt_path=exact_receipt,
+            exact_adoption_gate_path=adoption_path,
+            proc_root=proc,
         )
     (controller / "terminal.json").unlink()
     with (controller / ".controller.lock").open("r+") as handle:
@@ -378,9 +557,159 @@ def test_missing_controller_terminal_rejects_ordinary_terminal_and_held_lock(
             reconciliation.AIDSComRecGCTerminalReconciliationError,
             match="lock is still held",
         ):
-            reconciliation.validate_missing_controller_terminal(
-                manifest_path, proc_root=proc
+            reconciliation.validate_historical_controller_exact_authority(
+                manifest_path,
+                exact_receipt_path=exact_receipt,
+                exact_adoption_gate_path=adoption_path,
+                proc_root=proc,
             )
+
+
+def _posthoc_source(
+    tmp_path: Path, controller: dict[str, object]
+) -> tuple[Path, dict[str, object]]:
+    root = _zero_source(tmp_path)
+    (root / "PASS").write_bytes(b"PASS\n")
+    source_generation = tmp_path / "generation"
+    source_generation.mkdir()
+    source_integrity = root / "source_integrity_final.json"
+    _json(source_integrity, {"status": "PASS"})
+    exact = controller["exact_receipt"]
+    adoption_path = (
+        root / "common_recourse/external_memory/dbscan_adoption/run_manifest.json"
+    )
+    adoption = {
+        "status": "PASS",
+        "run_complete": True,
+        "source_access": "read_only",
+        "source_mutated": False,
+        "dbscan_recomputed": False,
+        "pair_store_recomputed": False,
+        "sklearn_float64_semantics_preserved": True,
+        "exact_recovery_receipt_path": exact["path"],
+        "exact_recovery_receipt_sha256": exact["sha256"],
+        "source_manifest_path": exact["dbscan_manifest_path"],
+        "source_manifest_sha256": exact["dbscan_manifest_sha256"],
+    }
+    _json(adoption_path, adoption)
+    common_manifest = {
+        "external_memory_artifacts": {
+            "dbscan_adopted_read_only": True,
+            "dbscan_adoption_manifest": str(adoption_path.resolve()),
+            "dbscan_adoption_manifest_sha256": _sha(adoption_path),
+        }
+    }
+    _json(root / "common_recourse/run_manifest.json", common_manifest)
+    _json(root / "common_recourse/_RUN_COMPLETE.json", {"status": "PASS"})
+    identities = {
+        "oracle_hash": "a" * 64,
+        "molclr_checkpoint_hash": "b" * 64,
+        "dataset_hash": "c" * 64,
+    }
+    standardized = {
+        "root": str((root / "standardized").resolve()),
+        "source_evaluation_root": "/science/unified_eval",
+        "run_manifest_sha256": _sha(root / "standardized/run_manifest.json"),
+        "final_artifact_audit_sha256": _sha(
+            root / "standardized/final_artifact_audit.json"
+        ),
+        "freeze_manifest_sha256": _sha(
+            root / "standardized/freeze_manifest.json"
+        ),
+        "identities": identities,
+    }
+    continuation = {
+        "schema_version": 1,
+        "status": "PASS",
+        "run_complete": True,
+        "dataset": "aids",
+        "method": "COMRECGC",
+        "oracle_backend": "rf",
+        "classifier_family": "random_forest",
+        "rf_oracle_used": True,
+        "generation_adopted": True,
+        "generation_rerun": False,
+        "ordering_adopted": False,
+        "evaluation_adopted": False,
+        "cf_mode": "strict_flip",
+        "distance_line": "MolCLR-Node-Wasserstein",
+        "standardized_output_root": str((root / "standardized").resolve()),
+        "standardized_run_manifest_sha256": standardized[
+            "run_manifest_sha256"
+        ],
+        "freeze_manifest_sha256": standardized["freeze_manifest_sha256"],
+        "teacher_sha256": identities["oracle_hash"],
+        "molclr_checkpoint_sha256": identities["molclr_checkpoint_hash"],
+        "dataset_csv_sha256": identities["dataset_hash"],
+        "source_generation_root": str(source_generation.resolve()),
+        "source_integrity_final_sha256": _sha(source_integrity),
+    }
+    _json(root / "_RUN_COMPLETE.json", continuation)
+    outer = dict(continuation)
+    outer.pop("run_complete")
+    _json(root / "run_manifest.json", outer)
+    _json(root / "final_gate.json", outer)
+    return root, standardized
+
+
+def test_posthoc_final_self_closure_binds_exact_receipt_without_stage_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller = {
+        "controller_manifest_path": "/control/controller.manifest.json",
+        "controller_manifest_sha256": "1" * 64,
+        "posthoc_exact_adoption_path": "/control/adoption.json",
+        "posthoc_exact_adoption_sha256": "2" * 64,
+        "checkpoint_path": "/science/checkpoint.json",
+        "checkpoint_sha256": "3" * 64,
+        "exact_receipt": {
+            "status": "PASS",
+            "path": "/science/exact_recovery_receipt.json",
+            "sha256": "4" * 64,
+            "dbscan_manifest_path": "/science/dbscan/run_manifest.json",
+            "dbscan_manifest_sha256": "5" * 64,
+        },
+    }
+    root, standardized = _posthoc_source(tmp_path, controller)
+    monkeypatch.setattr(
+        reconciliation, "_validate_common_recourse_completion", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        matrix, "_validate_aids_standardized", lambda _root: dict(standardized)
+    )
+    monkeypatch.setattr(
+        matrix,
+        "_writer_audit",
+        lambda *_args, **_kwargs: {
+            "procfs_verified": True,
+            "writable_fd_count": 0,
+            "writers": [],
+        },
+    )
+    result = reconciliation.validate_reconciled_final_science(
+        root, controller_evidence=controller, proc_root=tmp_path
+    )
+    assert result["terminal_kind"] == "AIDS_POSTHOC_SELF_CLOSED_SCIENCE_FINAL"
+    assert result["exact_receipt_sha256"] == "4" * 64
+    assert result["zero_strict_flip_evidence"]["scientific_output_empty"] is True
+
+    adoption_path = Path(result["dbscan_adoption_manifest_path"])
+    adoption = json.loads(adoption_path.read_text(encoding="utf-8"))
+    adoption["exact_recovery_receipt_sha256"] = "0" * 64
+    _json(adoption_path, adoption)
+    common_path = root / "common_recourse/run_manifest.json"
+    common = json.loads(common_path.read_text(encoding="utf-8"))
+    common["external_memory_artifacts"][
+        "dbscan_adoption_manifest_sha256"
+    ] = _sha(adoption_path)
+    _json(common_path, common)
+    with pytest.raises(
+        reconciliation.AIDSComRecGCTerminalReconciliationError,
+        match="final/exact receipt binding changed",
+    ):
+        reconciliation.validate_reconciled_final_science(
+            root, controller_evidence=controller, proc_root=tmp_path
+        )
 
 
 def test_fresh_wrapper_is_hash_closed_and_detects_source_drift(
@@ -390,30 +719,53 @@ def test_fresh_wrapper_is_hash_closed_and_detects_source_drift(
     zero = reconciliation.validate_zero_strict_flip_science(source)
     controller_root = tmp_path / "controller"
     controller_root.mkdir()
+    exact_science_root = tmp_path / "exact-science"
+    exact_science_root.mkdir()
     controller = {
         "status": "PASS",
         "controller_manifest_path": "/control/controller.manifest.json",
         "controller_manifest_sha256": "1" * 64,
         "controller_root": str(controller_root.resolve()),
+        "exact_science_root": str(exact_science_root.resolve()),
+        "historical_state": "BLOCKED_EXACT_COMPONENT_RECOVERY",
+        "stale_worker_projection_preserved": True,
+        "stale_startup_barrier_preserved": True,
         "controller_terminal_present": False,
         "controller_pass_marker_present": False,
         "controller_process_alive": False,
+        "exact_worker_alive": False,
+        "exact_process_group_alive": False,
         "controller_lock_held": False,
-        "all_typed_stages_pass": True,
-        "typed_stage_gates": {
-            stage: {"sha256": stage} for stage in reconciliation.STAGE_ORDER
+        "science_writer_absent": True,
+        "old_state_modified": False,
+        "posthoc_exact_adoption_path": "/control/adoption.json",
+        "posthoc_exact_adoption_sha256": "2" * 64,
+        "checkpoint_path": "/science/checkpoint.json",
+        "checkpoint_sha256": "3" * 64,
+        "exact_receipt": {
+            "status": "PASS",
+            "path": "/science/exact.json",
+            "sha256": "4" * 64,
+            "dbscan_manifest_path": "/science/dbscan.json",
+            "dbscan_manifest_sha256": "5" * 64,
         },
         "controller_restart_performed": False,
     }
+    science = _science_evidence(source, controller)
     monkeypatch.setattr(
         reconciliation,
-        "validate_missing_controller_terminal",
+        "validate_historical_controller_exact_authority",
         lambda *_args, **_kwargs: dict(controller),
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "validate_reconciled_final_science",
+        lambda root, **_kwargs: _science_evidence(Path(root), controller),
     )
     wrapper = tmp_path / "wrapper"
     receipt = reconciliation.publish_reconciliation(
         output_root=wrapper,
-        science_projection=_science_projection(source),
+        science_projection=reconciliation.science_terminal_projection(science),
         controller_evidence=controller,
         zero_evidence=zero,
         proc_root=tmp_path,
@@ -426,7 +778,18 @@ def test_fresh_wrapper_is_hash_closed_and_detects_source_drift(
     ):
         reconciliation.publish_reconciliation(
             output_root=controller_root / "forbidden-wrapper",
-            science_projection=_science_projection(source),
+            science_projection=reconciliation.science_terminal_projection(science),
+            controller_evidence=controller,
+            zero_evidence=zero,
+            proc_root=tmp_path,
+        )
+    with pytest.raises(
+        reconciliation.AIDSComRecGCTerminalReconciliationError,
+        match="overlaps the read-only exact science root",
+    ):
+        reconciliation.publish_reconciliation(
+            output_root=exact_science_root / "forbidden-wrapper",
+            science_projection=reconciliation.science_terminal_projection(science),
             controller_evidence=controller,
             zero_evidence=zero,
             proc_root=tmp_path,
@@ -435,7 +798,7 @@ def test_fresh_wrapper_is_hash_closed_and_detects_source_drift(
     figure.write_text(figure.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with pytest.raises(
         reconciliation.AIDSComRecGCTerminalReconciliationError,
-        match="evidence changed",
+        match="projection changed|evidence changed",
     ):
         reconciliation.validate_reconciliation_root(wrapper, proc_root=tmp_path)
 
@@ -460,16 +823,31 @@ def test_matrix_dispatch_accepts_only_matching_reconciliation_projection(
     receipt = {
         "source_science_root": str(source.resolve()),
         "controller_terminal_reconciliation": {
-            "controller_manifest_path": str(controller_manifest.resolve())
+            "controller_manifest_path": str(controller_manifest.resolve()),
+            "posthoc_exact_adoption_path": "/control/adoption.json",
+            "exact_receipt": {"path": "/science/exact.json"},
         },
         "science_terminal_projection": projection,
         "reconciliation_sha256": "f" * 64,
     }
     monkeypatch.setattr(matrix, "validate_aids_reconciliation_root", lambda *_a, **_k: receipt)
     monkeypatch.setattr(
-        matrix, "validate_aids_missing_controller_terminal", lambda *_a, **_k: receipt["controller_terminal_reconciliation"]
+        matrix,
+        "validate_aids_historical",
+        lambda *_a, **_k: receipt["controller_terminal_reconciliation"],
     )
-    monkeypatch.setattr(matrix, "_validate_aids_science_terminal", lambda *_a, **_k: dict(science))
+    monkeypatch.setattr(
+        matrix,
+        "validate_aids_reconciled_final_science",
+        lambda *_a, **_k: dict(science),
+    )
+    monkeypatch.setattr(
+        matrix,
+        "_validate_aids_science_terminal",
+        lambda *_a, **_k: pytest.fail(
+            "historical BLOCKED reconciliation must not use controller stage gates"
+        ),
+    )
     monkeypatch.setattr(matrix, "aids_science_terminal_projection", lambda _value: projection)
     monkeypatch.setattr(matrix, "_critical_inventory", lambda *_a, **_k: {})
     result = matrix._validate_aids_terminal(
@@ -543,6 +921,10 @@ def test_cli_and_slurm_keep_publication_on_shared_pointer() -> None:
             "publish",
             "--controller-manifest",
             "/control/controller.json",
+            "--exact-receipt",
+            "/science/exact_recovery_receipt.json",
+            "--exact-adoption-gate",
+            "/control/gates/89_exact_checkpoint_adoption.json",
             "--reconciliation-root",
             "/runtime/reconciliation",
             "--matrix-output-root",
@@ -566,5 +948,6 @@ def test_cli_and_slurm_keep_publication_on_shared_pointer() -> None:
         "export PYTHONPATH=$PWD",
         "--config configs/hpc.yaml",
         "--set inference.fallback_to_heuristic=false",
+        "--controller-manifest,--exact-receipt,--exact-adoption-gate",
     ):
         assert token in script

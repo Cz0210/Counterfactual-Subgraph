@@ -3502,9 +3502,17 @@ Mutagenicity roadmaps.
 ## 2026-09-01: AIDS completed-science terminal/publication reconciliation
 
 - [x] Keep the completed AIDS science and failed outer-controller roots
-  read-only; require all typed recovery stage gates PASS and full quiescence.
-- [x] Reopen the exact/final receipts, continuation/common terminals,
-  standardized freeze, Figure 3/4 and Table 2 from the original source.
+  read-only; preserve the historical `BLOCKED/exact_component_recovery` state,
+  stale worker projection, and stale startup barrier without rewriting them.
+- [x] Prove the historical controller, exact worker/process group, controller
+  lock, and source writers are quiescent; reject an ordinary controller terminal.
+- [x] Bind the posthoc exact-checkpoint adoption receipt to its controller
+  manifest and checkpoint SHA, then fully reopen the exact PASS receipt and
+  proven DBSCAN partition.
+- [x] Validate the separately completed final root by its own PASS-last marker,
+  continuation/common closure, read-only exact-DBSCAN adoption, RF/split/MolCLR
+  identities, standardized freeze, Figure 3/4, and Table 2.  Do not route this
+  historical case through controller final-stage gates that were never written.
 - [x] Preserve the legitimate zero-strict-flip result as zero coverage with
   unavailable conditional cost; prohibit candidate or numeric imputation.
 - [x] Publish a fresh hash-closed wrapper and route its one-cell append through

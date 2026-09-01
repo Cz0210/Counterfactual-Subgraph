@@ -15826,3 +15826,46 @@ force.  Calibration and test remain absent from the stop decision.
 ### Status
 
 Accepted; remote formal-receipt publication remains to be verified.
+
+---
+
+## [2026-09-01] Reconstruct the AIDS terminal from posthoc exact authority
+
+### Motivation
+
+The completed AIDS ComRecGC final root is scientifically closed, but its
+historical recovery controller did not advance beyond the persisted
+`BLOCKED/exact_component_recovery` projection.  Its worker and startup-barrier
+fields are stale even though the controller and worker are dead.  Consequently,
+requiring all controller stages or a controller final-stage gate would reject
+real completed science and would invite an impermissible rewrite of history.
+
+### Decision
+
+Leave both historical roots read-only.  A fresh reconciliation wrapper may be
+published only after independently proving controller/worker/process-group and
+writer quiescence, reopening the posthoc checkpoint-adoption receipt that binds
+the controller manifest and checkpoint SHA, and fully reopening the exact PASS
+receipt and proven DBSCAN partition.  Validate the separately completed final
+root from its own PASS-last marker, continuation/common closure, read-only exact
+DBSCAN adoption, RF oracle, split and MolCLR identities, freeze/audit hashes,
+and standardized exports.  This historical path must not call the ordinary
+controller-final validator or mutate the old state.
+
+The legitimate absence of strict flips remains a zero-coverage scientific
+result with unavailable conditional cost.  No rule, candidate, cost, or other
+numeric value may be fabricated.  Publication still goes through the existing
+unique `fast16_matrix_authority` pointer and lock.
+
+### Consequences
+
+- A stale historical `BLOCKED` projection is recorded truthfully rather than
+  promoted to an invented controller PASS.
+- A live/reused process, held lock, changed checkpoint, invalid exact receipt,
+  DBSCAN drift, RF/split/test-leakage mismatch, or final-root drift fails closed.
+- The source science and old controller remain unchanged; only a fresh,
+  hash-closed terminal wrapper and the normal authority append are written.
+
+### Status
+
+Accepted; AutoDL reconciliation and authority publication remain to be run.

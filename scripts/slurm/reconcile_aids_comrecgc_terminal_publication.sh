@@ -21,6 +21,8 @@ python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "route=aids_completed_science_terminal_publication_reconciliation"
 echo "source_science_mutated=false"
+echo "historical_controller_state_mutated=false"
+echo "required_authority_args=--controller-manifest,--exact-receipt,--exact-adoption-gate"
 exec python scripts/autodl/reconcile_aids_comrecgc_terminal_publication.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \

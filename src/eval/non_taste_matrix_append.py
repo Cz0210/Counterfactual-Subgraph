@@ -41,7 +41,8 @@ from src.eval.am_legacy_standardization import scan_live_writers
 from src.eval.aids_comrecgc_terminal_reconciliation import (
     RECONCILIATION_SCHEMA as AIDS_RECONCILIATION_SCHEMA,
     science_terminal_projection as aids_science_terminal_projection,
-    validate_missing_controller_terminal as validate_aids_missing_controller_terminal,
+    validate_historical_controller_exact_authority as validate_aids_historical,
+    validate_reconciled_final_science as validate_aids_reconciled_final_science,
     validate_reconciliation_root as validate_aids_reconciliation_root,
 )
 from src.eval.bace_frozen_cell_standardization import (
@@ -849,19 +850,28 @@ def _validate_aids_terminal(
             raise NonTasteMatrixAppendError(
                 "AIDS reconciliation/controller manifest identity changed"
             )
-        reopened_controller = validate_aids_missing_controller_terminal(
-            controller_manifest_path, proc_root=proc_root
+        exact = controller.get("exact_receipt")
+        if not isinstance(exact, Mapping):
+            raise NonTasteMatrixAppendError(
+                "AIDS reconciliation exact-receipt evidence is absent"
+            )
+        reopened_controller = validate_aids_historical(
+            controller_manifest_path,
+            exact_receipt_path=exact.get("path", ""),
+            exact_adoption_gate_path=controller.get(
+                "posthoc_exact_adoption_path", ""
+            ),
+            proc_root=proc_root,
         )
         if reopened_controller != controller:
             raise NonTasteMatrixAppendError(
-                "AIDS missing-controller terminal evidence changed"
+                "AIDS historical-controller exact authority changed"
             )
-        science = _validate_aids_science_terminal(
+        science = validate_aids_reconciled_final_science(
             receipt["source_science_root"],
-            controller_manifest_path=controller_manifest_path,
+            controller_evidence=reopened_controller,
             proc_root=proc_root,
             require_writer_audit=require_writer_audit,
-            require_controller_terminal=False,
         )
         if aids_science_terminal_projection(science) != receipt.get(
             "science_terminal_projection"

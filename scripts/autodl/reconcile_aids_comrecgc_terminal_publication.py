@@ -17,9 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.eval.aids_comrecgc_terminal_reconciliation import (  # noqa: E402
     publish_reconciliation,
     science_terminal_projection,
-    validate_missing_controller_terminal,
+    validate_historical_controller_exact_authority,
+    validate_reconciled_final_science,
     validate_reconciliation_root,
-    validate_zero_strict_flip_science,
 )
 from src.eval.fast16_matrix_authority_pointer import (  # noqa: E402
     DEFAULT_LOCK_PATH,
@@ -27,7 +27,6 @@ from src.eval.fast16_matrix_authority_pointer import (  # noqa: E402
     append_under_authority_pointer,
 )
 from src.eval.non_taste_matrix_append import (  # noqa: E402
-    _validate_aids_science_terminal,
     append_non_taste_matrix_cell,
 )
 
@@ -41,6 +40,8 @@ def _absolute(value: str) -> Path:
 
 def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--controller-manifest", type=_absolute, required=True)
+    parser.add_argument("--exact-receipt", type=_absolute, required=True)
+    parser.add_argument("--exact-adoption-gate", type=_absolute, required=True)
     parser.add_argument("--proc-root", type=_absolute, default=Path("/proc"))
 
 
@@ -74,22 +75,23 @@ def _check_cli(args: argparse.Namespace) -> None:
 
 
 def _reconcile(args: argparse.Namespace) -> dict[str, object]:
-    controller = validate_missing_controller_terminal(
-        args.controller_manifest, proc_root=args.proc_root
+    controller = validate_historical_controller_exact_authority(
+        args.controller_manifest,
+        exact_receipt_path=args.exact_receipt,
+        exact_adoption_gate_path=args.exact_adoption_gate,
+        proc_root=args.proc_root,
     )
-    science = _validate_aids_science_terminal(
+    science = validate_reconciled_final_science(
         args.source_science_root,
-        controller_manifest_path=args.controller_manifest,
+        controller_evidence=controller,
         proc_root=args.proc_root,
         require_writer_audit=True,
-        require_controller_terminal=False,
     )
-    zero = validate_zero_strict_flip_science(args.source_science_root)
     receipt = publish_reconciliation(
         output_root=args.output_root,
         science_projection=science_terminal_projection(science),
         controller_evidence=controller,
-        zero_evidence=zero,
+        zero_evidence=science["zero_strict_flip_evidence"],
         proc_root=args.proc_root,
     )
     print("[AIDS_COMRECGC_ZERO_STRICT_FLIP_TERMINAL_RECONCILIATION_PASS]", flush=True)
@@ -104,8 +106,24 @@ def _verify(args: argparse.Namespace) -> dict[str, object]:
         Path(str(receipt["controller_terminal_reconciliation"]["controller_manifest_path"]))
         .resolve(strict=True)
         != args.controller_manifest.resolve(strict=True)
+        or Path(
+            str(
+                receipt["controller_terminal_reconciliation"]["exact_receipt"][
+                    "path"
+                ]
+            )
+        ).resolve(strict=True)
+        != args.exact_receipt.resolve(strict=True)
+        or Path(
+            str(
+                receipt["controller_terminal_reconciliation"][
+                    "posthoc_exact_adoption_path"
+                ]
+            )
+        ).resolve(strict=True)
+        != args.exact_adoption_gate.resolve(strict=True)
     ):
-        raise ValueError("reconciliation/controller manifest identity changed")
+        raise ValueError("reconciliation/controller exact-authority identity changed")
     print("[AIDS_COMRECGC_ZERO_STRICT_FLIP_TERMINAL_RECONCILIATION_PASS]", flush=True)
     return receipt
 
