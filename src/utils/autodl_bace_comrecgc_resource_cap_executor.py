@@ -768,6 +768,202 @@ def materialize_resource_cap_checkpoint(
     return manifest
 
 
+def _write_post20k_exclusion_receipts(
+    *,
+    state_root: Path,
+    source_generation_root: str | Path,
+    checkpoint: Any,
+    materialized_manifest: Mapping[str, Any],
+    resource_cap_receipt: Mapping[str, Any],
+) -> tuple[Path, Path]:
+    """Bind the adopted 20k universe while preserving later uncommitted files."""
+
+    configured_max = resource_cap_receipt.get("M_configured_max")
+    effective_step = resource_cap_receipt.get("M_effective")
+    valid_unique = resource_cap_receipt.get("valid_unique_count")
+    lineage_errors = resource_cap_receipt.get("lineage_error_count")
+    if (
+        type(checkpoint.completed_step) is not int
+        or checkpoint.completed_step != 20_000
+        or type(configured_max) is not int
+        or configured_max != 20_000
+        or type(effective_step) is not int
+        or effective_step != 20_000
+        or resource_cap_receipt.get("stop_reason") != "RESOURCE_CAP_20000"
+        or type(valid_unique) is not int
+        or valid_unique < 10
+        or type(lineage_errors) is not int
+        or lineage_errors != 0
+        or materialized_manifest.get("M_configured_max") != 20_000
+        or materialized_manifest.get("M_effective") != 20_000
+        or materialized_manifest.get("stop_reason") != "RESOURCE_CAP_20000"
+        or materialized_manifest.get("resource_cap_used") is not True
+        or materialized_manifest.get("early_stop_used") is not False
+        or materialized_manifest.get("algorithm_rerun") is not False
+    ):
+        raise BaceComRecGCResourceCapExecutorError(
+            "20k exclusion receipt requires the exact clean committed-20k handover"
+        )
+    source = _absolute(
+        source_generation_root,
+        label="science output root",
+        existing=True,
+        directory=True,
+    )
+    handover_receipt_path = _absolute(
+        state_root / "resource_cap_receipt.json",
+        label="20k handover resource-cap receipt",
+        existing=True,
+        directory=False,
+    )
+    handover_receipt = _object(
+        handover_receipt_path,
+        label="20k handover resource-cap receipt",
+    )
+    if handover_receipt != dict(resource_cap_receipt):
+        raise BaceComRecGCResourceCapExecutorError(
+            "20k handover resource-cap receipt changed before formal closure"
+        )
+    signal_receipt_path = _absolute(
+        state_root / "signal_receipt.json",
+        label="20k handover signal receipt",
+        existing=True,
+        directory=False,
+    )
+    signal_receipt = _object(
+        signal_receipt_path,
+        label="20k handover signal receipt",
+    )
+    process_before = resource_cap_receipt.get("process_before_signal")
+    if (
+        not isinstance(process_before, Mapping)
+        or signal_receipt.get("signal") != "SIGTERM"
+        or signal_receipt.get("signal_number") != int(signal.SIGTERM)
+        or signal_receipt.get("exited_within_wait") is not True
+        or signal_receipt.get("sigkill_used") is not False
+        or signal_receipt.get("exact_pid") != process_before.get("pid")
+        or signal_receipt.get("exact_start_ticks")
+        != process_before.get("start_ticks")
+    ):
+        raise BaceComRecGCResourceCapExecutorError(
+            "20k handover signal receipt does not prove exact graceful exit"
+        )
+    checkpoint_manifest = checkpoint.validation.manifest
+    checkpoint_manifest_path = _absolute(
+        checkpoint.validation.checkpoint_dir / "checkpoint_manifest.json",
+        label="20k checkpoint manifest",
+        existing=True,
+        directory=False,
+    )
+    if _object(checkpoint_manifest_path, label="20k checkpoint manifest") != dict(
+        checkpoint_manifest
+    ):
+        raise BaceComRecGCResourceCapExecutorError(
+            "20k checkpoint manifest changed after checkpoint reload"
+        )
+    files = checkpoint_manifest.get("files")
+    generation_state = (
+        files.get("generation_state.pt") if isinstance(files, Mapping) else None
+    )
+    rng_container_sha = (
+        generation_state.get("sha256")
+        if isinstance(generation_state, Mapping)
+        else None
+    )
+    generation_state_path = _absolute(
+        checkpoint.validation.checkpoint_dir / "generation_state.pt",
+        label="committed 20k generation state",
+        existing=True,
+        directory=False,
+    )
+    candidate_universe_sha = materialized_manifest.get("counterfactuals_sha256")
+    if (
+        SHA256_RE.fullmatch(str(rng_container_sha or "")) is None
+        or SHA256_RE.fullmatch(str(candidate_universe_sha or "")) is None
+    ):
+        raise BaceComRecGCResourceCapExecutorError(
+            "20k exclusion receipt lacks checkpoint RNG or candidate-universe SHA256"
+        )
+    if sha256_file(generation_state_path) != rng_container_sha:
+        raise BaceComRecGCResourceCapExecutorError(
+            "committed 20k generation-state bytes changed after checkpoint reload"
+        )
+    candidate_path = _absolute(
+        str(materialized_manifest.get("counterfactuals_path") or ""),
+        label="materialized official 20k candidate universe",
+        existing=True,
+        directory=False,
+    )
+    if sha256_file(candidate_path) != candidate_universe_sha:
+        raise BaceComRecGCResourceCapExecutorError(
+            "materialized official 20k candidate-universe SHA256 changed"
+        )
+    progress_path = source / "progress.json"
+    progress_sha = (
+        sha256_file(progress_path)
+        if progress_path.is_file() and not progress_path.is_symlink()
+        else None
+    )
+    common = {
+        "M_CONFIGURED_MAX": int(resource_cap_receipt["M_configured_max"]),
+        "M_EFFECTIVE": int(resource_cap_receipt["M_effective"]),
+        "checkpoint_dir": str(checkpoint.validation.checkpoint_dir),
+        "checkpoint_SHA": str(checkpoint.validation.checkpoint_digest),
+        "checkpoint_manifest_SHA256": sha256_file(checkpoint_manifest_path),
+        "RNG_state_SHA": str(rng_container_sha),
+        "RNG_state_SHA_scope": (
+            "committed generation_state.pt container containing the exact "
+            "python/numpy/torch_cpu/torch_cuda RNG state"
+        ),
+        "candidate_universe_SHA": str(candidate_universe_sha),
+        "candidate_universe_SHA_scope": "materialized official 20k counterfactuals.pt",
+        "valid_unique_rules": int(resource_cap_receipt["valid_unique_count"]),
+        "lineage_errors": int(resource_cap_receipt["lineage_error_count"]),
+        "stop_reason": "RESOURCE_CAP_20000",
+        "post_20k_uncommitted_outputs_excluded": True,
+        "post_20k_uncommitted_outputs_preserved": True,
+        "handover_resource_cap_receipt": str(handover_receipt_path),
+        "handover_resource_cap_receipt_SHA256": sha256_file(
+            handover_receipt_path
+        ),
+        "handover_signal_receipt": str(signal_receipt_path),
+        "handover_signal_receipt_SHA256": sha256_file(signal_receipt_path),
+        "handover_exact_pid": int(signal_receipt["exact_pid"]),
+        "handover_exact_start_ticks": int(signal_receipt["exact_start_ticks"]),
+        "handover_graceful_exit": True,
+        "sigkill_used": False,
+        "source_generation_root": str(source),
+        "source_progress_present_after_signal": progress_sha is not None,
+        "source_progress_path": str(progress_path) if progress_sha else None,
+        "source_progress_SHA256_after_signal": progress_sha,
+        "formal_generation_root": str(candidate_path.parent),
+        "scientific_result_adopted_through_step": 20_000,
+        "later_partial_rows_adopted": False,
+        "later_temporary_outputs_deleted": False,
+        "created_at": utc_now(),
+    }
+    cap_path = state_root / "bace_comrecgc_20k_resource_cap_receipt.json"
+    excluded_path = state_root / "excluded_after_20k.json"
+    for path in (cap_path, excluded_path):
+        if path.exists() or path.is_symlink():
+            raise FileExistsError(f"refusing to replace existing receipt: {path}")
+    _atomic_json_new(
+        cap_path,
+        {
+            **common,
+            "schema_version": "bace_comrecgc_20k_resource_cap_receipt_v1",
+        },
+    )
+    _atomic_json_new(
+        excluded_path,
+        {
+            **common,
+            "schema_version": "bace_comrecgc_excluded_after_20k_v1",
+        },
+    )
+    return cap_path, excluded_path
+
+
 def build_postprocess_fragment(
     *,
     python: str | Path,
@@ -1064,6 +1260,27 @@ class ResourceCapExecutor:
             resource_cap_receipt=receipt,
             loaded_checkpoint=checkpoint,
         )
+        formal_receipt_state: dict[str, Any] = {}
+        materialized_at_20k = manifest.get("M_effective") == 20_000
+        receipt_is_20k_cap = receipt.get("stop_reason") == "RESOURCE_CAP_20000"
+        if materialized_at_20k != receipt_is_20k_cap:
+            raise BaceComRecGCResourceCapExecutorError(
+                "materialized generation and formal 20k receipt policy disagree"
+            )
+        if materialized_at_20k:
+            cap_receipt_path, exclusion_path = _write_post20k_exclusion_receipts(
+                state_root=self.state_root,
+                source_generation_root=self.inputs.process.output_root,
+                checkpoint=checkpoint,
+                materialized_manifest=manifest,
+                resource_cap_receipt=receipt,
+            )
+            formal_receipt_state = {
+                "formal_resource_cap_receipt": str(cap_receipt_path),
+                "formal_resource_cap_receipt_sha256": sha256_file(cap_receipt_path),
+                "excluded_after_20k": str(exclusion_path),
+                "excluded_after_20k_sha256": sha256_file(exclusion_path),
+            }
         postprocess = build_postprocess_fragment(
             python=self.inputs.python,
             project_root=self.inputs.project_root,
@@ -1089,6 +1306,7 @@ class ResourceCapExecutor:
                 generation_root / "run_manifest.json"
             ),
             M_effective=manifest["M_effective"],
+            **formal_receipt_state,
             postprocess_fragment=str(fragment_path),
             postprocess_fragment_sha256=sha256_file(fragment_path),
         )

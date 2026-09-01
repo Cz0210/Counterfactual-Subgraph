@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from dataclasses import replace
 
 import pytest
 
@@ -293,14 +293,30 @@ def test_cap_executor_uses_only_exact_sigterm_and_persists_postprocess_queue(
 ) -> None:
     request = tmp_path / "request.json"
     request.write_text(json.dumps(_eligible_request()), encoding="utf-8")
+    checkpoint_dir = tmp_path / "step-000000020000"
+    checkpoint_dir.mkdir()
+    generation_state = checkpoint_dir / "generation_state.pt"
+    generation_state.write_bytes(b"committed-20k-rng-and-science-state")
+    generation_state_sha = sha256_file(generation_state)
+    checkpoint_manifest = {
+        "files": {"generation_state.pt": {"sha256": generation_state_sha}}
+    }
+    (checkpoint_dir / "checkpoint_manifest.json").write_text(
+        json.dumps(checkpoint_manifest), encoding="utf-8"
+    )
     checkpoint = SimpleNamespace(
         validation=SimpleNamespace(
-            checkpoint_dir=tmp_path / "step-000000020000",
+            checkpoint_dir=checkpoint_dir,
             checkpoint_digest="a" * 64,
+            manifest=checkpoint_manifest,
         ),
         completed_step=20_000,
     )
-    monkeypatch.setattr(executor, "load_generation_checkpoint", lambda *_a, **_k: checkpoint)
+    monkeypatch.setattr(
+        executor,
+        "load_generation_checkpoint",
+        lambda *_a, **_k: checkpoint,
+    )
     monkeypatch.setattr(
         executor,
         "verify_exact_process",
@@ -318,10 +334,26 @@ def test_cap_executor_uses_only_exact_sigterm_and_persists_postprocess_queue(
         root = Path(str(kwargs["output_dir"]))
         root.mkdir(parents=True)
         (root / "run_manifest.json").write_text("{}\n", encoding="utf-8")
-        return {"M_effective": 20_000}
+        candidate_path = root / "counterfactuals.pt"
+        candidate_path.write_bytes(b"candidate-universe")
+        candidate_sha = sha256_file(candidate_path)
+        return {
+            "M_configured_max": 20_000,
+            "M_effective": 20_000,
+            "stop_reason": "RESOURCE_CAP_20000",
+            "resource_cap_used": True,
+            "early_stop_used": False,
+            "algorithm_rerun": False,
+            "counterfactuals_path": str(candidate_path),
+            "counterfactuals_sha256": candidate_sha,
+        }
 
     monkeypatch.setattr(executor, "materialize_resource_cap_checkpoint", materialize)
-    monkeypatch.setattr(executor, "build_postprocess_fragment", lambda **_kwargs: {"tasks": []})
+    monkeypatch.setattr(
+        executor,
+        "build_postprocess_fragment",
+        lambda **_kwargs: {"tasks": []},
+    )
     output = tmp_path / "cap"
     contract = executor.ProcessContract(
         pid=123,
@@ -361,7 +393,159 @@ def test_cap_executor_uses_only_exact_sigterm_and_persists_postprocess_queue(
     assert state["signals_sent"] == ["SIGTERM"]
     assert state["sigkill_used"] is False
     assert (output / "executor/resource_cap_receipt.json").is_file()
+    formal = json.loads(
+        (output / "executor/bace_comrecgc_20k_resource_cap_receipt.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    excluded = json.loads(
+        (output / "executor/excluded_after_20k.json").read_text(encoding="utf-8")
+    )
+    assert formal["schema_version"] == "bace_comrecgc_20k_resource_cap_receipt_v1"
+    assert excluded["schema_version"] == "bace_comrecgc_excluded_after_20k_v1"
+    assert formal["RNG_state_SHA"] == generation_state_sha
+    assert formal["candidate_universe_SHA"] == sha256_file(
+        output / "train_generation/counterfactuals.pt"
+    )
+    assert formal["post_20k_uncommitted_outputs_excluded"] is True
+    assert formal["scientific_result_adopted_through_step"] == 20_000
+    assert formal["handover_graceful_exit"] is True
+    assert formal["handover_exact_pid"] == 123
+    assert formal["handover_exact_start_ticks"] == 456
+    assert formal["sigkill_used"] is False
+    assert excluded["later_partial_rows_adopted"] is False
+    assert excluded["later_temporary_outputs_deleted"] is False
+    assert sha256_file(
+        output / "executor/bace_comrecgc_20k_resource_cap_receipt.json"
+    ) == state["formal_resource_cap_receipt_sha256"]
+    assert sha256_file(output / "executor/excluded_after_20k.json") == state[
+        "excluded_after_20k_sha256"
+    ]
     assert (output / "executor/postprocess.tasks.json").is_file()
+
+
+def _post20k_receipt_kwargs(tmp_path: Path) -> dict[str, object]:
+    checkpoint_dir = tmp_path / "step-000000020000"
+    checkpoint_dir.mkdir()
+    generation_state = checkpoint_dir / "generation_state.pt"
+    generation_state.write_bytes(b"committed-state")
+    checkpoint_manifest = {
+        "files": {
+            "generation_state.pt": {"sha256": sha256_file(generation_state)}
+        }
+    }
+    (checkpoint_dir / "checkpoint_manifest.json").write_text(
+        json.dumps(checkpoint_manifest), encoding="utf-8"
+    )
+    source = tmp_path / "source-generation"
+    source.mkdir()
+    candidate_root = tmp_path / "formal-generation"
+    candidate_root.mkdir()
+    candidate = candidate_root / "counterfactuals.pt"
+    candidate.write_bytes(b"formal-20k-candidates")
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    resource_cap_receipt = {
+        **_eligible_request(),
+        "M_configured_max": 20_000,
+        "M_effective": 20_000,
+        "stop_reason": "RESOURCE_CAP_20000",
+        "process_before_signal": {"pid": 123, "start_ticks": 456},
+    }
+    (state_root / "resource_cap_receipt.json").write_text(
+        json.dumps(resource_cap_receipt), encoding="utf-8"
+    )
+    (state_root / "signal_receipt.json").write_text(
+        json.dumps(
+            {
+                "signal": "SIGTERM",
+                "signal_number": 15,
+                "exact_pid": 123,
+                "exact_start_ticks": 456,
+                "exited_within_wait": True,
+                "sigkill_used": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint = SimpleNamespace(
+        completed_step=20_000,
+        validation=SimpleNamespace(
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_digest="a" * 64,
+            manifest=checkpoint_manifest,
+        ),
+    )
+    return {
+        "state_root": state_root,
+        "source_generation_root": source,
+        "checkpoint": checkpoint,
+        "materialized_manifest": {
+            "M_configured_max": 20_000,
+            "M_effective": 20_000,
+            "stop_reason": "RESOURCE_CAP_20000",
+            "resource_cap_used": True,
+            "early_stop_used": False,
+            "algorithm_rerun": False,
+            "counterfactuals_path": str(candidate),
+            "counterfactuals_sha256": sha256_file(candidate),
+        },
+        "resource_cap_receipt": resource_cap_receipt,
+    }
+
+
+def test_post20k_formal_receipt_reopens_candidate_and_checkpoint_bytes(
+    tmp_path: Path,
+) -> None:
+    kwargs = _post20k_receipt_kwargs(tmp_path)
+    manifest = dict(kwargs["materialized_manifest"])
+    manifest["counterfactuals_sha256"] = "d" * 64
+    kwargs["materialized_manifest"] = manifest
+
+    with pytest.raises(
+        executor.BaceComRecGCResourceCapExecutorError,
+        match="candidate-universe SHA256 changed",
+    ):
+        executor._write_post20k_exclusion_receipts(**kwargs)
+    state_root = Path(str(kwargs["state_root"]))
+    assert not (state_root / "bace_comrecgc_20k_resource_cap_receipt.json").exists()
+    assert not (state_root / "excluded_after_20k.json").exists()
+
+
+def test_post20k_formal_receipt_rejects_non_20k_policy(
+    tmp_path: Path,
+) -> None:
+    kwargs = _post20k_receipt_kwargs(tmp_path)
+    receipt = dict(kwargs["resource_cap_receipt"])
+    receipt["M_effective"] = 17_500
+    receipt["stop_reason"] = "PREREGISTERED_CONVERGENCE_PASS"
+    kwargs["resource_cap_receipt"] = receipt
+
+    with pytest.raises(
+        executor.BaceComRecGCResourceCapExecutorError,
+        match="exact clean committed-20k handover",
+    ):
+        executor._write_post20k_exclusion_receipts(**kwargs)
+
+
+def test_post20k_formal_receipt_rejects_signal_identity_drift(
+    tmp_path: Path,
+) -> None:
+    kwargs = _post20k_receipt_kwargs(tmp_path)
+    state_root = Path(str(kwargs["state_root"]))
+    signal_receipt = json.loads(
+        (state_root / "signal_receipt.json").read_text(encoding="utf-8")
+    )
+    signal_receipt["exact_start_ticks"] = 457
+    (state_root / "signal_receipt.json").write_text(
+        json.dumps(signal_receipt), encoding="utf-8"
+    )
+
+    with pytest.raises(
+        executor.BaceComRecGCResourceCapExecutorError,
+        match="does not prove exact graceful exit",
+    ):
+        executor._write_post20k_exclusion_receipts(**kwargs)
 
 
 def test_absolute_cap_failure_stops_exact_worker_without_materializing(
