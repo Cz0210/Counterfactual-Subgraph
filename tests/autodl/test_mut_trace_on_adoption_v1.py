@@ -461,6 +461,64 @@ def test_worker_waits_for_64g_without_holding_gpu(
     ]
 
 
+def test_worker_scopes_git_safe_directory_to_frozen_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upstream = tmp_path / "vendor-comrecgc"
+    upstream.mkdir()
+    gnn = tmp_path / "gnn.pt"
+    distance = tmp_path / "distance.pt"
+    teacher = tmp_path / "teacher.pkl"
+    for path in (gnn, distance, teacher):
+        path.write_bytes(path.name.encode("utf-8"))
+
+    commands: list[list[str]] = []
+
+    def fake_check_output(command: list[str], **_kwargs: Any) -> str:
+        commands.append(command)
+        if command[-2:] == ["rev-parse", "HEAD"]:
+            return successor.MUT_UPSTREAM_COMMIT + "\n"
+        if command[-3:] == ["status", "--porcelain", "--untracked-files=no"]:
+            return ""
+        raise AssertionError(command)
+
+    expected_hashes = {
+        gnn.resolve(): worker.HISTORICAL_GNN_SHA256,
+        distance.resolve(): worker.HISTORICAL_DISTANCE_SHA256,
+        teacher.resolve(): worker.HISTORICAL_RF_ORACLE_SHA256,
+    }
+    monkeypatch.setattr(worker.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(worker, "sha256_file", lambda path: expected_hashes[path])
+
+    result = worker._validate_frozen_replay_contract(
+        {
+            "replay": {
+                "parent_limit": 1448,
+                "batch_size": 128,
+                "steps": 500,
+                "seed": 0,
+                "upstream_root": str(upstream),
+                "gnn_checkpoint": str(gnn),
+                "distance_checkpoint": str(distance),
+            },
+            "standardization": {"teacher_path": str(teacher)},
+        }
+    )
+
+    safe_prefix = [
+        "git",
+        "-c",
+        f"safe.directory={upstream.resolve()}",
+        "-C",
+        str(upstream.resolve()),
+    ]
+    assert commands == [
+        [*safe_prefix, "rev-parse", "HEAD"],
+        [*safe_prefix, "status", "--porcelain", "--untracked-files=no"],
+    ]
+    assert result["status"] == "PASS"
+
+
 def test_worker_reopens_embedded_and_external_transitive_binding_receipts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

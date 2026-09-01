@@ -269,17 +269,22 @@ def _validate_frozen_replay_contract(spec: Mapping[str, Any]) -> dict[str, Any]:
     if changed:
         raise MutTraceWorkerError(f"Frozen Mut replay settings changed: {changed}")
     upstream = _absolute(replay["upstream_root"], label="frozen COMRECGC checkout")
+    git_prefix = [
+        "git",
+        "-c",
+        f"safe.directory={upstream}",
+        "-C",
+        str(upstream),
+    ]
     try:
         commit = subprocess.check_output(
-            ["git", "-C", str(upstream), "rev-parse", "HEAD"],
+            [*git_prefix, "rev-parse", "HEAD"],
             text=True,
             timeout=30,
         ).strip()
         tracked_status = subprocess.check_output(
             [
-                "git",
-                "-C",
-                str(upstream),
+                *git_prefix,
                 "status",
                 "--porcelain",
                 "--untracked-files=no",
