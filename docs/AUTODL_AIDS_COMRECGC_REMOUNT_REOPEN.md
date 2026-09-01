@@ -5,8 +5,9 @@ Linux device number.  The completed AIDS ComRecGC pair-store adoption records
 the original `st_dev`, so a byte-identical source can otherwise fail terminal
 publication after a host restart.
 
-The exception is intentionally narrow.  Ordinary pair-store adoption and
-reopen remain strict across every recorded stat field.  Only
+The exception is intentionally narrow.  Ordinary pair-store, theta-close,
+DBSCAN and component-summary reopen remain strict across every recorded stat
+field.  Only
 `validate_reconciled_final_science()` explicitly requests the terminal-
 reconciliation policy, which permits a changed `device` field while requiring
 the same absolute paths, inode, mode, size, mtime, ctime, pair-store schema and
@@ -14,12 +15,24 @@ all three SHA-256 values.  Writable-FD/mapping scans run both before and after
 the full hash reopen, the source-owner guard must still pass, and current stats
 must remain unchanged throughout validation.
 
+The same maintenance event also changed `st_dev` on all three sources recorded
+by the completed theta-close view: the 23.5-GB physical vector store, normalized
+distance array, and pair-semantics contract.  Their inode, mode, size, mtime,
+ctime and SHA-256 values remained exact.  The terminal-only reopen therefore
+brackets all three with exact-inode writable-FD/mapping scans and a full replay.
+The adopted DBSCAN terminal reuses that already-audited vector source, rehashes
+it, and retains every non-device stat field.  The completed component summary
+keeps its historical owner and writer-lock receipts byte-exact, permits only
+their recorded device number to differ, and holds the existing writer lock
+exclusively from admission through the complete terminal replay and final
+same-session stat check.  No receipt is rewritten.
+
 The drift is never silent.  The reopened AIDS terminal evidence contains
-`pair_store_reopen_evidence` with the recorded and observed stats for every
-source file, whether a device change was detected, the exact allowed field,
-the verified hashes, writer-scan counts and same-session stability result.  The
-fast16 append stores this object under `appended_cell.terminal_evidence` in
-`append_authority.json`.
+separate pair-store, close-view, DBSCAN-source and component-summary reopen
+evidence with recorded and observed stats, whether a device change was
+detected, the exact allowed field, verified hashes, writer/lock results and
+same-session stability.  The fast16 append stores these objects under
+`appended_cell.terminal_evidence` in `append_authority.json`.
 
 Use the existing publication entrypoint; no science stage is rerun:
 

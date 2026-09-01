@@ -758,6 +758,115 @@ def test_production_bridge_prunes_full_rows_and_reopens_compact_history(
     reopened_history.close()
 
 
+def test_production_bridge_prunes_each_completed_official_step_boundary():
+    """One 10k-neighbor batch must not remain live until the 10k cursor."""
+
+    graph_a = "a" * 64
+    graph_b = "b" * 64
+    transient_c = "c" * 64
+    history = SimpleNamespace(
+        bounds=production.T12ProductionBounds.pinned(parent_count=2),
+        lookup_first=lambda key: object() if key == graph_b else None,
+        observation_count=3,
+    )
+    bridge = _bridge(production_history=history)
+    original_restart = lambda _graphs: graph_a
+    move_results = iter(((graph_b, False), (graph_b, False), (None, True)))
+    original_move = lambda *_args, **_kwargs: next(move_results)
+    bridge.vrrw.restart_randomwalk = original_restart
+    bridge.vrrw.move_to_next_graph = original_move
+    bridge.vrrw.graph_map = {graph_a: object(), graph_b: object()}
+    bridge.vrrw.graph_index_map = {graph_a: 0, graph_b: 1}
+    bridge.vrrw.counterfactual_candidates = [
+        {"graph_hash": graph_a},
+        {"graph_hash": graph_b},
+    ]
+    bridge.vrrw.transitions = {}
+
+    bridge.records = {
+        graph_a: object(),
+        graph_b: object(),
+        transient_c: object(),
+    }
+    bridge.lineage_occurrences = {
+        graph_a: {},
+        graph_b: {},
+        transient_c: {},
+    }
+    bridge._record_deep_bytes = {
+        graph_a: 10,
+        graph_b: 10,
+        transient_c: 10,
+    }
+    bridge._record_serialized_bytes = {
+        graph_a: 5,
+        graph_b: 5,
+        transient_c: 5,
+    }
+    bridge._live_record_deep_bytes_total = 30
+    bridge._live_record_serialized_bytes_total = 15
+    bridge._transient_record_keys = {graph_b, transient_c}
+    bridge._live_domain_synced = False
+
+    with bridge.installed():
+        assert bridge.vrrw.move_to_next_graph() == (graph_b, False)
+        assert set(bridge.records) == {graph_a, graph_b}
+        assert bridge._transient_record_keys == set()
+        assert bridge._live_record_deep_bytes_total == 20
+        assert bridge._live_record_serialized_bytes_total == 10
+        assert bridge.evicted_complete_record_count == 1
+        assert bridge._live_domain_synced is True
+
+        # A target from an already-cached transition may enter graph_map long
+        # after its complete row was evicted.  Its authenticated compact row
+        # remains sufficient; pruning must not force a model recomputation.
+        del bridge.records[graph_b]
+        bridge._live_record_deep_bytes_total -= bridge._record_deep_bytes.pop(graph_b)
+        bridge._live_record_serialized_bytes_total -= (
+            bridge._record_serialized_bytes.pop(graph_b)
+        )
+        bridge.lineage_occurrences.pop(graph_b)
+        bridge.records[transient_c] = object()
+        bridge.lineage_occurrences[transient_c] = {}
+        bridge._record_deep_bytes[transient_c] = 10
+        bridge._record_serialized_bytes[transient_c] = 5
+        bridge._live_record_deep_bytes_total += 10
+        bridge._live_record_serialized_bytes_total += 5
+        bridge._transient_record_keys = {transient_c}
+        bridge._live_domain_synced = False
+        assert bridge.vrrw.move_to_next_graph() == (graph_b, False)
+        assert set(bridge.records) == {graph_a}
+        assert bridge.evicted_complete_record_count == 2
+        # The same history-backed subset must close at an exact 10k/20k-style
+        # durable segment boundary without rescoring the promoted target.
+        checkpoint_audit = bridge.retain_official_live_domain(
+            vrrw=bridge.vrrw, current_graph_identity=graph_b
+        )
+        assert checkpoint_audit["live_complete_record_count"] == 1
+        assert checkpoint_audit["compact_history_observation_count"] == 3
+
+        # A teleporting move has not yet chosen the restarted graph, so its
+        # pending batch remains until the immediately following restart.
+        bridge.records[transient_c] = object()
+        bridge.lineage_occurrences[transient_c] = {}
+        bridge._record_deep_bytes[transient_c] = 10
+        bridge._record_serialized_bytes[transient_c] = 5
+        bridge._live_record_deep_bytes_total = 20
+        bridge._live_record_serialized_bytes_total = 10
+        bridge._transient_record_keys = {transient_c}
+        bridge._live_domain_synced = False
+        assert bridge.vrrw.move_to_next_graph() == (None, True)
+        assert transient_c in bridge.records
+        assert bridge.vrrw.restart_randomwalk([]) == graph_a
+        assert set(bridge.records) == {graph_a}
+        assert bridge._transient_record_keys == set()
+        assert bridge.evicted_complete_record_count == 3
+        assert bridge._live_domain_synced is True
+
+    assert bridge.vrrw.restart_randomwalk is original_restart
+    assert bridge.vrrw.move_to_next_graph is original_move
+
+
 def test_production_raw_query_variants_are_journaled_without_live_tuple_growth(
     tmp_path,
 ):

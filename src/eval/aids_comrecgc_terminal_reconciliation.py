@@ -866,6 +866,7 @@ def validate_reconciled_final_science(
             marker=common_path,
             terminal=common,
             allow_pair_store_remount_device_drift_for_terminal_reconciliation=True,
+            allow_close_view_and_downstream_remount_device_drift_for_aids_terminal_reconciliation=True,
         )
     except Exception as exc:
         raise AIDSComRecGCTerminalReconciliationError(
@@ -888,6 +889,61 @@ def validate_reconciled_final_science(
     ):
         raise AIDSComRecGCTerminalReconciliationError(
             "AIDS remount-safe pair-store reopen evidence is absent"
+        )
+    close_view_reopen = common_validation.get(
+        "close_pair_view_reopen_evidence"
+    )
+    if (
+        not isinstance(close_view_reopen, Mapping)
+        or close_view_reopen.get("schema_version")
+        != "comrecgc_close_pair_view_reopen_evidence_v1"
+        or close_view_reopen.get("policy")
+        != "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
+        or close_view_reopen.get("remount_device_drift_allowed") is not True
+        or close_view_reopen.get("allowed_drift_fields") != ["device"]
+        or close_view_reopen.get("hashes_verified") is not True
+        or int(close_view_reopen.get("writer_scan_before_count", -1)) != 0
+        or int(close_view_reopen.get("writer_scan_after_count", -1)) != 0
+        or close_view_reopen.get("stat_stable_during_reopen") is not True
+        or not isinstance(close_view_reopen.get("source_files"), Mapping)
+        or len(close_view_reopen["source_files"]) != 3
+    ):
+        raise AIDSComRecGCTerminalReconciliationError(
+            "AIDS remount-safe close-view reopen evidence is absent"
+        )
+    dbscan_reopen = common_validation.get("dbscan_source_reopen_evidence")
+    if (
+        not isinstance(dbscan_reopen, Mapping)
+        or dbscan_reopen.get("schema_version")
+        != "comrecgc_dbscan_source_reopen_evidence_v1"
+        or dbscan_reopen.get("policy")
+        != "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
+        or dbscan_reopen.get("remount_device_drift_allowed") is not True
+        or dbscan_reopen.get("allowed_drift_fields") != ["device"]
+        or dbscan_reopen.get("hashes_verified") is not True
+        or dbscan_reopen.get("stat_stable_while_hashing") is not True
+    ):
+        raise AIDSComRecGCTerminalReconciliationError(
+            "AIDS remount-safe DBSCAN reopen evidence is absent"
+        )
+    component_reopen = common_validation.get(
+        "component_summary_reopen_evidence"
+    )
+    if (
+        not isinstance(component_reopen, Mapping)
+        or component_reopen.get("schema_version")
+        != "comrecgc_component_summary_reopen_evidence_v1"
+        or component_reopen.get("policy")
+        != "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
+        or component_reopen.get("remount_device_drift_allowed") is not True
+        or component_reopen.get("allowed_drift_fields") != ["device"]
+        or component_reopen.get("no_active_writer_verified") is not True
+        or component_reopen.get("stat_stable_during_reopen") is not True
+        or not isinstance(component_reopen.get("close_pair_view"), Mapping)
+        or component_reopen["close_pair_view"].get("hashes_verified") is not True
+    ):
+        raise AIDSComRecGCTerminalReconciliationError(
+            "AIDS remount-safe component-summary reopen evidence is absent"
         )
     expected_continuation = {
         "schema_version": 1,
@@ -1041,6 +1097,9 @@ def validate_reconciled_final_science(
         "dbscan_adoption_manifest_path": str(adoption_path),
         "dbscan_adoption_manifest_sha256": _sha(adoption_path),
         "pair_store_reopen_evidence": dict(pair_store_reopen),
+        "close_pair_view_reopen_evidence": dict(close_view_reopen),
+        "dbscan_source_reopen_evidence": dict(dbscan_reopen),
+        "component_summary_reopen_evidence": dict(component_reopen),
         "zero_strict_flip_evidence": zero,
         "writer_audit": writer,
         "inventory": _critical_inventory(

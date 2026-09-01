@@ -121,6 +121,37 @@ def _retryable_protected_baseline_failures(failures: Sequence[Any]) -> bool:
     )
 
 
+def _protected_baseline_transition(
+    baseline: Mapping[str, Any],
+    *,
+    coarse_task_ids: Sequence[str],
+    elapsed_seconds: float,
+    maximum_wait_seconds: int,
+) -> tuple[str, set[str]]:
+    """Keep a coarse counter out of the five-minute slowdown baseline.
+
+    Once one complete baseline window observes no step movement, a later
+    single checkpoint jump cannot establish the cadence of that counter.  The
+    task remains in the bounded activity-audit lane until the full authorized
+    900-second window has elapsed.
+    """
+
+    failures = [str(item) for item in baseline.get("failures") or []]
+    status = str(baseline.get("status") or "")
+    affected = {str(item) for item in coarse_task_ids}
+    if status != "PASS":
+        if not _retryable_protected_baseline_failures(failures):
+            return "FAIL", affected
+        affected.update(item.split(":", 1)[1] for item in failures)
+    if affected:
+        if float(elapsed_seconds) < int(maximum_wait_seconds):
+            return "WAIT", affected
+        return "ACTIVITY_FALLBACK", affected
+    if status == "PASS":
+        return "ACCEPT", affected
+    return "FAIL", affected
+
+
 def _protected_baseline_max_wait_seconds() -> int:
     raw = os.environ.get(
         "MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS",
@@ -196,6 +227,7 @@ def _activity_fallback_baseline(
     snapshots: Sequence[Mapping[str, Any]],
     *,
     maximum_wait_seconds: int,
+    forced_step_baseline_unavailable_task_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Use a stable 15-minute window or explicit activity-only evidence.
 
@@ -220,6 +252,13 @@ def _activity_fallback_baseline(
     tasks: dict[str, Any] = {}
     unavailable: list[str] = []
     expected_ids = [str(task["task_id"]) for task in manifest["tasks"]]
+    forced_unavailable = {
+        str(item) for item in forced_step_baseline_unavailable_task_ids
+    }
+    unknown_forced = sorted(forced_unavailable - set(expected_ids))
+    failures.extend(
+        f"unknown_forced_unavailable_task:{item}" for item in unknown_forced
+    )
     for key in expected_ids:
         rows = [
             snapshot.get("tasks", {}).get(key)
@@ -265,7 +304,7 @@ def _activity_fallback_baseline(
         if not all(bool(row.get("alive")) for row in typed_rows):
             failures.append(f"protected_task_identity_unstable:{key}")
             continue
-        if counter_delta > 0 and elapsed > 0:
+        if counter_delta > 0 and elapsed > 0 and key not in forced_unavailable:
             tasks[key] = {
                 **base,
                 "state": "ACTIVE",
@@ -276,6 +315,8 @@ def _activity_fallback_baseline(
 
         first = typed_rows[0]
         activity_kinds: list[str] = []
+        if counter_delta > 0:
+            activity_kinds.append("COARSE_STEP_COUNTER_ADVANCED")
         cpu_delta = int(latest["aggregate_cpu_ticks"]) - int(
             first["aggregate_cpu_ticks"]
         )
@@ -328,6 +369,9 @@ def _activity_fallback_baseline(
         "poll_seconds": SAMPLE_SECONDS,
         "maximum_wait_seconds": maximum_wait_seconds,
         "measurement_mode": "BOUNDED_15_MINUTE_ACTIVITY_FALLBACK",
+        "forced_step_baseline_unavailable_task_ids": sorted(
+            forced_unavailable
+        ),
         "step_baseline_unavailable_task_ids": sorted(unavailable),
         "warning": (
             PROTECTED_STEP_BASELINE_UNAVAILABLE_WARNING
@@ -2254,6 +2298,7 @@ def _run(args: argparse.Namespace) -> int:
             baseline_attempt = 0
             baseline_wait_started: float | None = None
             protected_activity_snapshots: list[dict[str, Any]] = []
+            coarse_step_baseline_task_ids: set[str] = set()
             while True:
                 prebaseline_admission = _wait_for_64g_parent_headroom(
                     cgroup, heartbeat=heartbeat
@@ -2345,60 +2390,72 @@ def _run(args: argparse.Namespace) -> int:
                     baseline,
                 )
                 atomic_json(output / "protected_throughput_baseline.json", baseline)
-                if baseline.get("status") != "PASS":
-                    failures = list(baseline.get("failures") or [])
-                    if _retryable_protected_baseline_failures(failures):
-                        elapsed = time.monotonic() - baseline_wait_started
-                        if elapsed < protected_baseline_max_wait:
-                            heartbeat(
-                                "WAITING_FOR_MEASURABLE_PROTECTED_BASELINE",
-                                baseline_attempt=baseline_attempt,
-                                baseline_elapsed_seconds=elapsed,
-                                baseline_failures=[str(item) for item in failures],
-                                retry_seconds=0,
-                                maximum_wait_seconds=(
-                                    protected_baseline_max_wait
-                                ),
-                                gpu_lock_held=False,
-                            )
-                            # Each baseline attempt already samples for five
-                            # minutes; retry immediately so the bounded wait
-                            # cannot be stretched beyond the authorized 900s.
-                            continue
-                        baseline = _activity_fallback_baseline(
-                            protected_manifest,
-                            protected_activity_snapshots,
-                            maximum_wait_seconds=protected_baseline_max_wait,
-                        )
-                        atomic_json(
-                            output / "protected_throughput_baseline.json",
-                            baseline,
-                        )
-                        if baseline.get("status") != "PASS":
-                            raise MutTraceWorkerError(
-                                "Protected activity fallback failed: "
-                                + ",".join(
-                                    str(item)
-                                    for item in baseline.get("failures") or []
-                                )
-                            )
-                        heartbeat(
-                            "PROTECTED_STEP_BASELINE_ACTIVITY_FALLBACK_PASS",
-                            baseline_attempt=baseline_attempt,
-                            baseline_elapsed_seconds=elapsed,
-                            step_baseline_unavailable_task_ids=baseline[
-                                "step_baseline_unavailable_task_ids"
-                            ],
-                            warning=baseline["warning"],
-                            strict_resource_gates_retained=True,
-                            semantic_equivalence_gates_unchanged=True,
-                            gpu_lock_held=False,
-                        )
-                    else:
+                failures = list(baseline.get("failures") or [])
+                elapsed = time.monotonic() - baseline_wait_started
+                baseline_action, coarse_step_baseline_task_ids = (
+                    _protected_baseline_transition(
+                        baseline,
+                        coarse_task_ids=coarse_step_baseline_task_ids,
+                        elapsed_seconds=elapsed,
+                        maximum_wait_seconds=protected_baseline_max_wait,
+                    )
+                )
+                if baseline_action == "WAIT":
+                    heartbeat(
+                        "WAITING_FOR_MEASURABLE_PROTECTED_BASELINE",
+                        baseline_attempt=baseline_attempt,
+                        baseline_elapsed_seconds=elapsed,
+                        baseline_failures=[str(item) for item in failures],
+                        coarse_step_baseline_task_ids=sorted(
+                            coarse_step_baseline_task_ids
+                        ),
+                        later_single_window_rate_ineligible=True,
+                        retry_seconds=0,
+                        maximum_wait_seconds=protected_baseline_max_wait,
+                        gpu_lock_held=False,
+                    )
+                    # Each baseline attempt already samples for five minutes;
+                    # retry immediately so the bounded wait cannot be
+                    # stretched beyond the authorized 900s.
+                    continue
+                if baseline_action == "FAIL":
+                    raise MutTraceWorkerError(
+                        "Protected-task five-minute baseline failed: "
+                        + ",".join(str(item) for item in failures)
+                    )
+                if baseline_action == "ACTIVITY_FALLBACK":
+                    baseline = _activity_fallback_baseline(
+                        protected_manifest,
+                        protected_activity_snapshots,
+                        maximum_wait_seconds=protected_baseline_max_wait,
+                        forced_step_baseline_unavailable_task_ids=sorted(
+                            coarse_step_baseline_task_ids
+                        ),
+                    )
+                    atomic_json(
+                        output / "protected_throughput_baseline.json",
+                        baseline,
+                    )
+                    if baseline.get("status") != "PASS":
                         raise MutTraceWorkerError(
-                            "Protected-task five-minute baseline failed: "
-                            + ",".join(str(item) for item in failures)
+                            "Protected activity fallback failed: "
+                            + ",".join(
+                                str(item)
+                                for item in baseline.get("failures") or []
+                            )
                         )
+                    heartbeat(
+                        "PROTECTED_STEP_BASELINE_ACTIVITY_FALLBACK_PASS",
+                        baseline_attempt=baseline_attempt,
+                        baseline_elapsed_seconds=elapsed,
+                        step_baseline_unavailable_task_ids=baseline[
+                            "step_baseline_unavailable_task_ids"
+                        ],
+                        warning=baseline["warning"],
+                        strict_resource_gates_retained=True,
+                        semantic_equivalence_gates_unchanged=True,
+                        gpu_lock_held=False,
+                    )
                 postbaseline_admission = _cgroup_snapshot(cgroup)
                 if (
                     postbaseline_admission["headroom_bytes"]

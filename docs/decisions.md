@@ -16364,6 +16364,13 @@ auxiliary evidence from process CPU ticks, an active GPU process, a changed
 checkpoint/progress file, or direct output-byte growth.  Record
 `PROTECTED_STEP_BASELINE_UNAVAILABLE_DURING_CHECKPOINT` for each such task.
 
+If any complete five-minute window first reports no positive step delta, that
+task is thereafter treated as a coarse counter for the entire 900-second
+audit.  A single checkpoint jump in a later five-minute window is liveness
+evidence, not a stable throughput estimate: it cannot arm the 10% slowdown
+comparison.  At 900 seconds the task is recorded as step-baseline-unavailable
+even when the bounded window contains such a jump.
+
 Activity-only tasks remain subject to exact process liveness plus all canary
 RSS, parent-headroom, failcnt, OOM, and exclusive-GPU gates.  Tasks with a
 measurable 15-minute step delta retain the ordinary 10% slowdown gate.  The
@@ -16468,3 +16475,123 @@ graph edit or scientific result.
 
 Accepted and implemented locally; positive and negative focused replay tests
 pass, and a fresh immutable AutoDL deployment is required.
+
+---
+
+## [2026-09-01] Externalize only the missing T13 matrix locator
+
+### Motivation
+
+The active post-maintenance T8 dual-branch recovery and its downstream T13
+relay run from an immutable deployed checkout.  That relay already performs
+the real full experiment and a separate terminal verification, then writes
+`completed_output_root`; however, it predates the standard JSON locator
+consumed by the durable fast16 matrix publisher.  Mutating the active checkout
+or restarting its science would discard a healthy, correctly bound chain.
+
+### Decision
+
+Add one TasteMolNet/GlobalGCE-only external follower.  Bind an explicitly named
+T8 dual controller, its exact downstream T13 launch receipt, managed-T8 PASS
+root, T13 controller/attempt/GPU/output identities, final heartbeat/state, and
+the T13 `SEALED`, `PASS`, run-manifest, independent-audit and checkpoint hash
+closure.  Only after all evidence passes, atomically create the existing
+`fast16_matrix_cell_root_locator_v1` payload.  The follower owns no science,
+performs no glob discovery, and contains no process-signal path.
+
+While either bound controller is nonterminal, require its exact PID to remain
+live and record `/proc` start ticks in the follower heartbeat.  A dead or zombie
+controller fails explicitly instead of waiting forever.  The T13 relay writes
+`completed_output_root` immediately before its final PASS update; observing
+that publication window remains a waiting state, not a terminal failure.
+
+Keep the matrix appender as the final scientific terminal verifier and unique
+authority writer.  A missing T13 terminal remains a waiting state; an identity
+or hash mismatch fails closed rather than repairing output.
+
+### Consequences
+
+- The live immutable b98 T8/T13 chain is neither modified nor restarted.
+- The future TasteMolNet/GlobalGCE root can enter the existing unattended
+  publisher queue without adding a generic controller or a second authority.
+- The locator attests only discovery/binding; method-specific matrix validation
+  remains unchanged and GNN backbone ablation remains disabled.
+
+### Status
+
+Implemented locally with focused waiting, binding, hash-drift, no-signal, and
+paired-Slurm tests; immutable deployment and sidecar launch remain pending.
+
+---
+
+## [2026-09-01] Reopen the complete AIDS read-only chain across a device remount
+
+### Motivation
+
+After the pair-store remount fix, AIDS terminal publication reached the next
+frozen identity gate.  The theta-close pair-semantics contract, normalized
+distances and physical vectors all retained path, inode, mode, size, mtime,
+ctime and SHA-256 but changed `st_dev` from 126 to 76.  The downstream DBSCAN
+source identity and component-summary owner/writer-lock receipts recorded the
+same old device and would fail serially for the same mount event.
+
+### Decision
+
+Keep every ordinary validator strict.  Only the explicit AIDS terminal
+reconciliation call may permit `device` drift across the theta-close sources,
+completed DBSCAN terminal and completed component-summary receipts.  Rehash
+all source bytes, replay the close view and summary, bracket source access with
+writable-FD/mapping audits, hold the component writer lock exclusively through
+the complete replay and final stat check, and require every other recorded
+stat field exactly.  Return separate immutable
+reopen evidence; never rewrite a historical manifest, owner claim or lock.
+
+### Consequences
+
+- One host remount is handled as one audited terminal reopen rather than a
+  sequence of expensive science reruns.
+- Any path, inode, mode, size, timestamp, hash, scientific replay or live-writer
+  mismatch still fails closed.
+- DBSCAN generation/resume, ordinary component-summary reopen and all non-AIDS
+  routes remain ineligible for the exception.
+
+### Status
+
+Implemented locally; focused close-view, DBSCAN, component-summary and AIDS
+terminal reconciliation tests pass.
+
+---
+
+## [2026-09-01] Evict T12 transient bridge rows at official step boundaries
+
+### Motivation
+
+The first fresh T12 production attempt failed at step 15, before any 10k
+checkpoint, because complete rows from successive 10k-neighbour importance
+batches remained in RAM until the segment checkpoint.  The pinned resource
+proof permits one transient batch in addition to the official live graph
+domain, not every batch accumulated across a 10k segment.
+
+### Decision
+
+After an official restart or non-teleport move has consumed all hashes and
+committed its selected graph, evict only complete bridge rows introduced by
+that step which did not enter `graph_map`.  Preserve the compact authenticated
+history, official graph/candidate/transition state, RNG, model calls, ordering,
+scores and coverage unchanged.  A live graph promoted later from a stored
+transition may be backed only by compact history; durable checkpoint closure
+requires every such missing full row to exist in that history and otherwise
+fails closed without model recomputation.
+
+### Consequences
+
+- The transient-row bound now describes the actual cache lifetime.
+- Existing exact replay evidence remains valid because scientific state and
+  the replay contract are unchanged.
+- The failed 15-step attempt has no legal checkpoint, so production restarts
+  with a fresh UUID/root while preserving the failed evidence read-only.
+
+### Status
+
+Implemented and focused-tested locally; immutable deployment and one fresh T12
+production attempt remain required.

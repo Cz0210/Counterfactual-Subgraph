@@ -316,6 +316,15 @@ both checkpoints, proves that the 20k trace and journals retain the committed
 and reopens the terminal candidate archive. Its PASS is generation-only and
 records `paper_cell_pass=false`.
 
+Production releases each complete transient neighbour batch at the official
+restart/move boundary, after all hashes are consumed and the selected graph is
+committed.  Only rows admitted to the official live `graph_map` remain in the
+full bridge cache; every observation remains authenticated by the compact
+history.  This is a cache-lifetime correction only: it adds no RNG draw or
+model call and changes no graph, transition, candidate, score, coverage or
+ordering.  A live graph whose full row was previously evicted must be present
+in compact history at checkpoint closure, otherwise the run fails closed.
+
 ### Persistent GPU1 handover after T11
 
 For the currently frozen T11 manager, launch the narrow sidecar once from the

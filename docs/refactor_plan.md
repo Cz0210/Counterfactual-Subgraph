@@ -3720,6 +3720,9 @@ Mutagenicity roadmaps.
 - [x] Permit an explicit activity-only record only for an exact live process
   with a monotonic coarse counter and positive CPU/GPU/checkpoint/output
   evidence.
+- [x] Once any five-minute window has no positive step delta, keep that task in
+  the coarse-counter lane for the full 900 seconds; a later isolated
+  checkpoint jump cannot be promoted to a stable five-minute rate.
 - [x] Keep PID/start-ticks liveness plus RSS, headroom, failcnt, OOM, GPU-lock,
   500-step semantic-equivalence, and checkpoint-reload gates fail-closed.
 - [x] Add focused coverage for the authorized fallback, the frozen 900-second
@@ -3742,3 +3745,49 @@ Mutagenicity roadmaps.
   test.
 - [ ] Deploy from a fresh immutable checkout and resume the existing chunk
   root; let the ordinary verifier scan every remaining chunk before reuse.
+
+## 2026-09-01: External locator for the immutable T8-to-T13 chain
+
+- [x] Bind exactly one named T8 dual-branch controller and its nested T13 relay
+  launch receipt without controller discovery or process signalling.
+- [x] Require matching managed-T8 roots, T13 controller/PID/UUIDv4/GPU1/output
+  bindings, terminal heartbeat/state, `SEALED`, `PASS`, final audit and PASS
+  checkpoint SHA closure.
+- [x] Atomically create only the standard TasteMolNet/GlobalGCE locator and
+  leave the existing matrix publisher as the sole terminal validator/authority
+  writer.
+- [x] Treat completed-root-before-PASS as a publication wait, and require each
+  nonterminal bound controller PID to remain live while recording start ticks.
+- [x] Add a thin persistent launcher, synchronized Slurm wrapper, focused
+  waiting/tamper/no-signal tests, and operator documentation.
+- [ ] Deploy from the next clean immutable checkout, launch against the exact
+  active T8 controller root, and add its locator path to the fast16 queue.
+
+## 2026-09-01: Complete AIDS remount-safe read-only reopen
+
+- [x] Confirm on AutoDL that theta-close physical vectors, normalized distances
+  and pair-semantics contract differ only in `st_dev` (126 to 76).
+- [x] Keep ordinary close-view, DBSCAN and component-summary validators strict;
+  expose an explicit AIDS-terminal-only device-drift policy.
+- [x] Preserve absolute paths, all other recorded stat fields, full hashes,
+  source replay, writer scans, component owner receipt and nonblocking writer-
+  lock proof without rewriting historical evidence.
+- [x] Return separate pair-store, close-view, DBSCAN and component-summary
+  reopen evidence to the matrix terminal.
+- [x] Add focused positive device-only and negative inode/live-writer tests and
+  run the existing full component-summary/AIDs reconciliation suites.
+- [ ] Deploy from a fresh immutable AutoDL checkout and rerun publication only;
+  do not rerun pair generation, distance scan, DBSCAN, centroid or evaluation.
+
+## 2026-09-01: Correct T12 production transient-cache lifetime
+
+- [x] Reproduce the step-15 failure as accumulated complete neighbour rows,
+  not a real RAM/GPU exhaustion or a scientific-state mismatch.
+- [x] Evict only the current step's unselected transient rows after the
+  official restart/move commits, preserving every official state and RNG draw.
+- [x] Allow checkpoint live graphs to use authenticated compact history when
+  a prior transition promotes an evicted target; fail if that history is absent.
+- [x] Cover per-step pruning, teleport/restart, cached-target promotion and
+  segment-end durable closure with focused tests.
+- [ ] Deploy immutably and launch one fresh T12 UUID/root; the failed 15-step
+  root has no reusable checkpoint and remains read-only evidence.

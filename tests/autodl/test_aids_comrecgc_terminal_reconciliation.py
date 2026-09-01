@@ -949,7 +949,39 @@ def test_posthoc_final_self_closure_binds_exact_receipt_without_stage_gates(
                         "stable_stat_fields_match": True,
                     }
                 },
-            }
+            },
+            "close_pair_view_reopen_evidence": {
+                "schema_version": "comrecgc_close_pair_view_reopen_evidence_v1",
+                "policy": "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY",
+                "remount_device_drift_allowed": True,
+                "remount_device_drift_detected": True,
+                "allowed_drift_fields": ["device"],
+                "hashes_verified": True,
+                "writer_scan_before_count": 0,
+                "writer_scan_after_count": 0,
+                "stat_stable_during_reopen": True,
+                "source_files": {
+                    f"/source/{name}": {"device_changed": True}
+                    for name in ("vectors.npy", "distances.npy", "pair.json")
+                },
+            },
+            "dbscan_source_reopen_evidence": {
+                "schema_version": "comrecgc_dbscan_source_reopen_evidence_v1",
+                "policy": "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY",
+                "remount_device_drift_allowed": True,
+                "allowed_drift_fields": ["device"],
+                "hashes_verified": True,
+                "stat_stable_while_hashing": True,
+            },
+            "component_summary_reopen_evidence": {
+                "schema_version": "comrecgc_component_summary_reopen_evidence_v1",
+                "policy": "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY",
+                "remount_device_drift_allowed": True,
+                "allowed_drift_fields": ["device"],
+                "no_active_writer_verified": True,
+                "stat_stable_during_reopen": True,
+                "close_pair_view": {"hashes_verified": True},
+            },
         }
 
     monkeypatch.setattr(
@@ -975,6 +1007,9 @@ def test_posthoc_final_self_closure_binds_exact_receipt_without_stage_gates(
     assert result["zero_strict_flip_evidence"]["scientific_output_empty"] is True
     assert common_calls[0][
         "allow_pair_store_remount_device_drift_for_terminal_reconciliation"
+    ] is True
+    assert common_calls[0][
+        "allow_close_view_and_downstream_remount_device_drift_for_aids_terminal_reconciliation"
     ] is True
     assert result["pair_store_reopen_evidence"][
         "remount_device_drift_detected"

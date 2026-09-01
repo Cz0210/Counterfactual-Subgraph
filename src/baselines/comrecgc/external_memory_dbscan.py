@@ -155,6 +155,7 @@ class ExternalDBSCANResult:
     noise_count: int
     core_count: int
     manifest_sha256: str
+    source_reopen_evidence: Mapping[str, Any] | None = None
 
 
 def _utc_now() -> str:
@@ -196,37 +197,142 @@ def _hash_source_with_stable_stat(path: Path) -> tuple[str, dict[str, int]]:
     return digest, before
 
 
+_DBSCAN_SOURCE_STAT_FIELDS = (
+    "device",
+    "inode",
+    "mode",
+    "size",
+    "mtime_ns",
+    "ctime_ns",
+)
+_DBSCAN_REMOUNT_STABLE_STAT_FIELDS = tuple(
+    field for field in _DBSCAN_SOURCE_STAT_FIELDS if field != "device"
+)
+_DBSCAN_REOPEN_EVIDENCE_SCHEMA = "comrecgc_dbscan_source_reopen_evidence_v1"
+_AIDS_TERMINAL_REMOUNT_POLICY = (
+    "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
+)
+
+
+def _compare_source_stat_identity(
+    *,
+    path: Path,
+    recorded: Mapping[str, Any],
+    observed: Mapping[str, Any],
+    allow_remount_device_drift_for_aids_terminal_reconciliation: bool,
+) -> dict[str, Any]:
+    try:
+        frozen = {str(key): int(value) for key, value in recorded.items()}
+        current = {str(key): int(value) for key, value in observed.items()}
+    except (TypeError, ValueError) as exc:
+        raise ExternalMemoryDBSCANError(
+            "DBSCAN vector source stat identity is invalid"
+        ) from exc
+    expected = set(_DBSCAN_SOURCE_STAT_FIELDS)
+    if set(frozen) != expected or set(current) != expected:
+        raise ExternalMemoryDBSCANError(
+            "DBSCAN vector source stat identity schema changed"
+        )
+    stable_mismatches = {
+        field: (frozen[field], current[field])
+        for field in _DBSCAN_REMOUNT_STABLE_STAT_FIELDS
+        if frozen[field] != current[field]
+    }
+    device_changed = frozen["device"] != current["device"]
+    if stable_mismatches or (
+        device_changed
+        and not allow_remount_device_drift_for_aids_terminal_reconciliation
+    ):
+        raise ExternalMemoryDBSCANError(
+            "DBSCAN vector source stat identity changed"
+        )
+    return {
+        "path": str(path),
+        "recorded_stat": frozen,
+        "observed_stat": current,
+        "device_changed": device_changed,
+        "stable_stat_fields_match": True,
+    }
+
+
 def _verify_source_identity(
     path: Path,
     *,
     expected_sha256: str,
     expected_stat: Mapping[str, Any],
     phase: str,
-) -> None:
+    allow_remount_device_drift_for_aids_terminal_reconciliation: bool = False,
+) -> dict[str, Any]:
     before = _source_stat_identity(path)
-    if before != dict(expected_stat):
+    try:
+        evidence = _compare_source_stat_identity(
+            path=path,
+            recorded=expected_stat,
+            observed=before,
+            allow_remount_device_drift_for_aids_terminal_reconciliation=(
+                allow_remount_device_drift_for_aids_terminal_reconciliation
+            ),
+        )
+    except ExternalMemoryDBSCANError as exc:
         raise ExternalMemoryDBSCANError(
             f"DBSCAN vector source stat identity changed before {phase}"
-        )
+        ) from exc
     digest = _sha256_file(path)
     after = _source_stat_identity(path)
     if (
         after != before
-        or after != dict(expected_stat)
         or digest != str(expected_sha256)
     ):
         raise ExternalMemoryDBSCANError(
             f"DBSCAN vector source content identity changed before {phase}"
         )
+    return {
+        "schema_version": _DBSCAN_REOPEN_EVIDENCE_SCHEMA,
+        "policy": (
+            _AIDS_TERMINAL_REMOUNT_POLICY
+            if allow_remount_device_drift_for_aids_terminal_reconciliation
+            else "STRICT_ALL_STAT_FIELDS"
+        ),
+        "remount_device_drift_allowed": bool(
+            allow_remount_device_drift_for_aids_terminal_reconciliation
+        ),
+        "remount_device_drift_detected": bool(evidence["device_changed"]),
+        "allowed_drift_fields": (
+            ["device"]
+            if allow_remount_device_drift_for_aids_terminal_reconciliation
+            else []
+        ),
+        "strict_stat_fields": list(_DBSCAN_REMOUNT_STABLE_STAT_FIELDS),
+        "source_file": {
+            **evidence,
+            "sha256": digest,
+            "hash_verified": True,
+        },
+        "hashes_verified": True,
+        "stat_stable_while_hashing": True,
+    }
 
 
 def _assert_source_stat_identity(
-    path: Path, *, expected_stat: Mapping[str, Any], phase: str
+    path: Path,
+    *,
+    expected_stat: Mapping[str, Any],
+    phase: str,
+    allow_remount_device_drift_for_aids_terminal_reconciliation: bool = False,
 ) -> None:
-    if _source_stat_identity(path) != dict(expected_stat):
+    try:
+        _compare_source_stat_identity(
+            path=path,
+            recorded=expected_stat,
+            observed=_source_stat_identity(path),
+            allow_remount_device_drift_for_aids_terminal_reconciliation=(
+                allow_remount_device_drift_for_aids_terminal_reconciliation
+            ),
+        )
+    except ExternalMemoryDBSCANError as exc:
         raise ExternalMemoryDBSCANError(
             f"DBSCAN vector source stat identity changed before {phase}"
-        )
+        ) from exc
 
 
 def _stable_hash(value: Mapping[str, Any]) -> str:
@@ -6293,6 +6399,7 @@ def fit_external_memory_dbscan(
     contract: ExternalDBSCANContract,
     expected_vectors_sha256: str | None = None,
     resume: bool = False,
+    allow_remount_device_drift_for_aids_terminal_reconciliation: bool = False,
 ) -> ExternalDBSCANResult:
     """Fit exact sklearn-compatible DBSCAN using three bounded passes."""
 
@@ -6301,6 +6408,13 @@ def fit_external_memory_dbscan(
     root = Path(work_dir).expanduser().resolve(strict=False)
     state_path = root / "checkpoint.json"
     final_manifest_path = root / "run_manifest.json"
+    if (
+        allow_remount_device_drift_for_aids_terminal_reconciliation
+        and not final_manifest_path.exists()
+    ):
+        raise ExternalMemoryDBSCANError(
+            "AIDS remount fallback is terminal-reopen only"
+        )
     if final_manifest_path.exists():
         manifest = _load_object(final_manifest_path)
         if manifest.get("schema_version") != SCHEMA_VERSION:
@@ -6323,11 +6437,14 @@ def fit_external_memory_dbscan(
             raise ExternalMemoryDBSCANError(
                 "terminal DBSCAN vector stat identity is absent"
             )
-        _verify_source_identity(
+        source_reopen_evidence = _verify_source_identity(
             source,
             expected_sha256=str(scientific_identity.get("vectors_sha256") or ""),
             expected_stat=expected_source_stat,
             phase="terminal reopen",
+            allow_remount_device_drift_for_aids_terminal_reconciliation=(
+                allow_remount_device_drift_for_aids_terminal_reconciliation
+            ),
         )
         actual_source_sha = str(scientific_identity["vectors_sha256"])
         if (
@@ -6381,6 +6498,9 @@ def fit_external_memory_dbscan(
             source,
             expected_stat=expected_source_stat,
             phase="terminal result return",
+            allow_remount_device_drift_for_aids_terminal_reconciliation=(
+                allow_remount_device_drift_for_aids_terminal_reconciliation
+            ),
         )
         return ExternalDBSCANResult(
             labels_path=labels_path,
@@ -6394,6 +6514,11 @@ def fit_external_memory_dbscan(
             noise_count=int(manifest["noise_count"]),
             core_count=int(manifest["core_count"]),
             manifest_sha256=_sha256_file(final_manifest_path),
+            source_reopen_evidence=(
+                source_reopen_evidence
+                if allow_remount_device_drift_for_aids_terminal_reconciliation
+                else None
+            ),
         )
     if root.exists() and any(root.iterdir()) and not resume:
         raise FileExistsError(f"external DBSCAN work directory is non-empty: {root}")

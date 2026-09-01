@@ -134,6 +134,38 @@ def _component_values(values: list[float]) -> np.ndarray:
     return result
 
 
+def test_terminal_dbscan_remount_stat_exception_is_device_only(tmp_path: Path) -> None:
+    path = _save(tmp_path / "vectors.npy", np.zeros((3, 2), dtype=np.float32))
+    observed = external._source_stat_identity(path)
+    recorded = {**observed, "device": observed["device"] + 1}
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError, match="stat identity changed"
+    ):
+        external._compare_source_stat_identity(
+            path=path,
+            recorded=recorded,
+            observed=observed,
+            allow_remount_device_drift_for_aids_terminal_reconciliation=False,
+        )
+    evidence = external._compare_source_stat_identity(
+        path=path,
+        recorded=recorded,
+        observed=observed,
+        allow_remount_device_drift_for_aids_terminal_reconciliation=True,
+    )
+    assert evidence["device_changed"] is True
+    assert evidence["stable_stat_fields_match"] is True
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError, match="stat identity changed"
+    ):
+        external._compare_source_stat_identity(
+            path=path,
+            recorded={**recorded, "inode": recorded["inode"] + 1},
+            observed=observed,
+            allow_remount_device_drift_for_aids_terminal_reconciliation=True,
+        )
+
+
 def test_boundary_reference_resolver_uses_inclusive_sklearn_float64() -> None:
     eps = 0.02
     left = np.zeros(64, dtype=np.float64)

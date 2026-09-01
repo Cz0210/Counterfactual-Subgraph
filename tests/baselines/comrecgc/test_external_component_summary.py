@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -814,3 +815,95 @@ def test_all_core_component_summary_revokes_pass_after_lock_inode_replacement(
             )
     else:
         assert not (root / "run_manifest.json").exists()
+
+
+def test_completed_summary_remount_stat_exception_is_device_only() -> None:
+    recorded = {"device": 126, "inode": 41, "mode": 0o40755}
+    observed = {"device": 76, "inode": 41, "mode": 0o40755}
+    evidence = summary._device_only_stat_reopen(
+        label="fixture", recorded=recorded, observed=observed
+    )
+    assert evidence["device_changed"] is True
+    assert evidence["stable_stat_fields_match"] is True
+    with pytest.raises(
+        dbscan.ExternalMemoryDBSCANError, match="stat identity drift"
+    ):
+        summary._device_only_stat_reopen(
+            label="fixture",
+            recorded=recorded,
+            observed={**observed, "inode": 42},
+        )
+
+
+def test_terminal_remount_validation_holds_writer_lock_through_full_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinates = np.asarray(
+        [0.000, 0.001, 0.002, 0.050, 0.051, 0.052], dtype=np.float32
+    )
+    pairs = np.asarray(
+        [[index % 3, index // 3] for index in range(6)], dtype=np.int64
+    )
+    vectors, pair_values, dbscan_result, pair_path = _fixture(
+        tmp_path, coordinates, pairs
+    )
+    labels = np.load(
+        dbscan_result.labels_path, mmap_mode="r", allow_pickle=False
+    )
+    completed = summary.summarize_proven_all_core_components_external(
+        work_dir=tmp_path / "summary",
+        dbscan_manifest_path=dbscan_result.manifest_path,
+        dbscan_manifest_sha256=dbscan_result.manifest_sha256,
+        labels=labels,
+        recourse_vectors=vectors,
+        pair_indices=pair_values,
+        pairs_sha256=_sha(pair_path),
+        radius=0.02,
+        theta=0.2,
+        recourse_size=100,
+        official_greedy=_greedy,
+        torch_module=torch,
+        max_rss_bytes=dbscan._rss_bytes() + 512 * 1024**2,
+        block_size=2,
+    )
+
+    entered_replay = threading.Event()
+    release_replay = threading.Event()
+    original_scan = summary._scan_centroid_range
+
+    def blocked_scan(*args, **kwargs):
+        entered_replay.set()
+        assert release_replay.wait(timeout=10)
+        return original_scan(*args, **kwargs)
+
+    monkeypatch.setattr(summary, "_scan_centroid_range", blocked_scan)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        validation = executor.submit(
+            summary.validate_proven_all_core_component_summary,
+            completed.manifest_path,
+            torch_module=torch,
+            full_replay=True,
+            allow_remount_device_drift_for_aids_terminal_reconciliation=True,
+        )
+        try:
+            assert entered_replay.wait(timeout=10)
+            descriptor = os.open(
+                completed.manifest_path.parent / ".writer.lock",
+                os.O_RDONLY | os.O_NOFOLLOW,
+            )
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(descriptor)
+        finally:
+            release_replay.set()
+        reopened = validation.result(timeout=10)
+
+    evidence = dict(reopened.source_reopen_evidence or {})
+    writer_evidence = dict(evidence["writer_lock"])
+    assert writer_evidence["exclusive_lock_held_for_terminal_validation"] is True
+    assert writer_evidence["terminal_validation_completed_while_lock_held"] is True
+    assert writer_evidence["session_stat_stable"] is True
+    assert evidence["no_active_writer_verified"] is True
+    assert evidence["stat_stable_during_reopen"] is True

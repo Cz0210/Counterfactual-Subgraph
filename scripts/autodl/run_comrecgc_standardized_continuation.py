@@ -1457,6 +1457,7 @@ def _validate_common_recourse_completion(
     marker: Path,
     terminal: Mapping[str, Any],
     allow_pair_store_remount_device_drift_for_terminal_reconciliation: bool = False,
+    allow_close_view_and_downstream_remount_device_drift_for_aids_terminal_reconciliation: bool = False,
 ) -> dict[str, Any]:
     """Close every large external-memory artifact before stage reconciliation."""
 
@@ -1615,6 +1616,7 @@ def _validate_common_recourse_completion(
         physical_vectors_sha256 = str(pair_manifest["vectors_sha256"])
         physical_pairs_sha256 = str(pair_manifest["pairs_sha256"])
     close_view = None
+    close_pair_view_reopen_evidence: Mapping[str, Any] | None = None
     close_manifest_raw = external.get("close_pair_view_manifest")
     close_manifest_sha = external.get("close_pair_view_manifest_sha256")
     if close_manifest_raw is None:
@@ -1638,6 +1640,10 @@ def _validate_common_recourse_completion(
                 expected_physical_vectors_sha256=physical_vectors_sha256,
                 require_dbscan_eligible=True,
                 require_pair_semantics_authority=True,
+                allow_remount_device_drift_for_aids_terminal_reconciliation=(
+                    allow_close_view_and_downstream_remount_device_drift_for_aids_terminal_reconciliation
+                ),
+                proc_root=_PROC_ROOT,
             )
         except Exception as exc:
             raise ValueError("RESUME_COMMON_CLOSE_VIEW_CLOSURE_MISMATCH") from exc
@@ -1654,11 +1660,17 @@ def _validate_common_recourse_completion(
             )
         ):
             raise ValueError("RESUME_COMMON_CLOSE_VIEW_SCIENTIFIC_MISMATCH")
+        close_pair_view_reopen_evidence = close_view.source_reopen_evidence
     dbscan_manifest_raw = external.get("dbscan_manifest")
     if dbscan_manifest_raw is None:
         if int(manifest.get("theta_eligible_pair_count", -1)) != 0:
             raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_MISSING")
-        return {"pair_store_reopen_evidence": pair_store_reopen_evidence}
+        return {
+            "pair_store_reopen_evidence": pair_store_reopen_evidence,
+            "close_pair_view_reopen_evidence": close_pair_view_reopen_evidence,
+            "dbscan_source_reopen_evidence": None,
+            "component_summary_reopen_evidence": None,
+        }
     adopted_dbscan = external.get("dbscan_adopted_read_only") is True
     if adopted_dbscan:
         relative = "external_memory/dbscan_adoption/run_manifest.json"
@@ -1735,6 +1747,7 @@ def _validate_common_recourse_completion(
         dbscan_manifest.get("clustering_path")
         == ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY
     )
+    dbscan_source_reopen_evidence: Mapping[str, Any] | None = None
     if adopted_dbscan:
         identity = dbscan_manifest.get("scientific_identity")
         if (
@@ -1748,12 +1761,42 @@ def _validate_common_recourse_completion(
         ):
             raise ValueError("RESUME_COMMON_DBSCAN_ADOPTION_SCIENTIFIC_MISMATCH")
         try:
+            if allow_close_view_and_downstream_remount_device_drift_for_aids_terminal_reconciliation:
+                if (
+                    not isinstance(close_pair_view_reopen_evidence, Mapping)
+                    or close_pair_view_reopen_evidence.get("hashes_verified")
+                    is not True
+                    or int(
+                        close_pair_view_reopen_evidence.get(
+                            "writer_scan_before_count", -1
+                        )
+                    )
+                    != 0
+                    or int(
+                        close_pair_view_reopen_evidence.get(
+                            "writer_scan_after_count", -1
+                        )
+                    )
+                    != 0
+                    or close_pair_view_reopen_evidence.get(
+                        "stat_stable_during_reopen"
+                    )
+                    is not True
+                    or str(physical_vectors_path)
+                    not in close_pair_view_reopen_evidence.get("source_files", {})
+                ):
+                    raise ValueError(
+                        "RESUME_COMMON_DBSCAN_REMOUNT_WRITER_GATE_MISSING"
+                    )
             reopened = fit_external_memory_dbscan(
                 vectors_path=physical_vectors_path,
                 work_dir=dbscan_manifest_path.parent,
                 contract=ExternalDBSCANContract(**identity["contract"]),
                 expected_vectors_sha256=physical_vectors_sha256,
                 resume=True,
+                allow_remount_device_drift_for_aids_terminal_reconciliation=(
+                    allow_close_view_and_downstream_remount_device_drift_for_aids_terminal_reconciliation
+                ),
             )
         except Exception as exc:
             raise ValueError(
@@ -1765,6 +1808,7 @@ def _validate_common_recourse_completion(
             != external.get("dbscan_manifest_sha256")
         ):
             raise ValueError("RESUME_COMMON_DBSCAN_ADOPTION_RESULT_MISMATCH")
+        dbscan_source_reopen_evidence = reopened.source_reopen_evidence
     required_dbscan_artifacts = [
         ("core_mask_path", "core_mask_sha256"),
         ("labels_path", "labels_sha256"),
@@ -1847,6 +1891,7 @@ def _validate_common_recourse_completion(
     component_summary_sha = external.get(
         "all_core_component_summary_manifest_sha256"
     )
+    component_summary_reopen_evidence: Mapping[str, Any] | None = None
     if component_recovery:
         relative = "external_memory/all_core_component_summary/run_manifest.json"
         if relative not in closure:
@@ -1864,6 +1909,10 @@ def _validate_common_recourse_completion(
                 component_summary_path,
                 pair_indices=None,
                 full_replay=True,
+                allow_remount_device_drift_for_aids_terminal_reconciliation=(
+                    allow_close_view_and_downstream_remount_device_drift_for_aids_terminal_reconciliation
+                ),
+                proc_root=_PROC_ROOT,
             )
         except Exception as exc:
             raise ValueError(
@@ -1906,9 +1955,15 @@ def _validate_common_recourse_completion(
             raise ValueError(
                 "RESUME_COMMON_COMPONENT_SUMMARY_SCIENTIFIC_MISMATCH"
             )
+        component_summary_reopen_evidence = component_summary.source_reopen_evidence
     elif component_summary_raw is not None or component_summary_sha is not None:
         raise ValueError("RESUME_COMMON_UNEXPECTED_COMPONENT_SUMMARY_MANIFEST")
-    return {"pair_store_reopen_evidence": pair_store_reopen_evidence}
+    return {
+        "pair_store_reopen_evidence": pair_store_reopen_evidence,
+        "close_pair_view_reopen_evidence": close_pair_view_reopen_evidence,
+        "dbscan_source_reopen_evidence": dbscan_source_reopen_evidence,
+        "component_summary_reopen_evidence": component_summary_reopen_evidence,
+    }
 
 
 def _archive_previous_failure(output_root: Path) -> None:

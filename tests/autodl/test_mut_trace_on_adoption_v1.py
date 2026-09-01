@@ -1479,6 +1479,56 @@ def test_only_no_progress_baseline_failures_are_retryable() -> None:
     )
 
 
+def test_coarse_counter_jump_cannot_replace_900_second_activity_fallback() -> None:
+    first = {
+        "status": "FAIL",
+        "failures": ["no_positive_baseline:taste_t14"],
+        "tasks": {},
+    }
+    action, affected = worker._protected_baseline_transition(
+        first,
+        coarse_task_ids=(),
+        elapsed_seconds=303.0,
+        maximum_wait_seconds=900,
+    )
+    assert action == "WAIT"
+    assert affected == {"taste_t14"}
+
+    # A single 800 -> 900 checkpoint publication in the next five-minute
+    # sample does not reveal the real coarse cadence and must not become a
+    # 0.3296 step/s slowdown baseline.
+    later_jump = {
+        "status": "PASS",
+        "failures": [],
+        "tasks": {
+            "taste_t14": {
+                "state": "ACTIVE",
+                "counter_start": 800.0,
+                "counter_end": 900.0,
+                "elapsed_seconds": 303.4,
+                "units_per_second": 100.0 / 303.4,
+            }
+        },
+    }
+    action, affected = worker._protected_baseline_transition(
+        later_jump,
+        coarse_task_ids=affected,
+        elapsed_seconds=606.4,
+        maximum_wait_seconds=900,
+    )
+    assert action == "WAIT"
+    assert affected == {"taste_t14"}
+
+    action, affected = worker._protected_baseline_transition(
+        later_jump,
+        coarse_task_ids=affected,
+        elapsed_seconds=909.0,
+        maximum_wait_seconds=900,
+    )
+    assert action == "ACTIVITY_FALLBACK"
+    assert affected == {"taste_t14"}
+
+
 def _activity_snapshot(
     *,
     sampled_at: float,
@@ -1587,6 +1637,57 @@ def test_activity_fallback_accepts_cpu_active_coarse_checkpoint_after_900s(
     assert receipt["missing_complete_five_minute_windows"] == []
     assert receipt["step_baseline_unavailable_task_ids"] == ["protected"]
     assert receipt["strict_resource_gates_retained"] is True
+
+
+def test_activity_fallback_marks_prior_zero_window_unavailable_after_jump() -> None:
+    baseline = worker._activity_fallback_baseline(
+        _protected_manifest(),
+        [
+            _activity_snapshot(
+                sampled_at=0.0,
+                counter=800.0,
+                cpu_ticks=100,
+                progress_sha="a" * 64,
+                progress_mtime_ns=1,
+            ),
+            _activity_snapshot(
+                sampled_at=303.0,
+                counter=800.0,
+                cpu_ticks=200,
+                progress_sha="a" * 64,
+                progress_mtime_ns=1,
+            ),
+            _activity_snapshot(
+                sampled_at=606.0,
+                counter=900.0,
+                cpu_ticks=300,
+                progress_sha="b" * 64,
+                progress_mtime_ns=2,
+            ),
+            _activity_snapshot(
+                sampled_at=909.0,
+                counter=900.0,
+                cpu_ticks=400,
+                progress_sha="b" * 64,
+                progress_mtime_ns=2,
+            ),
+        ],
+        maximum_wait_seconds=900,
+        forced_step_baseline_unavailable_task_ids=["protected"],
+    )
+
+    assert baseline["status"] == "PASS"
+    assert baseline["forced_step_baseline_unavailable_task_ids"] == [
+        "protected"
+    ]
+    assert baseline["step_baseline_unavailable_task_ids"] == ["protected"]
+    row = baseline["tasks"]["protected"]
+    assert row["counter_delta"] == 100.0
+    assert row["state"] == policy.PROTECTED_STEP_BASELINE_UNAVAILABLE_STATE
+    assert row["units_per_second"] is None
+    assert "COARSE_STEP_COUNTER_ADVANCED" in row["auxiliary_activity"][
+        "activity_kinds"
+    ]
 
 
 @pytest.mark.parametrize(

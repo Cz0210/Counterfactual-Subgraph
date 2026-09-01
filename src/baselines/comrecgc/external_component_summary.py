@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -39,6 +39,12 @@ ALL_CORE_COMPONENT_SUMMARY_SCHEMA = (
 _CHECKPOINT_SCHEMA = "comrecgc_exact_all_core_component_summary_checkpoint_v1"
 _OWNER_CLAIM_SCHEMA = "comrecgc_exact_component_summary_owner_claim_v1"
 _WRITER_LOCK_SCHEMA = "comrecgc_exact_component_summary_writer_lock_v1"
+_REMOUNT_REOPEN_EVIDENCE_SCHEMA = (
+    "comrecgc_component_summary_reopen_evidence_v1"
+)
+_AIDS_TERMINAL_REMOUNT_POLICY = (
+    "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
+)
 
 
 def _utc_now() -> str:
@@ -217,6 +223,200 @@ def _current_writer_lock_identity(root: Path) -> dict[str, Any]:
             "all-core summary writer lock terminal identity mismatch"
         )
     return expected
+
+
+def _device_only_stat_reopen(
+    *, label: str, recorded: Mapping[str, Any], observed: Mapping[str, Any]
+) -> dict[str, Any]:
+    try:
+        frozen = {str(key): int(value) for key, value in recorded.items()}
+        current = {str(key): int(value) for key, value in observed.items()}
+    except (TypeError, ValueError) as exc:
+        raise ExternalMemoryDBSCANError(
+            f"{label} stat identity is invalid"
+        ) from exc
+    if set(frozen) != set(current) or "device" not in frozen:
+        raise ExternalMemoryDBSCANError(f"{label} stat identity schema drift")
+    stable_fields = sorted(field for field in frozen if field != "device")
+    if any(frozen[field] != current[field] for field in stable_fields):
+        raise ExternalMemoryDBSCANError(f"{label} stat identity drift")
+    return {
+        "recorded_stat": frozen,
+        "observed_stat": current,
+        "device_changed": frozen["device"] != current["device"],
+        "stable_stat_fields": stable_fields,
+        "stable_stat_fields_match": True,
+    }
+
+
+@contextmanager
+def _validate_terminal_writer_lock_after_remount(
+    root: Path, *, expected_identity: Mapping[str, Any]
+) -> Iterator[dict[str, Any]]:
+    """Hold the completed writer lock throughout terminal validation.
+
+    The published receipt retains the pre-remount ``st_dev``.  Every other
+    identity field must match, and the current root/lock identities must stay
+    byte-for-byte stable from lock acquisition through the caller's complete
+    terminal replay.
+    """
+
+    lock_path = root / ".writer.lock"
+    receipt = _load_regular_json_nofollow(lock_path)
+    expected = dict(expected_identity)
+    if (
+        receipt != expected
+        or expected.get("schema_version") != _WRITER_LOCK_SCHEMA
+        or expected.get("root") != str(root)
+        or not isinstance(expected.get("root_stat_identity"), Mapping)
+        or not isinstance(expected.get("lock_stat_identity"), Mapping)
+    ):
+        raise ExternalMemoryDBSCANError(
+            "completed all-core writer lock receipt changed"
+        )
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ExternalMemoryDBSCANError(
+            "all-core summary requires O_NOFOLLOW terminal lock reads"
+        )
+    try:
+        descriptor = os.open(lock_path, os.O_RDONLY | int(nofollow))
+    except OSError as exc:
+        raise ExternalMemoryDBSCANError(
+            "completed all-core writer lock cannot be reopened"
+        ) from exc
+    locked = False
+    try:
+        descriptor_stat = os.fstat(descriptor)
+        path_stat = os.stat(lock_path, follow_symlinks=False)
+        current_lock = {
+            "device": int(descriptor_stat.st_dev),
+            "inode": int(descriptor_stat.st_ino),
+            "mode": int(descriptor_stat.st_mode),
+        }
+        path_lock = {
+            "device": int(path_stat.st_dev),
+            "inode": int(path_stat.st_ino),
+            "mode": int(path_stat.st_mode),
+        }
+        if (
+            not stat.S_ISREG(descriptor_stat.st_mode)
+            or current_lock != path_lock
+        ):
+            raise ExternalMemoryDBSCANError(
+                "completed all-core writer lock inode changed"
+            )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ExternalMemoryDBSCANError(
+                "completed all-core writer lock is still held"
+            ) from exc
+        locked = True
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            reopened_receipt = json.loads(os.read(descriptor, 64 * 1024))
+        except Exception as exc:
+            raise ExternalMemoryDBSCANError(
+                "completed all-core writer lock receipt is invalid"
+            ) from exc
+        if reopened_receipt != expected:
+            raise ExternalMemoryDBSCANError(
+                "completed all-core writer lock receipt changed"
+            )
+        current_root = _root_stat(root)
+        root_evidence = _device_only_stat_reopen(
+            label="completed all-core summary root",
+            recorded=expected["root_stat_identity"],
+            observed=current_root,
+        )
+        lock_evidence = _device_only_stat_reopen(
+            label="completed all-core writer lock",
+            recorded=expected["lock_stat_identity"],
+            observed=current_lock,
+        )
+        evidence = {
+            "receipt_matches_terminal_manifest": True,
+            "exclusive_lock_available": True,
+            "exclusive_lock_held_for_terminal_validation": True,
+            "terminal_validation_completed_while_lock_held": False,
+            "session_stat_stable": False,
+            "root": root_evidence,
+            "writer_lock": lock_evidence,
+        }
+        yield evidence
+
+        final_descriptor_stat = os.fstat(descriptor)
+        final_path_stat = os.stat(lock_path, follow_symlinks=False)
+        final_lock = {
+            "device": int(final_descriptor_stat.st_dev),
+            "inode": int(final_descriptor_stat.st_ino),
+            "mode": int(final_descriptor_stat.st_mode),
+        }
+        final_path_lock = {
+            "device": int(final_path_stat.st_dev),
+            "inode": int(final_path_stat.st_ino),
+            "mode": int(final_path_stat.st_mode),
+        }
+        final_root = _root_stat(root)
+        if (
+            not stat.S_ISREG(final_descriptor_stat.st_mode)
+            or final_lock != current_lock
+            or final_path_lock != path_lock
+            or final_root != current_root
+        ):
+            raise ExternalMemoryDBSCANError(
+                "completed all-core writer lock changed during terminal validation"
+            )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            final_receipt = json.loads(os.read(descriptor, 64 * 1024))
+        except Exception as exc:
+            raise ExternalMemoryDBSCANError(
+                "completed all-core writer lock receipt changed during terminal validation"
+            ) from exc
+        if final_receipt != expected:
+            raise ExternalMemoryDBSCANError(
+                "completed all-core writer lock receipt changed during terminal validation"
+            )
+        evidence.update(
+            {
+                "terminal_validation_completed_while_lock_held": True,
+                "session_stat_stable": True,
+                "root_stat_at_session_end": final_root,
+                "lock_stat_at_session_end": final_lock,
+            }
+        )
+    finally:
+        try:
+            if locked:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _validate_owner_claim_after_remount(
+    root: Path, *, identity_sha256: str
+) -> dict[str, Any]:
+    claim = _load_regular_json_nofollow(root / "owner_claim.json")
+    recorded_root = claim.get("root_stat_identity")
+    if (
+        claim.get("schema_version") != _OWNER_CLAIM_SCHEMA
+        or claim.get("root") != str(root)
+        or claim.get("scientific_identity_sha256") != identity_sha256
+        or not isinstance(recorded_root, Mapping)
+    ):
+        raise ExternalMemoryDBSCANError(
+            "all-core summary owner claim mismatch"
+        )
+    return {
+        "claim_verified": True,
+        "root": _device_only_stat_reopen(
+            label="all-core summary owner-claim root",
+            recorded=recorded_root,
+            observed=_root_stat(root),
+        ),
+    }
 
 
 def _claim_summary_root(
@@ -909,6 +1109,7 @@ class ExactAllCoreComponentSummaryResult:
     manifest_path: Path
     manifest_sha256: str
     retained_mask_path: Path
+    source_reopen_evidence: Mapping[str, Any] | None = None
 
 
 def _empty_centroid_payload(
@@ -2617,12 +2818,15 @@ def summarize_proven_all_core_components_external(
             raise
 
 
-def validate_proven_all_core_component_summary(
+def _validate_proven_all_core_component_summary_under_terminal_lock(
     manifest_path: str | Path,
     *,
     torch_module: Any | None = None,
     pair_indices: Any | None = None,
     full_replay: bool = True,
+    allow_remount_device_drift_for_aids_terminal_reconciliation: bool = False,
+    proc_root: str | Path = "/proc",
+    _remount_writer_evidence: Mapping[str, Any] | None = None,
 ) -> ExactAllCoreComponentSummaryResult:
     """Reopen the terminal manifest and its complete hash closure.
 
@@ -2665,19 +2869,39 @@ def validate_proven_all_core_component_summary(
         )
     root = path.parent.resolve(strict=True)
     terminal_lock_identity = manifest.get("writer_lock_identity")
-    if (
-        not isinstance(terminal_lock_identity, Mapping)
-        or dict(terminal_lock_identity) != _current_writer_lock_identity(root)
-    ):
+    if not isinstance(terminal_lock_identity, Mapping):
+        raise ExternalMemoryDBSCANError(
+            "completed all-core writer lock identity mismatch"
+        )
+    remount_writer_evidence: Mapping[str, Any] | None = None
+    remount_owner_evidence: Mapping[str, Any] | None = None
+    if allow_remount_device_drift_for_aids_terminal_reconciliation:
+        if (
+            not isinstance(_remount_writer_evidence, Mapping)
+            or _remount_writer_evidence.get(
+                "exclusive_lock_held_for_terminal_validation"
+            )
+            is not True
+        ):
+            raise ExternalMemoryDBSCANError(
+                "AIDS terminal remount replay requires a held writer lock"
+            )
+        remount_writer_evidence = _remount_writer_evidence
+    elif dict(terminal_lock_identity) != _current_writer_lock_identity(root):
         raise ExternalMemoryDBSCANError(
             "completed all-core writer lock identity mismatch"
         )
     n_samples, n_features = map(int, identity["vectors_shape"])
     cluster_count = int(identity["dbscan_cluster_count"])
     dtype = np.dtype(identity["vectors_dtype"])
-    _validate_owner_claim(
-        root, identity_sha256=str(manifest["scientific_identity_sha256"])
-    )
+    if allow_remount_device_drift_for_aids_terminal_reconciliation:
+        remount_owner_evidence = _validate_owner_claim_after_remount(
+            root, identity_sha256=str(manifest["scientific_identity_sha256"])
+        )
+    else:
+        _validate_owner_claim(
+            root, identity_sha256=str(manifest["scientific_identity_sha256"])
+        )
     dbscan_path = Path(identity["dbscan_manifest_path"]).resolve(strict=True)
     label_path = Path(identity["labels_path"]).resolve(strict=True)
     vector_path = Path(identity["vectors_path"]).resolve(strict=True)
@@ -2734,6 +2958,10 @@ def validate_proven_all_core_component_summary(
                 authority,
                 require_dbscan_eligible=True,
                 require_pair_semantics_authority=True,
+                allow_remount_device_drift_for_aids_terminal_reconciliation=(
+                    allow_remount_device_drift_for_aids_terminal_reconciliation
+                ),
+                proc_root=proc_root,
             )
             pairs = close_view.open_pairs()
         except Exception as exc:
@@ -2995,7 +3223,95 @@ def validate_proven_all_core_component_summary(
         retained_mask_path=Path(manifest["retained_mask_path"]).resolve(
             strict=True
         ),
+        source_reopen_evidence=(
+            {
+                "schema_version": _REMOUNT_REOPEN_EVIDENCE_SCHEMA,
+                "policy": _AIDS_TERMINAL_REMOUNT_POLICY,
+                "remount_device_drift_allowed": True,
+                "allowed_drift_fields": ["device"],
+                "writer_lock": dict(remount_writer_evidence or {}),
+                "owner_claim": dict(remount_owner_evidence or {}),
+                "close_pair_view": (
+                    None
+                    if identity["pairs_storage"] != "theta_close_view_v1"
+                    else dict(close_view.source_reopen_evidence or {})
+                ),
+                "no_active_writer_verified": bool(
+                    remount_writer_evidence
+                    and remount_writer_evidence.get(
+                        "exclusive_lock_held_for_terminal_validation"
+                    )
+                    is True
+                ),
+                "stat_stable_during_reopen": bool(
+                    remount_writer_evidence
+                    and remount_writer_evidence.get("session_stat_stable")
+                    is True
+                ),
+            }
+            if allow_remount_device_drift_for_aids_terminal_reconciliation
+            else None
+        ),
     )
+
+
+def validate_proven_all_core_component_summary(
+    manifest_path: str | Path,
+    *,
+    torch_module: Any | None = None,
+    pair_indices: Any | None = None,
+    full_replay: bool = True,
+    allow_remount_device_drift_for_aids_terminal_reconciliation: bool = False,
+    proc_root: str | Path = "/proc",
+) -> ExactAllCoreComponentSummaryResult:
+    """Validate a terminal summary, holding its writer lock for full replay."""
+
+    if not allow_remount_device_drift_for_aids_terminal_reconciliation:
+        return _validate_proven_all_core_component_summary_under_terminal_lock(
+            manifest_path,
+            torch_module=torch_module,
+            pair_indices=pair_indices,
+            full_replay=full_replay,
+            proc_root=proc_root,
+        )
+
+    path = Path(manifest_path).expanduser().resolve(strict=True)
+    manifest = _load_object(path)
+    terminal_lock_identity = manifest.get("writer_lock_identity")
+    if not isinstance(terminal_lock_identity, Mapping):
+        raise ExternalMemoryDBSCANError(
+            "completed all-core writer lock identity mismatch"
+        )
+    with _validate_terminal_writer_lock_after_remount(
+        path.parent.resolve(strict=True),
+        expected_identity=terminal_lock_identity,
+    ) as writer_evidence:
+        result = _validate_proven_all_core_component_summary_under_terminal_lock(
+            path,
+            torch_module=torch_module,
+            pair_indices=pair_indices,
+            full_replay=full_replay,
+            allow_remount_device_drift_for_aids_terminal_reconciliation=True,
+            proc_root=proc_root,
+            _remount_writer_evidence=writer_evidence,
+        )
+
+    source_evidence = dict(result.source_reopen_evidence or {})
+    source_evidence.update(
+        {
+            "writer_lock": dict(writer_evidence),
+            "no_active_writer_verified": (
+                writer_evidence.get(
+                    "terminal_validation_completed_while_lock_held"
+                )
+                is True
+            ),
+            "stat_stable_during_reopen": (
+                writer_evidence.get("session_stat_stable") is True
+            ),
+        }
+    )
+    return replace(result, source_reopen_evidence=source_evidence)
 
 
 __all__ = [

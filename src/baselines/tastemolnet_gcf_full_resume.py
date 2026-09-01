@@ -791,6 +791,12 @@ class T12StableGCFBridge:
         self._record_serialized_bytes: dict[str, int] = {}
         self._live_record_deep_bytes_total = 0
         self._live_record_serialized_bytes_total = 0
+        # Production scores one transient neighbor batch before the official
+        # walk chooses at most one row for ``graph_map``.  Keep the identities
+        # introduced since the preceding completed official transition so the
+        # batch can be released immediately after that choice.  Durable
+        # checkpoints are written only after this set has been emptied.
+        self._transient_record_keys: set[str] = set()
         self._live_domain_synced = production_history is None
 
     def _record_sizes(self, record: T12StableGraphRecord) -> tuple[int, int]:
@@ -819,6 +825,7 @@ class T12StableGCFBridge:
         self._live_record_deep_bytes_total += deep
         self._live_record_serialized_bytes_total += serialized
         if self.production_bounds is not None:
+            self._transient_record_keys.add(key)
             if len(self.records) > self.production_bounds.max_transient_full_records:
                 raise TasteGCFFullResumeError(
                     "T12 live bridge rows exceeded the pinned transient bound"
@@ -1443,6 +1450,106 @@ class T12StableGCFBridge:
             "official GCF queried an unknown structural identity"
         )
 
+    def _retain_after_official_step(
+        self, *, vrrw: Any, current_graph_identity: str
+    ) -> None:
+        """Release one scored neighbor batch after the official state commits.
+
+        The official move/restart functions first score a transient batch,
+        consume every stable hash, and only then update ``graph_map`` and the
+        ordered candidate registry.  Production's resource proof permits one
+        such batch in addition to the live official domain; waiting until the
+        10k checkpoint to evict it would retain many batches and violate that
+        proof.  This boundary performs no model call, RNG draw, reordering, or
+        scientific-state mutation: it drops only complete bridge cache rows
+        that the just-completed official transition did not retain.
+
+        The expensive transition-journal rescan remains in
+        :meth:`retain_official_live_domain` at the durable checkpoint.  Here
+        the pinned official invariant that at most the returned current graph
+        can newly enter ``graph_map`` is checked directly, keeping each 10k
+        neighbor step linear in its own transient batch rather than in all
+        historical transition files.
+        """
+
+        self._assert_idle()
+        if self.production_history is None or self.production_bounds is None:
+            raise TasteGCFFullResumeError(
+                "T12 per-step live-domain pruning requires production history"
+            )
+        current = _stable_graph_hash(
+            current_graph_identity, field="T12 production current graph"
+        )
+        graph_map = getattr(vrrw, "graph_map", None)
+        graph_index_map = getattr(vrrw, "graph_index_map", None)
+        candidates = getattr(vrrw, "counterfactual_candidates", None)
+        transitions = getattr(vrrw, "transitions", None)
+        live = set(graph_map) if isinstance(graph_map, Mapping) else set()
+        if (
+            not isinstance(graph_map, Mapping)
+            or not isinstance(graph_index_map, Mapping)
+            or not isinstance(candidates, list)
+            or not isinstance(transitions, Mapping)
+            or len(graph_map) != len(graph_index_map)
+            or len(graph_map) != len(candidates)
+            or live != set(graph_index_map)
+            or current not in live
+            or len(graph_map) > self.production_bounds.max_full_live_records
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 official step did not close one bounded live graph domain"
+            )
+        current_index = graph_index_map.get(current)
+        if (
+            type(current_index) is not int
+            or not 0 <= current_index < len(candidates)
+            or type(candidates[current_index]) is not dict
+            or candidates[current_index].get("graph_hash") != current
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 official step current graph/candidate registry changed"
+            )
+        if current not in self.records:
+            # A previously expanded transition can later select a target that
+            # was never admitted to graph_map at its first observation.  Its
+            # complete bridge cache row was correctly evicted, while the
+            # authenticated compact first-observation row remains sufficient
+            # for the official candidate predicate and transition payload.
+            if self.production_history.lookup_first(current) is None:
+                raise TasteGCFFullResumeError(
+                    "T12 official step current graph is absent from compact history"
+                )
+
+        evicted = self._transient_record_keys - live
+        if not set(self.records).difference(evicted).issubset(live):
+            raise TasteGCFFullResumeError(
+                "T12 official step and complete bridge live domains differ"
+            )
+        for key in evicted:
+            if key not in self.records:
+                raise TasteGCFFullResumeError(
+                    "T12 transient bridge row disappeared before step pruning"
+                )
+            del self.records[key]
+            self.lineage_occurrences.pop(key, None)
+            self._live_record_deep_bytes_total -= self._record_deep_bytes.pop(key)
+            self._live_record_serialized_bytes_total -= (
+                self._record_serialized_bytes.pop(key)
+            )
+        self.evicted_complete_record_count += len(evicted)
+        self._transient_record_keys.clear()
+        self._live_domain_synced = True
+        if (
+            len(self.records) > self.production_bounds.max_full_live_records
+            or self._live_record_deep_bytes_total
+            > self.production_bounds.max_bridge_ram_bytes
+            or self._live_record_serialized_bytes_total
+            > self.production_bounds.max_bridge_checkpoint_bytes
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 per-step pruned bridge state exceeds a production bound"
+            )
+
     def retain_official_live_domain(
         self, *, vrrw: Any, current_graph_identity: str
     ) -> dict[str, Any]:
@@ -1534,9 +1641,9 @@ class T12StableGCFBridge:
                             "T12 transition target is absent from compact history"
                         )
         missing = live - set(self.records)
-        if missing:
+        if any(self.production_history.lookup_first(key) is None for key in missing):
             raise TasteGCFFullResumeError(
-                "T12 official live graph registry lost complete bridge rows"
+                "T12 official live graph registry is absent from compact history"
             )
         evicted = set(self.records) - live
         for key in evicted:
@@ -1547,6 +1654,7 @@ class T12StableGCFBridge:
                 self._record_serialized_bytes.pop(key)
             )
         self.evicted_complete_record_count += len(evicted)
+        self._transient_record_keys.clear()
         self._live_domain_synced = True
         deep_total = self._live_record_deep_bytes_total
         serialized_total = self._live_record_serialized_bytes_total
@@ -1587,7 +1695,9 @@ class T12StableGCFBridge:
             raise TasteGCFFullResumeError(
                 "T12 NeuroSED retry state is not one mapping"
             )
-        if self.production_history is not None and not self._live_domain_synced:
+        if self.production_history is not None and (
+            not self._live_domain_synced or self._transient_record_keys
+        ):
             raise TasteGCFFullResumeError(
                 "T12 production checkpoint requested before live-domain pruning"
             )
@@ -1867,6 +1977,7 @@ class T12StableGCFBridge:
         self._live_record_serialized_bytes_total = sum(
             self._record_serialized_bytes.values()
         )
+        self._transient_record_keys.clear()
         lineages: dict[str, Counter[str]] = {}
         for key, raw in payload["lineage_occurrences"].items():
             if key not in records or type(raw) is not dict or not raw:
@@ -2028,9 +2139,48 @@ class T12StableGCFBridge:
             "calculate_hash": self.vrrw.calculate_hash,
             "is_graph_counterfactual": self.vrrw.is_graph_counterfactual,
         }
+        production = self.production_history is not None
+        if production:
+            restart = getattr(self.vrrw, "restart_randomwalk", None)
+            move = getattr(self.vrrw, "move_to_next_graph", None)
+            if not callable(restart) or not callable(move):
+                raise TasteGCFFullResumeError(
+                    "T12 production VRRW lacks official restart/move boundaries"
+                )
+            originals["restart_randomwalk"] = restart
+            originals["move_to_next_graph"] = move
+
+            def bounded_restart(*args: Any, **kwargs: Any) -> Any:
+                graph_hash = restart(*args, **kwargs)
+                self._retain_after_official_step(
+                    vrrw=self.vrrw, current_graph_identity=graph_hash
+                )
+                return graph_hash
+
+            def bounded_move(*args: Any, **kwargs: Any) -> Any:
+                result = move(*args, **kwargs)
+                if (
+                    not isinstance(result, tuple)
+                    or len(result) != 2
+                    or type(result[1]) is not bool
+                ):
+                    raise TasteGCFFullResumeError(
+                        "T12 official move result changed at the pruning boundary"
+                    )
+                next_graph, teleported = result
+                if not teleported:
+                    self._retain_after_official_step(
+                        vrrw=self.vrrw,
+                        current_graph_identity=next_graph,
+                    )
+                return result
+
         self.importance.call = self.call
         self.vrrw.calculate_hash = self.calculate_hash
         self.vrrw.is_graph_counterfactual = self.is_graph_counterfactual
+        if production:
+            self.vrrw.restart_randomwalk = bounded_restart
+            self.vrrw.move_to_next_graph = bounded_move
         try:
             yield
             self._assert_idle()
@@ -2038,6 +2188,9 @@ class T12StableGCFBridge:
             self.importance.call = originals["importance_call"]
             self.vrrw.calculate_hash = originals["calculate_hash"]
             self.vrrw.is_graph_counterfactual = originals["is_graph_counterfactual"]
+            if production:
+                self.vrrw.restart_randomwalk = originals["restart_randomwalk"]
+                self.vrrw.move_to_next_graph = originals["move_to_next_graph"]
 
 
 _IDENTITY_FIELDS = frozenset(

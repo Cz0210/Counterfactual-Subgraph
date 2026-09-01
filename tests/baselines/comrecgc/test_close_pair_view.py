@@ -11,6 +11,7 @@ import pytest
 from sklearn.cluster import DBSCAN
 import sklearn
 
+from src.baselines.comrecgc import close_pair_view as close_view_module
 from src.baselines.comrecgc.close_pair_view import (
     ALL_PAIRS_CLOSE_CERTIFICATE_SCHEMA,
     FILTER_OPERATOR,
@@ -131,6 +132,103 @@ def test_close_pair_view_replay_rejects_tampered_bitmap(tmp_path: Path) -> None:
     bitmap.flush()
     with pytest.raises(ExternalMemoryDBSCANError, match="artifact closure"):
         validate_theta_close_pair_view(result.manifest_path)
+
+
+def _device_drifted_pair_semantics_view(tmp_path: Path):
+    vectors_path = tmp_path / "physical.npy"
+    distances_path = tmp_path / "distances.npy"
+    pair_semantics_path = tmp_path / "pair-semantics.json"
+    np.save(vectors_path, np.arange(12, dtype=np.float32).reshape(6, 2))
+    np.save(
+        distances_path,
+        np.asarray([0.0, 0.2, 0.1, 0.3, 0.05, 0.4], dtype=np.float32),
+    )
+    pair_semantics_path.write_text('{"status":"PASS"}\n', encoding="utf-8")
+    result = materialize_theta_close_pair_view(
+        physical_vectors_path=vectors_path,
+        normalized_distances_path=distances_path,
+        pair_semantics_contract_path=pair_semantics_path,
+        output_dir=tmp_path / "view",
+        contract=_contract(parents=2, candidates=3),
+        max_compact_bytes=1024**2,
+        block_size=2,
+    )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    identity = manifest["scientific_identity"]
+    identity["pair_semantics_contract_stat_identity"]["device"] += 1
+    manifest["scientific_identity_sha256"] = close_view_module._stable_hash(identity)
+    result.manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return result, pair_semantics_path
+
+
+def test_close_pair_view_remount_fallback_is_explicit_and_device_only(
+    tmp_path: Path,
+) -> None:
+    result, pair_semantics_path = _device_drifted_pair_semantics_view(tmp_path)
+    with pytest.raises(ExternalMemoryDBSCANError, match="source identity drift"):
+        validate_theta_close_pair_view(result.manifest_path)
+
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    reopened = validate_theta_close_pair_view(
+        result.manifest_path,
+        allow_remount_device_drift_for_aids_terminal_reconciliation=True,
+        proc_root=proc_root,
+    )
+    evidence = reopened.source_reopen_evidence
+    assert evidence is not None
+    assert evidence["policy"] == (
+        "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
+    )
+    assert evidence["allowed_drift_fields"] == ["device"]
+    assert evidence["remount_device_drift_detected"] is True
+    assert evidence["writer_scan_before_count"] == 0
+    assert evidence["writer_scan_after_count"] == 0
+    assert evidence["stat_stable_during_reopen"] is True
+    pair_evidence = evidence["source_files"][str(pair_semantics_path.resolve())]
+    assert pair_evidence["device_changed"] is True
+    assert pair_evidence["stable_stat_fields_match"] is True
+    assert pair_evidence["hash_verified"] is True
+
+
+def test_close_pair_view_remount_fallback_rejects_inode_drift(tmp_path: Path) -> None:
+    result, _pair_semantics_path = _device_drifted_pair_semantics_view(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    identity = manifest["scientific_identity"]
+    identity["pair_semantics_contract_stat_identity"]["inode"] += 1
+    manifest["scientific_identity_sha256"] = close_view_module._stable_hash(identity)
+    result.manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    with pytest.raises(ExternalMemoryDBSCANError, match="source identity drift"):
+        validate_theta_close_pair_view(
+            result.manifest_path,
+            allow_remount_device_drift_for_aids_terminal_reconciliation=True,
+            proc_root=proc_root,
+        )
+
+
+def test_close_pair_view_remount_fallback_rejects_live_writer(tmp_path: Path) -> None:
+    result, pair_semantics_path = _device_drifted_pair_semantics_view(tmp_path)
+    proc_root = tmp_path / "proc"
+    fd_root = proc_root / "4242/fd"
+    fdinfo_root = proc_root / "4242/fdinfo"
+    fd_root.mkdir(parents=True)
+    fdinfo_root.mkdir()
+    (fd_root / "7").symlink_to(pair_semantics_path.resolve())
+    (fdinfo_root / "7").write_text("flags:\t02\n", encoding="utf-8")
+    with pytest.raises(
+        ExternalMemoryDBSCANError, match="CLOSE_VIEW_SOURCE_HAS_LIVE_WRITER"
+    ):
+        validate_theta_close_pair_view(
+            result.manifest_path,
+            allow_remount_device_drift_for_aids_terminal_reconciliation=True,
+            proc_root=proc_root,
+        )
 
 
 def test_partial_close_defaults_to_zero_copy_index_and_blocks_path_dbscan(

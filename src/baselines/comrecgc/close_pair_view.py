@@ -36,6 +36,9 @@ from .external_memory_dbscan import ExternalMemoryDBSCANError
 CLOSE_PAIR_VIEW_SCHEMA = "comrecgc_theta_close_pair_view_v1"
 CLOSE_PAIR_CHECKPOINT_SCHEMA = "comrecgc_theta_close_pair_checkpoint_v1"
 ALL_PAIRS_CLOSE_CERTIFICATE_SCHEMA = "comrecgc_all_pairs_close_certificate_v1"
+CLOSE_PAIR_VIEW_REOPEN_EVIDENCE_SCHEMA = (
+    "comrecgc_close_pair_view_reopen_evidence_v1"
+)
 PAIR_ORIENTATION = "col0_parent_col1_candidate"
 PAIR_ORDER = "candidate_major_parent_minor"
 FILTER_OPERATOR = "<="
@@ -43,6 +46,20 @@ SCALE_CONTRACT = "element_count(parent)+element_count(candidate)"
 NORMALIZED_DISTANCE_CONTRACT = (
     "GREED/NeuroSED.predict_outer(parent,candidate)/"
     "(element_count(parent)+element_count(candidate))"
+)
+_SOURCE_STAT_IDENTITY_FIELDS = (
+    "device",
+    "inode",
+    "mode",
+    "size",
+    "mtime_ns",
+    "ctime_ns",
+)
+_REMOUNT_STABLE_SOURCE_STAT_FIELDS = tuple(
+    field for field in _SOURCE_STAT_IDENTITY_FIELDS if field != "device"
+)
+_AIDS_TERMINAL_REMOUNT_POLICY = (
+    "AIDS_TERMINAL_RECONCILIATION_REMOUNT_DEVICE_ONLY"
 )
 
 
@@ -90,12 +107,51 @@ def _hash_stable_file(path: Path) -> tuple[str, dict[str, int]]:
     return digest, before
 
 
-def _verify_file(path: Path, *, sha256: str, identity: Mapping[str, Any]) -> None:
+def _verify_file(
+    path: Path,
+    *,
+    sha256: str,
+    identity: Mapping[str, Any],
+    allow_remount_device_drift_for_aids_terminal_reconciliation: bool = False,
+) -> dict[str, Any]:
     before = _stat_identity(path)
-    if before != dict(identity) or _sha256_file(path) != str(sha256):
+    try:
+        recorded = {str(key): int(value) for key, value in identity.items()}
+    except (TypeError, ValueError) as exc:
+        raise ExternalMemoryDBSCANError(
+            f"close-view source stat identity is invalid: {path}"
+        ) from exc
+    expected_fields = set(_SOURCE_STAT_IDENTITY_FIELDS)
+    if set(recorded) != expected_fields or set(before) != expected_fields:
+        raise ExternalMemoryDBSCANError(
+            f"close-view source stat identity schema drift: {path}"
+        )
+    stable_mismatches = {
+        field: (recorded[field], before[field])
+        for field in _REMOUNT_STABLE_SOURCE_STAT_FIELDS
+        if recorded[field] != before[field]
+    }
+    device_changed = recorded["device"] != before["device"]
+    if stable_mismatches or (
+        device_changed
+        and not allow_remount_device_drift_for_aids_terminal_reconciliation
+    ):
+        raise ExternalMemoryDBSCANError(f"close-view source identity drift: {path}")
+    actual_sha256 = _sha256_file(path)
+    if actual_sha256 != str(sha256):
         raise ExternalMemoryDBSCANError(f"close-view source identity drift: {path}")
     if _stat_identity(path) != before:
         raise ExternalMemoryDBSCANError(f"close-view source changed: {path}")
+    return {
+        "path": str(path),
+        "recorded_stat": recorded,
+        "observed_stat": before,
+        "device_changed": device_changed,
+        "stable_stat_fields_match": True,
+        "sha256": actual_sha256,
+        "hash_verified": True,
+        "stat_stable_while_hashing": True,
+    }
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -268,6 +324,7 @@ class ThetaClosePairView:
     blocking_reason: str | None
     pair_semantics_contract_path: Path | None
     pair_semantics_contract_sha256: str | None
+    source_reopen_evidence: Mapping[str, Any] | None = None
 
     def open_vectors(self) -> Any:
         """Open the logical vector view without copying selected rows."""
@@ -1295,6 +1352,8 @@ def validate_theta_close_pair_view(
     replay_block_size: int = 1_000_000,
     require_dbscan_eligible: bool = False,
     require_pair_semantics_authority: bool = False,
+    allow_remount_device_drift_for_aids_terminal_reconciliation: bool = False,
+    proc_root: str | Path = "/proc",
 ) -> ThetaClosePairView:
     """Reopen a terminal view and replay its exact predicate/mapping closure."""
 
@@ -1389,11 +1448,6 @@ def validate_theta_close_pair_view(
                 "logical view pair-semantics authority closure mismatch"
             )
         pair_semantics_path = Path(str(pair_semantics_raw)).resolve(strict=True)
-        _verify_file(
-            pair_semantics_path,
-            sha256=pair_semantics_sha,
-            identity=pair_semantics_stat,
-        )
     if expected_pair_semantics_contract_path is not None:
         expected_authority_path = Path(
             expected_pair_semantics_contract_path
@@ -1413,16 +1467,55 @@ def validate_theta_close_pair_view(
     distance_stat = identity.get("normalized_distances_stat_identity")
     if not isinstance(physical_stat, Mapping) or not isinstance(distance_stat, Mapping):
         raise ExternalMemoryDBSCANError("logical view source stat identity is absent")
-    _verify_file(
-        physical_path,
-        sha256=str(identity.get("physical_vectors_sha256") or ""),
-        identity=physical_stat,
-    )
-    _verify_file(
-        distance_path,
-        sha256=str(identity.get("normalized_distances_sha256") or ""),
-        identity=distance_stat,
-    )
+    source_specs: list[tuple[Path, str, Mapping[str, Any]]] = [
+        (
+            physical_path,
+            str(identity.get("physical_vectors_sha256") or ""),
+            physical_stat,
+        ),
+        (
+            distance_path,
+            str(identity.get("normalized_distances_sha256") or ""),
+            distance_stat,
+        ),
+    ]
+    if pair_semantics_path is not None:
+        assert pair_semantics_sha is not None and pair_semantics_stat is not None
+        source_specs.append(
+            (pair_semantics_path, pair_semantics_sha, pair_semantics_stat)
+        )
+    source_paths = [item[0] for item in source_specs]
+    session_before: dict[str, dict[str, int]] | None = None
+    writers_before: list[dict[str, Any]] | None = None
+    if allow_remount_device_drift_for_aids_terminal_reconciliation:
+        # Import locally to avoid making ordinary close-view validation depend
+        # on procfs.  This is the same exact-inode writable-FD/mapping audit
+        # already used by the adopted pair-store terminal reopen.
+        from .external_memory_recourse import _find_writable_process_references
+
+        resolved_proc_root = Path(proc_root).expanduser().resolve(strict=True)
+        writers_before = _find_writable_process_references(
+            source_paths, proc_root=resolved_proc_root
+        )
+        if writers_before:
+            raise ExternalMemoryDBSCANError(
+                "CLOSE_VIEW_SOURCE_HAS_LIVE_WRITER:"
+                + json.dumps(writers_before, sort_keys=True)
+            )
+        session_before = {
+            str(source): _stat_identity(source) for source in source_paths
+        }
+    source_file_evidence = {
+        str(source): _verify_file(
+            source,
+            sha256=expected_sha256,
+            identity=recorded_stat,
+            allow_remount_device_drift_for_aids_terminal_reconciliation=(
+                allow_remount_device_drift_for_aids_terminal_reconciliation
+            ),
+        )
+        for source, expected_sha256, recorded_stat in source_specs
+    }
     all_pairs_close = manifest.get("all_pairs_close") is True
     indexed_only = manifest.get("view_storage") == "bitmap_index_zero_copy"
     if manifest.get("all_pairs_close") not in {True, False}:
@@ -1642,6 +1735,47 @@ def validate_theta_close_pair_view(
             parent_count=int(contract.parent_count),
             block_size=int(replay_block_size),
         )
+    source_reopen_evidence: dict[str, Any] | None = None
+    if allow_remount_device_drift_for_aids_terminal_reconciliation:
+        assert session_before is not None and writers_before is not None
+        from .external_memory_recourse import _find_writable_process_references
+
+        resolved_proc_root = Path(proc_root).expanduser().resolve(strict=True)
+        writers_after = _find_writable_process_references(
+            source_paths, proc_root=resolved_proc_root
+        )
+        if writers_after:
+            raise ExternalMemoryDBSCANError(
+                "CLOSE_VIEW_SOURCE_HAS_LIVE_WRITER:"
+                + json.dumps(writers_after, sort_keys=True)
+            )
+        session_after = {
+            str(source): _stat_identity(source) for source in source_paths
+        }
+        if session_after != session_before:
+            raise ExternalMemoryDBSCANError(
+                "close-view source drift during terminal reconciliation"
+            )
+        source_reopen_evidence = {
+            "schema_version": CLOSE_PAIR_VIEW_REOPEN_EVIDENCE_SCHEMA,
+            "policy": _AIDS_TERMINAL_REMOUNT_POLICY,
+            "remount_device_drift_allowed": True,
+            "remount_device_drift_detected": any(
+                bool(item["device_changed"])
+                for item in source_file_evidence.values()
+            ),
+            "allowed_drift_fields": ["device"],
+            "strict_stat_fields": list(_REMOUNT_STABLE_SOURCE_STAT_FIELDS),
+            "source_files": source_file_evidence,
+            "hashes_verified": all(
+                bool(item["hash_verified"])
+                for item in source_file_evidence.values()
+            ),
+            "proc_root": str(resolved_proc_root),
+            "writer_scan_before_count": len(writers_before),
+            "writer_scan_after_count": len(writers_after),
+            "stat_stable_during_reopen": True,
+        }
     return ThetaClosePairView(
         manifest_path=path,
         manifest_sha256=_sha256_file(path),
@@ -1676,6 +1810,7 @@ def validate_theta_close_pair_view(
         pair_semantics_contract_sha256=(
             None if pair_semantics_sha is None else str(pair_semantics_sha)
         ),
+        source_reopen_evidence=source_reopen_evidence,
     )
 
 
@@ -1683,6 +1818,7 @@ __all__ = [
     "ALL_PAIRS_CLOSE_CERTIFICATE_SCHEMA",
     "CartesianThetaClosePairs",
     "CLOSE_PAIR_VIEW_SCHEMA",
+    "CLOSE_PAIR_VIEW_REOPEN_EVIDENCE_SCHEMA",
     "FILTER_OPERATOR",
     "PAIR_ORDER",
     "PAIR_ORIENTATION",
