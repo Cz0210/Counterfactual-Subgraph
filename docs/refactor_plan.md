@@ -1,5 +1,19 @@
 # Refactor Plan
 
+## 2026-09-01: Recover Taste routes after AutoDL maintenance
+
+- [x] Keep every T11 discrete generation field exact on resume and allow only
+  finite `1e-7` absolute drift in probability vectors and their two derived
+  score fields.
+- [x] Cover source-class probability drift so the test exercises derived
+  `cf_drop`/`reward_total`, and retain a larger-drift rejection regression.
+- [x] Start the T8 single-branch worker with isolated Python while retaining its
+  explicit resolved-repository import bootstrap and pinned official source.
+- [x] Preserve the incompatible historical T14 5k attempt read-only and start a
+  fresh current-commit attempt instead of weakening checkpoint provenance.
+- [ ] Deploy a fresh immutable commit, resume T11 on GPU1, relaunch T12 on GPU3,
+  and leave the fresh T8 controller queued behind the natural GPU1 release.
+
 ## 2026-09-01: Reconcile T14 frozen cohort probability diagnostics
 
 - [x] Preserve the committed cohort bytes when replay matches every member,
@@ -25,8 +39,10 @@
   semantics; enable canonical replay only at the generation bridge boundary.
 - [x] Prime T14 generation replay from validated bridge records after restoring
   an existing checkpoint, without changing the checkpoint/cohort contract.
-- [ ] Deploy in a fresh immutable AutoDL checkout, rerun the T12 canary, and
-  resume T14 from the committed 5k checkpoint.
+- [x] Audit the historical T14 5k checkpoint against the current immutable
+  runner.  Its execution/scientific identity is cross-version incompatible, so
+  preserve it read-only and use the fresh current-commit T14 route recorded
+  above; do not mask the mismatch as a resume.
 
 ## 2026-09-01: Final Taste T12/T8/T13 relays
 
@@ -3537,6 +3553,11 @@ Mutagenicity roadmaps.
 - [x] Bind the posthoc exact-checkpoint adoption receipt to its controller
   manifest and checkpoint SHA, then fully reopen the exact PASS receipt and
   proven DBSCAN partition.
+- [x] Reopen the frozen typed adoption receipt and exact scientific terminal
+  directly after a host restart, without consulting historical stage gates
+  whose writer-lock/process closure is no longer reproducible.  Preserve the
+  existing controller-evidence projection byte-for-byte so an already-published
+  overlay remains independently verifiable.
 - [x] Validate the separately completed final root by its own PASS-last marker,
   continuation/common closure, read-only exact-DBSCAN adoption, RF/split/MolCLR
   identities, standardized freeze, Figure 3/4, and Table 2.  Do not route this
@@ -3545,7 +3566,9 @@ Mutagenicity roadmaps.
   unavailable conditional cost; prohibit candidate or numeric imputation.
 - [x] Publish a fresh hash-closed wrapper and route its one-cell append through
   the existing `fast16_matrix_authority` state and lock.
-- [x] Add a thin AutoDL CLI, paired Slurm wrapper, and focused fail-closed tests.
+- [x] Add a thin AutoDL CLI, paired Slurm wrapper, and focused fail-closed tests,
+  including maintenance-restart regression coverage for the direct scientific
+  reopen.
 - [ ] Run reconciliation against the immutable completed AutoDL root, then
   publish the AIDS/ComRecGC cell from the current shared authority pointer.
 
@@ -3627,3 +3650,37 @@ Mutagenicity roadmaps.
   syntax validation, and no process-signalling path.
 - [ ] Deploy from one clean immutable checkout and launch only when GPU1 is
   naturally available; never reuse either `7c8` FAILED terminal root.
+
+## 2026-09-01: Managed-final remount-safe reopen
+
+- [x] Treat sealed `st_dev` as publication-session provenance rather than a
+  cross-reboot scientific identity field.
+- [x] Establish the current device number from the first descriptor-safe reopen
+  and reject any further device drift during that held consumer session.
+- [x] Continue to require the physical absolute path, no symlink, single-link
+  regular files, sealed inode, size, `mtime_ns`, SHA-256, exact directory
+  membership, and directory inode/digest closure.
+- [x] Expose every sealed/current device mismatch as separate consumer-session
+  evidence without changing the stable `revalidate()` evidence contract or
+  modifying the historical managed-v2 final.
+- [x] Add regression coverage for a remount-only device change plus inode-swap,
+  same-metadata byte-tamper, and symlink substitution failures.
+- [ ] Deploy from a fresh immutable AutoDL worktree and reopen the existing
+  sealed final; do not republish or rerun its completed science.
+
+## 2026-09-01: BACE held-out maintenance successor
+
+- [x] Bind both completed GlobalGCE/ComRecGC selections to the exact adoption
+  receipt and recursively verify its physical size/SHA inventory.
+- [x] Start the recovery boundary at held-out test shard 0; never rerun BACE
+  generation, training, calibration, or selection.
+- [x] Preserve incomplete attempts and adopt only independently valid PASS
+  stage terminals across a controller restart.
+- [x] Reuse the project GPU UUID lock and one BACE-only owner lock; forward
+  TERM only to the exact active child.
+- [x] Close GlobalGCE then ComRecGC through test merge, final freeze,
+  standardization, and the unique fast16 matrix authority.
+- [x] Keep legal expected-empty GlobalGCE results unchanged and keep all GNN
+  backbone ablations disabled.
+- [ ] Deploy from the clean immutable integration commit and launch on the
+  naturally assigned GPU0 after the post-maintenance source preflight passes.

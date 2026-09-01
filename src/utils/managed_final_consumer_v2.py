@@ -15,7 +15,7 @@ import json
 import os
 from pathlib import Path
 import stat
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Mapping
 
 from src.utils.managed_execution_v2 import (
@@ -103,6 +103,8 @@ class HeldVerifiedFinalV2:
     files: Mapping[str, Any]
     published_files: Mapping[str, FileEvidenceV2]
     published_directories: Mapping[str, DirectoryEvidenceV2]
+    mount_session_file_devices: Mapping[str, int]
+    mount_session_directory_devices: Mapping[str, int]
     attempt_id: str
     generation_token: str
     seal_sha256: str
@@ -135,6 +137,52 @@ class HeldVerifiedFinalV2:
             raise ManagedFinalConsumerV2Error(
                 f"published managed file is absent: {relative_path}"
             ) from exc
+
+    @property
+    def mount_session_device_drift(self) -> tuple[dict[str, int | str], ...]:
+        """Describe publication-device changes observed in this mount session.
+
+        ``st_dev`` identifies the mounted filesystem in one running kernel.  A
+        persistent managed final can therefore retain the same inode, bytes,
+        size, and timestamp while receiving a different device number after a
+        host reboot/remount.  The sealed value remains useful provenance, but
+        the first descriptor-safe reopen establishes the device identity for
+        this consumer session.
+        """
+
+        observations: list[dict[str, int | str]] = []
+        for relative, evidence in self.published_files.items():
+            observed = self.mount_session_file_devices[relative]
+            if observed != evidence.st_dev:
+                observations.append(
+                    {
+                        "kind": "file",
+                        "relative_path": relative,
+                        "sealed_st_dev": evidence.st_dev,
+                        "mount_session_st_dev": observed,
+                    }
+                )
+        for relative, evidence in self.published_directories.items():
+            observed = self.mount_session_directory_devices[relative]
+            if observed != evidence.st_dev:
+                observations.append(
+                    {
+                        "kind": "directory",
+                        "relative_path": relative,
+                        "sealed_st_dev": evidence.st_dev,
+                        "mount_session_st_dev": observed,
+                    }
+                )
+        return tuple(
+            sorted(
+                observations,
+                key=lambda item: (str(item["relative_path"]), str(item["kind"])),
+            )
+        )
+
+    @property
+    def mount_session_remount_detected(self) -> bool:
+        return bool(self.mount_session_device_drift)
 
     def _scan_exact_inventory(self) -> None:
         expected_files = set(self.published_files) | {
@@ -189,7 +237,8 @@ class HeldVerifiedFinalV2:
                     not stat.S_ISREG(info.st_mode)
                     or info.st_nlink != 1
                     or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)
-                    or int(info.st_dev) != evidence.st_dev
+                    or int(info.st_dev)
+                    != self.mount_session_file_devices[relative]
                     or int(info.st_ino) != evidence.st_ino
                     or int(info.st_size) != evidence.size
                     or int(info.st_mtime_ns) != evidence.mtime_ns
@@ -205,7 +254,8 @@ class HeldVerifiedFinalV2:
             info = os.stat(path, follow_symlinks=False)
             names = os.listdir(path)
             if (
-                int(info.st_dev) != evidence.st_dev
+                int(info.st_dev)
+                != self.mount_session_directory_devices[relative]
                 or int(info.st_ino) != evidence.st_ino
                 or int(info.st_size) != evidence.size
                 or int(info.st_mtime_ns) != evidence.mtime_ns
@@ -361,6 +411,7 @@ def hold_verified_managed_final(
                 "required managed final file is outside the published inventory"
             )
         held_files: dict[str, Any] = dict(terminal)
+        mount_session_file_devices: dict[str, int] = {}
         for relative, evidence in published_files.items():
             descriptor = os.open(
                 root / relative,
@@ -373,9 +424,9 @@ def hold_verified_managed_final(
                 digest = _sha256_fd(descriptor, evidence.size)
             finally:
                 os.close(descriptor)
+            mount_session_file_devices[relative] = int(info.st_dev)
             if (
-                int(info.st_dev) != evidence.st_dev
-                or int(info.st_ino) != evidence.st_ino
+                int(info.st_ino) != evidence.st_ino
                 or int(info.st_size) != evidence.size
                 or int(info.st_mtime_ns) != evidence.mtime_ns
                 or digest != evidence.sha256
@@ -389,6 +440,14 @@ def hold_verified_managed_final(
                         root / relative, expected_sha256=evidence.sha256
                     )
                 )
+        mount_session_directory_devices: dict[str, int] = {}
+        for relative, evidence in published_directories.items():
+            info = os.stat(root / relative, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode):
+                raise ManagedFinalConsumerV2Error(
+                    f"published managed directory changed: {relative}"
+                )
+            mount_session_directory_devices[relative] = int(info.st_dev)
         generation_payload = _json(
             held_files[".generation_token.json"].read_bytes(),
             label="generation token",
@@ -425,6 +484,12 @@ def hold_verified_managed_final(
             files=held_files,
             published_files=published_files,
             published_directories=published_directories,
+            mount_session_file_devices=MappingProxyType(
+                mount_session_file_devices
+            ),
+            mount_session_directory_devices=MappingProxyType(
+                mount_session_directory_devices
+            ),
             attempt_id=attempt_id,
             generation_token=generation,
             seal_sha256=terminal["SEALED.json"].sha256,

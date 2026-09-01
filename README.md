@@ -83,6 +83,10 @@ See:
   resource-cap handover, checkpoint-only fresh materialization, and
   post-generation BACE task continuation; it never signals a RUNNING_SLOW
   worker before an eligible committed checkpoint)
+- `docs/AUTODL_BACE_HELDOUT_CLOSEOUT_SUCCESSOR_V1.md` (maintenance-safe,
+  dataset-specific adoption of the two frozen BACE selections into held-out
+  shards, freeze, standardization, and the unique fast16 matrix authority;
+  generation/training/calibration are never replayed)
 - `docs/AUTODL_AM_LEGACY_STANDARDIZATION.md` (strict frozen-result adoption and
   deterministic matched-protocol re-export plus fail-closed
   AIDS/Mutagenicity legacy inventory)

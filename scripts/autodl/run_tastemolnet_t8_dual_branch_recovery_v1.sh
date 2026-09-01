@@ -195,7 +195,7 @@ run_branch() {
   local target=$1 attempt_id=$2 state_root=$3 scratch_root=$4 log=$5
   verify_failure_receipt verify
   capture_or_verify_science_inputs verify
-  "$PY" scripts/autodl/rerun_tastemolnet_t8_single_branch_v1.py \
+  "$PY" -I -B scripts/autodl/rerun_tastemolnet_t8_single_branch_v1.py \
     --config configs/hpc.yaml \
     --set inference.fallback_to_heuristic=false \
     --attempt-id "$attempt_id" \

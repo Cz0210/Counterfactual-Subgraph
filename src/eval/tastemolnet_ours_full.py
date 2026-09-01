@@ -71,6 +71,7 @@ GENERATION_CHUNK_RECEIPT_SCHEMA = "tastemolnet_t11_generation_chunk_receipt_v2"
 GENERATION_MANIFEST_SCHEMA = "tastemolnet_t11_generation_manifest_v2"
 PAIR_CHUNK_RECEIPT_SCHEMA = "tastemolnet_t11_pair_chunk_receipt_v2"
 PAIR_MANIFEST_SCHEMA = "tastemolnet_t11_pair_manifest_v2"
+GENERATION_REPLAY_ABS_TOL = 1e-7
 GENERATION_ROW_FIELDS = frozenset(
     {
         "dataset",
@@ -1034,7 +1035,50 @@ def _require_generation_semantic_replay(
         scorer=scorer,
         config=config,
     )
-    if jsonl_bytes(replay_rows) != jsonl_bytes(rows):
+    # CUDA kernels may change their final float32 reduction bits after a host
+    # restart even when the frozen model, inputs, graph edits, predictions and
+    # selected deletion are identical.  Keep every discrete scientific field
+    # byte-exact and admit only a bounded probability/score round-off drift.
+    float_fields = frozenset({"cf_drop", "reward_total"})
+    vector_fields = frozenset({"p_before", "p_after"})
+
+    def close_float(left: Any, right: Any) -> bool:
+        if type(left) not in {int, float} or type(right) not in {int, float}:
+            return False
+        return math.isfinite(float(left)) and math.isfinite(float(right)) and math.isclose(
+            float(left),
+            float(right),
+            rel_tol=0.0,
+            abs_tol=GENERATION_REPLAY_ABS_TOL,
+        )
+
+    def row_matches(saved: Mapping[str, Any], replayed: Mapping[str, Any]) -> bool:
+        if set(saved) != set(replayed):
+            return False
+        for field in vector_fields:
+            left = saved.get(field)
+            right = replayed.get(field)
+            if not isinstance(left, list) or not isinstance(right, list):
+                return False
+            if len(left) != len(right) or any(
+                not close_float(a, b) for a, b in zip(left, right, strict=True)
+            ):
+                return False
+        for field in float_fields:
+            left = saved.get(field)
+            right = replayed.get(field)
+            if left is None or right is None:
+                if left is not right:
+                    return False
+            elif not close_float(left, right):
+                return False
+        numeric = float_fields | vector_fields
+        return all(saved[field] == replayed[field] for field in set(saved) - numeric)
+
+    if len(rows) != len(replay_rows) or any(
+        not row_matches(saved, replayed)
+        for saved, replayed in zip(rows, replay_rows, strict=True)
+    ):
         raise TasteOursFullError(
             f"{config.name} resumed generation chunk fails frozen-GINE replay"
         )

@@ -1,5 +1,73 @@
 # Decisions Log
 
+## [2026-09-01] Recover Taste full routes at their verified maintenance boundaries
+
+### Motivation
+
+AutoDL maintenance removed every process while preserving the persistent
+artifacts.  T11's completed generation chunks replay the same rows, graph edits,
+labels, flips, and selections, with only roughly `7e-9` CUDA probability drift.
+T8's fresh branch worker was rejected because it was not started in Python
+isolated mode.  The historical T14 5k checkpoint, however, is bound to an older
+execution identity and cannot be migrated to the current scientific runner
+without a separate cross-version parity proof.
+
+### Decision
+
+For T11 resume validation, keep row count/order, schema, raw generations,
+parents, fragments, residuals, selected deletions, predictions, strict flips,
+destinations, and all other discrete scientific fields exact.  Permit only
+finite absolute drift at most `1e-7` in `p_before`, `p_after`, `cf_drop`, and
+`reward_total`; do not rewrite the preserved chunk.  Start T8 branch workers
+with `python -I -B`; the entrypoint explicitly inserts its resolved repository
+root before importing project code.  Preserve the old T14 attempt read-only and
+start a fresh current-commit T14 attempt rather than weakening checkpoint
+identity or claiming cross-commit equivalence.
+
+### Consequences
+
+- T11 reuses all completed expensive generation chunks and reruns only the
+  downstream resume boundary.
+- T8 reruns only the failed fresh branch attempt under the already-required
+  official-module provenance contract.
+- T14 is the one Taste route that must regenerate from step zero; its older 5k
+  checkpoint remains evidence and is never mixed into the fresh attempt.
+- Any T11 class/edit/selection change, nonfinite number, or drift over the bound
+  remains a hard failure.
+
+---
+
+## [2026-09-01] Restart BACE only at the frozen-selection boundary
+
+### Motivation
+
+AutoDL maintenance terminated the BACE test closeout controller while its first
+GlobalGCE held-out shard was running.  The interrupted held-out output has no
+valid terminal, while both GlobalGCE and ComRecGC calibration merges and top-20
+selections are already physical, hash-closed, test-free PASS artifacts.
+
+### Decision
+
+Add one dataset-specific successor that revalidates the exact selection
+adoption receipt and every inventoried byte, then starts fresh held-out
+attempts.  It runs test shards, merge, final freeze, standardization, and the
+locked fast16 append only.  A process restart may adopt an exact completed
+stage, but preserves and skips every incomplete attempt.  Hold the existing
+physical-GPU UUID lock for the GPU-critical section and forward termination
+only to the exact current child.
+
+### Consequences
+
+- BACE generation, GlobalGCE training, ComRecGC 20k materialization,
+  calibration, and selection are not repeated.
+- The interrupted empty held-out root is evidence only, not a checkpoint.
+- The expected-empty GlobalGCE semantics remain in the scientific evaluator;
+  the successor cannot turn a legal zero result into a fabricated nonzero row.
+- Each real standardized terminal is appended immediately through the unique
+  matrix pointer, with GNN ablation still disabled.
+
+---
+
 ## [2026-09-01] Preserve a validated T14 cohort across probability low-bit drift
 
 ### Motivation
@@ -16152,3 +16220,90 @@ offline audit while remaining below the existing 64-GiB cap.
 
 Accepted and implemented locally; focused CPU tests pass and a fresh real-GPU
 three-process canary is required before production release.
+
+---
+
+## [2026-09-01] Reopen AIDS posthoc exact science without historical stage gates
+
+### Motivation
+
+The completed AIDS exact receipt, DBSCAN partition/proof, posthoc checkpoint
+adoption, and zero-result publication overlay survived an AutoDL host restart.
+The historical typed adoption gate also retained controller-era writer-lock and
+process closure identities.  Those operational identities correctly stopped
+matching after the reboot, so routing a posthoc verification through the
+ordinary typed stage gate rejected unchanged completed science.
+
+### Decision
+
+Keep the old controller, gate, exact root, and publication overlay read-only.
+For this terminal-reconciliation path only, reopen the manifest-bound frozen
+adoption receipt directly with the existing typed receipt contract, then pass
+that exact receipt path and SHA-256 into the existing exact scientific terminal
+validator.  Reopen the exact receipt, DBSCAN closure, component proof,
+promotion/source/bootstrap bindings, checkpoint adoption, and writer
+quiescence as before, but do not consult historical stage-gate closure
+inventories.
+
+Do not add a field to, remove a field from, or reinterpret the existing
+`controller_terminal_reconciliation` projection.  A current live process,
+writer, changed frozen adoption receipt, source binding, exact receipt, DBSCAN
+artifact, proof, or checkpoint still fails closed.
+
+### Consequences
+
+- A machine restart no longer makes a completed immutable AIDS science chain
+  unverifiable merely because a dead controller's runtime identity changed.
+- The ordinary typed controller path remains unchanged and still requires its
+  full stage-gate closure during live execution.
+- Existing reconciliation overlays can be reverified without rewriting them or
+  rerunning pair-store, DBSCAN, downstream evaluation, or paper exports.
+
+### Status
+
+Accepted and implemented locally; focused reconciliation tests pass.
+
+---
+
+## [2026-09-01] Treat managed-final `st_dev` as mount-session evidence
+
+### Motivation
+
+An AutoDL maintenance reboot remounted the persistent data volume with a new
+kernel device number (`st_dev` changed from 126 to 76).  Managed-v2 final files
+retained the same physical absolute path, inode, size, `mtime_ns`, and SHA-256,
+but the final consumer rejected them solely because their sealed device number
+described the previous mount session.  Re-running or rewriting completed
+science to refresh that environmental number would be both unnecessary and a
+weaker provenance practice.
+
+### Decision
+
+For `managed_final_consumer_v2` only, retain sealed `st_dev` as immutable
+publication provenance and allow it to differ on the first safe reopen.  The
+consumer records the sealed and current device numbers for every affected file
+and directory, exposes those observations through a separate consumer property,
+and pins the current numbers for the lifetime of the held consumer.  The stable
+`revalidate()` evidence mapping is unchanged so existing checkpoint/input
+identity hashes do not drift.  A device change after that point still fails
+closed.
+
+All scientific and path identities remain strict: the root must be one
+resolved physical absolute directory; symlinks and multiply-linked files are
+rejected; opened and named objects must agree; sealed inode, size, `mtime_ns`,
+SHA-256, exact file/directory inventory, and directory name digest must match.
+The existing managed final, `SEALED.json`, verification, gate, and PASS bytes
+are never rewritten.
+
+### Consequences
+
+- A host reboot/remount no longer invalidates byte-identical completed managed
+  science merely because Linux assigned the persistent volume a new `st_dev`.
+- An inode swap, content mutation hidden behind restored size/timestamp, symlink
+  substitution, path redirection, or within-session mount drift still fails.
+- The exception is confined to historical-evidence comparison in the final
+  consumer; worker sealing and same-session descriptor checks remain strict.
+
+### Status
+
+Accepted and implemented locally; focused remount and tamper tests pass.

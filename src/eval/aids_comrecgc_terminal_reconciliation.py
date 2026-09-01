@@ -31,6 +31,7 @@ from src.baselines.comrecgc.external_memory_dbscan import (
 from src.eval.am_legacy_standardization import scan_live_writers
 from src.train.molecular_gnn_resume import atomic_rename_directory_noreplace
 from src.utils.autodl_aids_comrecgc_exact_recovery_controller_v1 import (
+    ADOPTION_STAGE,
     CONTROLLER_ID,
     EXACT_CHECKPOINT_ADOPTION_SCHEMA,
     EXACT_STAGE,
@@ -41,10 +42,11 @@ from src.utils.autodl_aids_comrecgc_exact_recovery_controller_v1 import (
     _frozen_stage_environment,
     _process_group_member_pids,
     _read_handover_artifact,
+    _validate_exact_terminal,
     _validate_checkpoint_observation_shape,
     _validated_exact_checkpoint_snapshot_and_artifact,
     load_bound_controller_manifest,
-    validate_stage_terminal,
+    validate_typed_adoption_receipt,
 )
 
 
@@ -434,11 +436,52 @@ def _validate_exact_receipt(
             "AIDS exact PASS receipt is not the manifest-bound stage terminal"
         )
     receipt = _json(receipt_path, label="AIDS exact PASS receipt")
+
+    # This is deliberately a posthoc scientific reopen, not an attempt to
+    # resurrect the historical controller.  The ordinary typed stage path
+    # first opens the old adoption gate, whose closure inventory includes the
+    # controller-era writer-lock/process identity.  Those orchestration facts
+    # legitimately cease to match after a host restart even though the frozen
+    # adoption receipt and exact science remain byte-identical.  Revalidate the
+    # immutable adoption receipt directly, using the controller's existing
+    # typed receipt contract, then feed only that artifact binding into the
+    # exact scientific validator.  No old stage gate is consulted.
+    adoption_stage = _stage_spec(manifest, ADOPTION_STAGE)
+    adoption_receipt_path = _physical_file(
+        str(adoption_stage.get("terminal_path") or ""),
+        label="AIDS frozen failed-selection adoption receipt",
+    )
+
+    def _read_frozen_adoption_receipt(*, output_dir: str | Path) -> dict[str, Any]:
+        output = _physical_directory(
+            output_dir, label="AIDS frozen failed-selection adoption root"
+        )
+        if output != adoption_receipt_path.parent:
+            raise AIDSComRecGCTerminalReconciliationError(
+                "AIDS frozen failed-selection adoption root changed"
+            )
+        return _json(
+            adoption_receipt_path,
+            label="AIDS frozen failed-selection adoption receipt",
+        )
+
     try:
-        typed_exact = validate_stage_terminal(manifest, stage_id=EXACT_STAGE)
+        adoption = validate_typed_adoption_receipt(
+            manifest=manifest,
+            validator=_read_frozen_adoption_receipt,
+        )
+        typed_exact = _validate_exact_terminal(
+            manifest,
+            {
+                "artifact": {
+                    "path": adoption["receipt_path"],
+                    "sha256": adoption["receipt_sha256"],
+                }
+            },
+        )
     except Exception as exc:
         raise AIDSComRecGCTerminalReconciliationError(
-            f"AIDS exact PASS receipt full scientific reopen failed: {exc}"
+            f"AIDS exact PASS receipt direct scientific reopen failed: {exc}"
         ) from exc
     if (
         Path(str(typed_exact.get("path") or "")).resolve(strict=True)

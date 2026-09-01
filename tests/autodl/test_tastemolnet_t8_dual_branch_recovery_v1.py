@@ -20,6 +20,14 @@ FAILED_ATTEMPT_ID = "7c8cafa6-6679-49d7-bdc6-8d6259a0fbf4"
 FAILED_SALVAGE_ATTEMPT_ID = "fadc2ac6-d1e8-4ede-b526-e06d0744eb8e"
 
 
+def test_branch_worker_uses_isolated_python_for_module_provenance() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    assert (
+        '"$PY" -I -B scripts/autodl/rerun_tastemolnet_t8_single_branch_v1.py'
+        in text
+    )
+
+
 def test_existing_fixed_recovery_contract_accepts_7c8_as_immediate_source() -> None:
     recovery, config = deadline._zero_candidate_recovery_contract(
         SimpleNamespace(

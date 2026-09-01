@@ -56,6 +56,16 @@ and records every file and artifact-directory `st_dev`, `st_ino`, size,
 `mtime_ns`, SHA-256, attempt ID, and generation token. `SEALED.json` binds the
 canonical inventory hash and raw/exit evidence hashes.
 
+For a later read-only final consumer, sealed `st_dev` is publication-session
+provenance rather than a cross-reboot scientific identity: a persistent volume
+may receive a different kernel device number after remount.  The consumer
+exposes such mismatches as separate mount-session observations, pins the device
+observed by its first descriptor-safe reopen for the rest of that held session,
+and still requires the sealed inode,
+size, `mtime_ns`, SHA-256, exact inventory/directory digest, physical absolute
+path, and no-symlink/single-link constraints.  It never rewrites the sealed
+artifact to refresh environmental evidence.
+
 Only the independent verifier uses:
 
 ```text

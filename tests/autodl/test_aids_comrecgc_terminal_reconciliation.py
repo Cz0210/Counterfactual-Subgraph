@@ -426,6 +426,144 @@ def _patch_controller_dependencies(
     )
 
 
+def test_exact_receipt_reopens_science_without_historical_typed_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adoption_root = tmp_path / "adoption"
+    adoption_receipt = adoption_root / "failed_selection_adoption_receipt.json"
+    adoption_payload = {"status": "RECOVERY_ONLY_READY", "science": "frozen"}
+    _json(adoption_receipt, adoption_payload)
+
+    exact_root = tmp_path / "exact"
+    proof_path = exact_root / "dbscan/shortcut_proof.json"
+    proof = {
+        "unique_seed_component_proven": True,
+        "seed_component_count": 1,
+        "all_points_core_proven": True,
+        "exact_multicomponent_partition_proven": True,
+        "all_progress_prefixes_complete": True,
+    }
+    _json(proof_path, proof)
+    dbscan_path = exact_root / "dbscan/run_manifest.json"
+    dbscan = {
+        "run_complete": True,
+        "clustering_path": reconciliation.ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY,
+        "approximation_used": False,
+        "num_samples": reconciliation.EXPECTED_ROWS,
+        "core_count": reconciliation.EXPECTED_ROWS,
+        "noise_count": 0,
+        "shortcut_proof_path": str(proof_path.resolve()),
+    }
+    _json(dbscan_path, dbscan)
+    linked_paths = {
+        "promotion_manifest_path": exact_root / "dbscan/promotion.json",
+        "source_evidence_receipt_path": exact_root / "source_evidence/receipt.json",
+        "continuation_bootstrap_path": exact_root / "bootstrap.json",
+    }
+    for path in linked_paths.values():
+        _json(path, {"status": "FROZEN"})
+    exact_receipt = exact_root / "exact_recovery_receipt.json"
+    receipt = {
+        "schema_version": reconciliation.EXACT_STAGE_RECEIPT_SCHEMA,
+        "status": "PASS",
+        "run_complete": True,
+        "recovery_only": True,
+        "ordinary_pass_dependency_eligible": False,
+        "dbscan_partition_proven": True,
+        "observed_environment": {"device": "cpu"},
+        "dbscan_manifest_path": str(dbscan_path.resolve()),
+        "dbscan_manifest_sha256": _sha(dbscan_path),
+    }
+    for path_field, path in linked_paths.items():
+        receipt[path_field] = str(path.resolve())
+        receipt[path_field.replace("_path", "_sha256")] = _sha(path)
+    _json(exact_receipt, receipt)
+    manifest = {
+        "stages": [
+            {
+                "stage_id": reconciliation.ADOPTION_STAGE,
+                "terminal_path": str(adoption_receipt.resolve()),
+            },
+            {
+                "stage_id": reconciliation.EXACT_STAGE,
+                "terminal_path": str(exact_receipt.resolve()),
+            },
+        ]
+    }
+    # This is the historical gate that became operationally stale after the
+    # host restart.  The posthoc path must not inspect it.
+    _json(
+        tmp_path / "controller/gates/01_failed_selection_adoption.json",
+        {"writer_lock_identity": {"pid": 999999, "start_ticks": 1}},
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "_frozen_stage_environment",
+        lambda _manifest: {"device": "cpu"},
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "_validate_component_recovery_closure",
+        lambda **_kwargs: None,
+    )
+
+    def validate_adoption_directly(
+        *, manifest: object, validator: object
+    ) -> dict[str, object]:
+        assert callable(validator)
+        assert validator(output_dir=adoption_root) == adoption_payload
+        return {
+            "receipt_path": str(adoption_receipt.resolve()),
+            "receipt_sha256": _sha(adoption_receipt),
+        }
+
+    def validate_exact_directly(
+        observed_manifest: object, adoption_binding: object
+    ) -> dict[str, object]:
+        assert observed_manifest is manifest
+        assert adoption_binding == {
+            "artifact": {
+                "path": str(adoption_receipt.resolve()),
+                "sha256": _sha(adoption_receipt),
+            }
+        }
+        return {
+            "path": str(exact_receipt.resolve()),
+            "sha256": _sha(exact_receipt),
+            "stage_receipt": receipt,
+            "manifest": dbscan,
+            "proof": proof,
+        }
+
+    monkeypatch.setattr(
+        reconciliation,
+        "validate_typed_adoption_receipt",
+        validate_adoption_directly,
+    )
+    monkeypatch.setattr(
+        reconciliation,
+        "_validate_exact_terminal",
+        validate_exact_directly,
+    )
+    result = reconciliation._validate_exact_receipt(
+        manifest=manifest,
+        receipt_path=exact_receipt.resolve(),
+    )
+    assert result == {
+        "status": "PASS",
+        "path": str(exact_receipt.resolve()),
+        "sha256": _sha(exact_receipt),
+        "dbscan_manifest_path": str(dbscan_path.resolve()),
+        "dbscan_manifest_sha256": _sha(dbscan_path),
+        "proof_path": str(proof_path.resolve()),
+        "proof_sha256": _sha(proof_path),
+        "linked_artifacts": {
+            path_field: {"path": str(path.resolve()), "sha256": _sha(path)}
+            for path_field, path in linked_paths.items()
+        },
+    }
+
+
 def test_historical_blocked_controller_binds_posthoc_exact_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

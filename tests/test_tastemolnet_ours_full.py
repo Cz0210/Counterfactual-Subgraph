@@ -388,6 +388,62 @@ def _refresh_terminal_hashes(science: Path, *names: str) -> None:
     ours.atomic_json(science / "run_manifest.json", run)
 
 
+def test_generation_semantic_replay_accepts_bounded_cuda_roundoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ours, "canonicalize_smiles", lambda value: value or None)
+    monkeypatch.setattr(ours, "clean_generated_smiles", lambda value: value)
+    monkeypatch.setattr(ours, "enumerate_connected_hard_deletions", _fake_outcomes)
+    parent = ours.TrainParent("TRAIN0", "parent", 1, "train")
+    config = ours.GenerationConfig("base", 0.3, 0.9, 1, 7)
+    saved = ours._score_generation(
+        parent=parent,
+        raw_outputs=["fragment"],
+        scorer=_FakeScorer(),
+        config=config,
+    )
+
+    class PerturbedScorer(_FakeScorer):
+        def score_smiles(self, values: list[str]) -> list[dict[str, object]]:
+            rows = super().score_smiles(values)
+            for value, row in zip(values, rows, strict=True):
+                probabilities = list(row["probabilities"])
+                # Move the source-class probability in opposite directions for
+                # parent and residual rows.  This exercises the bounded replay
+                # path for both the probability vectors and the derived
+                # cf_drop/reward_total values while preserving normalization.
+                drift = -5e-9 if value.startswith("RESIDUAL::") else 5e-9
+                probabilities[0] -= drift
+                probabilities[1] += drift
+                row["probabilities"] = probabilities
+            return rows
+
+    ours._require_generation_semantic_replay(
+        saved,
+        parent=parent,
+        scorer=PerturbedScorer(),
+        config=config,
+    )
+
+    class DriftedScorer(_FakeScorer):
+        def score_smiles(self, values: list[str]) -> list[dict[str, object]]:
+            rows = super().score_smiles(values)
+            for row in rows:
+                probabilities = list(row["probabilities"])
+                probabilities[0] += 2 * ours.GENERATION_REPLAY_ABS_TOL
+                probabilities[2] -= 2 * ours.GENERATION_REPLAY_ABS_TOL
+                row["probabilities"] = probabilities
+            return rows
+
+    with pytest.raises(ours.TasteOursFullError, match="frozen-GINE replay"):
+        ours._require_generation_semantic_replay(
+            saved,
+            parent=parent,
+            scorer=DriftedScorer(),
+            config=config,
+        )
+
+
 def test_generation_and_pair_semantic_replay_reject_forgery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
