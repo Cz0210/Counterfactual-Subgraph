@@ -1,0 +1,59 @@
+schema_version: bace_ours_llm_core_ablation_v1
+dataset: BACE
+method: Ours
+main_adaptation_path: BASE_PLUS_PPO_LORA
+project_sft_checkpoint_exists: false
+main_policy_scientific_name: CHEMLLM_7B_OFF_THE_SHELF_PLUS_FRESH_LORA_PPO
+
+variants:
+  - id: A0
+    variant: BRICS_FIXED
+    adapter_topology: NO_MODEL
+    candidate_pool_action: ADOPT_TRAIN_ONLY_BRICS_POOL
+  - id: A1
+    variant: CHEMLLM_7B_OFF_THE_SHELF
+    adapter_topology: BASE_ONLY_NO_ADAPTER
+    exact_revision: b8b2ea19e48f53d190fe8dced94572717f8e89a2
+    candidate_pool_action: GENERATE
+  - id: A2
+    variant: CHEMLLM_7B_PPO_MAIN
+    adapter_topology: BASE_PLUS_PPO_LORA_ADOPT_MAIN
+    exact_revision: b8b2ea19e48f53d190fe8dced94572717f8e89a2
+    candidate_pool_action: ADOPT_EXISTING_BACE_OURS_MAIN
+    retrain: false
+  - id: S0
+    variant: CHEMLLM_2B_OFF_THE_SHELF
+    adapter_topology: BASE_ONLY_NO_ADAPTER
+    exact_revision: 215c0dbc89417a06bbc3bae43a3ad61e58f0a56e
+    candidate_pool_action: GENERATE_AFTER_ISOLATED_LOAD_PASS
+
+scale_comparison:
+  rows:
+    - CHEMLLM_2B_OFF_THE_SHELF
+    - CHEMLLM_7B_OFF_THE_SHELF
+  interpretation: MODEL_SCALE_PROPOSAL_SENSITIVITY
+  full_method_scale_claim_allowed: false
+
+sft_auxiliary:
+  enabled: false
+  state: SFT_ABLATION_NOT_APPLICABLE_TO_CURRENT_MAIN_PIPELINE
+  activation_requires: NEW_USER_AUTHORIZATION_AND_MATCHED_TRAIN_ONLY_SFT_MANIFEST
+
+execution:
+  run_spec_schema: llm_core_variant_run_spec_v1
+  stages:
+    - candidate_pool
+    - common_verification
+    - selector_freeze
+    - heldout_test
+    - final_audit
+  checkpoint_resume: required
+  heldout_test_after_selector_freeze_only: true
+  fresh_uuid_and_output_root: required
+  main_priority_pause_at_stage_boundary: true
+  maximum_early_gpus: 1
+
+entrypoints:
+  runner: scripts/autodl/run_llm_ablation_variant.py
+  launcher: scripts/autodl/launch_llm_ablation_core_v1.sh
+  status: scripts/autodl/status_llm_ablation_core_v1.py

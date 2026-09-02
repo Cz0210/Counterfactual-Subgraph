@@ -28,6 +28,19 @@ from .contracts import (
     ProposalResult,
     artifact_sha256,
 )
+from .core_execution import (
+    CORE_VARIANT_ORDER,
+    MAIN_ADAPTATION_PATH,
+    SFT_AUXILIARY_STATE,
+    CoreLLMVariant,
+    CoreRunSpec,
+    derive_core_reference,
+    load_authorized_launch_decision,
+    load_core_run_spec,
+    run_core_variant,
+    status_core_run,
+    validate_variant_artifact_bindings,
+)
 from .downstream import CommonDownstreamPlan, build_common_downstream_plan
 from .early_launch_gate import (
     EarlyLaunchDecision,
@@ -50,6 +63,7 @@ from .runtime_evidence import (
     evaluate_runtime_model_evidence,
     load_bace_reference_v2,
     runtime_run_contract_sha256,
+    validate_off_the_shelf_7b_parameter_report,
     validate_stage_config_against_reference,
 )
 from .schema import (
@@ -83,6 +97,7 @@ __all__ = [
     "BACEReferenceEvidence", "BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT", "BRICSFixedGenerator",
     "BRICSFragmentRecord", "BRICSVocabulary", "CandidatePool", "CandidateRecord",
     "ChemLLMGeneratorAdapter", "CommonDownstreamPlan", "DecodingConfig",
+    "CORE_VARIANT_ORDER", "CoreLLMVariant", "CoreRunSpec",
     "DecodingRegime", "EarlyLaunchDecision", "EarlyLaunchSnapshot",
     "EarlyRunAuthorizationReceipt", "FileIdentity", "GeneratorAssets",
     "LLMAblationContractError", "LLMProposerVariant", "LLMScaleVariant",
@@ -90,16 +105,19 @@ __all__ = [
     "MatchedAdaptationPlan", "MatchedAttemptBudget", "ModelComparabilityInput",
     "ModelComparabilityReport", "ModelScaleEntry", "ModelSnapshotManifest",
     "NOT_SCALE_COMPARABLE", "PROPOSAL_ONLY_SCALE_COMPARABLE",
+    "MAIN_ADAPTATION_PATH",
     "ParameterCountReport", "ParentInput", "ProposalBudget", "ProposalGenerator",
     "ProposalParent", "ProposalRequest", "ProposalResult", "RuntimeGeneratorIdentity",
     "ScaleFallbackAssetTopology", "SeedManifest", "StageAssetTopology", "StageScaleProposalGenerator",
+    "SFT_AUXILIARY_STATE",
     "TrainingMolecule", "artifact_sha256", "assert_matched_adaptation",
     "build_common_downstream_plan", "build_proposal_record",
     "build_train_only_brics_vocabulary", "compare_model_scale_inputs",
     "count_actual_loaded_parameters", "evaluate_early_launch_gate",
+    "derive_core_reference", "load_authorized_launch_decision", "load_core_run_spec",
     "evaluate_runtime_model_evidence", "load_bace_reference_v2",
     "load_model_scale_registry", "main_priority_runtime_action", "proposal_output_template", "require_exact_revision",
-    "run_manifest_template", "runtime_run_contract_sha256", "summarize_novelty", "training_molecules_from_mappings",
+    "run_core_variant", "run_manifest_template", "runtime_run_contract_sha256", "status_core_run", "summarize_novelty", "training_molecules_from_mappings",
     "validate_attempt_matched_schedules", "validate_non_factorial_design",
-    "validate_proposal_record", "validate_stage_config_against_reference",
+    "validate_off_the_shelf_7b_parameter_report", "validate_proposal_record", "validate_stage_config_against_reference", "validate_variant_artifact_bindings",
 ]

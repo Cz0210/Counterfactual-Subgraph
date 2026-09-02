@@ -17051,3 +17051,31 @@ must not be presented as an actual loaded-parameter count.
   DBSCAN rebuild is introduced.  The attached controller and the owner's own
   sequential children are excluded from duplicate-writer detection.  T14
   affinity and active output are never modified.
+
+# 2026-09-03: Name and execute the LLM ablation from the observed base-plus-PPO lineage
+
+- Motivation: the frozen BACE/Ours provenance contains an off-the-shelf
+  ChemLLM-7B base, a fresh LoRA initializer with no training-data hash or SFT
+  updates, and 300 PPO optimizer updates.  Calling that policy
+  ``PROJECT_SFT_PPO`` would invent a training stage that did not occur.  The
+  earlier framework correctly blocked the invented SFT rows but still lacked
+  an executable, resumable path for the scientifically meaningful rows.
+- Decision: the core table is exactly `BRICS_FIXED`,
+  `CHEMLLM_7B_OFF_THE_SHELF`, `CHEMLLM_7B_PPO_MAIN`, and
+  `CHEMLLM_2B_OFF_THE_SHELF`.  The main adaptation path is
+  `BASE_PLUS_PPO_LORA`; the 7B PPO row adopts the completed BACE/Ours artifacts
+  and may not retrain.  The scale claim is limited to off-the-shelf 2B versus
+  off-the-shelf 7B.  SFT remains an explicitly disabled auxiliary study with
+  state `SFT_ABLATION_NOT_APPLICABLE_TO_CURRENT_MAIN_PIPELINE`.
+- Execution: a run spec binds a fresh UUID/root, reference, matrix authority,
+  adapter topology, and fixed generation/verification/selector/test/audit
+  stage order.  Commands execute without a shell, each stage commits a
+  self-hashed checkpoint, held-out test is impossible before selector freeze,
+  and a new main-table GPU waiter pauses the ablation only at a committed
+  stage boundary.  Launch still requires the existing project-owner receipt,
+  live 13-cell/main-owner/1200-second-idle gate, and target-specific runtime
+  evidence.  In particular, 2B remains blocked until isolated remote-code load
+  and actual-loaded parameter evidence pass.
+- Impact: this adds no GPU work, downloads no model, and does not mutate a main
+  result root or matrix authority.  It replaces the config-only launch gap
+  while retaining fail-closed evidence and main-table priority.

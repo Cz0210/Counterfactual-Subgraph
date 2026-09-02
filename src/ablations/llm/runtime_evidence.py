@@ -270,6 +270,26 @@ def _validate_parameter_report(
     return payload
 
 
+def validate_off_the_shelf_7b_parameter_report(
+    path_like: str | Path,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Validate a base-only 7B load; no project or PPO adapter may be present."""
+
+    payload = _validate_parameter_report(
+        path_like,
+        expected_sha256,
+        expected_total=7_737_708_544,
+        expected_lora=0,
+        role="chemllm_7b_off_the_shelf_parameter_report",
+    )
+    if payload.get("adapter_loaded") not in (False, None):
+        raise LLMAblationContractError("off-the-shelf 7B report loaded an adapter")
+    if payload.get("lora_trainable_parameters") != 0:
+        raise LLMAblationContractError("off-the-shelf 7B report contains LoRA parameters")
+    return payload
+
+
 def _validate_2b_snapshot(path_like: str | Path, expected_sha256: str) -> dict[str, Any]:
     _, payload = _physical_json(path_like, expected_sha256, role="chemllm_2b_snapshot")
     parameters = payload.get("parameters")
@@ -379,5 +399,6 @@ __all__ = [
     "load_bace_reference_v2",
     "runtime_run_contract_sha256",
     "sha256_file",
+    "validate_off_the_shelf_7b_parameter_report",
     "validate_stage_config_against_reference",
 ]

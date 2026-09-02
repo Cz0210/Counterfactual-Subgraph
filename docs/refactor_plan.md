@@ -3874,3 +3874,22 @@ Mutagenicity roadmaps.
 - [x] Require sustained slowdown plus independent memory/I/O contention.
 - [ ] Deploy only from an immutable tested commit after revalidating the
   terminal-controller receipt, GPU0 ownership, and all live Mut processes.
+
+## 2026-09-03: Truthful four-row LLM core execution
+
+- [x] Derive a hash-closed core reference from the audited base-plus-fresh-LoRA-
+  PPO provenance and explicitly record that no matched project SFT exists.
+- [x] Replace the scientific core rows with BRICS, 7B off-the-shelf, adopted 7B
+  PPO main, and 2B off-the-shelf.
+- [x] Add a real no-shell stage orchestrator with fresh UUID/root,
+  checkpoint/resume, exact artifact receipts, selector-before-test ordering,
+  and final-audit PASS enforcement.
+- [x] Add evidence-bound status and launch entrypoints that retain the one-GPU
+  early gate and pause at the next committed boundary when main work appears.
+- [x] Keep the 7B PPO row adoption-only and SFT auxiliary disabled.
+- [x] Wire 2B eligibility to isolated-import plus actual-loaded parameter
+  evidence without loading weights during framework tests.
+- [ ] Generate an operator-owned run spec for each row only after current
+  runtime paths and command entrypoints are independently audited.
+- [ ] Start science only after a matching project-owner authorization receipt
+  and a fresh live gate PASS; main-table GPU demand remains preemptive.
