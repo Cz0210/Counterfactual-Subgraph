@@ -17155,3 +17155,18 @@ must not be presented as an actual loaded-parameter count.
   mismatched evidence falls back to the existing lease-protected launcher.
 - Impact: the scheduler preserves one Mut writer and reports the actual owner;
   it does not weaken the worker's canonical lease or change any science state.
+
+# 2026-09-03: Derive the early-ablation ready gate from exact live owners
+
+- Motivation: the recovered main-table chain has no single pre-existing
+  `READY_WAITING_GPU` queue file.  Treating that missing file as empty would
+  risk giving an ablation GPU to an unowned main cell, while treating it as
+  permanently busy would prevent the authorized early launch forever.
+- Decision: the sidecar may consume a frozen manifest binding each remaining
+  cell to an exact PID and start ticks.  A missing cell is considered owned
+  only while that identity remains live; a missing/mismatched owner is
+  conservatively equivalent to `READY_WAITING_GPU`.  An explicit queue, when
+  available, remains authoritative over the fallback manifest.
+- Impact: LLM admission can become true only when every unfinished main cell
+  has a real owner, and naturally closes again when a science process exits
+  before its publisher appends the cell.

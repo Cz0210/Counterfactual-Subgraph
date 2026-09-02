@@ -165,6 +165,47 @@ def test_live_mut_owner_is_adopted_without_duplicate_dispatch(
     assert "mut_continuation" not in called
 
 
+def test_main_owner_manifest_is_conservative_ready_queue_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    matrix = tmp_path / "matrix.json"
+    cells = [
+        "Mutagenicity/ComRecGC",
+        "TasteMolNet/Ours",
+    ]
+    _matrix(matrix, cells)
+    owner_manifest = tmp_path / "owners.json"
+    owner_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "main_live_owner_manifest_v1",
+                "owners": [
+                    {"cell": "TasteMolNet/GCFExplainer", "pid": 12, "start_ticks": 120},
+                    {"cell": "TasteMolNet/GlobalGCE", "pid": 13, "start_ticks": 130},
+                    {"cell": "TasteMolNet/ComRecGC", "pid": 14, "start_ticks": 140},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MAIN_READY_QUEUE", raising=False)
+    monkeypatch.setenv("MAIN_OWNER_MANIFEST", str(owner_manifest))
+    monkeypatch.setattr(
+        module,
+        "_process_identity",
+        lambda pid: {"pid": pid, "alive": True, "start_ticks": pid * 10},
+    )
+    ready, reason = module._main_ready_waiting(module._matrix(matrix))
+    assert ready is False
+    assert reason.endswith("=0")
+    payload = json.loads(owner_manifest.read_text(encoding="utf-8"))
+    payload["owners"][0]["start_ticks"] = 999
+    owner_manifest.write_text(json.dumps(payload), encoding="utf-8")
+    ready, reason = module._main_ready_waiting(module._matrix(matrix))
+    assert ready is True
+    assert "TasteMolNet/GCFExplainer" in reason
+
+
 def test_gnn_dispatch_requires_16_and_all_final_receipts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

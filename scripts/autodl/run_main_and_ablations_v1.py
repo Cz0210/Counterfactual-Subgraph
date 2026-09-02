@@ -297,21 +297,73 @@ def _explicit_pass(path_text: str | None) -> bool:
     return value.get("status") == "PASS" or value.get("state") == "PASS"
 
 
-def _main_ready_waiting() -> tuple[bool, str]:
+def _main_ready_waiting(matrix: Mapping[str, Any]) -> tuple[bool, str]:
     configured = os.environ.get("MAIN_READY_QUEUE")
-    if not configured:
-        return True, "MAIN_READY_QUEUE_UNBOUND"
-    path = Path(configured)
+    if configured:
+        path = Path(configured)
+        if not path.is_absolute() or not path.is_file() or path.is_symlink():
+            return True, "MAIN_READY_QUEUE_UNAVAILABLE"
+        value = _load_json(path)
+        rows = value.get("ready_waiting_gpu", value.get("tasks", []))
+        if isinstance(rows, int):
+            return rows > 0, f"ready_waiting_gpu={rows}"
+        if isinstance(rows, list):
+            waiting = [
+                row
+                for row in rows
+                if not isinstance(row, Mapping)
+                or row.get("state") == "READY_WAITING_GPU"
+            ]
+            return bool(waiting), f"ready_waiting_gpu={len(waiting)}"
+        return True, "MAIN_READY_QUEUE_SCHEMA_UNKNOWN"
+
+    owner_manifest = os.environ.get("MAIN_OWNER_MANIFEST")
+    if not owner_manifest:
+        return True, "MAIN_READY_QUEUE_AND_OWNER_MANIFEST_UNBOUND"
+    path = Path(owner_manifest)
     if not path.is_absolute() or not path.is_file() or path.is_symlink():
-        return True, "MAIN_READY_QUEUE_UNAVAILABLE"
+        return True, "MAIN_OWNER_MANIFEST_UNAVAILABLE"
     value = _load_json(path)
-    rows = value.get("ready_waiting_gpu", value.get("tasks", []))
-    if isinstance(rows, int):
-        return rows > 0, f"ready_waiting_gpu={rows}"
-    if isinstance(rows, list):
-        waiting = [row for row in rows if not isinstance(row, Mapping) or row.get("state") == "READY_WAITING_GPU"]
-        return bool(waiting), f"ready_waiting_gpu={len(waiting)}"
-    return True, "MAIN_READY_QUEUE_SCHEMA_UNKNOWN"
+    if value.get("schema_version") != "main_live_owner_manifest_v1":
+        return True, "MAIN_OWNER_MANIFEST_SCHEMA_UNKNOWN"
+    rows = value.get("owners")
+    if not isinstance(rows, list):
+        return True, "MAIN_OWNER_MANIFEST_ROWS_INVALID"
+    owners: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return True, "MAIN_OWNER_MANIFEST_ROW_INVALID"
+        cell = row.get("cell")
+        if not isinstance(cell, str) or cell in owners:
+            return True, "MAIN_OWNER_MANIFEST_CELL_INVALID"
+        owners[cell] = row
+    missing_without_owner: list[str] = []
+    for cell in (
+        "Mutagenicity/ComRecGC",
+        "TasteMolNet/GCFExplainer",
+        "TasteMolNet/GlobalGCE",
+        "TasteMolNet/ComRecGC",
+    ):
+        dataset, method = cell.split("/", 1)
+        if _cell_present(matrix, dataset, method):
+            continue
+        row = owners.get(cell)
+        if row is None:
+            missing_without_owner.append(cell)
+            continue
+        pid = row.get("pid")
+        ticks = row.get("start_ticks")
+        if not isinstance(pid, int) or not isinstance(ticks, int):
+            missing_without_owner.append(cell)
+            continue
+        identity = _process_identity(pid)
+        if not identity.get("alive") or identity.get("start_ticks") != ticks:
+            missing_without_owner.append(cell)
+    return (
+        bool(missing_without_owner),
+        "main_missing_cells_without_live_owner="
+        + (",".join(missing_without_owner) if missing_without_owner else "0"),
+    )
 
 
 def observe_and_dispatch(
@@ -323,7 +375,7 @@ def observe_and_dispatch(
     dry_run: bool,
 ) -> dict[str, Any]:
     matrix = _matrix(matrix_path)
-    main_ready, main_ready_reason = _main_ready_waiting()
+    main_ready, main_ready_reason = _main_ready_waiting(matrix)
     components: dict[str, Any] = {}
 
     if _cell_present(matrix, "Mutagenicity", "ComRecGC"):
