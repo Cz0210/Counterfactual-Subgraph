@@ -16,6 +16,8 @@ MAX_EARLY_GPUS = 1
 @dataclass(frozen=True, slots=True)
 class EarlyLaunchSnapshot:
     matrix_complete_cells: int
+    matrix_authority_path: str
+    matrix_authority_sha256: str
     t8_t13_state: str
     t8_t13_science_pid: int | None
     t12_healthy: bool
@@ -39,6 +41,15 @@ class EarlyLaunchSnapshot:
         )
         if not 0 <= self.matrix_complete_cells <= 16:
             raise LLMAblationContractError("matrix count must be in [0, 16]")
+        if not self.matrix_authority_path.startswith("/"):
+            raise LLMAblationContractError("matrix authority evidence path must be absolute")
+        object.__setattr__(
+            self,
+            "matrix_authority_sha256",
+            require_sha256(
+                self.matrix_authority_sha256, field="matrix_authority_sha256"
+            ),
+        )
         if self.requested_early_gpus < 0:
             raise LLMAblationContractError("requested early GPU count must be non-negative")
 
@@ -103,7 +114,22 @@ def evaluate_early_launch_gate(
     snapshot: EarlyLaunchSnapshot,
     *,
     receipt: EarlyRunAuthorizationReceipt | None,
+    matrix_authority_sha256: str,
+    run_contract_sha256: str,
+    execution_commit: str,
+    runtime_evidence_ready: bool,
+    science_entrypoint_available: bool,
 ) -> EarlyLaunchDecision:
+    live_matrix_sha = require_sha256(
+        matrix_authority_sha256, field="live_matrix_authority_sha256"
+    )
+    live_contract_sha = require_sha256(
+        run_contract_sha256, field="live_run_contract_sha256"
+    )
+    if len(execution_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in execution_commit
+    ):
+        raise LLMAblationContractError("live execution_commit must be one Git SHA")
     blockers: list[str] = []
     if snapshot.matrix_complete_cells < MIN_MATRIX_CELLS:
         blockers.append("MATRIX_BELOW_13")
@@ -131,6 +157,10 @@ def evaluate_early_launch_gate(
         blockers.append("ABLATION_CHECKPOINT_RESUME_NOT_READY")
     if snapshot.requested_early_gpus != MAX_EARLY_GPUS:
         blockers.append("EARLY_GPU_REQUEST_MUST_EQUAL_ONE")
+    if not runtime_evidence_ready:
+        blockers.append("LLM_RUNTIME_EVIDENCE_NOT_READY")
+    if not science_entrypoint_available:
+        blockers.append("LLM_SCIENCE_ENTRYPOINT_CONFIG_ONLY")
     eligible = not blockers
     if receipt is None:
         if eligible:
@@ -139,6 +169,12 @@ def evaluate_early_launch_gate(
         return EarlyLaunchDecision(state, eligible, False, None, tuple(blockers))
     if receipt.snapshot_sha256 != snapshot_sha256(snapshot):
         blockers.append("EARLY_RECEIPT_SNAPSHOT_CHANGED")
+    if receipt.matrix_authority_sha256 != live_matrix_sha:
+        blockers.append("EARLY_RECEIPT_MATRIX_AUTHORITY_CHANGED")
+    if receipt.run_contract_sha256 != live_contract_sha:
+        blockers.append("EARLY_RECEIPT_RUN_CONTRACT_CHANGED")
+    if receipt.execution_commit != execution_commit:
+        blockers.append("EARLY_RECEIPT_EXECUTION_COMMIT_CHANGED")
     allowed = eligible and not blockers
     return EarlyLaunchDecision(
         state="AUTHORIZED_TO_START_ONE_LLM_GPU" if allowed else "BLOCKED_MAIN_PRIORITY",

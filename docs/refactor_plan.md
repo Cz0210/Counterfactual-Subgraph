@@ -3844,12 +3844,22 @@ Mutagenicity roadmaps.
 - [x] Extend the existing ablation framework instead of rebuilding it.
 - [x] Keep stage and scale contracts, output inventories, and paper templates separate.
 - [x] Register exact 2B/7B/20B roles with exact-revision and metadata-only gates.
-- [x] Count parameters from actual loaded tensors rather than model names.
+- [x] Add a parameter counter that reads actual loaded tensors rather than model names.
 - [x] Add a shared attempt-matched batch proposal-generator contract.
 - [x] Add config-only matched 2B SFT/PPO plans with no calibration/test access.
 - [x] Fail closed because the BACE reference is fresh-LoRA+PPO, not project-SFT+PPO.
 - [x] Allow only a clearly named proposal-only scale-sensitivity fallback.
 - [x] Add a one-GPU early gate that yields at a safe checkpoint to new main work.
 - [x] Retain the GNN framework while keeping GNN science blocked until 16/16.
+- [x] Build BRICS vocabulary from the complete train split, not the 386-parent cohort.
+- [x] Generate the BRICS attempt-matched pool only for the frozen 386-parent cohort.
+- [x] Persist candidate shortfalls without copying/backfilling candidates.
+- [x] Bind the BRICS CLI to the reference-v2 contract, the complete 959-row
+  train file, the frozen 386-parent proposal cohort, and an explicit
+  eight-attempt runtime value.
+- [x] Resolve exact 2B/7B/20B revisions and exact safetensors-header 2B/7B
+  counts while retaining a metadata-only, never-downloaded 20B estimate.
+- [x] Keep 2B science load blocked until remote code passes isolated import,
+  and require actual-loaded parameter reports before scale science.
 - [ ] Populate exact model snapshot manifests from independently audited runtime metadata.
 - [ ] Start any LLM GPU science only after the live main-priority gate passes.

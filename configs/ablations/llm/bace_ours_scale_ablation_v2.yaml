@@ -7,6 +7,26 @@ scale_stage_full_factorial: false
 parameter_count_source: ACTUAL_LOADED_WEIGHTS
 model_registry: configs/ablations/llm/chemllm_model_scale_registry_v2.yaml
 
+resolved_model_pins:
+  chemllm_2b_1_5:
+    revision: 215c0dbc89417a06bbc3bae43a3ad61e58f0a56e
+    safetensors_header_total_parameters: 1889110016
+    safetensors_header_dtype: bfloat16
+    actual_loaded_parameter_report: REQUIRED_BEFORE_SCIENCE
+    runtime_load_state: BLOCKED_REMOTE_CODE_ISOLATED_IMPORT
+  chemllm_7b_main:
+    revision: b8b2ea19e48f53d190fe8dced94572717f8e89a2
+    safetensors_header_base_parameters: 7737708544
+    safetensors_header_ppo_lora_parameters: 18874368
+    actual_loaded_parameter_report: REQUIRED_BEFORE_SCALE_SCIENCE
+    observed_stage: FRESH_LORA_PPO
+  chemllm_20b_sft:
+    revision: e8d0f503e00f143f6787263765ff6ee5f3fe3998
+    actual_total_parameters: null
+    metadata_index_parameter_estimate: 19861149696
+    weights_downloaded: false
+    run_enabled: false
+
 primary_comparison:
   small: CHEMLLM_2B_PROJECT_SFT_PPO
   reference: CHEMLLM_7B_PROJECT_SFT_PPO
@@ -19,6 +39,9 @@ primary_comparison:
 fallback_comparison:
   small: CHEMLLM_2B_OFF_THE_SHELF
   reference: CHEMLLM_7B_OFF_THE_SHELF
+  execution_variants:
+    - CHEMLLM_2B_OFF_THE_SHELF
+    - CHEMLLM_7B_OFF_THE_SHELF
   state: CONFIG_ONLY
   claim: MODEL_SCALE_PROPOSAL_SENSITIVITY
   require_comparability: PROPOSAL_ONLY_SCALE_COMPARABLE
@@ -58,4 +81,3 @@ outputs:
   aggregate_explanation_metrics: scale_ablation_explanation_metrics.csv
   aggregate_efficiency: scale_ablation_efficiency.csv
   aggregate_table: scale_ablation_table.tex
-

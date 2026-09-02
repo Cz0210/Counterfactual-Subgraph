@@ -13,16 +13,20 @@ from src.ablations.llm.comparability import (
 )
 from src.ablations.llm.contracts import LLMAblationContractError
 from src.ablations.llm.model_scale_registry import (
-    BLOCKED_MISSING_EXACT_REVISION,
     FileIdentity,
     ModelSnapshotManifest,
+    NOT_MEASURED_METADATA_ONLY,
+    READY,
+    VERIFIED_SAFETENSORS_HEADER_EXACT,
     load_model_scale_registry,
     require_exact_revision,
 )
 from src.ablations.llm.stage_scale import (
+    LLMScaleFallbackVariant,
     LLMScaleVariant,
     LLMStageVariant,
     MatchedAdaptationPlan,
+    ScaleFallbackAssetTopology,
     StageAssetTopology,
     assert_matched_adaptation,
     validate_non_factorial_design,
@@ -127,13 +131,45 @@ def test_registry_requires_exact_revision_and_keeps_20b_disabled() -> None:
         .read_text(encoding="utf-8")
     )
     registry = load_model_scale_registry(payload)
-    assert registry["chemllm_2b_1_5"].status == BLOCKED_MISSING_EXACT_REVISION
+    small = registry["chemllm_2b_1_5"]
+    assert small.status == READY
+    assert small.exact_revision == "215c0dbc89417a06bbc3bae43a3ad61e58f0a56e"
+    assert small.total_parameters is None
+    assert small.header_total_parameters == 1_889_110_016
+    assert small.parameter_count_state == VERIFIED_SAFETENSORS_HEADER_EXACT
+    assert small.actual_loaded_dtype is None
+    assert small.header_dtype == "bfloat16"
+    assert small.runtime_load_state == "BLOCKED_REMOTE_CODE_ISOLATED_IMPORT"
+    main = registry["chemllm_7b_main"]
+    assert main.exact_revision == "b8b2ea19e48f53d190fe8dced94572717f8e89a2"
+    assert main.header_base_parameters == 7_737_708_544
+    assert main.header_lora_parameters == 18_874_368
+    assert main.header_total_parameters == 7_756_582_912
+    assert main.executed_stage == "FRESH_LORA_PPO"
+    assert main.actual_loaded_dtype is None
+    assert main.header_dtype == "bfloat16"
+    assert main.header_adapter_dtype == "float32"
     upper = registry["chemllm_20b_sft"]
+    assert upper.exact_revision == "e8d0f503e00f143f6787263765ff6ee5f3fe3998"
     assert upper.metadata_only is True
     assert upper.run_enabled is False
     assert upper.download_weights is False
+    assert upper.total_parameters is None
+    assert upper.actual_loaded_dtype is None
+    assert upper.metadata_index_parameter_estimate == 19_861_149_696
+    assert upper.parameter_count_state == NOT_MEASURED_METADATA_ONLY
     with pytest.raises(LLMAblationContractError):
         require_exact_revision("main")
+
+
+def test_registry_rejects_a_different_well_formed_revision() -> None:
+    payload = yaml.safe_load(
+        (REPO_ROOT / "configs/ablations/llm/chemllm_model_scale_registry_v2.yaml")
+        .read_text(encoding="utf-8")
+    )
+    payload["models"]["chemllm_2b_1_5"]["exact_revision"] = "f" * 40
+    with pytest.raises(LLMAblationContractError, match="drifted from audited pin"):
+        load_model_scale_registry(payload)
 
 
 def test_remote_code_requires_pinned_inventory_and_isolated_import() -> None:
@@ -170,6 +206,7 @@ def _comparability_input(key: str, *, sft: bool, ppo: bool, stage: str):
         architecture_family="internlm2",
         tokenizer_family="internlm2",
         tokenizer_sha256=SHA,
+        special_tokens_sha256="6" * 64,
         chat_template_sha256="b" * 64,
         prompt_rendering_sha256="c" * 64,
         molecular_token_handling="character_plus_bpe",
@@ -198,6 +235,43 @@ def test_real_bace_fresh_lora_ppo_lineage_forces_proposal_only_fallback() -> Non
     assert any("REQUESTED_LABEL_MISMATCH" in item for item in report.blockers)
 
 
+def test_full_scale_compatibility_requires_exact_adaptation_plan_comparison() -> None:
+    small = _comparability_input(
+        "chemllm_2b_1_5", sft=True, ppo=True, stage="PROJECT_SFT_PPO"
+    )
+    reference = _comparability_input(
+        "chemllm_7b_main", sft=True, ppo=True, stage="PROJECT_SFT_PPO"
+    )
+    without_plans = compare_model_scale_inputs(small, reference)
+    assert without_plans.full_method_scale_claim_allowed is False
+    assert "MATCHED_ADAPTATION_PLANS_REQUIRED" in without_plans.blockers
+    with_plans = compare_model_scale_inputs(
+        small,
+        reference,
+        small_adaptation=MatchedAdaptationPlan("chemllm_2b_1_5", _sft(), _ppo()),
+        reference_adaptation=MatchedAdaptationPlan("chemllm_7b_main", _sft(), _ppo()),
+    )
+    assert with_plans.full_method_scale_claim_allowed is True
+
+
+def test_proposal_only_scale_fallback_has_constructible_no_adapter_rows() -> None:
+    for variant, key in (
+        (LLMScaleFallbackVariant.CHEMLLM_2B_OFF_THE_SHELF, "chemllm_2b_1_5"),
+        (LLMScaleFallbackVariant.CHEMLLM_7B_OFF_THE_SHELF, "chemllm_7b_main"),
+    ):
+        topology = ScaleFallbackAssetTopology(variant, key, SHA, "b" * 64)
+        assert topology.project_sft_sha256 is None
+        assert topology.project_ppo_sha256 is None
+    with pytest.raises(LLMAblationContractError, match="may not load project"):
+        ScaleFallbackAssetTopology(
+            LLMScaleFallbackVariant.CHEMLLM_2B_OFF_THE_SHELF,
+            "chemllm_2b_1_5",
+            SHA,
+            "b" * 64,
+            project_sft_sha256="c" * 64,
+        )
+
+
 def test_v2_configs_fail_closed_on_absent_project_sft() -> None:
     stage = yaml.safe_load(
         (REPO_ROOT / "configs/ablations/llm/bace_ours_stage_ablation_v2.yaml")
@@ -205,6 +279,9 @@ def test_v2_configs_fail_closed_on_absent_project_sft() -> None:
     )
     variants = {row["id"]: row for row in stage["design"]["variants"]}
     assert variants["A1"]["display_name"] == "OFF_THE_SHELF_CHEMLLM"
+    assert variants["A1"]["exact_base_revision"] == (
+        "b8b2ea19e48f53d190fe8dced94572717f8e89a2"
+    )
     assert variants["A2"]["availability"] == "BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT"
     assert variants["A3"]["observed_main_stage"] == "FRESH_LORA_PPO"
     assert variants["A3"]["reuse_main_result"] is False
@@ -213,5 +290,11 @@ def test_v2_configs_fail_closed_on_absent_project_sft() -> None:
         .read_text(encoding="utf-8")
     )
     assert scale["scale_stage_full_factorial"] is False
+    assert scale["resolved_model_pins"]["chemllm_2b_1_5"][
+        "safetensors_header_total_parameters"
+    ] == 1_889_110_016
+    assert scale["resolved_model_pins"]["chemllm_20b_sft"][
+        "actual_total_parameters"
+    ] is None
     assert scale["primary_comparison"]["state"] == "BLOCKED_REFERENCE_MISSING_MATCHED_SFT"
     assert scale["fallback_comparison"]["claim"] == "MODEL_SCALE_PROPOSAL_SENSITIVITY"

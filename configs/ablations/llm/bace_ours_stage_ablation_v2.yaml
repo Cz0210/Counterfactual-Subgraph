@@ -3,8 +3,12 @@ dataset: BACE
 method: Ours
 framework_build_allowed_now: true
 gpu_science_default_enabled: false
-reference_contract: null
-reference_contract_sha256: null
+reference_contract:
+  binding: REQUIRED_RUNTIME_PHYSICAL_FILE
+  expected_schema: bace_ours_llm_reference_v2
+  required_status: PASS
+  file_sha256_required: true
+  self_hash_required: true
 
 design:
   scale_stage_full_factorial: false
@@ -15,15 +19,26 @@ design:
       variant: BRICS_FIXED
       availability: CPU_PREPARATION_ALLOWED
       executed_stage: NOT_APPLICABLE
+      reference_variant_key: A0_BRICS_FIXED
+      reference_status: CPU_FRAMEWORK_AVAILABLE
     - id: A1
       variant: CHEMLLM_7B_OFF_THE_SHELF
       display_name: OFF_THE_SHELF_CHEMLLM
-      availability: PENDING_EXACT_BASE_AND_TOKENIZER_PINS
+      availability: READY_AFTER_RUNTIME_REFERENCE_CONTRACT_BINDING
+      model_registry_key: chemllm_7b_main
+      exact_base_revision: b8b2ea19e48f53d190fe8dced94572717f8e89a2
+      safetensors_header_base_parameters: 7737708544
+      reference_variant_key: A1_CHEMLLM_7B_OFF_THE_SHELF
+      reference_status: AVAILABLE
       project_sft_loaded: false
       project_ppo_loaded: false
     - id: A2
       variant: CHEMLLM_7B_PROJECT_SFT
       availability: BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT
+      model_registry_key: chemllm_7b_main
+      exact_base_revision: b8b2ea19e48f53d190fe8dced94572717f8e89a2
+      reference_variant_key: A2_CHEMLLM_7B_PROJECT_SFT
+      reference_status: BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT
       project_sft_loaded: null
       project_ppo_loaded: false
     - id: A3
@@ -31,6 +46,11 @@ design:
       availability: BLOCKED_REQUESTED_LABEL_MISMATCH
       requested_stage: PROJECT_SFT_PPO
       observed_main_stage: FRESH_LORA_PPO
+      exact_base_revision: b8b2ea19e48f53d190fe8dced94572717f8e89a2
+      safetensors_header_base_parameters: 7737708544
+      safetensors_header_ppo_lora_parameters: 18874368
+      reference_variant_key: A3_CHEMLLM_7B_PROJECT_SFT_PPO
+      reference_status: BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT
       blocker: BACE_MAIN_HAS_NO_INDEPENDENT_PROJECT_SFT_CHECKPOINT
       reuse_main_result: false
 
@@ -55,4 +75,3 @@ outputs:
   aggregate_candidate_metrics: stage_ablation_candidate_metrics.csv
   aggregate_explanation_metrics: stage_ablation_explanation_metrics.csv
   aggregate_table: stage_ablation_table.tex
-

@@ -15,6 +15,8 @@ from src.ablations.llm.early_launch_gate import (
 def _snapshot(**overrides) -> EarlyLaunchSnapshot:
     values = {
         "matrix_complete_cells": 13,
+        "matrix_authority_path": "/runtime/fast16/matrix_authority.json",
+        "matrix_authority_sha256": "a" * 64,
         "t8_t13_state": "RUNNING",
         "t8_t13_science_pid": 123,
         "t12_healthy": True,
@@ -52,18 +54,30 @@ def _receipt(snapshot: EarlyLaunchSnapshot) -> EarlyRunAuthorizationReceipt:
     )
 
 
+def _evaluate(snapshot: EarlyLaunchSnapshot, receipt=None, **overrides):
+    values = {
+        "matrix_authority_sha256": "a" * 64,
+        "run_contract_sha256": "b" * 64,
+        "execution_commit": "c" * 40,
+        "runtime_evidence_ready": True,
+        "science_entrypoint_available": True,
+    }
+    values.update(overrides)
+    return evaluate_early_launch_gate(snapshot, receipt=receipt, **values)
+
+
 def test_framework_allowed_at12_but_gpu_science_blocked() -> None:
-    decision = evaluate_early_launch_gate(_snapshot(matrix_complete_cells=12), receipt=None)
+    decision = _evaluate(_snapshot(matrix_complete_cells=12), receipt=None)
     assert decision.science_launch_allowed is False
     assert "MATRIX_BELOW_13" in decision.blockers
 
 
 def test_early_start_requires_receipt_and_then_allows_exactly_one_gpu() -> None:
     snapshot = _snapshot()
-    preflight = evaluate_early_launch_gate(snapshot, receipt=None)
+    preflight = _evaluate(snapshot, receipt=None)
     assert preflight.eligible_for_authorization_receipt is True
     assert preflight.science_launch_allowed is False
-    decision = evaluate_early_launch_gate(snapshot, receipt=_receipt(snapshot))
+    decision = _evaluate(snapshot, receipt=_receipt(snapshot))
     assert decision.science_launch_allowed is True
     assert decision.assigned_gpu == 0
 
@@ -74,7 +88,7 @@ def test_main_ready_gpu_or_short_idle_blocks_ablation() -> None:
         _snapshot(idle_gpu_seconds=1199),
         _snapshot(requested_early_gpus=2),
     ):
-        decision = evaluate_early_launch_gate(snapshot, receipt=None)
+        decision = _evaluate(snapshot, receipt=None)
         assert decision.science_launch_allowed is False
         assert decision.eligible_for_authorization_receipt is False
 
@@ -87,3 +101,31 @@ def test_running_ablation_yields_to_main_only_at_safe_checkpoint() -> None:
     assert main_priority_runtime_action(
         snapshot, ablation_running=True, at_safe_checkpoint=True
     ) == "GRACEFUL_PAUSE_AND_RELEASE_GPU"
+
+
+def test_early_receipt_binds_authority_contract_and_execution_commit() -> None:
+    snapshot = _snapshot()
+    receipt = _receipt(snapshot)
+    cases = (
+        (
+            {"matrix_authority_sha256": "d" * 64},
+            "EARLY_RECEIPT_MATRIX_AUTHORITY_CHANGED",
+        ),
+        ({"run_contract_sha256": "d" * 64}, "EARLY_RECEIPT_RUN_CONTRACT_CHANGED"),
+        ({"execution_commit": "d" * 40}, "EARLY_RECEIPT_EXECUTION_COMMIT_CHANGED"),
+    )
+    for changed, blocker in cases:
+        decision = _evaluate(snapshot, receipt=receipt, **changed)
+        assert decision.science_launch_allowed is False
+        assert blocker in decision.blockers
+
+
+def test_config_only_or_missing_runtime_evidence_blocks_science() -> None:
+    snapshot = _snapshot()
+    receipt = _receipt(snapshot)
+    missing = _evaluate(snapshot, receipt=receipt, runtime_evidence_ready=False)
+    assert "LLM_RUNTIME_EVIDENCE_NOT_READY" in missing.blockers
+    config_only = _evaluate(
+        snapshot, receipt=receipt, science_entrypoint_available=False
+    )
+    assert "LLM_SCIENCE_ENTRYPOINT_CONFIG_ONLY" in config_only.blockers

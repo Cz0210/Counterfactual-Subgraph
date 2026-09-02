@@ -19,6 +19,7 @@ class ModelComparabilityInput:
     architecture_family: str
     tokenizer_family: str
     tokenizer_sha256: str
+    special_tokens_sha256: str
     chat_template_sha256: str
     prompt_rendering_sha256: str
     molecular_token_handling: str
@@ -44,6 +45,7 @@ class ModelComparabilityInput:
                 raise LLMAblationContractError(f"{field} is required")
         for field in (
             "tokenizer_sha256",
+            "special_tokens_sha256",
             "chat_template_sha256",
             "prompt_rendering_sha256",
             "output_decoding_sha256",
@@ -77,16 +79,22 @@ class ModelComparabilityReport:
 def compare_model_scale_inputs(
     small: ModelComparabilityInput,
     reference: ModelComparabilityInput,
+    *,
+    small_adaptation: object | None = None,
+    reference_adaptation: object | None = None,
 ) -> ModelComparabilityReport:
     if small.registry_key == reference.registry_key:
         raise LLMAblationContractError("scale comparison needs distinct model entries")
     proposal_fields = (
         "architecture_family",
         "tokenizer_family",
+        "tokenizer_sha256",
+        "special_tokens_sha256",
         "chat_template_sha256",
         "prompt_rendering_sha256",
         "molecular_token_handling",
         "output_decoding_sha256",
+        "max_context",
     )
     matched = tuple(field for field in proposal_fields if getattr(small, field) == getattr(reference, field))
     mismatched = tuple(
@@ -113,6 +121,24 @@ def compare_model_scale_inputs(
         blockers.append("SMALL_MODEL_MATCHED_SFT_NOT_AVAILABLE")
     if not small.matched_project_ppo_available:
         blockers.append("SMALL_MODEL_MATCHED_PPO_NOT_AVAILABLE")
+    if matched_adaptation:
+        if small_adaptation is None or reference_adaptation is None:
+            blockers.append("MATCHED_ADAPTATION_PLANS_REQUIRED")
+        else:
+            from .stage_scale import (  # local import avoids a module-level cycle
+                MatchedAdaptationPlan,
+                assert_matched_adaptation,
+            )
+
+            if not isinstance(small_adaptation, MatchedAdaptationPlan) or not isinstance(
+                reference_adaptation, MatchedAdaptationPlan
+            ):
+                blockers.append("MATCHED_ADAPTATION_PLAN_TYPE_INVALID")
+            else:
+                try:
+                    assert_matched_adaptation(small_adaptation, reference_adaptation)
+                except LLMAblationContractError as exc:
+                    blockers.append("MATCHED_ADAPTATION_CONTRACT_MISMATCH:" + str(exc))
 
     if not mismatched and matched_adaptation and not blockers:
         classification = MATCHED_PROJECT_ADAPTATION_COMPATIBLE

@@ -30,6 +30,13 @@ no main GPU waiter, 1200 seconds of idleness, resource/resume gates, and a
 self-hashed authorization receipt. New main work triggers checkpoint-first
 graceful release, never a kill.
 
+The current 2B/7B numeric inventories are exact safetensors-header counts, not
+reports from instantiated model objects.  They remain separate
+`VERIFIED_SAFETENSORS_HEADER_EXACT` evidence.  In particular, the 2B remote
+code has not passed an isolated import, so its snapshot is ready but science
+loading is blocked.  An actual-loaded parameter report produced by the shared
+counter is required before scale science can use either numeric count.
+
 ### Consequences
 
 - Stage and scale outputs and paper sections remain separate.
@@ -37,6 +44,16 @@ graceful release, never a kill.
 - Missing SFT/PPO evidence cannot be borrowed or relabeled.
 - Framework and train-only BRICS CPU work acquire no GPU.
 - GNN science remains gated at 16/16.
+
+The BRICS CPU builder treats vocabulary provenance and proposal-cohort
+provenance as separate inputs. Vocabulary decomposition must consume the exact
+complete BACE `train.csv` with its expected byte hash and row count (959 in the
+current frozen split), while proposal generation uses the independently frozen
+386 source-label parent manifest. It requires `molecule_id == parent_id`,
+reopens the manifest/train binding, ranks only by train frequency after an
+actual parent match, writes every attempt including shortfalls, and never
+duplicates candidates to fill the budget. Calibration, validation, test, and
+oracle fields are outside the input projection.
 
 ### Status
 
@@ -16817,6 +16834,53 @@ Implemented on `feat/llm-gnn-ablation-framework-v1`; the authority/receipt
 gate and exact BACE reference have focused adversarial tests.  Final AutoDL
 config-only deployment and a future project-owner authorization receipt remain
 part of this handoff.
+
+## [2026-09-02] Bind the v2 BRICS control to full BACE train and audited model pins
+
+### Motivation
+
+The frozen BACE proposal cohort contains 386 source-label parents, but it is
+not the training split and therefore cannot define the BRICS vocabulary.  The
+stage/scale registry also cannot remain at symbolic model revisions after the
+three repository revisions and loaded parameter inventories have been audited.
+
+### Decision
+
+Build the A0 vocabulary only from the physical 959-row BACE `train.csv`, whose
+SHA-256 is supplied explicitly and is cross-bound to the BACE/Ours LLM
+reference-v2 contract.  Generate the attempt-matched proposal pool only for
+the separate frozen 386-parent train cohort.  Every candidate must actually
+match its parent; a shortfall is recorded and never filled by duplication.
+Read only molecule identity, SMILES, label, and split columns, and never open
+calibration/test paths or use an oracle for vocabulary ordering.  The CPU
+entrypoint limits workers to two, requires the proposal-attempt count
+explicitly, and produces hash-inventoried vocabulary, attempt, pool, and
+shortfall artifacts in a fresh output root.
+
+Pin the audited model revisions to `215c0dbc89417a06bbc3bae43a3ad61e58f0a56e`
+(2B), `b8b2ea19e48f53d190fe8dced94572717f8e89a2` (7B), and
+`e8d0f503e00f143f6787263765ff6ee5f3fe3998` (20B).  Exact safetensors-header
+evidence counts 1,889,110,016 BF16 parameters for 2B and 7,737,708,544 BF16 base plus
+18,874,368 FP32 LoRA parameters for the BACE 7B policy.  The 20B weights remain
+undownloaded: its 19,861,149,696 index-derived estimate is metadata only and
+must not be presented as an actual loaded-parameter count.
+
+### Consequences
+
+- A0 uses the complete train distribution for its fixed vocabulary while
+  preserving the same 386-parent/eight-attempt comparison cohort as Ours.
+- The BACE main policy remains named `FRESH_LORA_PPO`; these resolved pins do
+  not manufacture an independently matched project-SFT checkpoint.  A2,
+  A3/S1 full SFT+PPO, and the corresponding full-method scale claim stay
+  blocked, while the proposal-only scale-sensitivity fallback remains valid.
+- The paired Slurm file exists for repository workflow parity, but the formal
+  preparation is CPU-only and must not be submitted while it could reserve a
+  main-table GPU.
+- Runtime status reopens the physical matrix authority and reference files,
+  derives the run-contract hash from actual config/evidence bytes, and obtains
+  the execution commit from Git.  The v2 launcher remains explicitly
+  config-only and exits blocked; it cannot convert a gate decision into a
+  science process.
 
 # 2026-09-02: Bind Taste T11 action-aware WNode cache keys to the implementation version
 

@@ -5,31 +5,75 @@ models:
   chemllm_2b_1_5:
     source: AI4Chem/CHEMLLM-2b-1_5
     role: PRIMARY_SMALL_SCALE
-    run_enabled: true
+    run_enabled: false
     download_weights: true
-    exact_revision: null
-    status: BLOCKED_MISSING_EXACT_REVISION
+    exact_revision: 215c0dbc89417a06bbc3bae43a3ad61e58f0a56e
+    status: READY
     metadata_only: false
-    expected_dtype: null
+    expected_dtype: bfloat16
     source_from_reference_contract: false
+    total_parameters: null
+    base_parameters: null
+    trainable_parameters: null
+    lora_trainable_parameters: null
+    parameter_count_state: VERIFIED_SAFETENSORS_HEADER_EXACT
+    executed_stage: MODEL_SNAPSHOT_AUDIT_ONLY
+    actual_loaded_dtype: null
+    adapter_dtype: null
+    metadata_index_parameter_estimate: null
+    header_total_parameters: 1889110016
+    header_base_parameters: 1889110016
+    header_lora_parameters: 0
+    header_dtype: bfloat16
+    header_adapter_dtype: null
+    runtime_load_state: BLOCKED_REMOTE_CODE_ISOLATED_IMPORT
   chemllm_7b_main:
     source: FROM_BACE_REFERENCE_CONTRACT
     role: MAIN_REFERENCE
     run_enabled: true
     download_weights: false
-    exact_revision: null
-    status: BLOCKED_MISSING_MAIN_REFERENCE
+    exact_revision: b8b2ea19e48f53d190fe8dced94572717f8e89a2
+    status: READY
     metadata_only: false
     expected_dtype: bfloat16
     source_from_reference_contract: true
+    total_parameters: null
+    base_parameters: null
+    trainable_parameters: null
+    lora_trainable_parameters: null
+    parameter_count_state: VERIFIED_SAFETENSORS_HEADER_EXACT
+    executed_stage: FRESH_LORA_PPO
+    actual_loaded_dtype: null
+    adapter_dtype: null
+    metadata_index_parameter_estimate: null
+    header_total_parameters: 7756582912
+    header_base_parameters: 7737708544
+    header_lora_parameters: 18874368
+    header_dtype: bfloat16
+    header_adapter_dtype: float32
+    runtime_load_state: READY_FROM_MAIN_REFERENCE
   chemllm_20b_sft:
     source: AI4Chem/ChemLLM-20B-Chat-SFT
     role: OPTIONAL_UPPER_BOUND
     run_enabled: false
     download_weights: false
-    exact_revision: null
-    status: BLOCKED_MISSING_EXACT_REVISION
+    exact_revision: e8d0f503e00f143f6787263765ff6ee5f3fe3998
+    status: READY
     metadata_only: true
-    expected_dtype: null
+    expected_dtype: bfloat16
     source_from_reference_contract: false
-
+    total_parameters: null
+    base_parameters: null
+    trainable_parameters: null
+    lora_trainable_parameters: null
+    parameter_count_state: NOT_MEASURED_METADATA_ONLY
+    executed_stage: METADATA_ONLY_NOT_EXECUTED
+    actual_loaded_dtype: null
+    adapter_dtype: null
+    metadata_index_parameter_estimate: 19861149696
+    header_total_parameters: null
+    header_base_parameters: null
+    header_lora_parameters: null
+    header_dtype: null
+    header_adapter_dtype: null
+    runtime_load_state: METADATA_ONLY_DISABLED

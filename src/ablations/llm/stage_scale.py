@@ -32,6 +32,13 @@ class LLMScaleVariant(str, Enum):
     CHEMLLM_7B_PROJECT_SFT_PPO = "CHEMLLM_7B_PROJECT_SFT_PPO"
 
 
+class LLMScaleFallbackVariant(str, Enum):
+    """Actually constructible proposal-only scale-sensitivity rows."""
+
+    CHEMLLM_2B_OFF_THE_SHELF = "CHEMLLM_2B_OFF_THE_SHELF"
+    CHEMLLM_7B_OFF_THE_SHELF = "CHEMLLM_7B_OFF_THE_SHELF"
+
+
 @dataclass(frozen=True, slots=True)
 class ProposalParent:
     parent_id: str
@@ -213,6 +220,36 @@ class StageAssetTopology:
                 require_sha256(value, field=f"stage_asset[{index}]")
 
 
+@dataclass(frozen=True, slots=True)
+class ScaleFallbackAssetTopology:
+    """No-adapter asset topology for the proposal-only 2B/7B fallback."""
+
+    variant: LLMScaleFallbackVariant
+    model_registry_key: str
+    base_model_sha256: str
+    tokenizer_sha256: str
+    project_sft_sha256: None = None
+    project_ppo_sha256: None = None
+
+    def __post_init__(self) -> None:
+        variant = self.variant
+        if not isinstance(variant, LLMScaleFallbackVariant):
+            variant = LLMScaleFallbackVariant(str(variant))
+            object.__setattr__(self, "variant", variant)
+        expected_key = {
+            LLMScaleFallbackVariant.CHEMLLM_2B_OFF_THE_SHELF: "chemllm_2b_1_5",
+            LLMScaleFallbackVariant.CHEMLLM_7B_OFF_THE_SHELF: "chemllm_7b_main",
+        }[variant]
+        if self.model_registry_key != expected_key:
+            raise LLMAblationContractError("scale fallback model registry key changed")
+        for field in ("base_model_sha256", "tokenizer_sha256"):
+            require_sha256(getattr(self, field), field=f"scale_fallback.{field}")
+        if self.project_sft_sha256 is not None or self.project_ppo_sha256 is not None:
+            raise LLMAblationContractError(
+                "proposal-only scale fallback may not load project SFT/PPO"
+            )
+
+
 MATCHED_SFT_FIELDS = (
     "dataset_sha256",
     "ordered_examples_sha256",
@@ -318,6 +355,7 @@ __all__ = [
     "DecodingConfig",
     "DecodingRegime",
     "LLMScaleVariant",
+    "LLMScaleFallbackVariant",
     "LLMStageVariant",
     "MATCHED_PPO_FIELDS",
     "MATCHED_SFT_FIELDS",
@@ -326,6 +364,7 @@ __all__ = [
     "ProposalGenerator",
     "ProposalParent",
     "SeedManifest",
+    "ScaleFallbackAssetTopology",
     "StageAssetTopology",
     "assert_matched_adaptation",
     "validate_non_factorial_design",
