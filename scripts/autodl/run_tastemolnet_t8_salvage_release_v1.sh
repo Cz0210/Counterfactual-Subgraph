@@ -120,7 +120,7 @@ if ! run_salvage_attempt "$T8_SALVAGE_CONTROLLER_ROOT/salvage-attempt-1.log"; th
     write_heartbeat T8_SALVAGE_FAILED_NO_TARGET_SPECIFIC_RECOVERY 0
     exit 75
   fi
-  if ! INVALID_TARGET=$($PY -c 'import json,sys; v=json.load(open(sys.argv[1])); x=v.get("invalid_target_branches"); assert isinstance(x,list) and len(x)==1 and x[0] in (0,2); print(x[0])' "$FIRST_RERUN_REQUEST"); then
+  if ! INVALID_TARGET=$($PY -c 'import sys; from pathlib import Path; from src.utils.tastemolnet_t8_branch_salvage_v1 import read_single_branch_rerun_target; print(read_single_branch_rerun_target(Path(sys.argv[1])))' "$FIRST_RERUN_REQUEST"); then
     write_heartbeat T8_SALVAGE_FAILED_NON_SINGLE_BRANCH 0
     exit 75
   fi

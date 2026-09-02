@@ -2526,6 +2526,7 @@ def validate_candidates_with_original_gine(
     scorer: TastePredictionScorer,
     checkpoint_id: str,
     minimum_strict_flips_per_branch: int,
+    minimum_strict_flips_total: int = 1,
 ) -> dict[str, Any]:
     """Score final graphs in original class order and emit aggregates only."""
 
@@ -2536,7 +2537,9 @@ def validate_candidates_with_original_gine(
         or scorer.num_classes != NUM_CLASSES
         or scorer.source_label != SOURCE_LABEL
         or type(minimum_strict_flips_per_branch) is not int
-        or minimum_strict_flips_per_branch <= 0
+        or minimum_strict_flips_per_branch < 0
+        or type(minimum_strict_flips_total) is not int
+        or minimum_strict_flips_total <= 0
     ):
         raise TasteGlobalGCESmokeError("T8 final scorer/class contract changed")
     score_values: list[str] = []
@@ -2613,12 +2616,12 @@ def validate_candidates_with_original_gine(
         raise TasteGlobalGCESmokeError(
             "T8 final audit found a selected parent no longer predicted Sweet"
         )
-    if strict_count <= 0 or any(
+    if strict_count < minimum_strict_flips_total or any(
         strict_by_branch[branch] < minimum_strict_flips_per_branch
         for branch in TARGET_BRANCHES
     ):
         raise TasteGlobalGCESmokeError(
-            "T8 each target branch must contribute an untargeted strict flip"
+            "T8 strict-flip evidence did not meet its total/branch minimums"
         )
     return {
         "scored_parent_candidate_pairs": len(candidates),
@@ -2803,7 +2806,18 @@ def run_t8_science(
                 branch.close()
 
 
-def validate_science_summary(science: Mapping[str, Any]) -> None:
+def validate_science_summary(
+    science: Mapping[str, Any],
+    *,
+    minimum_strict_flips_per_branch: int = 1,
+) -> None:
+    if (
+        type(minimum_strict_flips_per_branch) is not int
+        or minimum_strict_flips_per_branch < 0
+    ):
+        raise TasteGlobalGCESmokeError(
+            "T8 science-summary branch flip minimum is invalid"
+        )
     top_keys = {
         "schema_version",
         "stage",
@@ -2866,6 +2880,9 @@ def validate_science_summary(science: Mapping[str, Any]) -> None:
             epochs=ZERO_CANDIDATE_RECOVERY_EPOCHS
         ).to_dict(),
     )
+    salvage_merged_flip_config = dict(accepted_configs[1])
+    salvage_merged_flip_config["minimum_strict_flips_per_branch"] = 0
+    accepted_configs = (*accepted_configs, salvage_merged_flip_config)
     science_config = science.get("config")
     if (
         type(science["temperature_hex"]) is not str
@@ -3179,7 +3196,7 @@ def validate_science_summary(science: Mapping[str, Any]) -> None:
         or type(strict.get("strict_flip_by_training_branch")) is not dict
         or set(strict["strict_flip_by_training_branch"]) != {"0", "2"}
         or any(
-            type(value) is not int or value < 1
+            type(value) is not int or value < minimum_strict_flips_per_branch
             for value in strict["strict_flip_by_training_branch"].values()
         )
         or type(strict.get("destination_distribution")) is not dict

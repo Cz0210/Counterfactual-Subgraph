@@ -84,6 +84,14 @@ mkdir -p "$(dirname "$WNODE_CACHE")" "$NODE_CACHE"
   printf 'gpu_index=%s\n' "$GPU_INDEX"
   printf 'gpu_uuid=%s\n' "$GPU_UUID"
   printf 't8_pass_root=%s\n' "$T8_PASS_ROOT"
+  # T8 used the fixed exact-top-k smoke recovery configuration.  T13's full
+  # 100-epoch/non-pruned contract is not a strict optimizer continuation, so
+  # the T8 checkpoint is evidence only and this remains one fresh full run.
+  printf 'initializer_mode=fresh_full_attempt\n'
+  printf 't8_checkpoint_initializer_compatible=false\n'
+  printf 'initializer_incompatibility_reason=smoke_exact_top_k_differs_from_full_contract\n'
+  printf 'K_MAX=20\n'
+  printf 'MIN_VALID_UNIQUE_RULES=10\n'
 } > "$T13_CONTROLLER_ROOT/launch.env"
 
 COMMON=(

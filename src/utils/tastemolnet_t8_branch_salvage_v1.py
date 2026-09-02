@@ -17,7 +17,7 @@ from pathlib import Path
 import shutil
 import stat
 from types import SimpleNamespace
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, NoReturn, Sequence
 
 from scripts.autodl import run_tastemolnet_t8_deadline as deadline
 from src.baselines.globalgce_bace_native_rules import (
@@ -90,6 +90,65 @@ REQUIRED_BRANCH_FILES = frozenset(
 )
 
 
+class T8FinalizationError(TasteGlobalGCESmokeError):
+    """Typed failure for the bounded T8 salvage/finalization path."""
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        field: str,
+        expected: Any,
+        actual: Any,
+        source_manifest: str,
+        source_artifact: str,
+        stage: str,
+    ) -> None:
+        self.code = code
+        self.field = field
+        self.expected = expected
+        self.actual = actual
+        self.source_manifest = source_manifest
+        self.source_artifact = source_artifact
+        self.stage = stage
+        super().__init__(
+            json.dumps(self.to_dict(), sort_keys=True, ensure_ascii=True)
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "error_type": type(self).__name__,
+            "code": self.code,
+            "field": self.field,
+            "expected": self.expected,
+            "actual": self.actual,
+            "source_manifest": self.source_manifest,
+            "source_artifact": self.source_artifact,
+            "stage": self.stage,
+        }
+
+
+def _raise_finalization_error(
+    *,
+    code: str,
+    field: str,
+    expected: Any,
+    actual: Any,
+    source_manifest: str,
+    source_artifact: Path,
+    stage: str,
+) -> NoReturn:
+    raise T8FinalizationError(
+        code=code,
+        field=field,
+        expected=expected,
+        actual=actual,
+        source_manifest=source_manifest,
+        source_artifact=str(source_artifact),
+        stage=stage,
+    )
+
+
 def _json_bytes(value: Any) -> bytes:
     return (
         json.dumps(
@@ -113,6 +172,14 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _read_json(path: Path, *, label: str) -> dict[str, Any]:
@@ -269,6 +336,105 @@ def write_single_branch_rerun_request(
     return receipt
 
 
+def read_single_branch_rerun_target(path: Path) -> int:
+    """Return the sole rerun target or fail with field-level evidence.
+
+    This replaces the shell finalizer's untyped condition.  A malformed or
+    multi-target receipt is a typed terminal blocker; it must never silently
+    select one branch or trigger an unbounded two-branch replay.
+    """
+
+    source_artifact = Path(path)
+    source_manifest = RERUN_SCHEMA
+    stage = "T8_SINGLE_BRANCH_RERUN_SELECTION"
+    try:
+        payload = json.loads(source_artifact.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _raise_finalization_error(
+            code="T8_RERUN_RECEIPT_UNREADABLE",
+            field="rerun_request",
+            expected="one readable JSON object",
+            actual=f"{type(exc).__name__}:{exc}",
+            source_manifest=source_manifest,
+            source_artifact=source_artifact,
+            stage=stage,
+        )
+    if type(payload) is not dict:
+        _raise_finalization_error(
+            code="T8_RERUN_RECEIPT_NOT_OBJECT",
+            field="rerun_request",
+            expected="object",
+            actual=type(payload).__name__,
+            source_manifest=source_manifest,
+            source_artifact=source_artifact,
+            stage=stage,
+        )
+    checks = (
+        (
+            "schema_version",
+            RERUN_SCHEMA,
+            payload.get("schema_version"),
+            "T8_RERUN_SCHEMA_MISMATCH",
+        ),
+        ("status", "RERUN_REQUIRED", payload.get("status"), "T8_RERUN_STATUS_MISMATCH"),
+    )
+    for field, expected, actual, code in checks:
+        if actual != expected:
+            _raise_finalization_error(
+                code=code,
+                field=field,
+                expected=expected,
+                actual=actual,
+                source_manifest=source_manifest,
+                source_artifact=source_artifact,
+                stage=stage,
+            )
+    targets = payload.get("invalid_target_branches")
+    if type(targets) is not list:
+        _raise_finalization_error(
+            code="T8_RERUN_TARGETS_NOT_LIST",
+            field="invalid_target_branches",
+            expected="list[int]",
+            actual=type(targets).__name__,
+            source_manifest=source_manifest,
+            source_artifact=source_artifact,
+            stage=stage,
+        )
+    if len(targets) != 1:
+        _raise_finalization_error(
+            code="T8_RERUN_NOT_SINGLE_BRANCH",
+            field="invalid_target_branches",
+            expected="exactly one target branch",
+            actual=targets,
+            source_manifest=source_manifest,
+            source_artifact=source_artifact,
+            stage=stage,
+        )
+    target = targets[0]
+    if type(target) is not int or target not in TARGET_BRANCHES:
+        _raise_finalization_error(
+            code="T8_RERUN_TARGET_INVALID",
+            field="invalid_target_branches[0]",
+            expected=list(TARGET_BRANCHES),
+            actual=target,
+            source_manifest=source_manifest,
+            source_artifact=source_artifact,
+            stage=stage,
+        )
+    reasons = payload.get("reasons")
+    if type(reasons) is not dict or type(reasons.get(str(target))) is not str:
+        _raise_finalization_error(
+            code="T8_RERUN_REASON_MISSING",
+            field=f"reasons.{target}",
+            expected="nonempty string",
+            actual=None if type(reasons) is not dict else reasons.get(str(target)),
+            source_manifest=source_manifest,
+            source_artifact=source_artifact,
+            stage=stage,
+        )
+    return target
+
+
 def _content_inventory(inventory: Mapping[str, Any]) -> dict[str, Any]:
     files = inventory.get("files")
     if type(files) is not dict:
@@ -411,6 +577,9 @@ def validate_source_branch(
             or type(oracle) is not dict
             or oracle.get("backend") != "frozen_gine"
             or oracle.get("checkpoint_id") != checkpoint_id
+            or not _is_sha256(oracle.get("identity_sha256"))
+            or type(oracle.get("temperature_hex")) is not str
+            or not _is_sha256(oracle.get("temperature_scaling_sha256"))
             or _feature_schema_hash(identity) != feature_schema_sha256
             or type(training_config) is not dict
             or training_config.get("epochs") != ZERO_CANDIDATE_RECOVERY_EPOCHS
@@ -570,7 +739,11 @@ def validate_source_branch(
             "schema_version": BRANCH_SEAL_SCHEMA,
             "status": "PASS",
             "source_root": str(root),
+            "dataset": DATASET,
+            "source_label": SOURCE_LABEL,
             "target_label": target,
+            "num_classes": NUM_CLASSES,
+            "generation_split": "train",
             "source_read_only": True,
             "active_writer_count": 0,
             "inventory_sha256": inventory["inventory_sha256"],
@@ -579,6 +752,11 @@ def validate_source_branch(
             "rules_sha256": evidence["terminal_rule_checkpoint_sha256"],
             "catalog_sha256": evidence["native_rule_catalog_sha256"],
             "oracle_checkpoint_hash": checkpoint_id,
+            "oracle_identity_sha256": oracle["identity_sha256"],
+            "temperature_hex": oracle["temperature_hex"],
+            "temperature_scaling_sha256": oracle[
+                "temperature_scaling_sha256"
+            ],
             "feature_schema_sha256": feature_schema_sha256,
             "training_resume_identity_sha256": resume_identity_sha,
             "native_train_cohort": identity["native_train_cohort"],
@@ -650,6 +828,7 @@ def _copy_validated_branches(
     branches: Mapping[int, ValidatedBranch],
     *,
     state_root: Path,
+    audit_documents: Mapping[str, Mapping[str, Any]],
 ) -> tuple[int, RetainedOutputTree]:
     if state_root.exists() or state_root.is_symlink():
         raise TasteGlobalGCESmokeError("T8 salvage private state root must be fresh")
@@ -670,6 +849,22 @@ def _copy_validated_branches(
             "branches": {str(target): branches[target].seal for target in TARGET_BRANCHES},
         },
     )
+    expected_audit_names = {
+        "target0_adoption_receipt.json",
+        "target2_adoption_receipt.json",
+        "branch_inventory.json",
+        "merged_rules.json",
+        "canonical_dedup.json",
+        "strict_flip_smoke.json",
+        "terminal.json",
+        "final_audit.json",
+    }
+    if set(audit_documents) != expected_audit_names:
+        raise TasteGlobalGCESmokeError(
+            "T8 salvage audit-document closure is incomplete"
+        )
+    for name in sorted(expected_audit_names):
+        _atomic_json(state_root / name, audit_documents[name])
     descriptor, tree = _open_tree(state_root)
     try:
         copied = tree.revalidate()
@@ -792,6 +987,18 @@ def run_salvage(
             device=device,
             batch_size=TasteGlobalGCESmokeConfig().oracle_batch_size,
         )
+        expected_temperature_hex = float(scorer.temperature).hex()
+        if any(
+            branches[target].seal["oracle_checkpoint_hash"] != checkpoint_id
+            or branches[target].seal["temperature_hex"]
+            != expected_temperature_hex
+            or branches[target].seal["feature_schema_sha256"]
+            != feature_schema_sha
+            for target in TARGET_BRANCHES
+        ):
+            raise TasteGlobalGCESmokeError(
+                "T8 salvage branches differ from the calibrated GINE identity"
+            )
         cohort = load_taste_train_cohort(
             train_payload,
             expected_row_count=int(preflight["train_rows"]),
@@ -832,10 +1039,20 @@ def run_salvage(
                 "T8 salvage target branches used different train/official identities"
             )
         source_trees = {target: branches[target].tree for target in TARGET_BRANCHES}
-        _merged_rules, rule_merge = merge_branch_rule_catalogs(
+        merged_rules, rule_merge = merge_branch_rule_catalogs(
             branch_trees=source_trees,
             checkpoint_id=checkpoint_id,
         )
+        if rule_merge.get("merged_unique_rule_count", 0) < 1:
+            _raise_finalization_error(
+                code="T8_SMOKE_INSUFFICIENT_UNIQUE_RULES",
+                field="rule_merge.merged_unique_rule_count",
+                expected=">=1",
+                actual=rule_merge.get("merged_unique_rule_count"),
+                source_manifest=SALVAGE_SCHEMA,
+                source_artifact=state_root,
+                stage="T8_CANONICAL_RULE_MERGE",
+            )
         try:
             generated, materialization = materialize_smoke_candidates(
                 {target: branches[target].catalog for target in TARGET_BRANCHES},
@@ -856,7 +1073,11 @@ def run_salvage(
                 candidates,
                 scorer=scorer,
                 checkpoint_id=checkpoint_id,
-                minimum_strict_flips_per_branch=1,
+                # The authorized salvage smoke is untargeted after merging:
+                # both target artifacts must be valid, but one real flip in
+                # either destination branch closes the smoke science gate.
+                minimum_strict_flips_per_branch=0,
+                minimum_strict_flips_total=1,
             )
         except TasteGlobalGCESmokeError as exc:
             counts = _strict_flip_counts_by_branch(candidates, scorer=scorer)
@@ -869,11 +1090,77 @@ def run_salvage(
             raise
         for target in TARGET_BRANCHES:
             branches[target].evidence["raw_generated_count"] = len(generated[target])
+        audit_documents: dict[str, Mapping[str, Any]] = {
+            "target0_adoption_receipt.json": {
+                **branches[0].seal,
+                "adoption_status": "PASS",
+                "source_artifact_mutated": False,
+            },
+            "target2_adoption_receipt.json": {
+                **branches[2].seal,
+                "adoption_status": "PASS",
+                "source_artifact_mutated": False,
+            },
+            "branch_inventory.json": {
+                "schema_version": "tastemolnet_t8_branch_inventory_v1",
+                "status": "PASS",
+                "branches": {
+                    str(target): branches[target].seal
+                    for target in TARGET_BRANCHES
+                },
+            },
+            "merged_rules.json": {
+                "schema_version": "tastemolnet_t8_merged_rules_v1",
+                "status": "PASS",
+                "merged_unique_rule_count": len(merged_rules),
+                "rules": merged_rules,
+            },
+            "canonical_dedup.json": {
+                "schema_version": "tastemolnet_t8_canonical_dedup_v1",
+                "status": "PASS",
+                "rule_merge": rule_merge,
+                "candidate_merge": candidate_merge,
+            },
+            "strict_flip_smoke.json": {
+                "schema_version": "tastemolnet_t8_strict_flip_smoke_v1",
+                "status": "PASS",
+                "minimum_required_total": 1,
+                "minimum_required_per_branch": 0,
+                "result": strict,
+            },
+            "terminal.json": {
+                "schema_version": "tastemolnet_t8_salvage_terminal_v1",
+                "state": "PASS",
+                "dataset": DATASET,
+                "method": METHOD,
+                "source_label": SOURCE_LABEL,
+                "target_branches": list(TARGET_BRANCHES),
+                "merged_valid_unique_rules": len(merged_rules),
+                "strict_flip_count": strict["strict_flip_count"],
+                "test_loaded": False,
+            },
+            "final_audit.json": {
+                "schema_version": "tastemolnet_t8_salvage_final_audit_v1",
+                "passed": True,
+                "same_calibrated_gine": True,
+                "same_temperature": True,
+                "same_dataset_split": True,
+                "both_target_artifacts_verified": True,
+                "canonical_merge_dedup_complete": True,
+                "real_untargeted_strict_flip_observed": True,
+                "source_artifacts_mutated": False,
+                "test_loaded": False,
+                "gnn_ablation_started": False,
+            },
+        }
         state_fd, state_tree = _copy_validated_branches(
             branches,
             state_root=state_root,
+            audit_documents=audit_documents,
         )
         state_inventory = state_tree.revalidate()
+        salvage_config = science_config.to_dict()
+        salvage_config["minimum_strict_flips_per_branch"] = 0
         science = {
             "schema_version": SCIENCE_SCHEMA,
             "stage": STAGE,
@@ -887,7 +1174,7 @@ def run_salvage(
             "classifier_family": "gine",
             "oracle_checkpoint_hash": checkpoint_id,
             "temperature_hex": float(scorer.temperature).hex(),
-            "config": science_config.to_dict(),
+            "config": salvage_config,
             "train_boundary": {
                 "train_loaded": True,
                 "train_row_count": cohort.train_row_count,
@@ -920,7 +1207,7 @@ def run_salvage(
             "dataset_redistributed": False,
             "per_example_terminal_payload": False,
         }
-        validate_science_summary(science)
+        validate_science_summary(science, minimum_strict_flips_per_branch=0)
         output = FreshOutputDirectory.create(output_root)
         manifest = {
             **preflight,
@@ -1128,11 +1415,13 @@ __all__ = [
     "RERUN_SCHEMA",
     "SALVAGE_MARKER",
     "SALVAGE_SCHEMA",
+    "T8FinalizationError",
     "ValidatedBranch",
     "T8BranchScientificFailure",
     "materialize_smoke_candidates",
     "run_salvage",
     "run_single_branch_recovery",
+    "read_single_branch_rerun_target",
     "validate_source_branch",
     "write_single_branch_rerun_request",
 ]

@@ -175,6 +175,25 @@ class _FakeScorer:
         return rows
 
 
+def test_merged_untargeted_smoke_can_require_one_total_flip() -> None:
+    candidates = [
+        {
+            "parent": "O",
+            "candidate": "N",
+            "target_branches": [2],
+        }
+    ]
+    result = t8.validate_candidates_with_original_gine(
+        candidates,
+        scorer=_FakeScorer(),
+        checkpoint_id="a" * 64,
+        minimum_strict_flips_per_branch=0,
+        minimum_strict_flips_total=1,
+    )
+    assert result["strict_flip_count"] == 1
+    assert result["strict_flip_by_training_branch"] == {"0": 0, "2": 1}
+
+
 def _rule_payload(target: int) -> dict:
     # Branches deliberately have different RHS atoms, so both survive merge.
     rhs = [0.0, 1.0, 0.0] if target == 0 else [0.0, 0.0, 1.0]

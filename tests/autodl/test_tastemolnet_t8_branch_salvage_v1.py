@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import src.utils.tastemolnet_t8_branch_salvage_v1 as salvage
 from src.utils.tastemolnet_t8_branch_salvage_v1 import (
     RERUN_SCHEMA,
+    T8FinalizationError,
+    read_single_branch_rerun_target,
     write_single_branch_rerun_request,
 )
 
@@ -16,6 +18,8 @@ T13_RELAY = ROOT / "scripts/autodl/run_tastemolnet_t13_after_t8_salvage_v1.sh"
 SLURM = ROOT / "scripts/slurm/salvage_tastemolnet_t8_branches_v1.sh"
 RERUN_CLI = ROOT / "scripts/autodl/rerun_tastemolnet_t8_single_branch_v1.py"
 RERUN_SLURM = ROOT / "scripts/slurm/rerun_tastemolnet_t8_single_branch_v1.sh"
+SALVAGE_SOURCE = ROOT / "src/utils/tastemolnet_t8_branch_salvage_v1.py"
+T13_SOURCE = ROOT / "src/baselines/tastemolnet_globalgce_full.py"
 
 
 def test_single_branch_failure_preserves_the_other_branch(tmp_path: Path) -> None:
@@ -27,6 +31,28 @@ def test_single_branch_failure_preserves_the_other_branch(tmp_path: Path) -> Non
     assert receipt["rerun_both_branches"] is False
     assert receipt["source_artifacts_mutated"] is False
     assert json.loads(path.read_text(encoding="utf-8")) == receipt
+    assert read_single_branch_rerun_target(path) == 2
+
+
+def test_multi_branch_rerun_failure_is_typed(tmp_path: Path) -> None:
+    path = tmp_path / "rerun.json"
+    write_single_branch_rerun_request(path, {0: "no flip", 2: "no flip"})
+    try:
+        read_single_branch_rerun_target(path)
+    except T8FinalizationError as exc:
+        evidence = exc.to_dict()
+    else:  # pragma: no cover - the typed failure is the contract under test
+        raise RuntimeError("multi-branch rerun request unexpectedly passed")
+    assert evidence == {
+        "error_type": "T8FinalizationError",
+        "code": "T8_RERUN_NOT_SINGLE_BRANCH",
+        "field": "invalid_target_branches",
+        "expected": "exactly one target branch",
+        "actual": [0, 2],
+        "source_manifest": RERUN_SCHEMA,
+        "source_artifact": str(path),
+        "stage": "T8_SINGLE_BRANCH_RERUN_SELECTION",
+    }
 
 
 def test_salvage_cli_exposes_only_read_only_source_roots() -> None:
@@ -107,8 +133,8 @@ def test_salvage_adopts_then_persists_t13_relay() -> None:
 def test_salvage_has_one_bounded_target_specific_recovery() -> None:
     text = ORCHESTRATOR.read_text(encoding="utf-8")
     assert "rerun_tastemolnet_t8_single_branch_v1.py" in text
-    assert "invalid_target_branches" in text
-    assert "len(x)==1" in text
+    assert "read_single_branch_rerun_target" in text
+    assert "assert " not in text
     assert "T8_SALVAGE_FAILED_NO_TARGET_SPECIFIC_RECOVERY" in text
     assert "T8_SALVAGE_FAILED_NON_SINGLE_BRANCH" in text
     assert "T8_SINGLE_BRANCH_RECOVERY_FAILED" in text
@@ -134,6 +160,123 @@ def test_t13_relay_has_no_unrelated_taste_dependencies() -> None:
     assert "PYTHONDONTWRITEBYTECODE=1" in text
     assert 'gpu-$GPU_UUID.coordination.lock' in text
     assert "flock -n 8" in text
+    assert "initializer_mode=fresh_full_attempt" in text
+    assert "t8_checkpoint_initializer_compatible=false" in text
+    assert "K_MAX=20" in text
+    assert "MIN_VALID_UNIQUE_RULES=10" in text
+
+
+def test_salvage_emits_field_level_branch_and_smoke_audits() -> None:
+    text = (
+        ROOT / "src/utils/tastemolnet_t8_branch_salvage_v1.py"
+    ).read_text(encoding="utf-8")
+    for token in (
+        "T8FinalizationError",
+        '"field"',
+        '"expected"',
+        '"actual"',
+        '"source_manifest"',
+        '"source_artifact"',
+        '"stage"',
+        "target0_adoption_receipt.json",
+        "target2_adoption_receipt.json",
+        "branch_inventory.json",
+        "merged_rules.json",
+        "canonical_dedup.json",
+        "strict_flip_smoke.json",
+        "terminal.json",
+        "final_audit.json",
+        '"temperature_scaling_sha256"',
+        '"test_loaded": False',
+    ):
+        assert token in text
+
+
+def test_t8_assertions_are_typed() -> None:
+    orchestrator = ORCHESTRATOR.read_text(encoding="utf-8")
+    source = SALVAGE_SOURCE.read_text(encoding="utf-8")
+    assert "assert " not in orchestrator
+    assert "T8FinalizationError" in source
+    for field in (
+        "field",
+        "expected",
+        "actual",
+        "source_manifest",
+        "source_artifact",
+        "stage",
+    ):
+        assert f'"{field}"' in source
+
+
+def test_t8_target0_salvage() -> None:
+    source = SALVAGE_SOURCE.read_text(encoding="utf-8")
+    assert '"target0_adoption_receipt.json"' in source
+    assert '"target_label": target' in source
+    assert "target not in TARGET_BRANCHES" in source
+
+
+def test_t8_target2_salvage() -> None:
+    source = SALVAGE_SOURCE.read_text(encoding="utf-8")
+    assert '"target2_adoption_receipt.json"' in source
+    assert '"target_branches": list(TARGET_BRANCHES)' in source
+
+
+def test_t8_same_gine() -> None:
+    source = SALVAGE_SOURCE.read_text(encoding="utf-8")
+    for token in (
+        '"oracle_checkpoint_hash"',
+        '"oracle_identity_sha256"',
+        '"temperature_hex"',
+        '"temperature_scaling_sha256"',
+        '"feature_schema_sha256"',
+    ):
+        assert token in source
+
+
+def test_t8_merge_dedup() -> None:
+    source = SALVAGE_SOURCE.read_text(encoding="utf-8")
+    assert "merge_branch_rule_catalogs" in source
+    assert "_deduplicate_generated_candidates" in source
+    assert '"canonical_dedup.json"' in source
+
+
+def test_t8_smoke_min_one_rule() -> None:
+    source = SALVAGE_SOURCE.read_text(encoding="utf-8")
+    assert 'rule_merge.get("merged_unique_rule_count", 0) < 1' in source
+    assert 'expected=">=1"' in source
+
+
+def test_t8_salvage_uses_merged_untargeted_flip_gate() -> None:
+    source = SALVAGE_SOURCE.read_text(encoding="utf-8")
+    assert "minimum_strict_flips_per_branch=0" in source
+    assert "minimum_strict_flips_total=1" in source
+    assert '"minimum_required_per_branch": 0' in source
+
+
+def test_t13_full_min_ten_rules() -> None:
+    source = T13_SOURCE.read_text(encoding="utf-8")
+    relay = T13_RELAY.read_text(encoding="utf-8")
+    assert "MIN_RULES = 10" in source
+    assert "K_MAX = 20" in source
+    assert "MIN_VALID_UNIQUE_RULES=10" in relay
+    assert "K_MAX=20" in relay
+
+
+def test_t13_initializer_compatibility() -> None:
+    relay = T13_RELAY.read_text(encoding="utf-8")
+    assert "initializer_mode=fresh_full_attempt" in relay
+    assert "t8_checkpoint_initializer_compatible=false" in relay
+    assert "smoke_exact_top_k_differs_from_full_contract" in relay
+
+
+def test_t13_no_test_before_freeze() -> None:
+    source = T13_SOURCE.read_text(encoding="utf-8")
+    run_body = source[source.index("def run_t13_full(") :]
+    freeze_position = run_body.index('phase="CALIBRATION_SELECTION_FROZEN"')
+    test_position = run_body.index(
+        "test_parents = authorize_and_load_test_after_freeze("
+    )
+    assert freeze_position < test_position
 
 
 def test_paired_slurm_keeps_hpc_baseline_and_science_flags() -> None:
