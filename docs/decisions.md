@@ -1,5 +1,30 @@
 # Decisions Log
 
+## [2026-09-03] Keep one fixed-priority main/ablation closeout owner
+
+### Decision
+
+Use one small, dataset-delegating sidecar with the immutable priority order
+main table (100), LLM ablation (50), then GNN ablation (20).  The sidecar does
+not implement scientific algorithms: it dispatches the existing Mut, T14, and
+Taste GlobalGCE dataset-specific helpers once, retains their independent
+single-writer gates, and publishes a durable heartbeat.  Early LLM execution
+requires the independent 13-cell/main-ready/runtime receipt; GNN requires the
+16-cell authority and PASS receipts for the final audit, Figure 3, Figure 4,
+and Table 2.  Missing evidence fails closed.
+
+### Impact
+
+The active T8, T12, and T14 processes and their execution roots are never
+signalled or modified.  Graph-Mamba and the matched-SFT auxiliary remain
+disabled.  This is a narrow scheduling bridge, not a new controller platform.
+
+### Status
+
+Implemented; deployment remains gated on the combined focused-test commit.
+
+---
+
 ## [2026-09-02] Separate ChemLLM adaptation-stage and model-scale ablations
 
 ### Background

@@ -1,5 +1,14 @@
 # Refactor Plan
 
+## 2026-09-03: Fixed-priority main and ablation closeout sidecar
+
+- [x] Enforce main > LLM > GNN priorities and the frozen experiment rows.
+- [x] Dispatch only dataset-specific helpers with one durable component receipt.
+- [x] Keep early LLM fail-closed until its independent live receipt passes.
+- [x] Keep five-backbone GNN science blocked until 16/16 and final artifacts.
+- [x] Add status, paired Slurm guards, focused tests, and durable heartbeat.
+- [ ] Deploy the immutable combined commit and revalidate every active PID/root.
+
 ## 2026-09-02: Close the Mut semantic-finalizer integration gap
 
 - [x] Preserve the exact historical and checkpoint-instrumented generation
