@@ -1,212 +1,204 @@
 # AutoDL Main Recovery and Ablation Framework Handoff
 
-Last live audit: 2026-09-02 02:55-03:05 CST.  This document records live
-execution facts separately from the post-main, config-only ablation design.
-It must not be used as a substitute for the matrix authority or terminal
-artifact receipts.
+Last read-only main-state audit: 2026-09-02 17:31:27 CST. T8/T13 was
+repaired and relaunched at approximately 16:46 CST. This document
+separates main-table execution facts from ablation preparation. The matrix
+authority and task heartbeats remain authoritative over this handoff.
 
-## 1. Main matrix authority
+## 1. Main-table authority
 
-- Authority pointer: `/autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json`
-- Live complete cells: `11 / 16`
-- Applied cells: AIDS/Ours, AIDS/GCFExplainer, AIDS/GlobalGCE, AIDS/ComRecGC;
-  Mutagenicity/Ours, Mutagenicity/GCFExplainer, Mutagenicity/GlobalGCE;
-  BACE/Ours, BACE/GCFExplainer, BACE/GlobalGCE, BACE/ComRecGC.
-- Missing cells: Mutagenicity/ComRecGC and all four TasteMolNet methods.
-- The AIDS publication-only reconciliation completed without rerunning science.
-  Its authority root is
-  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/publication_reconciliation/aids_comrecgc_matrix_append_5c11c28_20260902T021000Z`.
-- No second matrix authority was created or modified by the framework build.
+- Authority: `/autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json`
+- Authority mtime at audit: `2026-09-02 11:36:37.792215344 +0800`
+- Registered cells: `12 / 16`
+- Complete: all four AIDS cells, all four BACE cells,
+  Mutagenicity/Ours, Mutagenicity/GCFExplainer,
+  Mutagenicity/GlobalGCE, and TasteMolNet/Ours.
+- Missing: Mutagenicity/ComRecGC and TasteMolNet/GCFExplainer,
+  TasteMolNet/GlobalGCE, TasteMolNet/ComRecGC.
 
-## 2. Live main-table workers
+The framework work did not write the matrix authority, active roots, or GPU
+leases. No LLM or GNN ablation science was launched.
 
-| Line | PID | GPU | Live state / checkpoint | Root |
-|---|---:|---:|---|---|
-| AIDS ComRecGC publication | none | none | Published PASS; matrix append complete at 11/16 | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/publication_reconciliation/aids_comrecgc_matrix_append_5c11c28_20260902T021000Z` |
-| Mut ComRecGC trace-on adoption | 34081 (compute 35789) | 0 | `CANARY_RUNNING`; it owns the exact UUID lock for the sequential instrumentation-equivalence arm; fresh-50k and pair/DBSCAN recomputation remain false | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/mut_trace_on_adoption_20260901T183543Z` |
-| Taste T11 Ours | relay below | waiting for GPU 0 | Generation completed durably.  The old run failed in calibration because one cache-context version field was absent; checkpoint is `CALIBRATION_RUNNING`, 1/468 parents.  Commit `7fcf9ba` fixes only that context binding, and the one-shot relay resumes the existing science root after Mut releases GPU 0. | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/ours/t11-full/science-attempt-b73f789d-3888-4ec8-8e07-0442e224df29` |
-| Taste T8 target-2 recovery (feeds T13) | 33141 | 1 | target-0 finished; target-2 is in native training/materialization with a durable training checkpoint and T13 correctly remains gated | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t8-dual-branch-recovery/target-2-attempt-4a0651fa-5df4-43c0-a897-20f040f779d8` |
-| Taste T14 ComRecGC | 7224 | 2 | committed checkpoint 2500/20000; 29,240 valid unique rules at the audit | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/comrecgc/t14-full/attempt-f3b2e5f2-9f20-4c12-bd26-3d7cc8e0d9ab` |
-| Taste T12 GCFExplainer | 21562 | 3 | science process alive; no early production checkpoint yet | `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/gcfexplainer/t12-production/attempt-6616449a-6fa5-4502-8c8a-ae01b11366fb` |
+## 2. Main workers and recovery state
 
-The previous Mut worker (PID 22325) correctly failed closed when an
-uncoordinated T8 process appeared on its exclusively locked GPU.  This was not
-a trace-equivalence failure: its receipt records
-`fallback_route_required=false`, and no fresh 50k generation was launched.
-PID 34081 was therefore attached from the original immutable main execution
-commit `a21f89d` with a fresh authorization and output root.  It acquired GPU 0
-only after the protected baseline gate and now runs the bounded sequential
-canary.
+| Line | Last verified state | GPU | Evidence |
+|---|---|---:|---|
+| Taste T8/T13 GlobalGCE | One allowed grade-recovery attempt running after a provenance-only checkpoint resume; controller PID `82588`, science PID `82680`, checkpoint `TARGET_0_RUNNING`, output 126,323,403 bytes, seed 7, 100 epochs, ordinal `1/1` | 1 | `/autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-t8-t13-grade-recovery-once-20260902T084623Z-99cad1d6` |
+| Taste T12 GCFExplainer | Healthy original science PID `66459`; output 777,498,920 bytes and growing; not restarted or reconfigured | 3 | Existing T12 production root/relay |
+| Taste T14 ComRecGC | Healthy original science PID `7224`; progress 7,900/20,000 (39.5%), committed checkpoint 7,500 | 2 | Existing T14 production root/relay |
+| Mut ComRecGC | Worker PID `67797` absent; latest equivalence attempt failed its protected-throughput watchdog because T14 slowdown exceeded 10% | none | `/autodl-fs/data/counterfactual-subgraph-runtime/control/mut_fast_accurate_v2/mut_fast_accurate_v2_20260901T043250Z/trace_on_adoption_worker_heartbeat.json` |
 
-T11's costly generation output was not lost.  Its first calibration parent is
-committed in `raw/calibration_pair_chunks/00000000.jsonl`; the checkpoint and
-chunk reload cleanly.  The failure was exactly
-`distance_implementation_version` missing from the action-aware WNode cache
-context.  The isolated repair worktree is
-`/root/autodl-tmp/worktrees/t11-wnode-cache-fix-7fcf9ba-20260902T025000Z`.
-Focused T11 tests passed both locally and on AutoDL.  A first managed launch
-attempt safely failed with exit 125 because Mut won the GPU 0 lock; it started
-no child.  The narrow one-shot resume relay is persisted under
-`/autodl-fs/data/counterfactual-subgraph-runtime/control/` and waits without a
-GPU lock.  It is the only T11 successor and will run the exact existing
-checkpoint once the same physical UUID is naturally free.
+T8/T13 originally failed before training because the loader discarded the
+already-validated official `runtime_source_authority`. Commit
+`b12c9c80bf4ed5df8ae3f75e6d9c2992a5de9474` retains and passes that authority.
+The resumed process uses the same UUID
+`18675079-382b-41a9-b6ac-f5aa6e79babf`, the same output root, the same
+checkpoint, and the same one-shot ordinal. It is not a second scientific
+attempt. Local focused tests were 109 PASS and remote focused tests were 7
+PASS before relaunch.
 
-The T12/T13/T14 publisher and post-process relays had current heartbeats at
-the audit time.  T8, T12 and T14 were not restarted, reconfigured or
-preempted.  GPU 0 was used by Mut; GPUs 1/2/3 remained assigned to T8/T14/T12.
-No ablation PID or ablation GPU lock existed.
+Mut was deliberately not restarted because the current instruction explicitly
+protects it from restart. Its science gate did not fail trace equivalence; the
+resource watchdog stopped it to protect T14. Mut therefore remains a main-table
+blocker and must be resumed by the existing main release policy after the
+protected-resource condition changes.
 
-## 3. Main-table critical path
+## 3. Main critical path
 
-T11's generation is complete and only calibration/test/publication remain;
-its resume waits behind the bounded Mut canary on GPU 0.  T8 target-0 has
-finished and target-2 is the remaining T8 prerequisite before T13.  T14 has
-roughly 17,500 configured generation steps left after its committed 2500-step
-checkpoint;
-its measured protected baseline was about 0.330 steps/second, corresponding to
-roughly 15 hours for generation alone if sustained.  T12 remains the largest
-uncertainty because its current implementation does not yet expose an early
-progress checkpoint; its PID, GPU memory and process I/O are active, so it must
-not be restarted merely to add observability.  Consequently no defensible
-single 16/16 completion timestamp is available yet.  Natural completions must
-feed the existing post-process and publisher queues immediately.
+The remaining four cells depend on T12, T14, the one-shot T8/T13 recovery, and
+a later safe Mut continuation. T12/T14/T8 are long-running main science and
+must not be restarted for observability. No defensible 16/16 wall-clock time is
+available from the current checkpoints. When any task finishes, its existing
+postprocess/publisher relay must append through the same matrix authority.
 
-## 4. BACE/Ours main-reference contract
+## 4. LLM framework branch and deployment
 
-The framework freezes a machine-readable reference at:
+- Branch: `feat/llm-stage-scale-ablation-v2`
+- Framework commits: `443437f`, `e60bc67`, `2ab8ecbf`
+- Final commit: `2ab8ecbf436b796283122041d06b3bcc12708ee6`
+- Immutable AutoDL worktree:
+  `/root/autodl-tmp/worktrees/llm-stage-scale-ablation-2ab8ecb-20260902T093000Z`
+- Local and AutoDL focused tests: `76 passed`
+- Python compile, `git diff --check`, and AutoDL/Slurm shell syntax: PASS
 
-`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/contracts/bace_ours_main_reference_v1.json`
+The v2 launcher is deliberately config-only and exits blocked. It cannot
+acquire a GPU or start science. This is safer than exposing an incomplete
+launcher while runtime model evidence and main-table gates are unresolved.
 
-The builder reads the real, already-published BACE/Ours cell from the current
-matrix authority plus its GINE, temperature, feature schema,
-split, MolCLR, WNode, PPO, candidate-pool, verification and selector artifacts.
-Missing or mismatched provenance fails closed; values are not filled from
-memory.  Building this reference is allowed before 16/16 because it does not
-run science; the independent launch gate still requires final 16/16.  The
-reference records the real 386-parent, 4+4 proposal contract.
+## 5. BACE/Ours LLM reference
 
-The real contract was built on AutoDL and passed with reference SHA-256
-`808d1eb204e7ba285ac1d8aab8f4f2bffc0c2b9be004115303f25f3f40cebbe0`.
-The builder also proves that B10's serialized-pool hash and canonical
-candidate-universe hash are distinct identities, and binds B11/B12 to the
-canonical universe rather than conflating the two.
+- Reference v2:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/contracts/bace_ours_llm_reference_v2.json`
+- File SHA-256:
+  `775ab902fa02c7be8748f0d8ce9514e4aba0f57e6c61fc4f6c40e829b37b46c6`
+- Contract self SHA-256:
+  `344f4815d327f7bdbc5c276f7dbf35ac4f671f07833f49d8208c32ee457ecdd2`
 
-The verified main policy lineage is ChemLLM base plus a fresh LoRA initializer
-plus PPO.  There is no independently matched BACE SFT checkpoint.  Therefore:
+The real main lineage is:
 
-- `BRICS_FIXED`: config-only, no checkpoint;
-- `CHEMLLM_PRETRAINED`: available after exact base/tokenizer binding;
-- `CHEMLLM_SFT`: `BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT`;
-- `CHEMLLM_SFT_PPO`: `BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT` under the named
-  four-stage comparison (the existing PPO policy must not be relabelled as
-  SFT+PPO).
+`AI4Chem/ChemLLM-7B-Chat -> fresh LoRA initializer -> PPO (300 updates)`
 
-## 5. LLM proposer ablation contract
+There is no independently matched BACE project-SFT checkpoint. Consequently:
 
-Dataset and method are fixed to BACE/Ours.  The primary budget is proposal
-attempt matched: the same 386 train parents and the same main sampling regimes
-are bound for every available variant.  Valid-candidate matching is a secondary
-diagnostic only.
+- A0 `BRICS_FIXED`: CPU preparation is allowed.
+- A1 `CHEMLLM_7B_OFF_THE_SHELF`: topology/reference framework is available,
+  but GPU science remains gated.
+- A2 `CHEMLLM_7B_PROJECT_SFT`: `BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT`.
+- A3 `CHEMLLM_7B_PROJECT_SFT_PPO`: blocked because the existing policy is
+  fresh-LoRA PPO, not project-SFT+PPO. It must not be relabelled.
 
-The BRICS vocabulary is built only from the frozen BACE train cohort.  BRICS
-attachment dummies are removed to form canonical connected cores.  Records
-contain fragment SMILES, train frequency, atom count, source-parent count and
-rank; ordering is descending train frequency with canonical-SMILES tie-break.
-For each proposal parent, only vocabulary fragments that actually match that
-parent may be emitted.  A shortfall is recorded and candidates are never
-duplicated or oracle-ranked.
+## 6. Model-scale evidence
 
-All variants share the frozen parser, canonicalizer, direct-substructure and
-projection checks, hard deletion, GINE oracle, WNode matrix, calibration-only
-selector and held-out-test evaluator.  Planned candidate, novelty, coverage,
-cost, diversity, resource and parent-bootstrap metrics are schemas only until
-an authorized science run writes PASS manifests.
+### 2B
 
-## 6. GNN backbone ablation contract
+- Model: `AI4Chem/CHEMLLM-2b-1_5`
+- Revision: `215c0dbc89417a06bbc3bae43a3ad61e58f0a56e`
+- Snapshot:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/models/chemllm/CHEMLLM-2b-1_5/215c0dbc89417a06bbc3bae43a3ad61e58f0a56e`
+- Exact safetensors-header count: `1,889,110,016` BF16 parameters.
+- Four weight shards match their pinned LFS hashes.
+- State: `SNAPSHOT_READY_SCIENCE_LOAD_BLOCKED`; isolated remote-code import has
+  not passed, so header evidence is not called an actual-loaded parameter
+  report.
 
-The primary framework is BACE/Ours proposal-fixed with GINE (reference), GIN,
-GCN and GATv2.  It freezes the main candidate identities and budget, then
-recomputes classifier-dependent source cohorts, strict flips, WNode matrices,
-calibration selection and final test evaluation per backbone.  Candidate
-generation and ChemLLM are not rerun in proposal-fixed mode.
+### 7B main reference
 
-All models bind the same atom/bond feature schema and explicitly disclose how
-edge features enter messages.  Model training uses train, checkpoint selection
-and temperature fitting use validation, calibration is reserved for rule
-selection, and test is opened only after all model and selector freezes.
-Classifier metrics are ROC-AUC, balanced accuracy, macro-F1, NLL, ECE, Brier
-and parameter count.  Explanation metrics are reported on both each model's
-native correctly classified cohort and the common intersection; common-cohort
-stability is primary.
+- Revision: `b8b2ea19e48f53d190fe8dced94572717f8e89a2`
+- Exact safetensors-header base count: `7,737,708,544` BF16 parameters.
+- PPO LoRA header count: `18,874,368` FP32 parameters.
+- Header total: `7,756,582,912`.
+- These are header-exact counts, not a newly generated actual-loaded report.
 
-The optional BACE/Ours end-to-end mode is config-only.  It may eventually rerun
-PPO, generation and selection, but no end-to-end science runner is started by
-this framework.
+### Optional 20B
 
-## 7. Launch gates and current state
+- Model: `AI4Chem/ChemLLM-20B-Chat-SFT`
+- Revision: `e8d0f503e00f143f6787263765ff6ee5f3fe3998`
+- Metadata manifest:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/models/chemllm/ChemLLM-20B-Chat-SFT/e8d0f503e00f143f6787263765ff6ee5f3fe3998/metadata/metadata_manifest.json`
+- `weights_downloaded=false`, `run_enabled=false`.
+- The model-index estimate is metadata only and is never reported as an
+  actual-loaded parameter count.
 
-A future run requires all of the following, bound to the same matrix-authority
-root, matrix SHA, and combined-audit SHA:
+The requested matched 2B-full versus 7B-full scale study is blocked by the
+missing 7B project-SFT lineage. The supported fallback design is only
+`2B off-the-shelf vs 7B off-the-shelf`, labelled
+`MODEL_SCALE_PROPOSAL_SENSITIVITY`. It is not a full-method parameter ablation.
 
-1. the exact canonical 16-cell main matrix and final combined audit PASS;
-2. self-hashed PASS receipts for the final audit and final four-dataset
-   Figure 3, Figure 4, and Table 2 artifacts;
-3. a self-hashed project-owner run-authorization receipt bound to the family,
-   execution commit, run-contract SHA, authority, and all four receipt SHAs;
-4. both the tracked family flag and the corresponding operator run request.
+## 7. BRICS contract and CPU artifact
 
-At handoff, `RUN_LLM_ABLATION=0`, `RUN_GNN_ABLATION=0`, and no valid
-authorization receipt exists.  No ablation science has started.  A boolean or
-environment variable is not authorization.  Checked-in Slurm wrappers exist
-solely because repository policy requires a paired wrapper for Python
-entrypoints; they were not submitted and must not be submitted while
-main-table GPUs are occupied.
+The BRICS vocabulary reads the complete frozen BACE train split (959 rows).
+The separate 386-parent source cohort is used only for proposal generation.
+The primary budget is eight attempts per parent; every attempt and shortfall is
+written, and no candidate is copied to fill a shortfall.
 
-Both deployed status commands independently reopened the live authority and
-reported `BLOCKED_WAITING_MAIN_MATRIX`, `main_matrix_complete_cells=11`,
-`science_started=false`, and `gpu_lock_acquired=false`.  The audit bundle is:
+The audited main B10 freeze has no active numeric fragment-atom or atom-ratio
+threshold. Its structural predicate is parseable, valid, connected,
+chirality-aware direct-substructure with a valid oracle outcome. The shared
+downstream hard deletion additionally requires a non-empty, sanitizable,
+single-component residual. PPO reward windows and disabled projection limits
+are not final candidate filters. The BRICS proposer therefore records all
+numeric size bounds as `NONE`, uses `useChirality=True` for proposal-time
+matching, and leaves hard deletion/oracle/strict flip to the common downstream.
 
-`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/main_and_ablation_framework_20260901T184000Z/`
+CPU output root:
 
-## 8. Paper staging
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/llm/bace_ours_stage_v2/BRICS_FIXED/seed7/attempt-de7345e8-c1e1-448a-8154-41628d28a0a9`
 
-Claim-safe, number-free templates are written under:
+The terminal is PASS: 472 vocabulary entries, 386 parents, 3,088 proposal
+attempts, 3,088 candidates, and zero shortfalls. Calibration/test/oracle were
+not loaded, `gpu_used=false`, and all six listed artifacts pass
+`sha256sum -c`. The CPU command acquired no GPU and used one low-priority
+worker.
 
-`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_staging/ablations_v1/`
+## 8. Launch gates
 
-They contain TODO fields and disclose unavailable matched-SFT variants.  They
-must not be copied into the paper as result claims until hash-bound PASS
-aggregate manifests exist.
+Early LLM GPU science currently remains blocked because:
 
-## 9. Suggested future run order
+1. the registered matrix is below 13/16;
+2. Mut is not PASS and still needs a future main GPU continuation;
+3. main-table science occupies/reserves the remaining GPU path;
+4. no valid early-run receipt exists;
+5. 2B runtime loading and actual-loaded parameter reports are incomplete;
+6. framework v2 intentionally has no science entrypoint.
 
-Only after the gates above and a new explicit authorization:
+The receipt schema binds the physical matrix-authority SHA, runtime run-contract
+SHA, and exact Git execution commit. Caller-supplied booleans cannot override
+those bindings.
 
-1. BACE LLM proposer ablation (available variants; blocked variants remain
-   blocked);
-2. BACE GNN proposal-fixed ablation;
-3. BACE GNN end-to-end ablation;
-4. optional TasteMolNet GNN proposal-fixed ablation;
-5. optional TasteMolNet LLM ablation.
+The persisted decision is:
+
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/main_llm_scale_ablation_20260902T093127Z/ablation_start_decision.json`
+
+It reports `BLOCKED_MAIN_PRIORITY`, `science_started=false`, and
+`gpu_lock_acquired=false`.
+
+## 9. GNN framework
+
+The BACE/Ours proposal-fixed framework for GINE, GIN, GCN, and GATv2 remains
+config-only and rejects science launch before 16/16. Native and common cohort
+contracts are retained. Optional end-to-end execution is not implemented in
+the current planner and must not be reported as framework PASS. No GNN process
+or GPU lease was created.
 
 ## 10. Status commands
 
-From the deployed immutable framework worktree on AutoDL:
+Main authority:
 
 ```bash
-/root/miniconda3/envs/smiles_pip118/bin/python scripts/autodl/status_llm_ablation.py \
-  --config configs/hpc.yaml \
-  --common-config configs/ablations/common_v1.yaml \
-  --family llm \
-  --matrix-authority /autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json
-
-/root/miniconda3/envs/smiles_pip118/bin/python scripts/autodl/status_gnn_ablation.py \
-  --config configs/hpc.yaml \
-  --common-config configs/ablations/common_v1.yaml \
-  --family gnn \
-  --matrix-authority /autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json
+/root/miniconda3/envs/smiles_pip118/bin/python \
+  scripts/autodl/status_fast_16of16_v2.py \
+  --config configs/hpc.yaml
 ```
 
-For main status, read the matrix pointer and the exact controller heartbeats;
-do not infer completion from PID exit alone.  Do not restart T12 merely because
-it lacks an early progress file.
+LLM config/evidence status from the immutable worktree:
+
+```bash
+export BACE_LLM_REFERENCE_CONTRACT=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/contracts/bace_ours_llm_reference_v2.json
+export BACE_LLM_REFERENCE_CONTRACT_SHA256=775ab902fa02c7be8748f0d8ce9514e4aba0f57e6c61fc4f6c40e829b37b46c6
+export LLM_ABLATION_MAIN_SNAPSHOT=/path/to/a/fresh/read-only-main-snapshot.json
+/root/autodl-tmp/worktrees/llm-stage-scale-ablation-2ab8ecb-20260902T093000Z/scripts/autodl/launch_llm_ablation_v2.sh
+```
+
+The latter is expected to finish with
+`BLOCKED_CONFIG_ONLY_NO_SCIENCE_ENTRYPOINT`; that is a safe framework state,
+not a failed experiment.
