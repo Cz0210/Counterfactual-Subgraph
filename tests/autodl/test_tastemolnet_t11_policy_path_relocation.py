@@ -124,6 +124,12 @@ def test_build_and_reopen_relocation_after_old_checkout_disappears(
     ]
     assert built.policy.policy_id == built.payload["policy_id"]
     assert built.publication_evidence()["only_policy_path_relocated"] is True
+    binding = built.matrix_policy_binding()
+    assert binding["policy_id"] == built.policy.policy_id
+    assert binding["policy_receipt_sha256"] == built.policy_receipt.sha256
+    assert binding["paper_reporting_authorized"] is True
+    assert binding["dataset_redistribution_authorized"] is False
+    assert binding["policy_path_relocation"] == built.publication_evidence()
 
     # Retry logs are operational evidence, not part of the relocation receipt's
     # scientific identity and therefore do not change receipt validation.

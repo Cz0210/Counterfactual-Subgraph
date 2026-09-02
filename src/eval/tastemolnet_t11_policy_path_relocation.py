@@ -93,6 +93,21 @@ class T11PolicyPathRelocation:
             "science_rerun": False,
         }
 
+    def matrix_policy_binding(self) -> dict[str, Any]:
+        """Return the strict policy identity consumed by the matrix publisher."""
+
+        return {
+            "policy_receipt_path": str(self.policy_receipt.path),
+            "policy_receipt_sha256": self.policy_receipt.sha256,
+            "policy_id": self.policy.policy_id,
+            "policy_version": self.policy.version,
+            "paper_reporting_authorized": True,
+            "dataset_redistribution_authorized": False,
+            "license_conclusion": "NOT_GRANTED_OR_INFERRED",
+            "legacy_license_pass_claimed": False,
+            "policy_path_relocation": self.publication_evidence(),
+        }
+
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()

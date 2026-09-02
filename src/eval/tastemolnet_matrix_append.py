@@ -40,6 +40,9 @@ from src.eval.four_by_four_registry import (
     write_registry_outputs,
 )
 from src.eval.tastemolnet_t4_oracle_smoke_v2 import HeldPublishedT3
+from src.eval.tastemolnet_t11_policy_path_relocation import (
+    validate_t11_policy_path_relocation,
+)
 from src.train.molecular_gnn_resume import atomic_rename_directory_noreplace
 from src.utils.tastemolnet_research_policy import (
     load_tastemolnet_research_policy,
@@ -561,6 +564,7 @@ def _load_policy_binding(
     *,
     policy_path: str | Path,
     policy_receipt: str | Path,
+    policy_path_relocation_receipt: str | Path | None = None,
     prepared_root: str | Path,
     graph_cache_root: str | Path,
 ) -> dict[str, Any]:
@@ -651,15 +655,23 @@ def append_tastemolnet_cells(
     if destination.exists():
         raise TasteMatrixAppendError(f"Matrix append output must be absent: {destination}")
     held_t3 = dict(t3_binding or _load_t3_binding(t3_root))
-    scoped_policy = dict(
-        policy_binding
-        or _load_policy_binding(
+    if policy_binding is not None:
+        scoped_policy = dict(policy_binding)
+    elif policy_path_relocation_receipt is not None:
+        scoped_policy = validate_t11_policy_path_relocation(
+            policy_path_relocation_receipt,
+            current_policy_path=policy_path,
+            policy_receipt=policy_receipt,
+            prepared_root=prepared_root,
+            graph_cache_root=graph_cache_root,
+        ).matrix_policy_binding()
+    else:
+        scoped_policy = _load_policy_binding(
             policy_path=policy_path,
             policy_receipt=policy_receipt,
             prepared_root=prepared_root,
             graph_cache_root=graph_cache_root,
         )
-    )
     if (
         not _SHA256_RE.fullmatch(str(held_t3.get("checkpoint_id") or ""))
         or not _SHA256_RE.fullmatch(

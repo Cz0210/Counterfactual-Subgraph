@@ -10,7 +10,7 @@ import shutil
 
 import pytest
 
-from scripts.autodl.append_tastemolnet_matrix_authority import _cells
+from scripts.autodl.append_tastemolnet_matrix_authority import _cells, build_parser
 from src.eval.four_by_four_registry import (
     AuditConfig,
     audit_registry,
@@ -484,3 +484,25 @@ def test_cli_cell_parser_rejects_duplicates_and_accepts_batch(tmp_path: Path) ->
     assert list(parsed) == ["Ours", "GlobalGCE"]
     with pytest.raises(argparse.ArgumentTypeError):  # type: ignore[name-defined]
         _cells([f"Ours={tmp_path / 'a'}", f"Ours={tmp_path / 'b'}"])
+
+
+def test_cli_accepts_explicit_policy_path_relocation_receipt(tmp_path: Path) -> None:
+    parsed = build_parser().parse_args(
+        [
+            "--taste-cell",
+            f"Ours={tmp_path / 'ours'}",
+            "--t3-root",
+            str(tmp_path / "t3"),
+            "--taste-policy-receipt",
+            str(tmp_path / "policy.json"),
+            "--taste-policy-path-relocation-receipt",
+            str(tmp_path / "relocation.json"),
+            "--prepared-root",
+            str(tmp_path / "prepared"),
+            "--graph-cache-root",
+            str(tmp_path / "cache"),
+            "--output-root",
+            str(tmp_path / "output"),
+        ]
+    )
+    assert parsed.taste_policy_path_relocation_receipt == tmp_path / "relocation.json"

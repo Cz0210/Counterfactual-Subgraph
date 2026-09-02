@@ -71,6 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
         / "configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml",
     )
     parser.add_argument("--taste-policy-receipt", type=_absolute, required=True)
+    parser.add_argument(
+        "--taste-policy-path-relocation-receipt",
+        type=_absolute,
+        help=(
+            "Optional T11 publication-only receipt proving that only the "
+            "absolute policy checkout path changed."
+        ),
+    )
     parser.add_argument("--prepared-root", type=_absolute, required=True)
     parser.add_argument("--graph-cache-root", type=_absolute, required=True)
     parser.add_argument("--output-root", type=_absolute, required=True)
@@ -96,6 +104,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             t3_root=args.t3_root,
             policy_path=args.taste_policy,
             policy_receipt=args.taste_policy_receipt,
+            policy_path_relocation_receipt=(
+                args.taste_policy_path_relocation_receipt
+            ),
             prepared_root=args.prepared_root,
             graph_cache_root=args.graph_cache_root,
             proc_root=args.proc_root,
