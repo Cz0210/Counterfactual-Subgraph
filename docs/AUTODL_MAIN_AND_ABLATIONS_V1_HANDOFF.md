@@ -60,8 +60,11 @@ The train-only BRICS vocabulary has 472 entries.  Its candidate pool and
 shortfall receipt are already present under the BACE stage-v2 output root.
 The 2B snapshot is pinned at revision
 `215c0dbc89417a06bbc3bae43a3ad61e58f0a56e`; it contains 1,889,110,016
-parameters by safetensors headers.  The isolated-load report is still required
-before the 2B science row can run.
+parameters by safetensors headers.  Its isolated audit failed closed before
+import/load because the pinned remote tokenizer implements a filesystem write
+in `save_vocabulary` (`tokenization_internlm2.py:167`, `open(..., "wb")`).
+No actual-loaded-weight parameter claim was emitted.  The 2B science row is
+therefore blocked; this does not block the three non-2B stage rows.
 
 Early LLM science may use at most one GPU only after matrix >=13, Mut no longer
 needs GPU0, every remaining main cell has a healthy owner, no main task is
@@ -97,3 +100,10 @@ scripts/autodl/status_gnn_five_backbone_ablation_v1.py --help
 The active science PIDs must be checked by exact PID plus `/proc/<pid>/stat`
 start ticks.  Do not infer ownership from fuzzy command matching, and do not
 query the active T12/T14/T8 SQLite files.
+
+The closeout sidecar may adopt the live T14 relay only with
+`T14_AUDITOR_RELAY_HEARTBEAT` and its exact
+`T14_AUDITOR_RELAY_START_TICKS`.  Taste GlobalGCE valid-zero publication stays
+fail-closed until `TASTE_GLOBALGCE_ATTEMPT_RECEIPT` names the physical
+authoritative receipt for the sole recovery attempt; do not fabricate that
+receipt from an authorization file.

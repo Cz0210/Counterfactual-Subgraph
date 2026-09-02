@@ -220,6 +220,72 @@ def _adopt_live_mut_owner(
     }
 
 
+def _adopt_live_t14_relay(
+    path_text: str | None,
+    start_ticks_text: str | None,
+    *,
+    max_age_seconds: int = 180,
+) -> dict[str, Any] | None:
+    """Adopt the exact persistent T14 relay without launching a duplicate."""
+
+    if not path_text or not start_ticks_text:
+        return None
+    path = Path(path_text)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        return None
+    try:
+        heartbeat = _load_json(path)
+        controller_pid = heartbeat.get("controller_pid")
+        expected_start_ticks = int(start_ticks_text)
+        written = datetime.fromisoformat(
+            str(heartbeat["written_at"]).replace("Z", "+00:00")
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        heartbeat.get("schema_version")
+        != "tastemolnet_t14_external_convergence_relay_heartbeat_v1"
+    ):
+        return None
+    age = (datetime.now(timezone.utc) - written).total_seconds()
+    if age < 0 or age > max_age_seconds or not isinstance(controller_pid, int):
+        return None
+    identity = _process_identity(controller_pid)
+    if (
+        not identity.get("alive")
+        or identity.get("start_ticks") != expected_start_ticks
+    ):
+        return None
+    return {
+        "state": "ADOPTED_LIVE_RELAY",
+        "heartbeat": str(path.resolve(strict=True)),
+        "heartbeat_age_seconds": age,
+        "controller_pid": controller_pid,
+        "controller_start_ticks": expected_start_ticks,
+        "relay_phase": heartbeat.get("phase"),
+        "audited_through_step": heartbeat.get("audited_through_step"),
+        "converged": heartbeat.get("converged") is True,
+    }
+
+
+def _t8_zero_attempt_receipt_blocker() -> dict[str, Any] | None:
+    """Fail closed until the sole recovery attempt has an authoritative receipt."""
+
+    configured = os.environ.get("TASTE_GLOBALGCE_ATTEMPT_RECEIPT")
+    if not configured:
+        return {
+            "state": "BLOCKED_MISSING_AUTHORITATIVE_ATTEMPT_RECEIPT",
+            "required_env": "TASTE_GLOBALGCE_ATTEMPT_RECEIPT",
+        }
+    path = Path(configured)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        return {
+            "state": "BLOCKED_INVALID_AUTHORITATIVE_ATTEMPT_RECEIPT_PATH",
+            "attempt_receipt": str(path),
+        }
+    return None
+
+
 def _launcher(project_root: Path, component: str) -> Path:
     configured = os.environ.get(LAUNCHER_ENV[component], DEFAULT_LAUNCHERS[component])
     candidate = Path(configured)
@@ -394,22 +460,29 @@ def observe_and_dispatch(
     if _cell_present(matrix, "TasteMolNet", "ComRecGC"):
         components["t14_convergence_auditor"] = {"state": "MAIN_CELL_PASS"}
     else:
-        components["t14_convergence_auditor"] = _dispatch(
+        live_t14_relay = _adopt_live_t14_relay(
+            os.environ.get("T14_AUDITOR_RELAY_HEARTBEAT"),
+            os.environ.get("T14_AUDITOR_RELAY_START_TICKS"),
+        )
+        components["t14_convergence_auditor"] = live_t14_relay or _dispatch(
             state_root,
             project_root,
             "t14_convergence_auditor",
-            reason="P0_TASTE_COMRECGC_CELL_MISSING",
+            reason="P0_TASTE_COMRECGC_CELL_MISSING_NO_LIVE_RELAY",
             dry_run=dry_run,
         )
     if _cell_present(matrix, "TasteMolNet", "GlobalGCE"):
         components["t8_valid_zero_finalizer"] = {"state": "MAIN_CELL_PASS"}
     else:
-        components["t8_valid_zero_finalizer"] = _dispatch(
-            state_root,
-            project_root,
-            "t8_valid_zero_finalizer",
-            reason="P0_TASTE_GLOBALGCE_CELL_MISSING",
-            dry_run=dry_run,
+        components["t8_valid_zero_finalizer"] = (
+            _t8_zero_attempt_receipt_blocker()
+            or _dispatch(
+                state_root,
+                project_root,
+                "t8_valid_zero_finalizer",
+                reason="P0_TASTE_GLOBALGCE_CELL_MISSING",
+                dry_run=dry_run,
+            )
         )
 
     llm_blockers: list[str] = []

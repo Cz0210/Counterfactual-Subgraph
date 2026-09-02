@@ -17243,3 +17243,22 @@ has exited, no writable descriptor remains, and the independent replay passes.
   existing runtime gate's two isolated-import booleans and binds the separate
   load receipt/report; the original snapshot manifest is never rewritten.
   This commit performs no real model load and does not authorize LLM science.
+
+# 2026-09-03: Adopt the live T14 relay and require a canonical T8 attempt receipt
+
+- Motivation: the external T14 convergence relay is already the unique live
+  reader of sealed checkpoints, while the Taste GlobalGCE zero-result relay
+  cannot truthfully bind the recovery without a canonical consumed-attempt
+  receipt.  Blindly dispatching either helper would respectively create a
+  duplicate controller attempt or a launcher that cannot establish scientific
+  provenance.
+- Decision: the closeout sidecar adopts T14 only when its exact heartbeat
+  schema is fresh and its controller PID plus externally frozen start ticks
+  still match `/proc`.  For Taste GlobalGCE, absence of a physical absolute
+  attempt-receipt path produces
+  `BLOCKED_MISSING_AUTHORITATIVE_ATTEMPT_RECEIPT`; it does not launch the
+  valid-zero relay and does not synthesize missing execution state.
+- Impact: main science continues unchanged.  The sidecar remains a truthful
+  observer and admission gate, while zero-result publication waits for the
+  sole recovery owner to emit or reconcile an authoritative receipt through
+  its normal lifecycle.

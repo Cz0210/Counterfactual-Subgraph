@@ -100,6 +100,9 @@ def test_at_12_dispatches_only_missing_main_helpers(
         "TasteMolNet/Ours",
     ]
     _matrix(matrix, cells)
+    attempt_receipt = tmp_path / "t8-attempt.json"
+    attempt_receipt.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("TASTE_GLOBALGCE_ATTEMPT_RECEIPT", str(attempt_receipt))
     called: list[str] = []
 
     def fake_dispatch(_state, _project, component: str, **_kwargs):
@@ -163,6 +166,84 @@ def test_live_mut_owner_is_adopted_without_duplicate_dispatch(
     )
     assert result["components"]["mut_continuation"]["state"] == "ADOPTED_LIVE_OWNER"
     assert "mut_continuation" not in called
+
+
+def test_live_t14_relay_is_adopted_without_duplicate_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _policy_env(monkeypatch)
+    matrix = tmp_path / "matrix.json"
+    _matrix(matrix, ["TasteMolNet/Ours"])
+    heartbeat = tmp_path / "t14-heartbeat.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "schema_version": (
+                    "tastemolnet_t14_external_convergence_relay_heartbeat_v1"
+                ),
+                "written_at": datetime.now(timezone.utc).isoformat(),
+                "controller_pid": 7654,
+                "phase": "WAITING_FOR_12500",
+                "audited_through_step": 0,
+                "converged": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("T14_AUDITOR_RELAY_HEARTBEAT", str(heartbeat))
+    monkeypatch.setenv("T14_AUDITOR_RELAY_START_TICKS", "8765")
+    monkeypatch.setattr(
+        module,
+        "_process_identity",
+        lambda pid: {"pid": pid, "alive": True, "start_ticks": 8765},
+    )
+    called: list[str] = []
+
+    def fake_dispatch(_state, _project, component: str, **_kwargs):
+        called.append(component)
+        return {"state": "WOULD_DISPATCH"}
+
+    monkeypatch.setattr(module, "_dispatch", fake_dispatch)
+    result = module.observe_and_dispatch(
+        state_root=tmp_path / "state",
+        project_root=PROJECT_ROOT,
+        matrix_path=matrix,
+        policy=module.validate_policy(),
+        dry_run=True,
+    )
+    assert (
+        result["components"]["t14_convergence_auditor"]["state"]
+        == "ADOPTED_LIVE_RELAY"
+    )
+    assert "t14_convergence_auditor" not in called
+
+
+def test_t8_zero_relay_fails_closed_without_authoritative_attempt_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _policy_env(monkeypatch)
+    matrix = tmp_path / "matrix.json"
+    _matrix(matrix, ["TasteMolNet/Ours"])
+    monkeypatch.delenv("TASTE_GLOBALGCE_ATTEMPT_RECEIPT", raising=False)
+    called: list[str] = []
+
+    def fake_dispatch(_state, _project, component: str, **_kwargs):
+        called.append(component)
+        return {"state": "WOULD_DISPATCH"}
+
+    monkeypatch.setattr(module, "_dispatch", fake_dispatch)
+    result = module.observe_and_dispatch(
+        state_root=tmp_path / "state",
+        project_root=PROJECT_ROOT,
+        matrix_path=matrix,
+        policy=module.validate_policy(),
+        dry_run=True,
+    )
+    assert result["components"]["t8_valid_zero_finalizer"] == {
+        "state": "BLOCKED_MISSING_AUTHORITATIVE_ATTEMPT_RECEIPT",
+        "required_env": "TASTE_GLOBALGCE_ATTEMPT_RECEIPT",
+    }
+    assert "t8_valid_zero_finalizer" not in called
 
 
 def test_main_owner_manifest_is_conservative_ready_queue_fallback(
