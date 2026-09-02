@@ -10,6 +10,7 @@ import shutil
 
 import pytest
 
+import src.eval.tastemolnet_matrix_append as matrix_append
 from scripts.autodl.append_tastemolnet_matrix_authority import _cells, build_parser
 from src.eval.four_by_four_registry import (
     AuditConfig,
@@ -506,3 +507,45 @@ def test_cli_accepts_explicit_policy_path_relocation_receipt(tmp_path: Path) -> 
         ]
     )
     assert parsed.taste_policy_path_relocation_receipt == tmp_path / "relocation.json"
+
+
+def test_append_consumes_validated_policy_path_relocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prior = _prior_eight(tmp_path)
+    t3 = _t3(tmp_path)
+    cell = tmp_path / "taste-Ours"
+    _taste_cell(cell, method="Ours", t3=t3)
+    expected_binding = _policy(tmp_path)
+    receipt = tmp_path / "relocation.json"
+
+    class _Relocation:
+        def matrix_policy_binding(self) -> dict[str, object]:
+            return expected_binding
+
+    observed: dict[str, object] = {}
+
+    def _validate(path: Path, **kwargs: object) -> _Relocation:
+        observed["path"] = path
+        observed.update(kwargs)
+        return _Relocation()
+
+    monkeypatch.setattr(matrix_append, "validate_t11_policy_path_relocation", _validate)
+    result = append_tastemolnet_cells(
+        prior_authority_root=prior,
+        taste_cells={"Ours": cell},
+        output_root=tmp_path / "matrix-nine",
+        t3_root=tmp_path / "unused-t3",
+        policy_path=tmp_path / "current-policy",
+        policy_receipt=tmp_path / "source-policy-receipt",
+        policy_path_relocation_receipt=receipt,
+        prepared_root=tmp_path / "prepared",
+        graph_cache_root=tmp_path / "cache",
+        proc_root=tmp_path / "proc",
+        require_writer_audit=False,
+        git_identity={"commit": "a" * 40, "tree": "b" * 40},
+        t3_binding=t3,
+    )
+    assert result["matrix_complete_cells"] == 9
+    assert observed["path"] == receipt
+    assert observed["current_policy_path"] == tmp_path / "current-policy"

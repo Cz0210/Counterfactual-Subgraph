@@ -564,7 +564,6 @@ def _load_policy_binding(
     *,
     policy_path: str | Path,
     policy_receipt: str | Path,
-    policy_path_relocation_receipt: str | Path | None = None,
     prepared_root: str | Path,
     graph_cache_root: str | Path,
 ) -> dict[str, Any]:
@@ -623,6 +622,7 @@ def append_tastemolnet_cells(
     t3_root: str | Path,
     policy_path: str | Path,
     policy_receipt: str | Path,
+    policy_path_relocation_receipt: str | Path | None = None,
     prepared_root: str | Path,
     graph_cache_root: str | Path,
     proc_root: str | Path = "/proc",
