@@ -481,6 +481,43 @@ def _torch_load(path: Path, *, map_location: Any) -> Mapping[str, Any]:
     return payload
 
 
+def _build_model_from_frozen_config(
+    payload: Any,
+    *,
+    feature_schema: MolecularFeatureSchema,
+) -> tuple[Any, Any]:
+    """Reconstruct either the legacy message-passing model or GraphGPS."""
+
+    if not isinstance(payload, Mapping):
+        raise ValueError("Frozen molecular GNN model_config must be a mapping")
+    source = payload.get("gnn", payload)
+    if not isinstance(source, Mapping):
+        raise ValueError("Frozen molecular GNN config.gnn must be a mapping")
+    from src.models.gnn_backbone_registry import normalize_gnn_backbone
+
+    backbone = normalize_gnn_backbone(str(source.get("backbone", "gine")))
+    if backbone == "gps":
+        from src.models.graphgps_backbone import (
+            GraphGPSMolecularConfig,
+            GraphGPSMolecularGNN,
+        )
+
+        config = GraphGPSMolecularConfig.from_mapping(payload)
+        model = GraphGPSMolecularGNN(
+            config,
+            node_cardinalities=feature_schema.node_cardinalities,
+            edge_cardinalities=feature_schema.edge_cardinalities,
+        )
+        return model, config
+    config = MolecularGNNConfig.from_mapping(payload)
+    model = MolecularGNN(
+        config,
+        node_cardinalities=feature_schema.node_cardinalities,
+        edge_cardinalities=feature_schema.edge_cardinalities,
+    )
+    return model, config
+
+
 def _json_payload_bytes(
     payloads: Mapping[str, bytes],
     name: str,
@@ -549,11 +586,9 @@ def load_gnn_checkpoint_payloads(
     state_dict = model_payload.get("state_dict")
     if type(state_dict) is not dict or not state_dict:
         raise ValueError("Frozen GNN model state is empty")
-    config = MolecularGNNConfig.from_mapping(model_payload.get("model_config"))
-    model = MolecularGNN(
-        config,
-        node_cardinalities=feature_schema.node_cardinalities,
-        edge_cardinalities=feature_schema.edge_cardinalities,
+    model, config = _build_model_from_frozen_config(
+        model_payload.get("model_config"),
+        feature_schema=feature_schema,
     )
     model.load_state_dict(state_dict, strict=True)
     model.to(device)
@@ -633,11 +668,9 @@ def load_gnn_checkpoint_bundle(
         )
     if payload.get("feature_schema_sha256") != feature_schema_payload["schema_sha256"]:
         raise ValueError("model.pt and feature_schema.json fingerprints differ.")
-    config = MolecularGNNConfig.from_mapping(payload["model_config"])
-    model = MolecularGNN(
-        config,
-        node_cardinalities=feature_schema.node_cardinalities,
-        edge_cardinalities=feature_schema.edge_cardinalities,
+    model, config = _build_model_from_frozen_config(
+        payload["model_config"],
+        feature_schema=feature_schema,
     )
     model.load_state_dict(payload["state_dict"], strict=True)
     model.to(device)
@@ -790,7 +823,9 @@ class GNNOracle(BaseOracle):
             raise ValueError("GNNOracle cannot predict an empty graph sequence.")
         for start in range(0, len(values), size):
             yield collate_molecular_graphs(
-                values[start : start + size], edge_feature_dim=self.edge_feature_dim
+                values[start : start + size],
+                edge_feature_dim=self.edge_feature_dim,
+                random_walk_pe_length=(16 if self.backbone == "gps" else None),
             )
 
     def _known_graph_count(self, graphs: Any) -> int | None:

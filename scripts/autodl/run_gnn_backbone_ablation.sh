@@ -13,7 +13,7 @@ fi
 DATASET="${GNN_ABLATION_DATASET:-bace}"
 BACKBONE="${GNN_BACKBONE:-gcn}"
 PROFILE="${GNN_ABLATION_PROFILE:-full}"
-case "$BACKBONE" in gine|gin|gcn|gatv2) ;; *) echo "unsupported backbone: $BACKBONE" >&2; exit 2 ;; esac
+case "$BACKBONE" in gine|gin|gcn|gatv2|gps) ;; *) echo "unsupported backbone: $BACKBONE" >&2; exit 2 ;; esac
 case "$PROFILE" in smoke|full) ;; *) echo "unsupported profile: $PROFILE" >&2; exit 2 ;; esac
 case "$DATASET" in
   bace) DATA_ROOT="$BACE_SPLIT_ROOT" ;;

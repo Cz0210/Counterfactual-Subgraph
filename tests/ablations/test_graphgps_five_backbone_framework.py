@@ -12,8 +12,11 @@ from src.ablations.gnn.five_backbone import (
     load_five_backbone_config,
     validate_proposal_fixed_runtime_manifest,
 )
+from src.ablations.gnn.five_backbone_launch import evaluate_five_backbone_launch
+from src.ablations.launch_gate import LaunchGateDecision
 from src.models.gnn_backbone_registry import (
     available_gnn_backbones,
+    build_backbone,
     get_gnn_backbone_spec,
     normalize_gnn_backbone,
 )
@@ -199,3 +202,160 @@ def test_graphgps_output_shape_edge_attr_and_gradient() -> None:
     assert model.edge_encoder.embeddings[0].weight.grad is not None
     with pytest.raises(ValueError, match="random_walk_pe"):
         model(x=x, edge_index=edge_index, edge_attr=edge_attr, batch=batch)
+
+
+def test_registry_builds_checked_in_gps_config() -> None:
+    pytest.importorskip("torch")
+    from src.data.molecular_graph_featurizer import default_molecular_feature_schema
+    from src.utils.env import load_yaml_config
+
+    schema = default_molecular_feature_schema()
+    model = build_backbone(
+        "gps",
+        load_yaml_config(PROJECT_ROOT / "configs/gnn/gps.yaml"),
+        feature_schema=schema,
+        expected_feature_schema_sha256=schema.to_dict()["schema_sha256"],
+        num_classes=2,
+    )
+    assert model.config.backbone == "gps"
+    assert model.config.hidden_dim == 160
+    assert model.config.rwpe_walk_length == 16
+
+
+def _main_gate(*, complete: int = 16) -> LaunchGateDecision:
+    return LaunchGateDecision(
+        state="READY_FOR_USER_APPROVAL",
+        science_launch_allowed=False,
+        main_matrix_complete_cells=complete,
+        main_matrix_total_cells=16,
+        final_audit_pass=True,
+        figure3_pass=True,
+        figure4_pass=True,
+        table2_pass=True,
+        explicit_run_authorization=False,
+        run_requested=True,
+        authority_verified=True,
+        authority_root="/runtime/authority",
+        matrix_status_sha256="1" * 64,
+        combined_audit_sha256="2" * 64,
+        artifact_receipts_bound=True,
+        authorization_receipt_sha256=None,
+        evidence_errors=(),
+        reasons=("EXPLICIT_RUN_AUTHORIZATION_REQUIRED",),
+    )
+
+
+def _proposal_manifest() -> dict[str, object]:
+    return {
+        "dataset": "bace",
+        "method": "ours",
+        "source_split": "train",
+        "candidate_universe_sha256": "a" * 64,
+        "generation_per_backbone": False,
+        "calibration_loaded": False,
+        "test_loaded": False,
+    }
+
+
+def _gps_runtime() -> dict[str, object]:
+    return {
+        "torch_available": True,
+        "torch_geometric_available": True,
+        "gpsconv_available": True,
+        "add_random_walk_pe_available": True,
+    }
+
+
+def test_five_backbone_waits_for_16_and_user_run_flags() -> None:
+    config = load_five_backbone_config(CONFIG, project_root=PROJECT_ROOT)
+    blocked = evaluate_five_backbone_launch(
+        config=config,
+        main_gate=_main_gate(complete=15),
+        allow_after_16=True,
+        run_requested=True,
+        main_ready_gpu_tasks=None,
+        proposal_manifest=_proposal_manifest(),
+        gps_runtime_capabilities=_gps_runtime(),
+    )
+    assert blocked.science_launch_allowed is False
+    assert "WAITING_HASH_CLOSED_MAIN_16_OF_16_AND_FINAL_EXPORTS" in blocked.blockers
+    no_run = evaluate_five_backbone_launch(
+        config=config,
+        main_gate=_main_gate(),
+        allow_after_16=True,
+        run_requested=False,
+        main_ready_gpu_tasks=None,
+        proposal_manifest=_proposal_manifest(),
+        gps_runtime_capabilities=_gps_runtime(),
+    )
+    assert no_run.science_launch_allowed is False
+    assert "RUN_GNN_ABLATION_NOT_SET" in no_run.blockers
+
+
+def test_five_backbone_gate_emits_exact_two_lane_schedule() -> None:
+    config = load_five_backbone_config(CONFIG, project_root=PROJECT_ROOT)
+    decision = evaluate_five_backbone_launch(
+        config=config,
+        main_gate=_main_gate(),
+        allow_after_16=True,
+        run_requested=True,
+        main_ready_gpu_tasks={"status": "PASS", "ready_waiting_gpu": []},
+        proposal_manifest=_proposal_manifest(),
+        gps_runtime_capabilities=_gps_runtime(),
+    )
+    assert decision.science_launch_allowed is True
+    assert decision.max_concurrent_gpus == 2
+    assert decision.phase1_seed == 7
+    assert decision.schedule == {
+        "lane0": ("gine", "gin", "gps"),
+        "lane1": ("gcn", "gatv2"),
+    }
+    assert decision.graph_mamba_run_enabled is False
+
+
+def test_main_ready_gpu_task_and_missing_pyg_block_launch() -> None:
+    config = load_five_backbone_config(CONFIG, project_root=PROJECT_ROOT)
+    decision = evaluate_five_backbone_launch(
+        config=config,
+        main_gate=_main_gate(),
+        allow_after_16=True,
+        run_requested=True,
+        main_ready_gpu_tasks={
+            "status": "READY",
+            "ready_waiting_gpu": [{"task_id": "main-task"}],
+        },
+        proposal_manifest=_proposal_manifest(),
+        gps_runtime_capabilities={**_gps_runtime(), "gpsconv_available": False},
+    )
+    assert decision.science_launch_allowed is False
+    assert "MAIN_TASK_READY_WAITING_GPU" in decision.blockers
+    assert "PYG_GPSCONV_OR_RANDOM_WALK_PE_UNAVAILABLE" in decision.blockers
+
+
+def test_five_backbone_launcher_and_status_have_slurm_pairing() -> None:
+    launcher = PROJECT_ROOT / "scripts/autodl/launch_gnn_five_backbone_ablation_v1.sh"
+    status = PROJECT_ROOT / "scripts/autodl/status_gnn_five_backbone_ablation_v1.py"
+    slurm = PROJECT_ROOT / "scripts/slurm/status_gnn_five_backbone_ablation_v1.sh"
+    launch_slurm = (
+        PROJECT_ROOT / "scripts/slurm/launch_gnn_five_backbone_ablation_v1.sh"
+    )
+    assert (
+        launcher.is_file()
+        and status.is_file()
+        and slurm.is_file()
+        and launch_slurm.is_file()
+    )
+    launcher_source = launcher.read_text(encoding="utf-8")
+    assert "ALLOW_GNN_ABLATION_RUN_AFTER_16" in launcher_source
+    assert "RUN_GNN_ABLATION" in launcher_source
+    assert "status_gnn_five_backbone_ablation_v1.py" in launcher_source
+    slurm_source = slurm.read_text(encoding="utf-8")
+    assert "#SBATCH --partition=A800" in slurm_source
+    assert "#SBATCH --gres=gpu:a800:1" in slurm_source
+    assert "export PYTHONPATH=$PWD" in slurm_source
+    assert "--config configs/hpc.yaml" in slurm_source
+    launch_slurm_source = launch_slurm.read_text(encoding="utf-8")
+    assert "#SBATCH --partition=A800" in launch_slurm_source
+    assert "#SBATCH --gres=gpu:a800:1" in launch_slurm_source
+    assert "export PYTHONPATH=$PWD" in launch_slurm_source
+    assert "launch_gnn_five_backbone_ablation_v1.sh" in launch_slurm_source

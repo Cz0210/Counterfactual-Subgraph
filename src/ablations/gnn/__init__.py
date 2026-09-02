@@ -28,6 +28,20 @@ from src.ablations.gnn.framework import (
     load_ablation_config,
     validate_plan,
 )
+from src.ablations.gnn.five_backbone import (
+    FIVE_BACKBONES,
+    FIVE_BACKBONE_CONFIG_SCHEMA,
+    FIVE_BACKBONE_PLAN_SCHEMA,
+    FiveBackboneConfig,
+    FiveBackboneConfigError,
+    build_five_backbone_plan,
+    load_five_backbone_config,
+    validate_proposal_fixed_runtime_manifest,
+)
+from src.ablations.gnn.five_backbone_launch import (
+    FiveBackboneLaunchDecision,
+    evaluate_five_backbone_launch,
+)
 
 __all__ = [
     "CANDIDATE_IDENTITY_SCHEMA",
@@ -36,10 +50,16 @@ __all__ = [
     "COHORT_SPLIT_AUTHORITY_SCHEMA",
     "CONFIG_SCHEMA",
     "FINAL_MANIFEST_SCHEMA",
+    "FIVE_BACKBONES",
+    "FIVE_BACKBONE_CONFIG_SCHEMA",
+    "FIVE_BACKBONE_PLAN_SCHEMA",
     "OUTPUT_CONTRACT_SCHEMA",
     "PARENT_PREDICTION_SCHEMA",
     "PLAN_SCHEMA",
     "CohortFreeze",
+    "FiveBackboneConfig",
+    "FiveBackboneConfigError",
+    "FiveBackboneLaunchDecision",
     "GNNAblationConfig",
     "GNNAblationConfigError",
     "GNNAblationContractError",
@@ -50,8 +70,12 @@ __all__ = [
     "build_ablation_plan",
     "build_ablation_plan_from_config",
     "build_cohort_split_authority",
+    "build_five_backbone_plan",
+    "evaluate_five_backbone_launch",
     "freeze_common_and_native_cohorts",
     "load_ablation_config",
+    "load_five_backbone_config",
     "stable_sha256",
     "validate_plan",
+    "validate_proposal_fixed_runtime_manifest",
 ]

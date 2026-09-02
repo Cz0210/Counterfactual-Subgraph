@@ -185,6 +185,7 @@ class MolecularGraphBatch:
     smiles: tuple[str, ...]
     splits: tuple[str | None, ...]
     graph_sha256s: tuple[str, ...]
+    random_walk_pe: Any | None = None
 
     @property
     def num_graphs(self) -> int:
@@ -198,6 +199,11 @@ class MolecularGraphBatch:
             edge_attr=self.edge_attr.to(device),
             batch=self.batch.to(device),
             y=self.y.to(device),
+            random_walk_pe=(
+                None
+                if self.random_walk_pe is None
+                else self.random_walk_pe.to(device)
+            ),
         )
 
 
@@ -262,6 +268,7 @@ def collate_molecular_graphs(
     graphs: Sequence[Any],
     *,
     edge_feature_dim: int | None = None,
+    random_walk_pe_length: int | None = None,
 ) -> MolecularGraphBatch:
     """Batch portable or PyG-compatible graphs without requiring PyG itself."""
 
@@ -292,6 +299,7 @@ def collate_molecular_graphs(
     smiles_values: list[str] = []
     splits: list[str | None] = []
     graph_hashes: list[str] = []
+    positional_encodings: list[Any] = []
     offset = 0
     for graph_index, part in enumerate(parts):
         x, edge_index, edge_attr, label, molecule_id, smiles, split, graph_hash = part
@@ -316,6 +324,23 @@ def collate_molecular_graphs(
         smiles_values.append(smiles)
         splits.append(None if split is None else str(split))
         graph_hashes.append(graph_hash)
+        if random_walk_pe_length is not None:
+            from src.models.graphgps_backbone import (
+                GRAPHGPS_RWPE_WALK_LENGTH,
+                compute_topology_only_random_walk_pe,
+            )
+
+            if int(random_walk_pe_length) != GRAPHGPS_RWPE_WALK_LENGTH:
+                raise ValueError(
+                    "GraphGPS random-walk length differs from the frozen contract"
+                )
+            positional_encodings.append(
+                compute_topology_only_random_walk_pe(
+                    edge_index,
+                    num_nodes=int(x.shape[0]),
+                    walk_length=int(random_walk_pe_length),
+                )
+            )
         offset += int(x.shape[0])
 
     return MolecularGraphBatch(
@@ -328,6 +353,11 @@ def collate_molecular_graphs(
         smiles=tuple(smiles_values),
         splits=tuple(splits),
         graph_sha256s=tuple(graph_hashes),
+        random_walk_pe=(
+            None
+            if random_walk_pe_length is None
+            else torch.cat(positional_encodings, dim=0)
+        ),
     )
 
 
@@ -900,19 +930,27 @@ def build_molecular_data_loader(
     shuffle: bool = False,
     sampler: Any = None,
     num_workers: int = 0,
+    random_walk_pe_length: int | None = None,
 ) -> Any:
     """Construct a torch DataLoader while enforcing sampler/shuffle exclusivity."""
 
     torch = _require_torch()
     if sampler is not None and shuffle:
         raise ValueError("A weighted sampler and shuffle cannot be enabled together.")
+    from functools import partial
+
+    collate = partial(
+        collate_molecular_graphs,
+        edge_feature_dim=len(dataset.feature_schema.edge_fields),
+        random_walk_pe_length=random_walk_pe_length,
+    )
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=int(batch_size),
         shuffle=bool(shuffle) if sampler is None else False,
         sampler=sampler,
         num_workers=int(num_workers),
-        collate_fn=dataset.collate,
+        collate_fn=collate,
     )
 
 

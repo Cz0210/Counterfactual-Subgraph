@@ -38,6 +38,11 @@ from src.data.molecular_graph_featurizer import (  # noqa: E402
     default_molecular_feature_schema,
 )
 from src.chem.hard_deletion import enumerate_connected_hard_deletions  # noqa: E402
+from src.models.graphgps_backbone import (  # noqa: E402
+    GraphGPSMolecularConfig,
+    GraphGPSMolecularGNN,
+)
+from src.models.gnn_backbone_registry import normalize_gnn_backbone  # noqa: E402
 from src.models.molecular_gnn import MolecularGNN, MolecularGNNConfig  # noqa: E402
 from src.oracles.gnn_oracle import (  # noqa: E402
     GNNOracle,
@@ -661,7 +666,7 @@ def _training_resume_contract(
         TasteResearchPolicy, TasteLocalDataAuthority, TastePolicyReceipt
     ]
     | None,
-    model_config: MolecularGNNConfig,
+    model_config: Any,
     feature_schema: Mapping[str, Any],
     max_epochs: int,
     patience: int,
@@ -1616,34 +1621,52 @@ def main(argv: list[str] | None = None) -> int:
         sampler = torch.utils.data.WeightedRandomSampler(
             sample_weights, len(sample_weights), replacement=True
         )
+    gnn_values = dict(config.get("gnn", {}))
+    if args.backbone:
+        gnn_values["backbone"] = args.backbone
+    gnn_values["num_classes"] = num_classes
+    configured_backbone = normalize_gnn_backbone(
+        str(gnn_values.get("backbone", "gine"))
+    )
+    model_config: Any
+    if configured_backbone == "gps":
+        model_config = GraphGPSMolecularConfig.from_mapping(gnn_values)
+        random_walk_pe_length: int | None = model_config.rwpe_walk_length
+    else:
+        model_config = MolecularGNNConfig.from_mapping(gnn_values)
+        random_walk_pe_length = None
+
     train_loader = build_molecular_data_loader(
         train_dataset,
         batch_size=batch_size,
         shuffle=sampler is None,
         sampler=sampler,
         num_workers=num_workers,
+        random_walk_pe_length=random_walk_pe_length,
     )
     validation_loader = build_molecular_data_loader(
         validation_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        random_walk_pe_length=random_walk_pe_length,
     )
-
-    gnn_values = dict(config.get("gnn", {}))
-    if args.backbone:
-        gnn_values["backbone"] = args.backbone
-    gnn_values["num_classes"] = num_classes
-    model_config = MolecularGNNConfig.from_mapping(gnn_values)
     if taste_runtime is not None and model_config.backbone != "gine":
         raise MolecularGNNResumeError(
             "verified Taste backbone and instantiated model config differ"
         )
-    model = MolecularGNN(
-        model_config,
-        node_cardinalities=schema.node_cardinalities,
-        edge_cardinalities=schema.edge_cardinalities,
-    ).to(device)
+    if model_config.backbone == "gps":
+        model = GraphGPSMolecularGNN(
+            model_config,
+            node_cardinalities=schema.node_cardinalities,
+            edge_cardinalities=schema.edge_cardinalities,
+        ).to(device)
+    else:
+        model = MolecularGNN(
+            model_config,
+            node_cardinalities=schema.node_cardinalities,
+            edge_cardinalities=schema.edge_cardinalities,
+        ).to(device)
     criterion_weights = (
         torch.tensor(weights, dtype=torch.float32, device=device)
         if class_weighted

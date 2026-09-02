@@ -3914,8 +3914,8 @@ Mutagenicity roadmaps.
 - [x] Add a no-training analytical/runtime parameter dry-run and focused
   registry, RWPE, shape, edge-gradient, proposal-hash, cohort, and leakage tests.
 - [x] Register Graph-Mamba metadata only and fail closed on execution.
-- [ ] Add the post-16/16 five-backbone launcher/status tools and exact two-GPU
-  schedule without starting science.
+- [x] Add the post-16/16 five-backbone gate/status entrypoints and exact two-lane
+  schedule without starting science or creating a duplicate task writer.
 - [ ] Supply the runtime BACE/Ours candidate-universe receipt and obtain a
   separate explicit GNN run authorization after the main matrix closes.
 
