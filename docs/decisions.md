@@ -17197,6 +17197,14 @@ must not be presented as an actual loaded-parameter count.
   uses the unique matrix authority.  The finalizer cannot signal a process,
   launch training, open an active database, or authorize a second recovery.
 
+The policy is registered ahead of completion through a narrow waiting relay.
+It observes only the canonical checkpoint, physical branch manifests, gSpan
+heartbeat JSON, and the exact science PID identity.  It never opens SQLite,
+signals a process, or starts training.  A completed non-zero catalog exits via
+the unchanged normal T13 path.  The zero overlay is considered only after both
+target branches and their gSpan roots are complete, the exact science process
+has exited, no writable descriptor remains, and the independent replay passes.
+
 # 2026-09-03: Re-run the T14 external audit at each new committed checkpoint
 
 - Motivation: the one-shot auditor correctly returns a metadata-only wait
