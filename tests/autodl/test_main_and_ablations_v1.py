@@ -268,3 +268,9 @@ def test_sidecar_uses_persistent_t14_auditor_relay() -> None:
     assert module.DEFAULT_LAUNCHERS["t14_convergence_auditor"].endswith(
         "launch_t14_external_convergence_auditor_relay_v1.sh"
     )
+
+
+def test_sidecar_uses_waiting_globalgce_zero_relay() -> None:
+    assert module.DEFAULT_LAUNCHERS["t8_valid_zero_finalizer"].endswith(
+        "launch_tastemolnet_globalgce_valid_zero_relay_v1.sh"
+    )
