@@ -17125,3 +17125,20 @@ must not be presented as an actual loaded-parameter count.
   `acb4a2321d46f4044cb5e073a9fadd47eb4f343f`; unverified licensing and missing
   molecular compatibility keep it non-runnable.  No GNN science or GPU lease
   is created by this change.
+
+# 2026-09-03: Audit T14 convergence outside the active run
+
+- Motivation: T14 checkpoints contain tens of GiB of state and an authoritative
+  SQLite snapshot while the live writer continues.  Opening active SQLite or
+  treating incomplete/checkpointing state as convergence evidence risks both
+  interference and an invalid early-stop decision.
+- Decision: the external auditor recognizes only complete committed steps
+  5k/10k/12.5k/15k/17.5k/20k, validates the manifest and completion marker,
+  and only stats—never opens—the SQLite snapshot.  Before 12.5k it returns a
+  metadata-only waiting receipt.  Once the first three eligible checkpoints
+  exist, it loads generation state one checkpoint at a time and computes the
+  preregistered top-100/top-20 Jaccard, candidate-frequency Spearman,
+  train-only coverage gain, valid-unique, and lineage gates.
+- Impact: the auditor writes only to a fresh external audit root and has no
+  signal API.  A two-window PASS creates a receipt for a separate controller
+  to consume at a verified safe checkpoint; it does not itself stop T14.

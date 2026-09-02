@@ -3918,3 +3918,13 @@ Mutagenicity roadmaps.
   schedule without starting science.
 - [ ] Supply the runtime BACE/Ours candidate-universe receipt and obtain a
   separate explicit GNN run authorization after the main matrix closes.
+
+## 2026-09-03: T14 external convergence audit
+
+- [x] Discover only authorized complete committed checkpoint steps.
+- [x] Validate checkpoint manifests/markers without opening SQLite.
+- [x] Defer all large state loads until 5k/10k/12.5k are present.
+- [x] Compute the six preregistered train-side gates over consecutive windows.
+- [x] Keep signal delivery outside the read-only auditor.
+- [ ] Let the closeout controller consume a PASS receipt only after exact PID,
+  start-ticks, command, root, and next-safe-checkpoint verification.
