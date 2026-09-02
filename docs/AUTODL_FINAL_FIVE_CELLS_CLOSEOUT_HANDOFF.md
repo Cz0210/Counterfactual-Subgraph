@@ -38,7 +38,13 @@ about 3.5--6.25 hours.
   - target 2: `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t8-dual-branch-recovery/target-2-attempt-4a0651fa-5df4-43c0-a897-20f040f779d8/state/target-2`
 - Typed-preflight commit: `ba8374d7f64fd923e668430112c041373c37834e`.
 - Fresh typed-preflight controller:
-  `/autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-t8-salvage-20260902T041912Z-8a9ee579`.
+  `/autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-t8-salvage-20260902T042219Z-da32d7e3`.
+- Fresh typed-preflight attempt:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t8-salvage/attempt-9c7105bf-fe6c-46de-9ef8-da56e2b24c98`.
+- Typed RHS evidence:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t8-salvage/attempt-9c7105bf-fe6c-46de-9ef8-da56e2b24c98/rhs-standalone-chemistry-preflight.json`.
+- Recovery request:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t8-salvage/attempt-9c7105bf-fe6c-46de-9ef8-da56e2b24c98/single-branch-rerun-request.json`.
 
 The seven exposed RHS rules are chemically unusable independently of the
 parent, so the current contract cannot produce a real candidate or strict
@@ -92,5 +98,5 @@ cat /autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_author
 cat /autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-t12-gcf-release-20260902T035837Z-7e5b1f3f/{state,heartbeat.json}
 cat /autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-t12-paper-after-generation-20260902T035900Z-1048144/{state,heartbeat.json}
 tail -n 80 /autodl-fs/data/counterfactual-subgraph-runtime/logs/mut_trace_on_adoption/mut_semantic_finalizer_20260902T041411Z.log
-cat /autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-t8-salvage-20260902T041912Z-8a9ee579/{state,heartbeat.json}
+cat /autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-t8-salvage-20260902T042219Z-da32d7e3/{state,heartbeat.json}
 ```
