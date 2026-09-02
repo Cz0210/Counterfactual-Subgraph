@@ -1,7 +1,8 @@
 # AutoDL Main Recovery and Ablation Framework Handoff
 
-Last read-only main-state audit: 2026-09-02 17:31:27 CST. T8/T13 was
-repaired and relaunched at approximately 16:46 CST. This document
+Last read-only main-state audit: 2026-09-02 17:31:27 CST. The one-shot T8
+grade recovery that is a prerequisite for T13 was repaired and relaunched at
+approximately 16:46 CST; T13 itself had not started at this audit. This document
 separates main-table execution facts from ablation preparation. The matrix
 authority and task heartbeats remain authoritative over this handoff.
 
@@ -23,12 +24,12 @@ leases. No LLM or GNN ablation science was launched.
 
 | Line | Last verified state | GPU | Evidence |
 |---|---|---:|---|
-| Taste T8/T13 GlobalGCE | One allowed grade-recovery attempt running after a provenance-only checkpoint resume; controller PID `82588`, science PID `82680`, checkpoint `TARGET_0_RUNNING`, output 126,323,403 bytes, seed 7, 100 epochs, ordinal `1/1` | 1 | `/autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-t8-t13-grade-recovery-once-20260902T084623Z-99cad1d6` |
-| Taste T12 GCFExplainer | Healthy original science PID `66459`; output 777,498,920 bytes and growing; not restarted or reconfigured | 3 | Existing T12 production root/relay |
+| Taste T8 recovery (T13 prerequisite) | One allowed grade-recovery attempt running after a provenance-only checkpoint resume; controller PID `82588`, science PID `82680`, checkpoint `TARGET_0_RUNNING`, output 126,323,403 bytes, seed 7, 100 epochs, ordinal `1/1`; T13 not yet started | 1 | `/autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-t8-t13-grade-recovery-once-20260902T084623Z-99cad1d6` |
+| Taste T12 GCFExplainer | Healthy current fresh-successor science PID `66459`; output 777,498,920 bytes and growing; not restarted or reconfigured during this work | 3 | Existing T12 production root/relay |
 | Taste T14 ComRecGC | Healthy original science PID `7224`; progress 7,900/20,000 (39.5%), committed checkpoint 7,500 | 2 | Existing T14 production root/relay |
 | Mut ComRecGC | Worker PID `67797` absent; latest equivalence attempt failed its protected-throughput watchdog because T14 slowdown exceeded 10% | none | `/autodl-fs/data/counterfactual-subgraph-runtime/control/mut_fast_accurate_v2/mut_fast_accurate_v2_20260901T043250Z/trace_on_adoption_worker_heartbeat.json` |
 
-T8/T13 originally failed before training because the loader discarded the
+The T8 recovery originally failed before training because the loader discarded the
 already-validated official `runtime_source_authority`. Commit
 `b12c9c80bf4ed5df8ae3f75e6d9c2992a5de9474` retains and passes that authority.
 The resumed process uses the same UUID
@@ -40,12 +41,14 @@ PASS before relaunch.
 Mut was deliberately not restarted because the current instruction explicitly
 protects it from restart. Its science gate did not fail trace equivalence; the
 resource watchdog stopped it to protect T14. Mut therefore remains a main-table
-blocker and must be resumed by the existing main release policy after the
-protected-resource condition changes.
+blocker. No live automatic continuation owner was verified at this audit, so a
+later safe continuation must be explicitly confirmed after the protected-resource
+condition changes; this handoff does not claim that it will resume unattended.
 
 ## 3. Main critical path
 
-The remaining four cells depend on T12, T14, the one-shot T8/T13 recovery, and
+The remaining four cells depend on T12, T14, the one-shot T8 recovery followed
+by T13, and
 a later safe Mut continuation. T12/T14/T8 are long-running main science and
 must not be restarted for observability. No defensible 16/16 wall-clock time is
 available from the current checkpoints. When any task finishes, its existing
@@ -144,7 +147,8 @@ CPU output root:
 
 `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/llm/bace_ours_stage_v2/BRICS_FIXED/seed7/attempt-de7345e8-c1e1-448a-8154-41628d28a0a9`
 
-The terminal is PASS: 472 vocabulary entries, 386 parents, 3,088 proposal
+The CPU vocabulary/proposal-preparation terminal is PASS; this is not an A0
+downstream-ablation result. It contains 472 vocabulary entries, 386 parents, 3,088 proposal
 attempts, 3,088 candidates, and zero shortfalls. Calibration/test/oracle were
 not loaded, `gpu_used=false`, and all six listed artifacts pass
 `sha256sum -c`. The CPU command acquired no GPU and used one low-priority
@@ -190,15 +194,22 @@ Main authority:
   --config configs/hpc.yaml
 ```
 
-LLM config/evidence status from the immutable worktree:
+LLM config/evidence status from the immutable worktree, reproducing the
+persisted 17:31 decision (a newer live decision requires a newly generated
+read-only main snapshot):
 
 ```bash
-export BACE_LLM_REFERENCE_CONTRACT=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/contracts/bace_ours_llm_reference_v2.json
-export BACE_LLM_REFERENCE_CONTRACT_SHA256=775ab902fa02c7be8748f0d8ce9514e4aba0f57e6c61fc4f6c40e829b37b46c6
-export LLM_ABLATION_MAIN_SNAPSHOT=/path/to/a/fresh/read-only-main-snapshot.json
-/root/autodl-tmp/worktrees/llm-stage-scale-ablation-2ab8ecb-20260902T093000Z/scripts/autodl/launch_llm_ablation_v2.sh
+/root/miniconda3/envs/smiles_pip118/bin/python \
+  /root/autodl-tmp/worktrees/llm-stage-scale-ablation-2ab8ecb-20260902T093000Z/scripts/autodl/status_llm_ablation_v2.py \
+  --config /root/autodl-tmp/worktrees/llm-stage-scale-ablation-2ab8ecb-20260902T093000Z/configs/hpc.yaml \
+  --main-snapshot /autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/main_llm_scale_ablation_20260902T093127Z/live_main_snapshot.json \
+  --reference-contract /autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/contracts/bace_ours_llm_reference_v2.json \
+  --reference-contract-sha256 775ab902fa02c7be8748f0d8ce9514e4aba0f57e6c61fc4f6c40e829b37b46c6 \
+  --two-b-snapshot-manifest /autodl-fs/data/counterfactual-subgraph-runtime/models/chemllm/CHEMLLM-2b-1_5/215c0dbc89417a06bbc3bae43a3ad61e58f0a56e/snapshot_manifest.json \
+  --two-b-snapshot-manifest-sha256 39144d398f7251f176505c57c70a00abea47d85fc6bb2c4bd6ff9aeae69a5c12 \
+  --twenty-b-metadata-manifest /autodl-fs/data/counterfactual-subgraph-runtime/models/chemllm/ChemLLM-20B-Chat-SFT/e8d0f503e00f143f6787263765ff6ee5f3fe3998/metadata/metadata_manifest.json \
+  --twenty-b-metadata-manifest-sha256 f62323399a388695a270eb8b165694c8b48cead4be331aecd7e715f2a796bb9e
 ```
 
-The latter is expected to finish with
-`BLOCKED_CONFIG_ONLY_NO_SCIENCE_ENTRYPOINT`; that is a safe framework state,
-not a failed experiment.
+The status tool reports a config-only blocked state and never starts science or
+acquires a GPU; that is a safe framework state, not a failed experiment.
