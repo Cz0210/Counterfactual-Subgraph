@@ -27,6 +27,7 @@ import re
 import sqlite3
 import stat
 import struct
+import time
 from typing import Any, Mapping, Sequence
 import uuid
 
@@ -39,6 +40,9 @@ HISTORY_MAGIC = b"T12HST2\n"
 HISTORY_HEADER_LIMIT_BYTES = 4096
 HISTORY_MAX_SEGMENTS = 2
 HISTORY_INDEX_CACHE_KIB = 64 * 1024
+HISTORY_INDEX_BUSY_TIMEOUT_MILLISECONDS = 120_000
+HISTORY_INDEX_RETRY_INITIAL_SECONDS = 0.05
+HISTORY_INDEX_RETRY_MAX_SECONDS = 0.5
 
 PINNED_TOTAL_STEPS = 20_000
 PINNED_CHECKPOINT_CURSORS = (10_000, 20_000)
@@ -56,6 +60,14 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 class TasteT12ProductionStateError(RuntimeError):
     """A compact-history or production resource contract is invalid."""
+
+
+def _is_sqlite_lock_error(error: sqlite3.OperationalError) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if type(code) is int and code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        return True
+    message = str(error).lower()
+    return "database is locked" in message or "database is busy" in message
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -402,7 +414,18 @@ class T12CompactHistoryJournal:
         if self.index_root.is_symlink() or self.index_root.resolve(strict=True) != self.index_root:
             raise TasteT12ProductionStateError("T12 history index root is an alias")
         self._index_path = self.index_root / f"t12-history-{uuid.uuid4()}.sqlite3"
-        self._connection = sqlite3.connect(self._index_path)
+        # The index is explicitly non-authoritative and is rebuilt from the
+        # authenticated history segments on resume.  A read-only observer can
+        # nevertheless take a SQLite SHARED lock, so use a bounded busy wait
+        # instead of aborting an otherwise valid production walk immediately.
+        # This does not change any scientific state or history semantics.
+        self._connection = sqlite3.connect(
+            self._index_path,
+            timeout=HISTORY_INDEX_BUSY_TIMEOUT_MILLISECONDS / 1_000,
+        )
+        self._connection.execute(
+            f"PRAGMA busy_timeout={HISTORY_INDEX_BUSY_TIMEOUT_MILLISECONDS}"
+        )
         self._connection.execute("PRAGMA journal_mode=OFF")
         self._connection.execute("PRAGMA synchronous=OFF")
         self._connection.execute(f"PRAGMA cache_size=-{HISTORY_INDEX_CACHE_KIB}")
@@ -458,9 +481,28 @@ class T12CompactHistoryJournal:
     def first_seen_strict_counterfactual_count(self) -> int:
         return self.candidate_first_seen_count
 
-    def _commit_index(self) -> None:
-        self._connection.commit()
-        self._connection.execute("BEGIN")
+    def _commit_index(self, *, begin_next: bool = True) -> None:
+        deadline = (
+            time.monotonic() + HISTORY_INDEX_BUSY_TIMEOUT_MILLISECONDS / 1_000
+        )
+        delay = HISTORY_INDEX_RETRY_INITIAL_SECONDS
+        while True:
+            try:
+                self._connection.commit()
+                break
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_lock_error(exc):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TasteT12ProductionStateError(
+                        "T12 disposable history index remained locked past the "
+                        "bounded busy timeout"
+                    ) from exc
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, HISTORY_INDEX_RETRY_MAX_SECONDS)
+        if begin_next:
+            self._connection.execute("BEGIN")
         self._pending_index_writes = 0
 
     def _start_segment(self) -> None:
@@ -942,12 +984,19 @@ class T12CompactHistoryJournal:
         self.chain_head = chain_head
         self._segments = restored
 
-    def close(self) -> None:
+    def close(self, *, commit_index: bool = True) -> None:
         if self._active_stream is not None:
             self._active_stream.close()
             self._active_stream = None
         try:
-            self._connection.commit()
+            if commit_index:
+                self._commit_index(begin_next=False)
+            else:
+                # SQLite is a disposable index.  On a failed science body the
+                # authenticated append-only journal remains the evidence, and
+                # rolling back here prevents close() from masking that primary
+                # exception with a second lock error.
+                self._connection.rollback()
         finally:
             self._connection.close()
 

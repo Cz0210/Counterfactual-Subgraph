@@ -16841,3 +16841,26 @@ part of this handoff.
   New Taste roots still undergo terminal inventory, writer, classifier,
   temperature, split, freeze-before-test, and scoped-policy validation.  No
   scientific metric is recomputed and no prior source root is modified.
+
+# 2026-09-02: Wait out transient readers of the disposable T12 history index
+
+- Motivation: the first Taste T12 10k production segment exited at walk step
+  279 when a read-only SQLite observer held a shared lock during an index
+  commit.  The authenticated append-only history and transition journals were
+  preserved, but there was no 10k checkpoint containing the official VRRW,
+  bridge, adapter, current-graph, action-count, and RNG state.  The partial
+  root therefore cannot be promoted to a scientific resume point.
+- Decision: keep the history journal authoritative and retain
+  `journal_mode=OFF`; do not introduce WAL files on the persistent filesystem.
+  The disposable SQLite lookup index now has a bounded 120-second busy timeout
+  and retries only SQLite BUSY/LOCKED commit failures.  Other operational or
+  database errors still fail immediately.  A failed science body rolls back
+  the disposable index during close so a secondary lock error cannot replace
+  the primary traceback.  Active status tools must use heartbeat, logs, and
+  non-SQLite receipts rather than opening the live history index.
+- Recovery impact: preserve the failed attempt read-only as failure evidence.
+  Because production checkpoints are deliberately only at 10k and 20k, launch
+  a fresh UUID, generation token, controller root, and output root on the same
+  frozen T3/T7/NeuroSED/replay inputs.  Do not claim a step-279 resume and do
+  not change the GCF scientific configuration, sample budget, or checkpoint
+  semantics.

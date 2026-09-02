@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
+import threading
+import time
 import uuid
 
 import pytest
@@ -124,6 +127,54 @@ def test_compact_history_rejects_committed_prefix_tamper(tmp_path: Path):
             index_name="index-b",
             open_writer=False,
         )
+
+
+def test_compact_history_waits_for_transient_read_lock(tmp_path: Path):
+    attempt = str(uuid.uuid4())
+    journal = _journal(tmp_path, attempt_id=attempt, index_name="index-a")
+    _append(journal, graph="1" * 64, lineage="2" * 64)
+
+    reader_ready = threading.Event()
+
+    def hold_read_lock() -> None:
+        connection = sqlite3.connect(journal._index_path)
+        try:
+            connection.execute("BEGIN")
+            connection.execute("SELECT COUNT(*) FROM first_observation").fetchone()
+            reader_ready.set()
+            time.sleep(0.2)
+            connection.commit()
+        finally:
+            connection.close()
+
+    reader = threading.Thread(target=hold_read_lock)
+    reader.start()
+    assert reader_ready.wait(timeout=2)
+    started = time.monotonic()
+    journal._commit_index()
+    elapsed = time.monotonic() - started
+    reader.join(timeout=2)
+
+    assert not reader.is_alive()
+    assert elapsed >= 0.1
+    assert journal._connection.execute("PRAGMA busy_timeout").fetchone() == (
+        production.HISTORY_INDEX_BUSY_TIMEOUT_MILLISECONDS,
+    )
+    journal.close()
+
+
+def test_compact_history_failure_close_rolls_back_disposable_index(tmp_path: Path):
+    attempt = str(uuid.uuid4())
+    journal = _journal(tmp_path, attempt_id=attempt, index_name="index-a")
+    _append(journal, graph="1" * 64, lineage="2" * 64)
+    index_path = journal._index_path
+
+    journal.close(commit_index=False)
+
+    with sqlite3.connect(index_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM first_observation"
+        ).fetchone() == (0,)
 
 
 def test_10k_20k_plan_is_the_only_production_orchestration():

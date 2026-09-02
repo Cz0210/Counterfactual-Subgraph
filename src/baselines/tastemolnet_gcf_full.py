@@ -617,6 +617,7 @@ def run_t12_generation_segment(
             vrrw.transitions = transition_store
         current_graph: str | None = None
         old_cwd = Path.cwd()
+        science_body_failed = False
         try:
             os.chdir(runtime_root)
             with ExitStack() as stack:
@@ -724,12 +725,17 @@ def run_t12_generation_segment(
                 )
                 _write_new(receipt_path, receipt)
                 return {**receipt, "receipt_path": str(receipt_path)}
+        except BaseException:
+            science_body_failed = True
+            raise
         finally:
             os.chdir(old_cwd)
             vrrw.neighbor_graph_access = original_neighbor
-            history.close()
-            if transition_store is not None:
-                transition_store.close()
+            try:
+                history.close(commit_index=not science_body_failed)
+            finally:
+                if transition_store is not None:
+                    transition_store.close()
 
 
 __all__ = [
