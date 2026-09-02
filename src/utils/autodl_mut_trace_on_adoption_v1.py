@@ -109,6 +109,24 @@ def load_protected_throughput_manifest(path: Path) -> dict[str, Any]:
             "counter_field": str(raw.get("counter_field") or ""),
             "terminal_value": float(raw.get("terminal_value", -1)),
         }
+        for optional_key in (
+            "output_root",
+            "phase_path",
+            "phase_field",
+            "checkpoint_root",
+        ):
+            optional_value = raw.get(optional_key)
+            if optional_value in (None, ""):
+                continue
+            if optional_key == "phase_field":
+                row[optional_key] = str(optional_value)
+                continue
+            optional_path = Path(str(optional_value)).expanduser()
+            if not optional_path.is_absolute() or optional_path.is_symlink():
+                raise MutTraceAuthorizationError(
+                    f"Protected task {optional_key} must be absolute and non-symlink"
+                )
+            row[optional_key] = str(optional_path.resolve(strict=True))
         if not row["task_id"] or not row["counter_field"]:
             raise MutTraceAuthorizationError("Protected task ID/counter field is empty")
         normalized.append(row)

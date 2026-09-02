@@ -3863,3 +3863,14 @@ Mutagenicity roadmaps.
   and require actual-loaded parameter reports before scale science.
 - [ ] Populate exact model snapshot manifests from independently audited runtime metadata.
 - [ ] Start any LLM GPU science only after the live main-priority gate passes.
+
+## 2026-09-03: Mut throttled continuation closeout
+
+- [x] Preserve the existing dataset-specific trace/adoption route and lease.
+- [x] Add a global single-writer preflight that permits only the attached
+  controller and the current owner's own sequential children.
+- [x] Pin two non-SMT-sibling CPUs, nice/ionice, workers, and prefetch.
+- [x] Exclude checkpoint/materialization windows from T14 slowdown decisions.
+- [x] Require sustained slowdown plus independent memory/I/O contention.
+- [ ] Deploy only from an immutable tested commit after revalidating the
+  terminal-controller receipt, GPU0 ownership, and all live Mut processes.

@@ -83,6 +83,15 @@ from src.utils.autodl_mut_traceoff_parity_v1 import (  # noqa: E402
     SOURCE_PAYLOAD_SHA256,
     validate_instrumentation_equivalence_gate,
 )
+from src.utils.autodl_mut_throttled_continuation_v1 import (  # noqa: E402
+    BASELINE_SECONDS as ROBUST_BASELINE_SECONDS,
+    EVALUATION_SECONDS as ROBUST_EVALUATION_SECONDS,
+    MAXIMUM_SLOWDOWN as ROBUST_MAXIMUM_SLOWDOWN,
+    MutThrottlePolicy,
+    RobustProtectedThroughputGate,
+    assert_single_continuation_owner,
+    sample_and_select_two_cpus,
+)
 from src.utils.autodl_runtime import (  # noqa: E402
     GPUFileLock,
     GPULockError,
@@ -105,6 +114,8 @@ REQUIRED_TRACE_PHASES = (
 SAMPLE_SECONDS = 10
 PROTECTED_WINDOW_SECONDS = 300
 PROTECTED_BASELINE_MAX_WAIT_SECONDS = 900
+ROBUST_PROFILE = "robust-v2"
+LEGACY_PROFILE = "legacy-v1"
 HEADROOM_WAIT_SECONDS = 60
 TRACE_BRANCH_ALLOWLIST = frozenset(
     {"OBSERVATIONAL_WRITE_ONLY", "CHECKPOINT_SERIALIZATION_ONLY"}
@@ -155,21 +166,29 @@ def _protected_baseline_transition(
     return "FAIL", affected
 
 
-def _protected_baseline_max_wait_seconds() -> int:
+def _protected_baseline_max_wait_seconds(profile: str = LEGACY_PROFILE) -> int:
+    expected = (
+        ROBUST_BASELINE_SECONDS
+        if profile == ROBUST_PROFILE
+        else PROTECTED_BASELINE_MAX_WAIT_SECONDS
+    )
     raw = os.environ.get(
         "MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS",
-        str(PROTECTED_BASELINE_MAX_WAIT_SECONDS),
+        str(expected),
     )
     try:
         value = int(raw)
     except ValueError as exc:
         raise MutTraceWorkerError(
-            "MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS must be integer 900"
+            "MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS must be an integer"
         ) from exc
-    if value != PROTECTED_BASELINE_MAX_WAIT_SECONDS:
-        raise MutTraceWorkerError(
+    if value != expected:
+        message = (
             "MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS is frozen to 900"
+            if profile == LEGACY_PROFILE
+            else "MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS is frozen to 1800"
         )
+        raise MutTraceWorkerError(message)
     return value
 
 
@@ -240,8 +259,11 @@ def _activity_fallback_baseline(
     """
 
     failures: list[str] = []
-    if maximum_wait_seconds != PROTECTED_BASELINE_MAX_WAIT_SECONDS:
-        failures.append("maximum_wait_seconds_not_900")
+    if maximum_wait_seconds not in {
+        PROTECTED_BASELINE_MAX_WAIT_SECONDS,
+        ROBUST_BASELINE_SECONDS,
+    }:
+        failures.append("maximum_wait_seconds_not_authorized")
     if len(snapshots) < 2:
         failures.append("insufficient_activity_snapshots")
         elapsed = 0.0
@@ -250,7 +272,11 @@ def _activity_fallback_baseline(
             snapshots[0]["sampled_at_monotonic"]
         )
         if elapsed < maximum_wait_seconds:
-            failures.append("activity_window_lt_900_seconds")
+            failures.append(
+                "activity_window_lt_900_seconds"
+                if maximum_wait_seconds == PROTECTED_BASELINE_MAX_WAIT_SECONDS
+                else "activity_window_lt_1800_seconds"
+            )
 
     tasks: dict[str, Any] = {}
     unavailable: list[str] = []
@@ -371,7 +397,11 @@ def _activity_fallback_baseline(
         "baseline_seconds": elapsed,
         "poll_seconds": SAMPLE_SECONDS,
         "maximum_wait_seconds": maximum_wait_seconds,
-        "measurement_mode": "BOUNDED_15_MINUTE_ACTIVITY_FALLBACK",
+        "measurement_mode": (
+            "BOUNDED_30_MINUTE_ACTIVITY_FALLBACK"
+            if maximum_wait_seconds == ROBUST_BASELINE_SECONDS
+            else "BOUNDED_15_MINUTE_ACTIVITY_FALLBACK"
+        ),
         "forced_step_baseline_unavailable_task_ids": sorted(
             forced_unavailable
         ),
@@ -949,7 +979,13 @@ def _validate_frozen_replay_contract(spec: Mapping[str, Any]) -> dict[str, Any]:
 
 
 @contextmanager
-def _worker_lease(path: Path, *, controller_id: str) -> Iterator[TextIO]:
+def _worker_lease(
+    path: Path,
+    *,
+    controller_id: str,
+    require_global_mut_writer_exclusion: bool = False,
+    attached_controller_pid: int | None = None,
+) -> Iterator[TextIO]:
     target = _absolute(path, exists=False, label="worker lease")
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.is_symlink():
@@ -960,6 +996,13 @@ def _worker_lease(path: Path, *, controller_id: str) -> Iterator[TextIO]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise MutTraceWorkerError("Another Mut trace-on one-shot worker is live") from exc
+        owner_preflight: Mapping[str, Any] | None = None
+        if require_global_mut_writer_exclusion:
+            owner_preflight = assert_single_continuation_owner(
+                Path("/proc"),
+                current_pid=os.getpid(),
+                attached_controller_pid=attached_controller_pid,
+            )
         handle.seek(0)
         handle.truncate()
         json.dump(
@@ -969,6 +1012,7 @@ def _worker_lease(path: Path, *, controller_id: str) -> Iterator[TextIO]:
                 "pid": os.getpid(),
                 "start_ticks": _process_start_ticks(Path("/proc"), os.getpid()),
                 "acquired_at": _utc_now(),
+                "global_mut_writer_preflight": owner_preflight,
             },
             handle,
             sort_keys=True,
@@ -1002,6 +1046,67 @@ def _cgroup_snapshot(root: Path) -> dict[str, Any]:
         "oom_kill": int(oom.get("oom_kill", 0)),
         "under_oom": int(oom.get("under_oom", 0)),
         "sampled_at": _utc_now(),
+    }
+
+
+def _verify_current_throttle_policy() -> dict[str, Any]:
+    """Fail closed unless the robust continuation inherited every throttle."""
+
+    policy = MutThrottlePolicy().validate()
+    affinity = sorted(int(item) for item in os.sched_getaffinity(0))
+    nice_value = os.getpriority(os.PRIO_PROCESS, 0)
+    environment = {
+        key: os.environ.get(key)
+        for key in (
+            "MUT_EXACT_WORKERS",
+            "MUT_CPU_WORKERS",
+            "MUT_PREFETCH",
+            "MUT_PREFETCH_FACTOR",
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+        )
+    }
+    expected_environment = {
+        "MUT_EXACT_WORKERS": "2",
+        "MUT_CPU_WORKERS": "2",
+        "MUT_PREFETCH": "1",
+        "MUT_PREFETCH_FACTOR": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+    }
+    try:
+        ionice = subprocess.check_output(
+            ["ionice", "-p", str(os.getpid())],
+            text=True,
+            timeout=5,
+        ).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise MutTraceWorkerError("Cannot verify Mut ionice policy") from exc
+    failures: list[str] = []
+    if len(affinity) != policy.workers:
+        failures.append("affinity_not_two_cpus")
+    if nice_value < policy.nice:
+        failures.append("nice_priority_too_high")
+    if environment != expected_environment:
+        failures.append("worker_or_prefetch_environment")
+    normalized_ionice = ionice.lower().replace(" ", "")
+    if "best-effort" not in ionice.lower() or "prio7" not in normalized_ionice:
+        failures.append("ionice_not_best_effort_7")
+    if failures:
+        raise MutTraceWorkerError(
+            "Mut robust throttle policy is not active: " + ",".join(failures)
+        )
+    return {
+        "schema_version": "mut_throttle_runtime_verification_v1",
+        "status": "PASS",
+        "policy": policy.as_receipt(),
+        "cpu_affinity": affinity,
+        "nice": nice_value,
+        "ionice": ionice,
+        "environment": environment,
+        "t14_affinity_modified": False,
     }
 
 
@@ -1137,6 +1242,8 @@ class CanaryMonitor:
         monitor_path: Path,
         throughput_gate: ProtectedThroughputGate,
         heartbeat: Any,
+        protected_window_seconds: int = PROTECTED_WINDOW_SECONDS,
+        throttle_profile: str = LEGACY_PROFILE,
     ) -> None:
         self.cgroup_root = cgroup_root
         self.proc_root = proc_root
@@ -1144,6 +1251,8 @@ class CanaryMonitor:
         self.monitor_path = monitor_path
         self.throughput_gate = throughput_gate
         self.heartbeat = heartbeat
+        self.protected_window_seconds = int(protected_window_seconds)
+        self.throttle_profile = str(throttle_profile)
         self.initial = _cgroup_snapshot(cgroup_root)
         self.samples = 0
         self.phase_stats: dict[str, dict[str, Any]] = {}
@@ -1377,7 +1486,7 @@ class CanaryMonitor:
         }
 
     def finish_protected_window(self) -> dict[str, Any]:
-        deadline = time.monotonic() + PROTECTED_WINDOW_SECONDS + 30
+        deadline = time.monotonic() + self.protected_window_seconds + 30
         while True:
             self._sample(process=None, phase="post_canary_protected_window")
             receipt = self.throughput_gate.receipt()
@@ -1389,7 +1498,7 @@ class CanaryMonitor:
                 )
             if time.monotonic() >= deadline:
                 raise MutTraceWorkerError(
-                    "No complete five-minute protected-task window was observed"
+                    "No complete protected-task comparison window was observed"
                 )
             time.sleep(SAMPLE_SECONDS)
 
@@ -1443,6 +1552,8 @@ class CanaryMonitor:
             "schema_version": MEMORY_SCHEMA,
             "status": "PASS" if not failures else "FAIL",
             "sample_interval_seconds": SAMPLE_SECONDS,
+            "throttle_profile": self.throttle_profile,
+            "protected_window_seconds": self.protected_window_seconds,
             "sample_count": self.samples,
             "arms_sequential": True,
             "max_concurrent_arms": 1,
@@ -1775,15 +1886,26 @@ def _validate_memory_receipt(path: Path) -> dict[str, Any]:
     )
     if unavailable:
         baseline = value.get("protected_baseline")
+        receipt_profile = str(value.get("throttle_profile") or LEGACY_PROFILE)
+        expected_fallback_seconds = (
+            ROBUST_BASELINE_SECONDS
+            if receipt_profile == ROBUST_PROFILE
+            else PROTECTED_BASELINE_MAX_WAIT_SECONDS
+        )
+        expected_measurement_mode = (
+            "BOUNDED_30_MINUTE_ACTIVITY_FALLBACK"
+            if receipt_profile == ROBUST_PROFILE
+            else "BOUNDED_15_MINUTE_ACTIVITY_FALLBACK"
+        )
         if (
             not isinstance(baseline, Mapping)
             or baseline.get("status") != "PASS"
             or baseline.get("measurement_mode")
-            != "BOUNDED_15_MINUTE_ACTIVITY_FALLBACK"
+            != expected_measurement_mode
             or int(baseline.get("maximum_wait_seconds", -1))
-            != PROTECTED_BASELINE_MAX_WAIT_SECONDS
+            != expected_fallback_seconds
             or float(baseline.get("baseline_seconds", 0))
-            < PROTECTED_BASELINE_MAX_WAIT_SECONDS
+            < expected_fallback_seconds
             or len(baseline.get("activity_snapshots") or []) < 2
             or sorted(baseline.get("step_baseline_unavailable_task_ids") or [])
             != sorted(unavailable)
@@ -2220,7 +2342,20 @@ def _write_fallback(root: Path, *, reason: str, science_gate_failed: bool) -> No
 def _run(args: argparse.Namespace) -> int:
     if os.environ.get("RUN_GNN_ABLATION", "0") != "0":
         raise MutTraceWorkerError("RUN_GNN_ABLATION must remain 0")
-    protected_baseline_max_wait = _protected_baseline_max_wait_seconds()
+    throttle_profile = str(args.throttle_profile)
+    robust_profile = throttle_profile == ROBUST_PROFILE
+    protected_baseline_seconds = (
+        ROBUST_BASELINE_SECONDS if robust_profile else PROTECTED_WINDOW_SECONDS
+    )
+    protected_evaluation_seconds = (
+        ROBUST_EVALUATION_SECONDS if robust_profile else PROTECTED_WINDOW_SECONDS
+    )
+    protected_maximum_slowdown = (
+        ROBUST_MAXIMUM_SLOWDOWN if robust_profile else 0.10
+    )
+    protected_baseline_max_wait = _protected_baseline_max_wait_seconds(
+        throttle_profile
+    )
     _validate_worker_guard(args)
     spec = load_spec(args.spec)
     controller = _verify_controller(
@@ -2269,14 +2404,26 @@ def _run(args: argparse.Namespace) -> int:
                 "protected_baseline_max_wait_seconds": (
                     protected_baseline_max_wait
                 ),
+                "throttle_profile": throttle_profile,
+                "protected_baseline_seconds": protected_baseline_seconds,
+                "protected_evaluation_seconds": protected_evaluation_seconds,
+                "protected_maximum_slowdown": protected_maximum_slowdown,
                 "heartbeat_at": _utc_now(),
                 **extra,
             },
         )
 
     lease = control / "trace_on_adoption_worker.lock"
-    with _worker_lease(lease, controller_id=str(spec["controller_id"])):
+    with _worker_lease(
+        lease,
+        controller_id=str(spec["controller_id"]),
+        require_global_mut_writer_exclusion=robust_profile,
+        attached_controller_pid=int(args.controller_pid),
+    ):
         try:
+            if robust_profile:
+                throttle_receipt = _verify_current_throttle_policy()
+                atomic_json(output / "mut_throttle_runtime.json", throttle_receipt)
             heartbeat("AUTHORIZATION_LOADING")
             authorization, authorization_file_sha = validate_authorization_receipt(
                 _absolute(args.authorization_receipt, label="authorization receipt"),
@@ -2437,7 +2584,7 @@ def _run(args: argparse.Namespace) -> int:
                 baseline = establish_protected_throughput_baseline(
                     protected_manifest,
                     proc_root=proc_root,
-                    baseline_seconds=PROTECTED_WINDOW_SECONDS,
+                    baseline_seconds=protected_baseline_seconds,
                     poll_seconds=SAMPLE_SECONDS,
                     progress_callback=lambda elapsed, _first: heartbeat(
                         "PROTECTED_BASELINE_RUNNING",
@@ -2570,13 +2717,22 @@ def _run(args: argparse.Namespace) -> int:
                                 gpu_lock_release_pending=True,
                             )
                         else:
-                            gate = ProtectedThroughputGate(
-                                protected_manifest,
-                                baseline,
-                                proc_root=proc_root,
-                                window_seconds=PROTECTED_WINDOW_SECONDS,
-                                maximum_slowdown=0.10,
-                            )
+                            if robust_profile:
+                                gate = RobustProtectedThroughputGate(
+                                    protected_manifest,
+                                    baseline,
+                                    proc_root=proc_root,
+                                    window_seconds=protected_evaluation_seconds,
+                                    maximum_slowdown=protected_maximum_slowdown,
+                                )
+                            else:
+                                gate = ProtectedThroughputGate(
+                                    protected_manifest,
+                                    baseline,
+                                    proc_root=proc_root,
+                                    window_seconds=protected_evaluation_seconds,
+                                    maximum_slowdown=protected_maximum_slowdown,
+                                )
                             monitor = CanaryMonitor(
                                 cgroup_root=cgroup,
                                 proc_root=proc_root,
@@ -2584,6 +2740,10 @@ def _run(args: argparse.Namespace) -> int:
                                 monitor_path=output / "canary_memory_monitor.jsonl",
                                 throughput_gate=gate,
                                 heartbeat=heartbeat,
+                                protected_window_seconds=(
+                                    protected_evaluation_seconds
+                                ),
+                                throttle_profile=throttle_profile,
                             )
                             environment = {
                                 **os.environ,
@@ -2788,11 +2948,36 @@ def _authorize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _owner_preflight(args: argparse.Namespace) -> int:
+    receipt = assert_single_continuation_owner(
+        Path(args.proc_root),
+        current_pid=os.getpid(),
+        attached_controller_pid=args.controller_pid,
+    )
+    print(json.dumps(receipt, sort_keys=True))
+    return 0
+
+
+def _select_cpus(args: argparse.Namespace) -> int:
+    selected = sample_and_select_two_cpus(
+        proc_root=Path(args.proc_root),
+        sample_seconds=float(args.sample_seconds),
+    )
+    print(",".join(str(item) for item in selected))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="action", required=True)
+    owner = commands.add_parser("owner-preflight")
+    owner.add_argument("--proc-root", type=Path, default=Path("/proc"))
+    owner.add_argument("--controller-pid", type=int)
+    cpus = commands.add_parser("select-cpus")
+    cpus.add_argument("--proc-root", type=Path, default=Path("/proc"))
+    cpus.add_argument("--sample-seconds", type=float, default=1.0)
     authorize = commands.add_parser("authorize")
     authorize.add_argument("--spec", type=Path, required=True)
     authorize.add_argument("--output", type=Path, required=True)
@@ -2818,11 +3003,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--terminal-controller-evidence", type=Path)
     run.add_argument("--successor-guard-script", required=True, help=argparse.SUPPRESS)
     run.add_argument("--successor-guard-action", required=True, help=argparse.SUPPRESS)
+    run.add_argument(
+        "--throttle-profile",
+        choices=(LEGACY_PROFILE, ROBUST_PROFILE),
+        default=LEGACY_PROFILE,
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.action == "owner-preflight":
+        return _owner_preflight(args)
+    if args.action == "select-cpus":
+        return _select_cpus(args)
     if args.action == "authorize":
         return _authorize(args)
     if args.action == "verify-adoption":

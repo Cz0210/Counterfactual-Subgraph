@@ -17031,3 +17031,23 @@ must not be presented as an actual loaded-parameter count.
   T13 is not launched.  A second dual-branch retrain, a new seed/epoch budget,
   chemical projection, or publication as a zero-result would change the
   frozen scientific protocol and requires a new explicit project decision.
+
+# 2026-09-03: Resume Mut through one throttled continuation owner
+
+- Motivation: the prior Mut equivalence owner is terminal while GPU0 is free,
+  but Taste T14 remains a high-memory, checkpoint-heavy main-table job.  A
+  coarse committed-step counter is not a valid throughput measure while T14
+  is serializing or flushing a checkpoint.
+- Decision: retain the existing single worker lease and sequential trace arms,
+  add a global live-Mut-writer preflight, and run the continuation on two
+  least-busy non-SMT-sibling CPUs with nice 10, best-effort ionice priority 7,
+  two workers, and prefetch one.  Protect T14 with a 1,800-second baseline and
+  1,200-second comparison window.  A pause is actionable only when slowdown
+  exceeds 15%, the phases are comparable, and memory or I/O contention is
+  observed in the same window.  Checkpoint/flush windows and zero-step windows
+  with continuing CPU/output activity are excluded rather than treated as
+  slowdown.
+- Impact: no second Mut writer, fresh 50k generation, pair-store rebuild, or
+  DBSCAN rebuild is introduced.  The attached controller and the owner's own
+  sequential children are excluded from duplicate-writer detection.  T14
+  affinity and active output are never modified.
