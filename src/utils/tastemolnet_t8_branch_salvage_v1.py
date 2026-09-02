@@ -56,11 +56,13 @@ from src.baselines.tastemolnet_globalgce_smoke import (
     _deduplicate_generated_candidates,
     _validate_official_startup_identity,
     load_taste_train_cohort,
-    merge_branch_rule_catalogs,
     run_resumed_target_branch,
     select_bounded_sweet_parents,
     validate_candidates_with_original_gine,
     validate_science_summary,
+)
+from src.baselines.tastemolnet_multiclass_adapters import (
+    merge_globalgce_target_branches,
 )
 from src.utils.retained_output_directory import (
     FreshOutputDirectory,
@@ -72,6 +74,9 @@ from src.utils.retained_output_directory import (
 SALVAGE_SCHEMA = "tastemolnet_t8_branch_salvage_v1"
 BRANCH_SEAL_SCHEMA = "tastemolnet_t8_read_only_branch_seal_v1"
 RERUN_SCHEMA = "tastemolnet_t8_single_branch_rerun_request_v1"
+RHS_CHEMISTRY_PREFLIGHT_SCHEMA = (
+    "tastemolnet_t8_rhs_standalone_chemistry_preflight_v1"
+)
 SALVAGE_MARKER = "[TASTE_T8_SALVAGE_PASS]"
 REQUIRED_BRANCH_FILES = frozenset(
     {
@@ -522,6 +527,362 @@ class T8BranchScientificFailure(TasteGlobalGCESmokeError):
     def __init__(self, message: str, *, invalid_targets: Sequence[int]) -> None:
         super().__init__(message)
         self.invalid_targets = tuple(sorted(set(invalid_targets)))
+
+
+def _hard_label(values: Any) -> int:
+    return int(values.argmax(-1).item())
+
+
+def _edge_position(left: int, right: int) -> int:
+    high, low = max(int(left), int(right)), min(int(left), int(right))
+    if high == low:
+        raise TasteGlobalGCESmokeError("T8 RHS preflight rejects self-edge slots")
+    return (high - 1) * high // 2 + low
+
+
+def _raw_rule_identity(
+    raw_rule: Mapping[str, Any],
+    *,
+    target: int,
+    catalog_row_index: int,
+) -> dict[str, Any]:
+    source = (
+        raw_rule.get("rule")
+        if isinstance(raw_rule.get("rule"), Mapping)
+        else raw_rule
+    )
+    return {
+        "target_label": target,
+        "catalog_row_index": catalog_row_index,
+        "candidate_id": raw_rule.get("candidate_id"),
+        "native_rule_index": source.get("native_rule_index"),
+        "raw_rule_sha256": _canonical_sha256(raw_rule),
+    }
+
+
+def _rhs_rule_chemistry_evidence(
+    raw_rule: Mapping[str, Any],
+    *,
+    target: int,
+    catalog_row_index: int,
+    source_artifact: Path,
+) -> tuple[GlobalGCENativeRule | None, dict[str, Any]]:
+    """Validate one standalone RHS without applying it to a parent graph."""
+
+    identity = _raw_rule_identity(
+        raw_rule,
+        target=target,
+        catalog_row_index=catalog_row_index,
+    )
+    evidence: dict[str, Any] = {
+        **identity,
+        "source_artifact": str(source_artifact),
+        "status": "FAILED",
+        "rhs_internal_bond_no_edge_consistent": False,
+        "rhs_standalone_rdkit_sanitized": False,
+        "errors": [],
+    }
+    try:
+        rule = GlobalGCENativeRule.from_payload(raw_rule)
+    except Exception as exc:
+        evidence["errors"] = [
+            {
+                "code": "T8_RHS_RULE_DECODE_FAILED",
+                "field": "rule",
+                "expected": "one valid pinned native LHS/RHS rule",
+                "actual": f"{type(exc).__name__}:{exc}",
+            }
+        ]
+        return None, evidence
+
+    active = tuple(
+        index
+        for index in range(rule.maximum_nodes)
+        if _hard_label(rule.rhs_feature[index]) > 0
+    )
+    active_set = set(active)
+    errors: list[dict[str, Any]] = []
+    pair_evidence: list[dict[str, Any]] = []
+    for left in range(rule.maximum_nodes):
+        for right in range(left + 1, rule.maximum_nodes):
+            edge_position = _edge_position(left, right)
+            adjacency_present = bool(
+                float(rule.rhs_adjacency[left, right].item()) > 0.5
+            )
+            bond_label = _hard_label(rule.rhs_edge_attr[edge_position])
+            both_active = left in active_set and right in active_set
+            pair = {
+                "left": left,
+                "right": right,
+                "edge_position": edge_position,
+                "both_nodes_active": both_active,
+                "adjacency_present": adjacency_present,
+                "bond_label": bond_label,
+                "bond_name": (
+                    rule.bond_names[bond_label]
+                    if 0 <= bond_label < len(rule.bond_names)
+                    else None
+                ),
+            }
+            pair_evidence.append(pair)
+            if not both_active and (adjacency_present or bond_label != 0):
+                errors.append(
+                    {
+                        "code": "T8_RHS_INACTIVE_NODE_EDGE_STATE",
+                        "field": f"rhs_pair[{left},{right}]",
+                        "expected": {
+                            "adjacency_present": False,
+                            "bond_label": 0,
+                        },
+                        "actual": {
+                            "adjacency_present": adjacency_present,
+                            "bond_label": bond_label,
+                        },
+                    }
+                )
+            elif both_active and adjacency_present != (bond_label != 0):
+                errors.append(
+                    {
+                        "code": "T8_RHS_BOND_NO_EDGE_MISMATCH",
+                        "field": f"rhs_pair[{left},{right}]",
+                        "expected": (
+                            "adjacency present iff decoded bond label is not no_edge"
+                        ),
+                        "actual": {
+                            "adjacency_present": adjacency_present,
+                            "bond_label": bond_label,
+                            "bond_name": pair["bond_name"],
+                        },
+                    }
+                )
+    evidence.update(
+        {
+            "rhs_active_node_indices": list(active),
+            "rhs_active_node_count": len(active),
+            "rhs_internal_pairs": pair_evidence,
+            "rhs_internal_bond_no_edge_consistent": not errors,
+        }
+    )
+    if not active:
+        errors.append(
+            {
+                "code": "T8_RHS_EMPTY",
+                "field": "rhs_feature",
+                "expected": ">=1 active atom",
+                "actual": 0,
+            }
+        )
+    if errors:
+        evidence["errors"] = errors
+        return None, evidence
+
+    try:
+        from rdkit import Chem
+
+        editable = Chem.RWMol()
+        old_to_new: dict[int, int] = {}
+        for old_index in active:
+            atom_label = _hard_label(rule.rhs_feature[old_index])
+            if not 0 < atom_label <= len(rule.atom_symbols):
+                raise ValueError(f"unknown RHS atom label {atom_label}")
+            old_to_new[old_index] = int(
+                editable.AddAtom(Chem.Atom(rule.atom_symbols[atom_label - 1]))
+            )
+        bond_types = {
+            "single": Chem.BondType.SINGLE,
+            "double": Chem.BondType.DOUBLE,
+            "triple": Chem.BondType.TRIPLE,
+            "aromatic": Chem.BondType.AROMATIC,
+        }
+        for position, left in enumerate(active):
+            for right in active[position + 1 :]:
+                if float(rule.rhs_adjacency[left, right].item()) <= 0.5:
+                    continue
+                bond_label = _hard_label(
+                    rule.rhs_edge_attr[_edge_position(left, right)]
+                )
+                bond_name = rule.bond_names[bond_label].strip().lower()
+                if bond_name not in bond_types:
+                    raise ValueError(f"unsupported RHS bond label {bond_name!r}")
+                editable.AddBond(
+                    old_to_new[left],
+                    old_to_new[right],
+                    bond_types[bond_name],
+                )
+        molecule = editable.GetMol()
+        Chem.SanitizeMol(molecule)
+        canonical = Chem.MolToSmiles(
+            molecule,
+            canonical=True,
+            isomericSmiles=True,
+        )
+        if not canonical:
+            raise ValueError("standalone sanitized RHS has empty canonical SMILES")
+    except Exception as exc:
+        evidence["errors"] = [
+            {
+                "code": "T8_RHS_STANDALONE_SANITIZATION_FAILED",
+                "field": "rhs_standalone_molecule",
+                "expected": "RDKit SanitizeMol PASS with nonempty canonical SMILES",
+                "actual": f"{type(exc).__name__}:{exc}",
+            }
+        ]
+        return None, evidence
+
+    evidence.update(
+        {
+            "status": "PASS",
+            "rhs_standalone_rdkit_sanitized": True,
+            "rhs_standalone_canonical_smiles": canonical,
+            "rhs_standalone_component_count": len(Chem.GetMolFrags(molecule)),
+            "errors": [],
+        }
+    )
+    return rule, evidence
+
+
+def preflight_rhs_rule_catalogs(
+    catalogs: Mapping[int, Sequence[Mapping[str, Any]]],
+    *,
+    source_artifacts: Mapping[int, Path],
+    artifact_path: Path,
+) -> tuple[dict[int, list[Mapping[str, Any]]], dict[str, Any]]:
+    """Filter only independently sane RHS rules and persist field-level evidence."""
+
+    if set(catalogs) != set(TARGET_BRANCHES) or set(source_artifacts) != set(
+        TARGET_BRANCHES
+    ):
+        raise TasteGlobalGCESmokeError(
+            "T8 RHS preflight requires both target catalogs and source artifacts"
+        )
+    approved: dict[int, list[Mapping[str, Any]]] = {0: [], 2: []}
+    rule_evidence: dict[str, list[dict[str, Any]]] = {"0": [], "2": []}
+    for target in TARGET_BRANCHES:
+        for index, raw_rule in enumerate(catalogs[target]):
+            rule, evidence = _rhs_rule_chemistry_evidence(
+                raw_rule,
+                target=target,
+                catalog_row_index=index,
+                source_artifact=source_artifacts[target],
+            )
+            rule_evidence[str(target)].append(evidence)
+            if rule is not None:
+                approved[target].append(raw_rule)
+    approved_counts = {
+        str(target): len(approved[target]) for target in TARGET_BRANCHES
+    }
+    rejected_counts = {
+        str(target): len(catalogs[target]) - len(approved[target])
+        for target in TARGET_BRANCHES
+    }
+    invalid_targets = [
+        target for target in TARGET_BRANCHES if not approved[target]
+    ]
+    audit = {
+        "schema_version": RHS_CHEMISTRY_PREFLIGHT_SCHEMA,
+        "status": "BLOCKED" if invalid_targets else "PASS",
+        "stage": "T8_RHS_STANDALONE_CHEMISTRY_PREFLIGHT",
+        "source_artifacts_mutated": False,
+        "native_rule_application_started": False,
+        "gine_candidate_validation_started": False,
+        "approved_rule_counts": approved_counts,
+        "rejected_rule_counts": rejected_counts,
+        "invalid_target_branches": invalid_targets,
+        "rules": rule_evidence,
+    }
+    _atomic_json(artifact_path, audit)
+    if invalid_targets:
+        raise T8FinalizationError(
+            code="T8_RHS_PREFLIGHT_NO_USABLE_RULES",
+            field="branches.approved_rule_counts",
+            expected={str(target): ">=1" for target in TARGET_BRANCHES},
+            actual=approved_counts,
+            source_manifest=RHS_CHEMISTRY_PREFLIGHT_SCHEMA,
+            source_artifact=str(artifact_path),
+            stage="T8_RHS_STANDALONE_CHEMISTRY_PREFLIGHT",
+        )
+    return approved, audit
+
+
+def _merge_preflight_approved_rules(
+    catalogs: Mapping[int, Sequence[Mapping[str, Any]]],
+    *,
+    checkpoint_id: str,
+    preflight: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    branches: dict[int, list[dict[str, Any]]] = {}
+    branch_hashes: dict[int, set[str]] = {}
+    for target in TARGET_BRANCHES:
+        rows: list[dict[str, Any]] = []
+        hashes: set[str] = set()
+        for raw in catalogs[target]:
+            action = _canonical_rule_action(raw)
+            if action["rule_hash"] in hashes:
+                raise TasteGlobalGCESmokeError(
+                    "T8 RHS-approved catalog repeats one canonical rule"
+                )
+            hashes.add(action["rule_hash"])
+            rows.append(
+                {
+                    **action,
+                    "action_kind": "lhs_rhs_graph_transformation_rule",
+                    "target_label": target,
+                    "source_label": SOURCE_LABEL,
+                    "data_split_used": "train",
+                    "calibration_loaded": False,
+                    "test_loaded": False,
+                    "rf_oracle_used": False,
+                    "oracle_backend": "gnn",
+                    "oracle_checkpoint_hash": checkpoint_id,
+                }
+            )
+        if not rows:
+            raise TasteGlobalGCESmokeError(
+                f"T8 target-{target} has no RHS-approved native rules"
+            )
+        branches[target] = rows
+        branch_hashes[target] = hashes
+    merged = merge_globalgce_target_branches(
+        branches,
+        oracle_checkpoint_hash=checkpoint_id,
+    )
+    if not merged or len({row["rule_hash"] for row in merged}) != len(merged):
+        raise TasteGlobalGCESmokeError(
+            "T8 RHS-approved canonical rule merge is empty or duplicated"
+        )
+    overlap = branch_hashes[0] & branch_hashes[2]
+    return merged, {
+        "merge_stage": (
+            "after_rhs_standalone_chemistry_preflight_before_calibration"
+        ),
+        "dedup_identity": (
+            "sha256(canonical_lhs,rhs,official_attachment_map,action_kind)"
+        ),
+        "target_0_rule_count": len(branches[0]),
+        "target_2_rule_count": len(branches[2]),
+        "premerge_rule_count": len(branches[0]) + len(branches[2]),
+        "cross_branch_duplicate_count": len(overlap),
+        "merged_unique_rule_count": len(merged),
+        "hash_collision_or_action_mismatch": False,
+        "canonical_dedup_complete": True,
+        "rhs_chemistry_preflight_schema": RHS_CHEMISTRY_PREFLIGHT_SCHEMA,
+        "rhs_chemistry_preflight_status": preflight.get("status"),
+        "rhs_chemistry_approved_rule_counts": preflight.get(
+            "approved_rule_counts"
+        ),
+        "rhs_chemistry_rejected_rule_counts": preflight.get(
+            "rejected_rule_counts"
+        ),
+        "merged_rule_set_sha256": _canonical_sha256(
+            [
+                {
+                    "rule_hash": row["rule_hash"],
+                    "target_branches": row["target_branches"],
+                }
+                for row in merged
+            ]
+        ),
+    }
 
 
 def validate_source_branch(
@@ -978,6 +1339,35 @@ def run_salvage(
         raise TasteGlobalGCESmokeError(
             "T8 salvage rejected source branch(es): " + ",".join(map(str, sorted(failures)))
         )
+    rhs_preflight_path = rerun_request.with_name(
+        "rhs-standalone-chemistry-preflight.json"
+    )
+    try:
+        approved_catalogs, rhs_preflight = preflight_rhs_rule_catalogs(
+            {target: branches[target].catalog for target in TARGET_BRANCHES},
+            source_artifacts={
+                target: branches[target].root / "native_rule_catalog.jsonl"
+                for target in TARGET_BRANCHES
+            },
+            artifact_path=rhs_preflight_path,
+        )
+    except T8FinalizationError as exc:
+        invalid_targets = json.loads(
+            rhs_preflight_path.read_text(encoding="utf-8")
+        ).get("invalid_target_branches", [])
+        write_single_branch_rerun_request(
+            rerun_request,
+            {
+                int(target): (
+                    f"{exc.code}:field={exc.field}:"
+                    f"evidence={rhs_preflight_path}"
+                )
+                for target in invalid_targets
+            },
+        )
+        for branch in branches.values():
+            branch.close()
+        raise
     state_fd = -1
     state_tree: RetainedOutputTree | None = None
     prepared = None
@@ -1038,10 +1428,10 @@ def run_salvage(
             raise TasteGlobalGCESmokeError(
                 "T8 salvage target branches used different train/official identities"
             )
-        source_trees = {target: branches[target].tree for target in TARGET_BRANCHES}
-        merged_rules, rule_merge = merge_branch_rule_catalogs(
-            branch_trees=source_trees,
+        merged_rules, rule_merge = _merge_preflight_approved_rules(
+            approved_catalogs,
             checkpoint_id=checkpoint_id,
+            preflight=rhs_preflight,
         )
         if rule_merge.get("merged_unique_rule_count", 0) < 1:
             _raise_finalization_error(
@@ -1055,7 +1445,7 @@ def run_salvage(
             )
         try:
             generated, materialization = materialize_smoke_candidates(
-                {target: branches[target].catalog for target in TARGET_BRANCHES},
+                approved_catalogs,
                 parents=parents,
             )
         except T8BranchScientificFailure as exc:
@@ -1104,6 +1494,7 @@ def run_salvage(
             "branch_inventory.json": {
                 "schema_version": "tastemolnet_t8_branch_inventory_v1",
                 "status": "PASS",
+                "rhs_chemistry_preflight": rhs_preflight,
                 "branches": {
                     str(target): branches[target].seal
                     for target in TARGET_BRANCHES
@@ -1151,6 +1542,8 @@ def run_salvage(
                 "source_artifacts_mutated": False,
                 "test_loaded": False,
                 "gnn_ablation_started": False,
+                "rhs_standalone_chemistry_preflight": True,
+                "rhs_preflight_artifact": str(rhs_preflight_path),
             },
         }
         state_fd, state_tree = _copy_validated_branches(
@@ -1191,6 +1584,7 @@ def run_salvage(
                 "2": branches[2].evidence,
             },
             "rule_merge": rule_merge,
+            "rhs_standalone_chemistry_preflight": rhs_preflight,
             "candidate_merge": candidate_merge,
             "strict_flip_validation": strict,
             "private_state": {
@@ -1271,6 +1665,8 @@ def run_salvage(
             "candidate_merge": candidate_merge,
             "strict_flip_validation": strict,
             "materialization": materialization,
+            "rhs_chemistry_preflight": rhs_preflight,
+            "rhs_chemistry_preflight_artifact": str(rhs_preflight_path),
             "single_branch_rerun_policy": True,
         }
     finally:

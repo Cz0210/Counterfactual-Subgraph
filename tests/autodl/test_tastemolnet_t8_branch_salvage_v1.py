@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 import src.utils.tastemolnet_t8_branch_salvage_v1 as salvage
 from src.utils.tastemolnet_t8_branch_salvage_v1 import (
+    RHS_CHEMISTRY_PREFLIGHT_SCHEMA,
     RERUN_SCHEMA,
     T8FinalizationError,
+    preflight_rhs_rule_catalogs,
     read_single_branch_rerun_target,
     write_single_branch_rerun_request,
 )
@@ -20,6 +22,21 @@ RERUN_CLI = ROOT / "scripts/autodl/rerun_tastemolnet_t8_single_branch_v1.py"
 RERUN_SLURM = ROOT / "scripts/slurm/rerun_tastemolnet_t8_single_branch_v1.sh"
 SALVAGE_SOURCE = ROOT / "src/utils/tastemolnet_t8_branch_salvage_v1.py"
 T13_SOURCE = ROOT / "src/baselines/tastemolnet_globalgce_full.py"
+
+
+def _native_rule_payload(candidate_id: str, *, rhs_no_edge: bool = False) -> dict:
+    return {
+        "candidate_id": candidate_id,
+        "native_rule_index": 0,
+        "lhs_feature": [[0.0, 1.0], [0.0, 1.0]],
+        "lhs_adjacency": [[0.0, 1.0], [1.0, 0.0]],
+        "lhs_edge_attr": [[0.0, 1.0]],
+        "rhs_feature": [[0.0, 1.0], [0.0, 1.0]],
+        "rhs_adjacency": [[0.0, 1.0], [1.0, 0.0]],
+        "rhs_edge_attr": [[1.0, 0.0] if rhs_no_edge else [0.0, 1.0]],
+        "atom_symbols": ["C"],
+        "bond_names": ["no_edge", "single"],
+    }
 
 
 def test_single_branch_failure_preserves_the_other_branch(tmp_path: Path) -> None:
@@ -95,6 +112,65 @@ def test_native_materialization_keeps_target_provenance(monkeypatch) -> None:
     assert [row["raw_smiles"] for row in records[2]] == ["CCO"]
     assert all(row["source_split"] == "train" for rows in records.values() for row in rows)
     assert audit["source_branch_mutated"] is False
+
+
+def test_rhs_standalone_preflight_filters_inconsistent_rule(tmp_path: Path) -> None:
+    artifact = tmp_path / "rhs-preflight.json"
+    valid = _native_rule_payload("valid")
+    invalid = _native_rule_payload("invalid", rhs_no_edge=True)
+    approved, audit = preflight_rhs_rule_catalogs(
+        {0: [invalid, valid], 2: [valid]},
+        source_artifacts={
+            0: tmp_path / "target0.jsonl",
+            2: tmp_path / "target2.jsonl",
+        },
+        artifact_path=artifact,
+    )
+    assert approved == {0: [valid], 2: [valid]}
+    assert audit["schema_version"] == RHS_CHEMISTRY_PREFLIGHT_SCHEMA
+    assert audit["status"] == "PASS"
+    assert audit["approved_rule_counts"] == {"0": 1, "2": 1}
+    rejected = audit["rules"]["0"][0]
+    assert rejected["candidate_id"] == "invalid"
+    assert rejected["errors"][0]["code"] == "T8_RHS_BOND_NO_EDGE_MISMATCH"
+    assert rejected["errors"][0]["field"] == "rhs_pair[0,1]"
+    assert json.loads(artifact.read_text(encoding="utf-8")) == audit
+
+
+def test_rhs_preflight_zero_usable_branch_is_typed_blocker(tmp_path: Path) -> None:
+    artifact = tmp_path / "rhs-preflight.json"
+    invalid = _native_rule_payload("invalid", rhs_no_edge=True)
+    valid = _native_rule_payload("valid")
+    try:
+        preflight_rhs_rule_catalogs(
+            {0: [invalid], 2: [valid]},
+            source_artifacts={
+                0: tmp_path / "target0.jsonl",
+                2: tmp_path / "target2.jsonl",
+            },
+            artifact_path=artifact,
+        )
+    except T8FinalizationError as exc:
+        evidence = exc.to_dict()
+    else:  # pragma: no cover
+        raise RuntimeError("RHS-empty target branch unexpectedly passed")
+    assert evidence["code"] == "T8_RHS_PREFLIGHT_NO_USABLE_RULES"
+    assert evidence["field"] == "branches.approved_rule_counts"
+    assert evidence["actual"] == {"0": 0, "2": 1}
+    audit = json.loads(artifact.read_text(encoding="utf-8"))
+    assert audit["status"] == "BLOCKED"
+    assert audit["invalid_target_branches"] == [0]
+    assert audit["native_rule_application_started"] is False
+    assert audit["gine_candidate_validation_started"] is False
+
+
+def test_rhs_preflight_precedes_native_apply_and_gine() -> None:
+    source = SALVAGE_SOURCE.read_text(encoding="utf-8")
+    run_body = source[source.index("def run_salvage(") :]
+    preflight = run_body.index("preflight_rhs_rule_catalogs(")
+    scorer = run_body.index("FrozenTasteGINEScorer(")
+    native_apply = run_body.index("materialize_smoke_candidates(")
+    assert preflight < scorer < native_apply
 
 
 def test_checkpoint_reload_is_restricted_and_branch_validator_is_scientific() -> None:
@@ -235,7 +311,7 @@ def test_t8_same_gine() -> None:
 
 def test_t8_merge_dedup() -> None:
     source = SALVAGE_SOURCE.read_text(encoding="utf-8")
-    assert "merge_branch_rule_catalogs" in source
+    assert "_merge_preflight_approved_rules" in source
     assert "_deduplicate_generated_candidates" in source
     assert '"canonical_dedup.json"' in source
 
