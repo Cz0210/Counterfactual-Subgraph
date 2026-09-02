@@ -50,6 +50,19 @@ from .early_launch_gate import (
     main_priority_runtime_action,
 )
 from .generators import ChemLLMGeneratorAdapter, ProposalGenerator, RuntimeGeneratorIdentity
+from .isolated_chemllm_load import (
+    CHEMLLM_2B_REPOSITORY_ID,
+    CHEMLLM_2B_REVISION,
+    CHEMLLM_2B_TOTAL_PARAMETERS,
+    ChemLLM2BSnapshotPin,
+    audit_remote_code,
+    build_isolated_child_command,
+    build_isolated_child_environment,
+    pin_chemllm_2b_snapshot,
+    prepare_fresh_output_root,
+    run_isolated_child_probe,
+    validate_isolated_load_receipt,
+)
 from .model_scale_registry import (
     FileIdentity,
     ModelScaleEntry,
@@ -96,6 +109,8 @@ __all__ = [
     "AVAILABLE", "ArtifactPin", "AttemptRegime",
     "BACEReferenceEvidence", "BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT", "BRICSFixedGenerator",
     "BRICSFragmentRecord", "BRICSVocabulary", "CandidatePool", "CandidateRecord",
+    "CHEMLLM_2B_REPOSITORY_ID", "CHEMLLM_2B_REVISION",
+    "CHEMLLM_2B_TOTAL_PARAMETERS", "ChemLLM2BSnapshotPin",
     "ChemLLMGeneratorAdapter", "CommonDownstreamPlan", "DecodingConfig",
     "CORE_VARIANT_ORDER", "CoreLLMVariant", "CoreRunSpec",
     "DecodingRegime", "EarlyLaunchDecision", "EarlyLaunchSnapshot",
@@ -111,13 +126,15 @@ __all__ = [
     "ScaleFallbackAssetTopology", "SeedManifest", "StageAssetTopology", "StageScaleProposalGenerator",
     "SFT_AUXILIARY_STATE",
     "TrainingMolecule", "artifact_sha256", "assert_matched_adaptation",
-    "build_common_downstream_plan", "build_proposal_record",
+    "audit_remote_code", "build_common_downstream_plan", "build_isolated_child_command",
+    "build_isolated_child_environment", "build_proposal_record",
     "build_train_only_brics_vocabulary", "compare_model_scale_inputs",
     "count_actual_loaded_parameters", "evaluate_early_launch_gate",
     "derive_core_reference", "load_authorized_launch_decision", "load_core_run_spec",
     "evaluate_runtime_model_evidence", "load_bace_reference_v2",
-    "load_model_scale_registry", "main_priority_runtime_action", "proposal_output_template", "require_exact_revision",
-    "run_core_variant", "run_manifest_template", "runtime_run_contract_sha256", "status_core_run", "summarize_novelty", "training_molecules_from_mappings",
+    "load_model_scale_registry", "main_priority_runtime_action", "pin_chemllm_2b_snapshot",
+    "prepare_fresh_output_root", "proposal_output_template", "require_exact_revision",
+    "run_core_variant", "run_isolated_child_probe", "run_manifest_template", "runtime_run_contract_sha256", "status_core_run", "summarize_novelty", "training_molecules_from_mappings",
     "validate_attempt_matched_schedules", "validate_non_factorial_design",
-    "validate_off_the_shelf_7b_parameter_report", "validate_proposal_record", "validate_stage_config_against_reference", "validate_variant_artifact_bindings",
+    "validate_isolated_load_receipt", "validate_off_the_shelf_7b_parameter_report", "validate_proposal_record", "validate_stage_config_against_reference", "validate_variant_artifact_bindings",
 ]

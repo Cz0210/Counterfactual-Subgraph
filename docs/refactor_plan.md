@@ -3933,3 +3933,22 @@ Mutagenicity roadmaps.
   exposing a signal or SQLite API.
 - [ ] Let the closeout controller consume a PASS receipt only after exact PID,
   start-ticks, command, root, and next-safe-checkpoint verification.
+
+## 2026-09-03: Pinned ChemLLM 2B isolated-load evidence
+
+- [x] Add a physical local-snapshot gate for the exact
+  `AI4Chem/CHEMLLM-2b-1_5` revision and downloaded safetensors shards.
+- [x] Statically inventory and reject remote code with network, subprocess,
+  dynamic-code, or filesystem-write side effects before importing it.
+- [x] Re-exec the audit under `python -I -B`, `PYTHONNOUSERSITE=1`, offline
+  local-only Hugging Face settings, a fresh `HF_MODULES_CACHE`, and hidden CUDA.
+- [x] Support a metadata-only config/tokenizer/model-class import and a
+  separate CPU-weight mode that emits the shared actual-loaded tensor count.
+- [x] Publish a fresh runtime-adoption overlay for existing launch gates while
+  leaving the downloaded snapshot manifest byte-for-byte unchanged.
+- [x] Keep the optional tiny forward disabled by default and require CPU-load
+  mode when it is explicitly requested.
+- [x] Add a mock orchestration test proving no shell, GPU visibility, user-site
+  import, main GPU lock, or main output-root write is used.
+- [ ] Run the real CPU-load audit on AutoDL only after an operator supplies the
+  current manifest byte hash and a fresh non-main evidence root.

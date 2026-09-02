@@ -17215,3 +17215,23 @@ must not be presented as an actual loaded-parameter count.
   `stop_action_pending_exact_pid_handover=true`; the existing owner remains
   responsible for exact PID/start-ticks/command/root verification and any
   later graceful handover.
+
+# 2026-09-03: Fail closed before importing the pinned ChemLLM 2B remote code
+
+- Motivation: exact safetensors-header counts prove downloaded tensor shape
+  inventory, but they do not prove that the snapshot's custom Python can be
+  imported safely or that an instantiated model has the same parameter count.
+- Decision: freeze the physical `CHEMLLM-2b-1_5` revision, manifest byte hash,
+  remote-code inventory, config, safetensors index, and every referenced shard.
+  Reject network/process/dynamic-code/write side effects by AST before import,
+  then repeat the audit in an offline `python -I -B` child with a fresh dynamic
+  module cache, no user site, and no visible CUDA devices.  Metadata mode may
+  prove config/tokenizer/model-class import only; only a complete CPU weight
+  load may emit `ACTUAL_LOADED_WEIGHTS` evidence through the shared parameter
+  counter.  Tiny forward remains optional and off by default.
+- Impact: the framework can close the 2B runtime-evidence blocker without
+  acquiring a project GPU lock, writing a main result root, or mistaking header
+  metadata for an instantiated model.  A fresh adoption overlay carries the
+  existing runtime gate's two isolated-import booleans and binds the separate
+  load receipt/report; the original snapshot manifest is never rewritten.
+  This commit performs no real model load and does not authorize LLM science.
