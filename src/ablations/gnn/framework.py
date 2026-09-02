@@ -597,7 +597,7 @@ def load_ablation_config(
             )
         )
     names = tuple(item.name for item in normalized_backbones)
-    if names != REQUIRED_BACKBONES or set(names) != set(available_gnn_backbones()):
+    if names != REQUIRED_BACKBONES:
         raise GNNAblationConfigError(
             "backbones must appear exactly as gine, gin, gcn, gatv2"
         )

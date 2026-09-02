@@ -195,6 +195,16 @@ def build_backbone(
         "normalization",
         "residual",
     }
+    if canonical == "gps":
+        allowed.update(
+            {
+                "rwpe_walk_length",
+                "attention_heads",
+                "local_mpnn",
+                "global_attention",
+                "backend",
+            }
+        )
     unknown = sorted(set(values) - allowed)
     if unknown:
         raise ValueError(f"Unsupported GNN build configuration fields: {unknown}")
@@ -590,6 +600,20 @@ register_gnn_backbone(
         edge_feature_mode="native_edge_conditioned_message",
         description="GIN-style sum aggregation with learned bond-conditioned messages.",
         aliases=("gineconv",),
+    )
+)
+register_gnn_backbone(
+    GNNBackboneSpec(
+        name="gps",
+        display_name="GraphGPS",
+        edge_feature_mode=(
+            "local_gine_native_edge_conditioned_message_plus_global_attention"
+        ),
+        description=(
+            "GraphGPS with local GINE bond-conditioned messages, topology-only "
+            "random-walk positional encodings, and global multi-head attention."
+        ),
+        aliases=("graphgps", "gpsconv"),
     )
 )
 register_gnn_backbone(

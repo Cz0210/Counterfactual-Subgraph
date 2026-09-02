@@ -17104,3 +17104,24 @@ must not be presented as an actual loaded-parameter count.
 - Impact: this adds no GPU work, downloads no model, and does not mutate a main
   result root or matrix authority.  It replaces the config-only launch gap
   while retaining fail-closed evidence and main-table priority.
+
+# 2026-09-03: Register parameter-matched GraphGPS as the fifth proposal-fixed backbone
+
+- Motivation: the BACE/Ours classifier sensitivity study needs one hybrid
+  local/global backbone in addition to GINE, GIN, GCN, and GATv2, without
+  changing the frozen candidate universe or using held-out results to size the
+  model.  The actual reloaded BACE GINE contains 1,432,583 parameters.
+- Decision: register GraphGPS with five allowed hidden dimensions only
+  (`96,128,160,192,256`) and select by absolute parameter-count proximity under
+  a 15% relative-difference gate.  An audited PyG `GPSConv` dry-run selects
+  hidden dimension 160 (1,608,327 parameters, 12.2676% difference); all other
+  allowed dimensions fail the gate.  Selection never reads validation or test
+  metrics.  Random-walk positional encodings use length 16 and topology only,
+  while local GINE receives the already projected bond embedding directly.
+- Execution boundary: the five-backbone framework is config-only until the
+  unique main authority is 16/16 and its final audit/Figure 3/Figure 4/Table 2
+  receipts pass with explicit GNN authorization.  Graph-Mamba is registered
+  only as pinned metadata at commit
+  `acb4a2321d46f4044cb5e073a9fadd47eb4f343f`; unverified licensing and missing
+  molecular compatibility keep it non-runnable.  No GNN science or GPU lease
+  is created by this change.

@@ -1,0 +1,28 @@
+schema_version: graph_mamba_optional_metadata_v1
+registered: true
+run_enabled: false
+role: OPTIONAL_SEQUENCE_AWARE_BACKBONE
+official_repository: https://github.com/bowang-lab/Graph-Mamba
+official_commit: acb4a2321d46f4044cb5e073a9fadd47eb4f343f
+paper_arxiv: "2402.00789"
+metadata_audited_at: "2026-09-03"
+weights_downloaded: false
+code_downloaded: false
+license_status: NOT_FOUND_OR_UNVERIFIED
+ordering_requirements:
+  input_dependent_node_selection: true
+  node_prioritization: true
+  permutation_or_ordering_policy_must_be_frozen: true
+  ordering_policy_source: official_implementation_required
+compatibility:
+  molecular_edge_features: REQUIRES_IMPLEMENTATION_AUDIT
+  project_feature_schema: REQUIRES_IMPLEMENTATION_AUDIT
+  proposal_fixed_pipeline: METADATA_ONLY_NOT_VERIFIED
+  checkpoint_bundle: NOT_IMPLEMENTED
+blockers:
+  - RUN_GRAPH_MAMBA=0
+  - license_not_verified
+  - official_implementation_not_vendored
+  - molecular_edge_feature_compatibility_not_verified
+science_started: false
+gpu_lock_allowed: false

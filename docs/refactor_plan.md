@@ -3902,3 +3902,19 @@ Mutagenicity roadmaps.
   runtime paths and command entrypoints are independently audited.
 - [ ] Start science only after a matching project-owner authorization receipt
   and a fresh live gate PASS; main-table GPU demand remains preemptive.
+
+## 2026-09-03: Five-backbone BACE proposal-fixed framework
+
+- [x] Add GraphGPS to the molecular backbone registry with explicit local-GINE
+  bond handling and global multi-head attention.
+- [x] Add topology-only length-16 random-walk positional preprocessing with a
+  fixed-shape runtime gate.
+- [x] Bind the actual 1,432,583-parameter BACE GINE receipt and select GraphGPS
+  hidden dimension 160 from only `96,128,160,192,256` under the 15% gate.
+- [x] Add a no-training analytical/runtime parameter dry-run and focused
+  registry, RWPE, shape, edge-gradient, proposal-hash, cohort, and leakage tests.
+- [x] Register Graph-Mamba metadata only and fail closed on execution.
+- [ ] Add the post-16/16 five-backbone launcher/status tools and exact two-GPU
+  schedule without starting science.
+- [ ] Supply the runtime BACE/Ours candidate-universe receipt and obtain a
+  separate explicit GNN run authorization after the main matrix closes.

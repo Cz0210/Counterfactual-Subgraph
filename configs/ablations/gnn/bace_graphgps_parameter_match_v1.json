@@ -1,0 +1,43 @@
+{
+  "schema_version": "graphgps_parameter_match_v1",
+  "status": "PASS",
+  "dataset": "bace",
+  "method": "ours",
+  "reference_backbone": "gine",
+  "candidate_backbone": "gps",
+  "reference_receipt": "configs/ablations/gnn/bace_gine_reference_parameter_receipt_v1.json",
+  "reference_parameter_count": 1432583,
+  "allowed_hidden_dims": [96, 128, 160, 192, 256],
+  "max_relative_difference": 0.15,
+  "selected_hidden_dim": 160,
+  "selected_parameter_count": 1608327,
+  "selected_relative_difference": 0.12267631264645748,
+  "candidates": [
+    {"hidden_dim": 96, "parameter_count": 590215, "absolute_difference": 842368, "relative_difference": 0.5880064191743166, "within_tolerance": false},
+    {"hidden_dim": 128, "parameter_count": 1036807, "absolute_difference": 395776, "relative_difference": 0.2762674134762174, "within_tolerance": false},
+    {"hidden_dim": 160, "parameter_count": 1608327, "absolute_difference": 175744, "relative_difference": 0.12267631264645748, "within_tolerance": true},
+    {"hidden_dim": 192, "parameter_count": 2304775, "absolute_difference": 872192, "relative_difference": 0.6088247591937082, "within_tolerance": false},
+    {"hidden_dim": 256, "parameter_count": 4072455, "absolute_difference": 2639872, "relative_difference": 1.8427358135619367, "within_tolerance": false}
+  ],
+  "parameter_formula": {
+    "schema_version": "graphgps_parameter_formula_v1",
+    "expression_bace_binary": "61*hidden_dim^2 + 292*hidden_dim + 7",
+    "node_embedding_cardinality_sum": 173,
+    "edge_embedding_cardinality_sum": 19,
+    "rwpe_walk_length": 16,
+    "num_layers": 5,
+    "num_classes": 2,
+    "local_gine_edge_dim": null,
+    "edge_projection_reason": "bond embeddings already have hidden_dim dimensions"
+  },
+  "runtime_verification": {
+    "environment": "AutoDL smiles_pip118 CPU dry-run",
+    "torch_geometric_version": "2.8.0",
+    "gpsconv_available": true,
+    "add_random_walk_pe_available": true,
+    "all_candidate_counts_equal_formula": true
+  },
+  "selection_inputs": ["reference_parameter_count", "allowed_hidden_dims", "model_architecture"],
+  "validation_metrics_loaded": false,
+  "test_metrics_loaded": false
+}

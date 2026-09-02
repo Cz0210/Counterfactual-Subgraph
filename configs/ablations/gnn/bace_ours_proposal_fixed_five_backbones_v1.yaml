@@ -1,0 +1,105 @@
+schema_version: gnn_five_backbone_proposal_fixed_v1
+experiment:
+  id: bace_ours_proposal_fixed_five_backbones_v1
+  dataset: bace
+  method: ours
+  mode: proposal_fixed
+  primary_seed: 7
+  optional_seeds:
+    - 17
+    - 27
+  max_concurrent_gpus: 2
+  science_started: false
+backbones:
+  - name: gine
+    role: reference
+    model_config: configs/gnn/gine.yaml
+    checkpoint_policy: adopt_exact_bace_main_if_verified
+  - name: gin
+    role: ablation
+    model_config: configs/gnn/gin.yaml
+    checkpoint_policy: train
+  - name: gcn
+    role: ablation
+    model_config: configs/gnn/gcn.yaml
+    checkpoint_policy: train
+  - name: gatv2
+    role: ablation
+    model_config: configs/gnn/gatv2.yaml
+    checkpoint_policy: train
+  - name: gps
+    role: ablation
+    model_config: configs/gnn/gps.yaml
+    checkpoint_policy: train
+graphgps:
+  rwpe_walk_length: 16
+  rwpe_source: topology_only_preprocessing
+  local_mpnn: gine
+  global_attention: multihead
+  num_layers: 5
+  attention_heads: 4
+  dropout: 0.2
+  pooling: mean
+  allowed_hidden_dims:
+    - 96
+    - 128
+    - 160
+    - 192
+    - 256
+  selected_hidden_dim: 160
+  max_parameter_difference_fraction: 0.15
+  reference_parameter_receipt: configs/ablations/gnn/bace_gine_reference_parameter_receipt_v1.json
+  parameter_match_receipt: configs/ablations/gnn/bace_graphgps_parameter_match_v1.json
+proposal_fixed:
+  source: bace_ours_main_candidate_pool
+  candidate_identity_hash_required: true
+  runtime_candidate_manifest_required: true
+  rerun_chemllm: false
+  rerun_ppo: false
+  selector_shared: true
+  verifier_shared: true
+  evaluation_shared: true
+splits:
+  classifier_fit: train
+  checkpoint_selection: validation
+  temperature_calibration: calibration
+  final_evaluation: test
+  test_open_after_selector_freeze: true
+cohorts:
+  native: true
+  common_five_backbone_intersection: true
+resource_reporting:
+  total_parameters: required
+  estimated_flops: required
+  peak_vram_bytes: required
+  training_gpu_hours: required
+launch_gate:
+  matrix_complete_cells: 16
+  matrix_total_cells: 16
+  final_matrix_audit: PASS
+  final_figure3: PASS
+  final_figure4: PASS
+  final_table2: PASS
+  explicit_gnn_run_authorization: true
+  no_main_task_waiting_for_gpu: true
+  run_gnn_ablation_default: false
+scheduling:
+  gpu0:
+    - gine
+    - gin
+    - gps
+  gpu1:
+    - gcn
+    - gatv2
+  phase1_seeds:
+    - 7
+  optional_seed_expansion:
+    - 17
+    - 27
+graph_mamba:
+  metadata: configs/ablations/gnn/graph_mamba_optional_v1.yaml
+  registered: true
+  run_enabled: false
+outputs:
+  root_template: "{runtime_root}/outputs/autodl/ablations/gnn/bace_ours_proposal_fixed_five_backbones_v1/{backbone}/seed{seed}/{attempt_id}"
+  main_matrix_write_allowed: false

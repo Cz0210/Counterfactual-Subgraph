@@ -452,11 +452,38 @@ def build_molecular_gnn(
     readout_layers: int = 2,
     normalization: str = "batch_norm",
     residual: bool = True,
-) -> MolecularGNN:
+    rwpe_walk_length: int = 16,
+    attention_heads: int = 4,
+    local_mpnn: str = "gine",
+    global_attention: str = "multihead",
+    backend: str = "auto",
+) -> Any:
     """Build a classifier through the only public backbone-selection API."""
 
+    canonical = normalize_gnn_backbone(backbone)
+    if canonical == "gps":
+        from src.models.graphgps_backbone import build_graphgps_molecular_gnn
+
+        return build_graphgps_molecular_gnn(
+            num_classes=int(num_classes),
+            node_feature_schema=node_feature_schema,
+            edge_feature_schema=edge_feature_schema,
+            num_layers=int(num_layers),
+            hidden_dim=int(hidden_dim),
+            dropout=float(dropout),
+            pooling=pooling,
+            readout_layers=int(readout_layers),
+            normalization=normalization,
+            residual=bool(residual),
+            rwpe_walk_length=int(rwpe_walk_length),
+            attention_heads=int(attention_heads),
+            local_mpnn=local_mpnn,
+            global_attention=global_attention,
+            backend=backend,
+        )
+
     config = MolecularGNNConfig(
-        backbone=backbone,
+        backbone=canonical,
         num_classes=int(num_classes),
         num_layers=int(num_layers),
         hidden_dim=int(hidden_dim),
