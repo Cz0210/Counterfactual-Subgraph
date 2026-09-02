@@ -3926,5 +3926,10 @@ Mutagenicity roadmaps.
 - [x] Defer all large state loads until 5k/10k/12.5k are present.
 - [x] Compute the six preregistered train-side gates over consecutive windows.
 - [x] Keep signal delivery outside the read-only auditor.
+- [x] Add a persistent dataset-specific relay that heartbeats below 12.5k and
+  triggers a fresh one-shot audit for every newly observed committed audit
+  checkpoint, so an initial waiting result cannot suppress later review.
+- [x] Persist convergence as `STOP_ACTION_PENDING_EXACT_PID_HANDOVER` without
+  exposing a signal or SQLite API.
 - [ ] Let the closeout controller consume a PASS receipt only after exact PID,
   start-ticks, command, root, and next-safe-checkpoint verification.

@@ -17196,3 +17196,22 @@ must not be presented as an actual loaded-parameter count.
   parse reasons.  It reopens the source recovery again before append and still
   uses the unique matrix authority.  The finalizer cannot signal a process,
   launch training, open an active database, or authorize a second recovery.
+
+# 2026-09-03: Re-run the T14 external audit at each new committed checkpoint
+
+- Motivation: the one-shot auditor correctly returns a metadata-only wait
+  before 12.5k, but a queue that marks that invocation dispatched forever
+  would never revisit convergence when 12.5k or a later checkpoint arrives.
+- Decision: add one narrow persistent relay.  It validates only the sealed
+  checkpoint directory/manifest/completion-marker surface while waiting and
+  starts a fresh one-shot audit root only for a newly observed committed
+  12.5k, 15k, 17.5k, or 20k boundary.  If several checkpoints arrive while
+  the relay is offline, one audit of the newest boundary covers the complete
+  eligible sequence.  The relay never opens active or checkpoint SQLite and
+  never signals a process.
+- Impact: a non-converged audit waits for the next checkpoint instead of
+  becoming a permanent terminal dispatch.  A converged audit produces a
+  self-hashed relay receipt and heartbeat with
+  `stop_action_pending_exact_pid_handover=true`; the existing owner remains
+  responsible for exact PID/start-ticks/command/root verification and any
+  later graceful handover.
