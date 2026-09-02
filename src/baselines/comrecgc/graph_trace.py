@@ -21,7 +21,7 @@ MODEL_CF_IMPORTANCE_THRESHOLD = 0.5
 TRACE_CHECKPOINT_SCHEMA_VERSION = "comrecgc_action_trace_state_v1"
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True)
 class SemanticTransitionKey:
     """One scientific single-edit class between two exact graph payloads.
 
@@ -33,9 +33,13 @@ class SemanticTransitionKey:
     same target payload.
     """
 
-    source_graph_sha256: str
-    target_graph_sha256: str
-    operation_class: str
+    pinned_upstream_graph_hash: str
+    normalized_action_type: str
+    normalized_single_edit_signature: str
+    downstream_graph_hash: str
+    action_parameter_digest: str
+    source_head_id: str | None = None
+    generation_step: int | None = None
 
 
 class SemanticTransitionStatus(str, Enum):
@@ -76,9 +80,23 @@ class SemanticTransitionResolution:
             "status": self.status.value,
             "semantic_key": (
                 {
-                    "source_graph_sha256": self.semantic_key.source_graph_sha256,
-                    "target_graph_sha256": self.semantic_key.target_graph_sha256,
-                    "operation_class": self.semantic_key.operation_class,
+                    "pinned_upstream_graph_hash": (
+                        self.semantic_key.pinned_upstream_graph_hash
+                    ),
+                    "normalized_action_type": (
+                        self.semantic_key.normalized_action_type
+                    ),
+                    "normalized_single_edit_signature": (
+                        self.semantic_key.normalized_single_edit_signature
+                    ),
+                    "downstream_graph_hash": (
+                        self.semantic_key.downstream_graph_hash
+                    ),
+                    "action_parameter_digest": (
+                        self.semantic_key.action_parameter_digest
+                    ),
+                    "source_head_id": self.semantic_key.source_head_id,
+                    "generation_step": self.semantic_key.generation_step,
                 }
                 if self.semantic_key is not None
                 else None
@@ -1216,12 +1234,60 @@ def _semantic_transition_key(
     source_graph: Any,
     target_graph: Any,
     action: Sequence[Any],
+    *,
+    source_head_id: str | int | None = None,
+    generation_step: int | None = None,
 ) -> SemanticTransitionKey:
     resolved = _normalized_action_tuple(action)
+    operation = str(resolved[0])
+    source_payload = normalized_untyped_graph_payload(source_graph)
+    target_payload = normalized_untyped_graph_payload(target_graph)
+    source_hash = stable_json_sha256(source_payload)
+    target_hash = stable_json_sha256(target_payload)
+    # This signature describes the canonical graph effect, not the raw action
+    # representative.  Symmetric node indices therefore collapse only when
+    # they replay to the same full attributed COMRECGC graph under the same
+    # exact operation class.
+    signature_payload = {
+        "schema_version": "comrecgc_normalized_single_edit_signature_v1",
+        "normalized_action_type": operation,
+        "pinned_upstream_graph_hash": source_hash,
+        "downstream_graph_hash": target_hash,
+        "node_count_delta": int(target_payload["num_nodes"])
+        - int(source_payload["num_nodes"]),
+        "directed_edge_count_delta": len(target_payload["directed_edges"])
+        - len(source_payload["directed_edges"]),
+        "source_node_feature_multiset_sha256": stable_json_sha256(
+            sorted(
+                source_payload["x"],
+                key=lambda row: json.dumps(row, separators=(",", ":")),
+            )
+        ),
+        "target_node_feature_multiset_sha256": stable_json_sha256(
+            sorted(
+                target_payload["x"],
+                key=lambda row: json.dumps(row, separators=(",", ":")),
+            )
+        ),
+    }
+    signature = stable_json_sha256(signature_payload)
+    parameter_digest = stable_json_sha256(
+        {
+            "schema_version": "comrecgc_semantic_action_parameters_v1",
+            "normalized_action_type": operation,
+            "normalized_single_edit_signature": signature,
+        }
+    )
     return SemanticTransitionKey(
-        source_graph_sha256=stable_untyped_graph_sha256(source_graph),
-        target_graph_sha256=stable_untyped_graph_sha256(target_graph),
-        operation_class=str(resolved[0]),
+        pinned_upstream_graph_hash=source_hash,
+        normalized_action_type=operation,
+        normalized_single_edit_signature=signature,
+        downstream_graph_hash=target_hash,
+        action_parameter_digest=parameter_digest,
+        source_head_id=(None if source_head_id is None else str(source_head_id)),
+        generation_step=(
+            None if generation_step is None else int(generation_step)
+        ),
     )
 
 
@@ -1231,6 +1297,8 @@ def collapse_semantic_transition_aliases(
     *,
     authoritative_historic_action: Sequence[Any] | None = None,
     candidate_actions: Sequence[Sequence[Any]] | None = None,
+    source_head_id: str | int | None = None,
+    generation_step: int | None = None,
 ) -> SemanticTransitionResolution:
     """Resolve symmetric raw action aliases without relaxing single-edit science.
 
@@ -1283,7 +1351,13 @@ def collapse_semantic_transition_aliases(
         if serialized in unique_actions:
             continue
         unique_actions[serialized] = resolved
-        key = _semantic_transition_key(source_graph, target_graph, resolved)
+        key = _semantic_transition_key(
+            source_graph,
+            target_graph,
+            resolved,
+            source_head_id=source_head_id,
+            generation_step=generation_step,
+        )
         classes.setdefault(key, []).append(resolved)
 
     raw_unique_count = len(unique_actions)
@@ -1296,7 +1370,13 @@ def collapse_semantic_transition_aliases(
 
     authoritative_pin_used = historic_pin is not None
     if historic_pin is not None:
-        pin_key = _semantic_transition_key(source_graph, target_graph, historic_pin)
+        pin_key = _semantic_transition_key(
+            source_graph,
+            target_graph,
+            historic_pin,
+            source_head_id=source_head_id,
+            generation_step=generation_step,
+        )
         class_actions = classes.get(pin_key)
         if class_actions is None or historic_pin not in class_actions:
             raise ValueError(
@@ -1768,6 +1848,10 @@ def _lineage_recovery_context(
                     source_graph,
                     target_graph,
                     authoritative_historic_action=resolved_action,
+                    source_head_id=event.get("head_id", event.get("head_index")),
+                    generation_step=event.get(
+                        "generation_step", event.get("move_index")
+                    ),
                 )
             except ValueError:
                 audit["semantic_transition_failure_count"] += 1
@@ -1839,6 +1923,10 @@ def _lineage_recovery_context(
                     source_graph,
                     target_graph,
                     candidate_actions=raw_candidates,
+                    source_head_id=event.get("head_id", event.get("head_index")),
+                    generation_step=event.get(
+                        "generation_step", event.get("move_index")
+                    ),
                 )
             except ValueError:
                 audit["legacy_inference_ambiguous_count"] += 1

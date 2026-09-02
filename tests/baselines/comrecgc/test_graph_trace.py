@@ -810,6 +810,16 @@ def test_mut_historical_symmetric_nr_alias_rows_use_authoritative_pin(
     assert resolution.raw_unique_candidate_count == len(aliases)
     assert resolution.raw_alias_count == len(aliases) - 1
     assert resolution.lineage_valid_candidate_count == 1
+    assert resolution.semantic_key is not None
+    assert resolution.semantic_key.pinned_upstream_graph_hash == (
+        stable_untyped_graph_sha256(source)
+    )
+    assert resolution.semantic_key.downstream_graph_hash == (
+        stable_untyped_graph_sha256(target)
+    )
+    assert resolution.semantic_key.normalized_action_type == "NR"
+    assert len(resolution.semantic_key.normalized_single_edit_signature) == 64
+    assert len(resolution.semantic_key.action_parameter_digest) == 64
 
     audit: dict[str, object] = {}
     lineage = recover_candidate_lineage_from_selected_trace(
@@ -841,6 +851,9 @@ def test_mut_historical_symmetric_nr_alias_rows_use_authoritative_pin(
     assert recovered["semantic_transition_resolution"]["raw_alias_count"] == (
         len(aliases) - 1
     )
+    recovered_key = recovered["semantic_transition_resolution"]["semantic_key"]
+    assert recovered_key["source_head_id"] == "0"
+    assert recovered_key["generation_step"] == move_index
     assert audit["semantic_transition_raw_alias_event_count"] == 1
 
 
