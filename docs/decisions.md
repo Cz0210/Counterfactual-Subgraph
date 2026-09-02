@@ -1,5 +1,60 @@
 # Decisions Log
 
+## [2026-09-02] Close T8 salvage failures with typed evidence and keep T13 fresh
+
+### Motivation
+
+The retained TasteMolNet GlobalGCE target-0 and target-2 branches contain real
+25-epoch model, rule, checkpoint, train-cohort, and frozen-GINE evidence. The
+downstream salvage controller nevertheless surfaced a bare ``AssertionError``
+when a rerun receipt did not name exactly one target. That traceback did not
+identify the failed field or artifact and could not safely distinguish a
+single-branch retry from a terminal multi-branch blocker.
+
+### Decision
+
+Replace that assertion with ``T8FinalizationError`` carrying ``code``,
+``field``, ``expected``, ``actual``, ``source_manifest``, ``source_artifact``,
+and ``stage``. Continue to permit only one bounded target-specific retry;
+malformed or multi-target receipts fail closed and never select an arbitrary
+branch. The read-only salvage reopens both source trees, rechecks model/rule/
+checkpoint bytes, train-only split/cohort, feature schema, calibrated GINE and
+temperature identities, canonical merge/dedup, and real original-order
+untargeted strict flips. Its private sealed state records per-branch adoption,
+inventory, merged-rule, dedup, strict-flip, terminal, and final-audit evidence
+without mutating either source root.
+
+The authorized salvage smoke requires both target artifacts to pass those
+identity checks, at least one merged canonical rule, and at least one real
+untargeted strict flip across the merged candidate pool.  It does not require
+each training branch to produce a flip.  The ordinary non-salvage T8 route
+retains its stricter per-branch flip minimum.
+
+T13 retains its independent full gate of at least ten canonical unique rules
+with no copied backfill. The fixed-25-epoch T8 recovery used exact-top-k
+pruning while T13 full uses the non-pruned 100-epoch contract, so the smoke
+checkpoint is not represented as a strict optimizer continuation. T13 starts
+one fresh full attempt after typed T8 PASS; T8 remains prerequisite evidence,
+not a silently incompatible initializer.
+
+### Consequences
+
+- A rerun-selection failure now names the exact field and immutable source
+  artifact instead of emitting an unclassified ``AssertionError``.
+- Passing sibling branches remain retained; neither branch is retrained unless
+  the typed single-target receipt explicitly requests the one bounded retry.
+- T8 smoke and T13 full remain separate scientific gates, and no rule is
+  duplicated to satisfy the T13 minimum.
+- This change launches no science, touches no active output root, and keeps all
+  LLM/GNN ablations disabled.
+
+### Status
+
+Implemented with focused local tests; AutoDL deployment and real salvage remain
+pending.
+
+---
+
 ## [2026-09-01] Relay the recovered T14 generation into its paper terminal
 
 ### Motivation
@@ -16708,3 +16763,81 @@ part of this handoff.
   1,412 rows, zero strict flips, and only null WNode values, so it can be
   independently revalidated and retained.  Resume continues from the existing
   science root; candidate generation is not rerun.
+
+# 2026-09-02: Relocate the Taste T11 publication policy by content, not pathname
+
+- Motivation: T11 science and its sealed final artifacts can be published from
+  a newer immutable execution checkout, while the original scoped-policy
+  receipt records the absolute policy path of the older checkout.  The tracked
+  policy bytes are unchanged, so making an absolute deployment pathname a
+  scientific identity would force an unnecessary science rerun.
+- Decision: keep the ordinary Taste policy-receipt validator strict and add a
+  T11 publication-only relocation receipt.  Construction reopens both physical
+  regular non-symlink policy files, requires byte-identical raw SHA-256 and
+  identical canonical policy content, then validates the original receipt and
+  private data/cache authority without changing them.  Reopening substitutes
+  only the original receipt's recorded `policy_path` into an otherwise exact
+  policy identity; every non-path evidence field, both policy hashes, the
+  receipt hash, policy version/ID, reporting authorization, and
+  no-redistribution state remain exact.
+- Publication boundary: the overlay schema is
+  `tastemolnet_policy_path_relocation_receipt_v1`.  It is created under a fresh
+  publication-reconciliation root and never writes the sealed T11 science or
+  final root.  The validator reads the named receipt rather than treating
+  unrelated retry logs in that directory as scientific inventory.  The old
+  checkout may disappear after construction because the immutable original
+  receipt plus the current raw/canonical content hashes close the authority.
+- Scope: this does not add generic path tolerance, does not authorize T12--T14,
+  does not reopen selection or test evaluation, and does not itself modify the
+  matrix authority.  A matrix publication retry must use a fresh append output
+  root and must still pass the ordinary T11 terminal and authority checks.
+
+# 2026-09-02: Collapse only lineage-pinned Mut symmetric raw action aliases
+
+- Motivation: the Mut trace-on adoption replay from historical algorithm
+  commit `7f7ed51a1176de1c23344cda0fbf0e6c5ba210b4` closed all 500 scientific
+  steps but legacy graph-delta recovery rejected five selected NR transitions.
+  Rows 139, 576, 1151, 1892, and 2103 each have two or three symmetric raw
+  node indices that produce the same exact frozen target.  Their historical
+  selected-action records identify NR 8, 29, 12, 5, and 5 respectively; each
+  pin exact-replays the target and is the unique match to the frozen node-ID
+  lineage.  This is raw-index aliasing, not evidence for multiple edits.
+- Decision: identify a semantic transition by the exact untyped source graph
+  SHA, exact untyped target graph SHA, and exact pinned-upstream operation
+  class.  Every raw representative must first exact-replay the target.  Keep
+  all raw aliases in the audit, but use the historical recorded action as the
+  authoritative representative when it is lineage-valid.  If that
+  representative is lineage-invalid, replacement is allowed only by the
+  unique lineage-valid raw action in the same semantic class.  Otherwise emit
+  a typed excluded result; current lineage recovery has no cluster-fill caller
+  and therefore still fails closed on that result.
+- Boundaries: NR and INR, and ER and ERR, remain different semantic classes.
+  Multiple operation classes require an exact historic pin and are never
+  resolved by iteration order.  A missing pin, inconsistent payload replay,
+  non-unique lineage match, or malformed node-ID evidence fails closed.  A
+  content-equivalent frozen graph representative with a disjoint parent node-ID
+  namespace is treated as incomparable metadata, so it cannot override an
+  otherwise exact historic action pin.
+- Impact: the existing recorded-action-first recovery now emits typed semantic
+  alias evidence and counters.  No candidate cluster selection policy, 50k
+  generation, pair store, DBSCAN result, classifier, split, or evaluator is
+  changed or recomputed.
+
+# 2026-09-02: Treat a hash-closed predecessor matrix as immutable during append
+
+- Motivation: the generic registry scanner cannot reconstruct every reviewed
+  publication decision.  In particular, the authoritative AIDS/ComRecGC row
+  intentionally publishes a scientifically valid zero-result cell, while a
+  later generic re-scan classifies its conditional-cost files as incomplete.
+  Requiring row equality during a Taste-only append therefore blocked T11 even
+  though neither the predecessor authority nor T11 science had changed.
+- Decision: a matrix append audits every newly requested Taste terminal under
+  the existing strict method contract, then copies every non-target row from
+  the verified, hash-closed predecessor authority byte-for-byte.  Derived
+  oracle summaries are rebuilt from the final authoritative rows.  The append
+  still requires exactly the requested increase in passing-cell count and
+  atomically publishes a fresh combined hash closure.
+- Impact: an append cannot reinterpret or erase a prior valid-zero decision.
+  New Taste roots still undergo terminal inventory, writer, classifier,
+  temperature, split, freeze-before-test, and scoped-policy validation.  No
+  scientific metric is recomputed and no prior source root is modified.
