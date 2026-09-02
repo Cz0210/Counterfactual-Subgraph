@@ -43,6 +43,13 @@ from src.eval.tastemolnet_t4_oracle_smoke_v2 import HeldPublishedT3
 from src.eval.tastemolnet_t11_policy_path_relocation import (
     validate_t11_policy_path_relocation,
 )
+from src.eval.tastemolnet_globalgce_valid_zero import (
+    AUDIT_SCHEMA as GLOBALGCE_ZERO_AUDIT_SCHEMA,
+    RESULT_TYPE as GLOBALGCE_ZERO_RESULT_TYPE,
+    RUN_MANIFEST_SCHEMA as GLOBALGCE_ZERO_RUN_SCHEMA,
+    TERMINAL_SCHEMA as GLOBALGCE_ZERO_TERMINAL_SCHEMA,
+    validate_valid_zero_source,
+)
 from src.train.molecular_gnn_resume import atomic_rename_directory_noreplace
 from src.utils.tastemolnet_research_policy import (
     load_tastemolnet_research_policy,
@@ -84,8 +91,12 @@ METHOD_CONTRACTS: dict[str, MethodContract] = {
     "GlobalGCE": MethodContract(
         stage="T13_GLOBALGCE_FULL",
         pass_payload=b"PASS\n",
-        run_schema="tastemolnet_t13_run_manifest_v1",
-        audit_schema="tastemolnet_t13_terminal_verification_v1",
+        run_schema=re.compile(
+            rf"(?:tastemolnet_t13_run_manifest_v1|{GLOBALGCE_ZERO_RUN_SCHEMA})"
+        ),
+        audit_schema=re.compile(
+            rf"(?:tastemolnet_t13_terminal_verification_v1|{GLOBALGCE_ZERO_AUDIT_SCHEMA})"
+        ),
     ),
     "ComRecGC": MethodContract(
         stage="T14_COMRECGC_FULL_POSTPROCESS",
@@ -164,6 +175,173 @@ def _schema_matches(value: Any, expected: str | re.Pattern[str]) -> bool:
 def _require_bool(payload: Mapping[str, Any], field: str, expected: bool, *, label: str) -> None:
     if payload.get(field) is not expected:
         raise TasteMatrixAppendError(f"{label}.{field} must be {expected}")
+
+
+def _csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    with _physical_file(path, label=path.name).open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as handle:
+        reader = csv.DictReader(handle)
+        return list(reader.fieldnames or []), [dict(row) for row in reader]
+
+
+def _validate_globalgce_valid_zero_terminal(
+    root: Path,
+    *,
+    manifest: Mapping[str, Any],
+    audit: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+    proc_root: str | Path,
+) -> dict[str, Any]:
+    """Reopen the exact user-authorised zero-rule terminal without imputation."""
+
+    if manifest.get("schema_version") != GLOBALGCE_ZERO_RUN_SCHEMA:
+        return {"valid_zero_result": False}
+    terminal = _read_json(
+        _physical_file(root / "terminal.json", label="GlobalGCE valid-zero terminal")
+    )
+    payloads = (manifest, audit, summary, evaluation, terminal)
+    if any(
+        payload.get("result_type") != GLOBALGCE_ZERO_RESULT_TYPE
+        or payload.get("valid_zero_result") is not True
+        or payload.get("no_valid_rule_generated") is not True
+        or payload.get("recovery_attempts") != 1
+        or payload.get("effective_rule_count") != 0
+        or payload.get("coverage") != 0.0
+        or payload.get("CCRCOV") != 0.0
+        or payload.get("flip_count") != 0
+        or payload.get("cost") != "N/A"
+        or payload.get("numeric_imputation_used") is not False
+        for payload in payloads
+    ):
+        raise TasteMatrixAppendError("GlobalGCE valid-zero metrics were imputed or changed")
+    if (
+        terminal.get("schema_version") != GLOBALGCE_ZERO_TERMINAL_SCHEMA
+        or terminal.get("matrix_append_ready") is not True
+        or manifest.get("worker_wrote_pass") is not False
+        or manifest.get("terminal_verifier")
+        != "separate_valid_zero_finalizer_invocation"
+    ):
+        raise TasteMatrixAppendError("GlobalGCE valid-zero terminal is not independently closed")
+    checks = audit.get("checks")
+    required_checks = {
+        "one_recovery_attempt_only",
+        "both_target_branches_complete",
+        "same_gine_identity",
+        "train_only",
+        "no_calibration_or_test_training_leakage",
+        "checkpoint_and_output_closure",
+        "zero_native_rule_catalogs",
+        "rejection_accounting_complete",
+        "typed_rhs_chemistry_replayed",
+        "typed_scientific_rejections_only",
+        "no_engineering_failure",
+        "no_active_writer",
+        "no_fake_or_duplicated_rules",
+        "zero_metrics_replayed",
+        "active_database_opened",
+        "second_training_attempt_started",
+    }
+    if (
+        not isinstance(checks, Mapping)
+        or any(
+            checks.get(name) is not (False if name in {
+                "active_database_opened", "second_training_attempt_started"
+            } else True)
+            for name in required_checks
+        )
+    ):
+        raise TasteMatrixAppendError("GlobalGCE valid-zero scientific checks changed")
+    for name in ("raw/merged_rules.jsonl", "raw/selected_rules.jsonl"):
+        if _physical_file(root / name, label=name).read_bytes() != b"":
+            raise TasteMatrixAppendError("GlobalGCE valid-zero terminal contains fake rules")
+    figure3_fields, figure3 = _csv_rows(root / "figure3_coverage_vs_k.csv")
+    table2_path = root / "table2_globalgce_k10.csv"
+    table2_fields, table2 = _csv_rows(table2_path)
+    if (
+        [int(row.get("k") or 0) for row in figure3] != list(range(1, 21))
+        or len(table2) != 1
+        or int(table2[0].get("k") or 0) != 10
+        or any(
+            float(row.get("coverage") or -1) != 0.0
+            or float(row.get("CCRCOV") or -1) != 0.0
+            or row.get("cost") != "N/A"
+            or int(row.get("effective_rule_count") or -1) != 0
+            or str(row.get("empty_rule_set") or "").lower() != "true"
+            for row in [*figure3, *table2]
+        )
+        or "cost" not in figure3_fields
+        or "cost" not in table2_fields
+    ):
+        raise TasteMatrixAppendError("GlobalGCE valid-zero Figure3/Table2 changed")
+    copied_source = _read_json(
+        _physical_file(root / "raw/source_verification.json", label="source verification")
+    )
+    replayed_source = validate_valid_zero_source(
+        str(manifest.get("source_recovery_root") or ""), proc_root=proc_root
+    )
+    if (
+        copied_source != replayed_source
+        or terminal.get("source_audit_sha256") != stable_json_sha256(copied_source)
+    ):
+        raise TasteMatrixAppendError("GlobalGCE valid-zero source replay changed")
+    return {
+        "valid_zero_result": True,
+        "result_type": GLOBALGCE_ZERO_RESULT_TYPE,
+        "source_root": replayed_source["source_root"],
+        "source_audit_sha256": stable_json_sha256(replayed_source),
+        "effective_rule_count": 0,
+        "numeric_imputation_used": False,
+    }
+
+
+def _reconcile_globalgce_valid_zero_registry_row(
+    row: Mapping[str, Any], *, terminal_root: str | Path
+) -> dict[str, Any]:
+    """Promote only the registry's known N/A-cost result for an empty rule set."""
+
+    result = dict(row)
+    root = _physical_directory(terminal_root, label="Taste GlobalGCE valid-zero root")
+    manifest = _read_json(root / "run_manifest.json")
+    if manifest.get("schema_version") != GLOBALGCE_ZERO_RUN_SCHEMA:
+        return result
+    terminal = _read_json(root / "terminal.json")
+    reasons = frozenset(
+        reason for reason in str(result.get("rerun_reason") or "").split(";") if reason
+    )
+    allowed = frozenset({"FIGURE3_INVALID:ValueError", "TABLE2_INVALID:ValueError"})
+    if (
+        result.get("dataset") != TARGET_DATASET
+        or result.get("method") != "GlobalGCE"
+        or result.get("status") not in {
+            CellStatus.INCOMPLETE.value,
+            CellStatus.STALE_METRIC.value,
+        }
+        or result.get("k_max") != 20
+        or result.get("table2_k") != 10
+        or reasons != allowed
+        or terminal.get("schema_version") != GLOBALGCE_ZERO_TERMINAL_SCHEMA
+        or terminal.get("result_type") != GLOBALGCE_ZERO_RESULT_TYPE
+        or terminal.get("valid_zero_result") is not True
+        or terminal.get("no_valid_rule_generated") is not True
+        or terminal.get("effective_rule_count") != 0
+        or terminal.get("coverage") != 0.0
+        or terminal.get("CCRCOV") != 0.0
+        or terminal.get("flip_count") != 0
+        or terminal.get("cost") != "N/A"
+        or terminal.get("numeric_imputation_used") is not False
+    ):
+        raise TasteMatrixAppendError(
+            "GlobalGCE valid-zero registry mismatch is not the exact approved shape"
+        )
+    result["status"] = CellStatus.FROZEN_PASS.value
+    result["adoption_reason"] = (
+        "user-authorized, independently replayed valid zero-rule baseline; "
+        "conditional cost is undefined and no numeric value was imputed"
+    )
+    result["rerun_reason"] = ""
+    return result
 
 
 def _safe_inventory_path(root: Path, raw_name: Any, *, label: str) -> Path:
@@ -396,6 +574,18 @@ def _validate_taste_cell(
         _physical_file(root / "evaluation_manifest.json", label="evaluation manifest")
     )
     summary = _read_json(_physical_file(root / "summary.json", label="summary"))
+    valid_zero_evidence = (
+        _validate_globalgce_valid_zero_terminal(
+            root,
+            manifest=manifest,
+            audit=audit,
+            summary=summary,
+            evaluation=evaluation,
+            proc_root=proc_root,
+        )
+        if method == "GlobalGCE"
+        else {"valid_zero_result": False}
+    )
     destination_labels = evaluation.get("destination_labels")
     if destination_labels is None and method == "Ours":
         # T11 v2 records the branch set in summary.json; its evaluation
@@ -548,6 +738,7 @@ def _validate_taste_cell(
         "freeze": freeze,
         "terminal_inventory": terminal,
         "writer_audit": writer_audit,
+        "valid_zero": valid_zero_evidence,
     }
 
 
@@ -708,6 +899,13 @@ def append_tastemolnet_cells(
         for row in result.matrix_rows
     }
     target_keys = {(TARGET_DATASET, method) for method in taste_cells}
+    if "GlobalGCE" in taste_cells:
+        proposed[(TARGET_DATASET, "GlobalGCE")] = (
+            _reconcile_globalgce_valid_zero_registry_row(
+                proposed[(TARGET_DATASET, "GlobalGCE")],
+                terminal_root=taste_cells["GlobalGCE"],
+            )
+        )
     for key, prior_row in prior_rows.items():
         if key in target_keys:
             continue

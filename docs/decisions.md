@@ -17170,3 +17170,29 @@ must not be presented as an actual loaded-parameter count.
 - Impact: LLM admission can become true only when every unfinished main cell
   has a real owner, and naturally closes again when a science process exits
   before its publisher appends the cell.
+
+# 2026-09-03: Publish one complete Taste GlobalGCE recovery as a valid zero rule result
+
+- Motivation: the ordinary T13 route correctly requires 10--20 valid native
+  rules, but the project owner separately authorized an honest zero-result
+  baseline if the sole seed-7, 100-epoch dual-target recovery completes and
+  every learned rule fails the unchanged typed chemistry gate.  Treating that
+  scientific outcome as an engineering crash would discard a completed
+  baseline; weakening the normal T13 minimum or inventing rules would be
+  invalid.
+- Decision: a separate finalizer requires the canonical ordinal-1/max-1
+  attempt receipt, both complete target-0/target-2 branch manifests, the same
+  frozen three-class GINE and train cohort, no calibration/test training
+  leakage, no live writer, and a CPU replay of the saved rule tensors.  Only
+  `GlobalGCENativeRuleError` and the typed source-codec exception class are
+  scientific rejections; generic I/O, import, runtime, index, or value errors
+  remain engineering failures.  The finalizer writes a fresh overlay with an
+  actually empty rule set, a K=1..20 zero plateau, a one-row K=10 empty-set
+  summary, undefined (`N/A`) cost, explicit authorization/observation
+  receipts, and no numeric imputation.
+- Publication impact: the ordinary T13 route is unchanged.  Taste matrix
+  append recognizes only this exact independently replayed alternate terminal
+  schema and narrowly reconciles the generic registry's expected `N/A`-cost
+  parse reasons.  It reopens the source recovery again before append and still
+  uses the unique matrix authority.  The finalizer cannot signal a process,
+  launch training, open an active database, or authorize a second recovery.
