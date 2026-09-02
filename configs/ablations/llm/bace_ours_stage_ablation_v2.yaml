@@ -1,0 +1,58 @@
+schema_version: bace_ours_llm_stage_ablation_v2
+dataset: BACE
+method: Ours
+framework_build_allowed_now: true
+gpu_science_default_enabled: false
+reference_contract: null
+reference_contract_sha256: null
+
+design:
+  scale_stage_full_factorial: false
+  primary_budget: ATTEMPT_MATCHED
+  secondary_budget: VALID_CANDIDATE_MATCHED_DIAGNOSTIC_ONLY
+  variants:
+    - id: A0
+      variant: BRICS_FIXED
+      availability: CPU_PREPARATION_ALLOWED
+      executed_stage: NOT_APPLICABLE
+    - id: A1
+      variant: CHEMLLM_7B_OFF_THE_SHELF
+      display_name: OFF_THE_SHELF_CHEMLLM
+      availability: PENDING_EXACT_BASE_AND_TOKENIZER_PINS
+      project_sft_loaded: false
+      project_ppo_loaded: false
+    - id: A2
+      variant: CHEMLLM_7B_PROJECT_SFT
+      availability: BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT
+      project_sft_loaded: null
+      project_ppo_loaded: false
+    - id: A3
+      variant: CHEMLLM_7B_PROJECT_SFT_PPO
+      availability: BLOCKED_REQUESTED_LABEL_MISMATCH
+      requested_stage: PROJECT_SFT_PPO
+      observed_main_stage: FRESH_LORA_PPO
+      blocker: BACE_MAIN_HAS_NO_INDEPENDENT_PROJECT_SFT_CHECKPOINT
+      reuse_main_result: false
+
+common_proposal_contract:
+  parent_cohort: FROM_BACE_REFERENCE_CONTRACT
+  attempts_per_parent: FROM_BACE_REFERENCE_CONTRACT
+  seed_manifest: FROM_BACE_REFERENCE_CONTRACT
+  prompt_semantics: FROM_BACE_REFERENCE_CONTRACT
+  decoding_regimes: FROM_BACE_REFERENCE_CONTRACT
+  max_new_tokens: FROM_BACE_REFERENCE_CONTRACT
+
+common_downstream:
+  parser: FROM_BACE_REFERENCE_CONTRACT
+  projection: FROM_BACE_REFERENCE_CONTRACT
+  verifier: FROM_BACE_REFERENCE_CONTRACT
+  selector: FROM_BACE_REFERENCE_CONTRACT
+  evaluation: FROM_BACE_REFERENCE_CONTRACT
+  test_after_freeze_only: true
+
+outputs:
+  root: "{runtime_root}/outputs/autodl/ablations/llm/bace_ours_stage_v2/{variant}"
+  aggregate_candidate_metrics: stage_ablation_candidate_metrics.csv
+  aggregate_explanation_metrics: stage_ablation_explanation_metrics.csv
+  aggregate_table: stage_ablation_table.tex
+

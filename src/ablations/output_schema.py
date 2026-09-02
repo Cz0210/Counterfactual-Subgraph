@@ -52,6 +52,21 @@ GNN_AGGREGATE_OUTPUT_FILES = (
     "gnn_ablation_manifest.json",
 )
 
+LLM_STAGE_AGGREGATE_OUTPUT_FILES = (
+    "stage_ablation_candidate_metrics.csv",
+    "stage_ablation_explanation_metrics.csv",
+    "stage_ablation_table.tex",
+    "stage_ablation_manifest.json",
+)
+
+LLM_SCALE_AGGREGATE_OUTPUT_FILES = (
+    "scale_ablation_candidate_metrics.csv",
+    "scale_ablation_explanation_metrics.csv",
+    "scale_ablation_efficiency.csv",
+    "scale_ablation_table.tex",
+    "scale_ablation_manifest.json",
+)
+
 
 def output_inventory(family: str, *, aggregate: bool = False) -> tuple[str, ...]:
     key = str(family).strip().lower()
@@ -60,6 +75,17 @@ def output_inventory(family: str, *, aggregate: bool = False) -> tuple[str, ...]
     if key == "gnn":
         return GNN_AGGREGATE_OUTPUT_FILES if aggregate else GNN_VARIANT_OUTPUT_FILES
     raise KeyError(f"unknown ablation output family: {family}")
+
+
+def llm_v2_output_inventory(effect: str) -> tuple[str, ...]:
+    """Keep stage and scale effects in separate, interpretable aggregates."""
+
+    key = str(effect).strip().lower()
+    if key == "stage":
+        return LLM_STAGE_AGGREGATE_OUTPUT_FILES
+    if key == "scale":
+        return LLM_SCALE_AGGREGATE_OUTPUT_FILES
+    raise KeyError(f"unknown LLM ablation effect: {effect}")
 
 
 def run_manifest_template(family: str) -> dict[str, Any]:
@@ -83,7 +109,10 @@ __all__ = [
     "GNN_AGGREGATE_OUTPUT_FILES",
     "GNN_VARIANT_OUTPUT_FILES",
     "LLM_AGGREGATE_OUTPUT_FILES",
+    "LLM_SCALE_AGGREGATE_OUTPUT_FILES",
+    "LLM_STAGE_AGGREGATE_OUTPUT_FILES",
     "LLM_VARIANT_OUTPUT_FILES",
     "output_inventory",
+    "llm_v2_output_inventory",
     "run_manifest_template",
 ]

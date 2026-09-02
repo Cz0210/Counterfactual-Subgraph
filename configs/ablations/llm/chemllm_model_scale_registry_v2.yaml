@@ -1,0 +1,35 @@
+schema_version: chemllm_model_scale_registry_v2
+parameter_count_source: ACTUAL_LOADED_WEIGHTS
+formal_revision_policy: EXACT_COMMIT_SHA_ONLY
+models:
+  chemllm_2b_1_5:
+    source: AI4Chem/CHEMLLM-2b-1_5
+    role: PRIMARY_SMALL_SCALE
+    run_enabled: true
+    download_weights: true
+    exact_revision: null
+    status: BLOCKED_MISSING_EXACT_REVISION
+    metadata_only: false
+    expected_dtype: null
+    source_from_reference_contract: false
+  chemllm_7b_main:
+    source: FROM_BACE_REFERENCE_CONTRACT
+    role: MAIN_REFERENCE
+    run_enabled: true
+    download_weights: false
+    exact_revision: null
+    status: BLOCKED_MISSING_MAIN_REFERENCE
+    metadata_only: false
+    expected_dtype: bfloat16
+    source_from_reference_contract: true
+  chemllm_20b_sft:
+    source: AI4Chem/ChemLLM-20B-Chat-SFT
+    role: OPTIONAL_UPPER_BOUND
+    run_enabled: false
+    download_weights: false
+    exact_revision: null
+    status: BLOCKED_MISSING_EXACT_REVISION
+    metadata_only: true
+    expected_dtype: null
+    source_from_reference_contract: false
+

@@ -1,0 +1,61 @@
+schema_version: bace_ours_llm_scale_ablation_v2
+dataset: BACE
+method: Ours
+framework_build_allowed_now: true
+gpu_science_default_enabled: false
+scale_stage_full_factorial: false
+parameter_count_source: ACTUAL_LOADED_WEIGHTS
+model_registry: configs/ablations/llm/chemllm_model_scale_registry_v2.yaml
+
+primary_comparison:
+  small: CHEMLLM_2B_PROJECT_SFT_PPO
+  reference: CHEMLLM_7B_PROJECT_SFT_PPO
+  state: BLOCKED_REFERENCE_MISSING_MATCHED_SFT
+  claim: FULL_METHOD_PARAMETER_SCALE
+  require_comparability: MATCHED_PROJECT_ADAPTATION_COMPATIBLE
+  seven_b_main_result_reused: false
+  blocker: BACE_MAIN_EXECUTED_STAGE_IS_FRESH_LORA_PPO_NOT_PROJECT_SFT_PPO
+
+fallback_comparison:
+  small: CHEMLLM_2B_OFF_THE_SHELF
+  reference: CHEMLLM_7B_OFF_THE_SHELF
+  state: CONFIG_ONLY
+  claim: MODEL_SCALE_PROPOSAL_SENSITIVITY
+  require_comparability: PROPOSAL_ONLY_SCALE_COMPARABLE
+
+matched_project_adaptation:
+  sft:
+    dataset_sha256: FROM_EXACT_BACE_REFERENCE
+    ordered_examples_sha256: FROM_EXACT_BACE_REFERENCE
+    optimizer_family: FROM_EXACT_BACE_REFERENCE
+    optimizer_updates: FROM_EXACT_BACE_REFERENCE
+    max_sequence_length: FROM_EXACT_BACE_REFERENCE
+    validation_policy_sha256: FROM_EXACT_BACE_REFERENCE
+    checkpoint_selection_policy_sha256: FROM_EXACT_BACE_REFERENCE
+    seed: FROM_EXACT_BACE_REFERENCE
+    lora_rank: FROM_EXACT_BACE_REFERENCE
+    lora_alpha: FROM_EXACT_BACE_REFERENCE
+    lora_dropout: FROM_EXACT_BACE_REFERENCE
+    lora_target_roles: FROM_EXACT_BACE_REFERENCE
+  ppo:
+    parent_manifest_sha256: FROM_EXACT_BACE_REFERENCE
+    rollout_budget: FROM_EXACT_BACE_REFERENCE
+    reward_config_sha256: FROM_EXACT_BACE_REFERENCE
+    reward_weights_sha256: FROM_EXACT_BACE_REFERENCE
+    kl_config_sha256: FROM_EXACT_BACE_REFERENCE
+    clip_config_sha256: FROM_EXACT_BACE_REFERENCE
+    optimizer_updates: FROM_EXACT_BACE_REFERENCE
+    sampling_policy_sha256: FROM_EXACT_BACE_REFERENCE
+    validation_policy_sha256: FROM_EXACT_BACE_REFERENCE
+    seed: FROM_EXACT_BACE_REFERENCE
+    global_effective_batch: FROM_EXACT_BACE_REFERENCE
+  calibration_loaded: false
+  test_loaded: false
+
+outputs:
+  root: "{runtime_root}/outputs/autodl/ablations/llm/bace_ours_scale_v2/{model_size}"
+  aggregate_candidate_metrics: scale_ablation_candidate_metrics.csv
+  aggregate_explanation_metrics: scale_ablation_explanation_metrics.csv
+  aggregate_efficiency: scale_ablation_efficiency.csv
+  aggregate_table: scale_ablation_table.tex
+

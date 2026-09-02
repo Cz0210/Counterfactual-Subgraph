@@ -1,5 +1,49 @@
 # Decisions Log
 
+## [2026-09-02] Separate ChemLLM adaptation-stage and model-scale ablations
+
+### Background
+
+The post-main framework needs to answer two distinct questions: which training
+stage changes proposal quality, and how sensitive the same pipeline is to base
+model scale. A scale-by-stage full factorial would consume unnecessary GPU time
+and obscure those contrasts. The frozen BACE/Ours provenance also records a
+fresh LoRA initializer followed by 300 PPO optimizer steps, with no matched
+project-SFT checkpoint; it is not an SFT-plus-PPO result.
+
+### Decision
+
+Register four fixed 7B stage rows (BRICS, off-the-shelf, project SFT, project
+SFT+PPO) and two non-factorial scale rows (2B and 7B project SFT+PPO). Fail
+closed on the missing BACE project-SFT lineage: A2 is
+`BLOCKED_MISSING_MATCHED_SFT_CHECKPOINT`; A3/S1 record a requested-label
+mismatch with observed stage `FRESH_LORA_PPO` and cannot reuse the main result
+under an SFT+PPO name. Permit only a separately labeled proposal-only 2B/7B
+sensitivity fallback when prompt/tokenizer/runtime comparability passes.
+
+Pin formal model revisions to exact commit SHAs and reject `main`. Count model
+size from unique tensors in actually loaded weights, including embedding,
+non-embedding, trainable, LoRA-trainable, dtype, and byte counts. Register 20B
+as metadata-only: it cannot download weights or run. Early LLM GPU science may
+use at most one card after 13 matrix cells, healthy owners for all main paths,
+no main GPU waiter, 1200 seconds of idleness, resource/resume gates, and a
+self-hashed authorization receipt. New main work triggers checkpoint-first
+graceful release, never a kill.
+
+### Consequences
+
+- Stage and scale outputs and paper sections remain separate.
+- A1 is called off-the-shelf rather than raw pretrained.
+- Missing SFT/PPO evidence cannot be borrowed or relabeled.
+- Framework and train-only BRICS CPU work acquire no GPU.
+- GNN science remains gated at 16/16.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-09-02] Bind Mut 500-step lineage finalization to the reviewed semantic resolver
 
 ### Decision
