@@ -56,13 +56,11 @@ from src.baselines.tastemolnet_globalgce_smoke import (
     _deduplicate_generated_candidates,
     _validate_official_startup_identity,
     load_taste_train_cohort,
+    merge_branch_rule_catalogs,
     run_resumed_target_branch,
     select_bounded_sweet_parents,
     validate_candidates_with_original_gine,
     validate_science_summary,
-)
-from src.baselines.tastemolnet_multiclass_adapters import (
-    merge_globalgce_target_branches,
 )
 from src.utils.retained_output_directory import (
     FreshOutputDirectory,
@@ -710,7 +708,40 @@ def _rhs_rule_chemistry_evidence(
                     bond_types[bond_name],
                 )
         molecule = editable.GetMol()
-        Chem.SanitizeMol(molecule)
+        try:
+            Chem.SanitizeMol(molecule)
+        except Exception:
+            problem_atoms: set[int] = set()
+            for problem in Chem.DetectChemistryProblems(molecule):
+                if hasattr(problem, "GetAtomIdx"):
+                    problem_atoms.add(int(problem.GetAtomIdx()))
+                elif hasattr(problem, "GetAtomIndices"):
+                    problem_atoms.update(
+                        int(value) for value in problem.GetAtomIndices()
+                    )
+            inherited_capable = {
+                new_index
+                for old_index, new_index in old_to_new.items()
+                if _hard_label(rule.lhs_feature[old_index])
+                == _hard_label(rule.rhs_feature[old_index])
+                and _hard_label(rule.lhs_feature[old_index]) > 0
+            }
+            if problem_atoms and problem_atoms <= inherited_capable:
+                evidence.update(
+                    {
+                        "status": "PASS_CONTEXT_REQUIRED",
+                        "rhs_standalone_rdkit_sanitized": False,
+                        "rhs_standalone_context_required": True,
+                        "context_required_atom_indices": sorted(problem_atoms),
+                        "context_reason": (
+                            "RHS atom type is unchanged; native application may "
+                            "inherit pinned parent charge/hydrogen attributes"
+                        ),
+                        "errors": [],
+                    }
+                )
+                return rule, evidence
+            raise
         canonical = Chem.MolToSmiles(
             molecule,
             canonical=True,
@@ -802,87 +833,6 @@ def preflight_rhs_rule_catalogs(
             stage="T8_RHS_STANDALONE_CHEMISTRY_PREFLIGHT",
         )
     return approved, audit
-
-
-def _merge_preflight_approved_rules(
-    catalogs: Mapping[int, Sequence[Mapping[str, Any]]],
-    *,
-    checkpoint_id: str,
-    preflight: Mapping[str, Any],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    branches: dict[int, list[dict[str, Any]]] = {}
-    branch_hashes: dict[int, set[str]] = {}
-    for target in TARGET_BRANCHES:
-        rows: list[dict[str, Any]] = []
-        hashes: set[str] = set()
-        for raw in catalogs[target]:
-            action = _canonical_rule_action(raw)
-            if action["rule_hash"] in hashes:
-                raise TasteGlobalGCESmokeError(
-                    "T8 RHS-approved catalog repeats one canonical rule"
-                )
-            hashes.add(action["rule_hash"])
-            rows.append(
-                {
-                    **action,
-                    "action_kind": "lhs_rhs_graph_transformation_rule",
-                    "target_label": target,
-                    "source_label": SOURCE_LABEL,
-                    "data_split_used": "train",
-                    "calibration_loaded": False,
-                    "test_loaded": False,
-                    "rf_oracle_used": False,
-                    "oracle_backend": "gnn",
-                    "oracle_checkpoint_hash": checkpoint_id,
-                }
-            )
-        if not rows:
-            raise TasteGlobalGCESmokeError(
-                f"T8 target-{target} has no RHS-approved native rules"
-            )
-        branches[target] = rows
-        branch_hashes[target] = hashes
-    merged = merge_globalgce_target_branches(
-        branches,
-        oracle_checkpoint_hash=checkpoint_id,
-    )
-    if not merged or len({row["rule_hash"] for row in merged}) != len(merged):
-        raise TasteGlobalGCESmokeError(
-            "T8 RHS-approved canonical rule merge is empty or duplicated"
-        )
-    overlap = branch_hashes[0] & branch_hashes[2]
-    return merged, {
-        "merge_stage": (
-            "after_rhs_standalone_chemistry_preflight_before_calibration"
-        ),
-        "dedup_identity": (
-            "sha256(canonical_lhs,rhs,official_attachment_map,action_kind)"
-        ),
-        "target_0_rule_count": len(branches[0]),
-        "target_2_rule_count": len(branches[2]),
-        "premerge_rule_count": len(branches[0]) + len(branches[2]),
-        "cross_branch_duplicate_count": len(overlap),
-        "merged_unique_rule_count": len(merged),
-        "hash_collision_or_action_mismatch": False,
-        "canonical_dedup_complete": True,
-        "rhs_chemistry_preflight_schema": RHS_CHEMISTRY_PREFLIGHT_SCHEMA,
-        "rhs_chemistry_preflight_status": preflight.get("status"),
-        "rhs_chemistry_approved_rule_counts": preflight.get(
-            "approved_rule_counts"
-        ),
-        "rhs_chemistry_rejected_rule_counts": preflight.get(
-            "rejected_rule_counts"
-        ),
-        "merged_rule_set_sha256": _canonical_sha256(
-            [
-                {
-                    "rule_hash": row["rule_hash"],
-                    "target_branches": row["target_branches"],
-                }
-                for row in merged
-            ]
-        ),
-    }
 
 
 def validate_source_branch(
@@ -1343,7 +1293,7 @@ def run_salvage(
         "rhs-standalone-chemistry-preflight.json"
     )
     try:
-        approved_catalogs, rhs_preflight = preflight_rhs_rule_catalogs(
+        _approved_catalogs, rhs_preflight = preflight_rhs_rule_catalogs(
             {target: branches[target].catalog for target in TARGET_BRANCHES},
             source_artifacts={
                 target: branches[target].root / "native_rule_catalog.jsonl"
@@ -1428,10 +1378,10 @@ def run_salvage(
             raise TasteGlobalGCESmokeError(
                 "T8 salvage target branches used different train/official identities"
             )
-        merged_rules, rule_merge = _merge_preflight_approved_rules(
-            approved_catalogs,
+        source_trees = {target: branches[target].tree for target in TARGET_BRANCHES}
+        merged_rules, rule_merge = merge_branch_rule_catalogs(
+            branch_trees=source_trees,
             checkpoint_id=checkpoint_id,
-            preflight=rhs_preflight,
         )
         if rule_merge.get("merged_unique_rule_count", 0) < 1:
             _raise_finalization_error(
@@ -1445,7 +1395,7 @@ def run_salvage(
             )
         try:
             generated, materialization = materialize_smoke_candidates(
-                approved_catalogs,
+                {target: branches[target].catalog for target in TARGET_BRANCHES},
                 parents=parents,
             )
         except T8BranchScientificFailure as exc:

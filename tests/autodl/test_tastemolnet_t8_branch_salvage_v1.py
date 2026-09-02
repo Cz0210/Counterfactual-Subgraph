@@ -311,7 +311,7 @@ def test_t8_same_gine() -> None:
 
 def test_t8_merge_dedup() -> None:
     source = SALVAGE_SOURCE.read_text(encoding="utf-8")
-    assert "_merge_preflight_approved_rules" in source
+    assert "merge_branch_rule_catalogs" in source
     assert "_deduplicate_generated_candidates" in source
     assert '"canonical_dedup.json"' in source
 
