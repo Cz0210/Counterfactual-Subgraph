@@ -262,3 +262,9 @@ def test_launch_and_slurm_contracts() -> None:
         assert "export PYTHONPATH=$PWD" in text
         assert "--config configs/hpc.yaml" in text
         assert "--set inference.fallback_to_heuristic=false" in text
+
+
+def test_sidecar_uses_persistent_t14_auditor_relay() -> None:
+    assert module.DEFAULT_LAUNCHERS["t14_convergence_auditor"].endswith(
+        "launch_t14_external_convergence_auditor_relay_v1.sh"
+    )

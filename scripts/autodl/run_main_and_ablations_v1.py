@@ -35,7 +35,7 @@ COMPONENTS = (
 )
 DEFAULT_LAUNCHERS = {
     "mut_continuation": "scripts/autodl/launch_mut_throttled_continuation_v1.sh",
-    "t14_convergence_auditor": "scripts/autodl/launch_t14_external_convergence_auditor_v1.sh",
+    "t14_convergence_auditor": "scripts/autodl/launch_t14_external_convergence_auditor_relay_v1.sh",
     "t8_valid_zero_finalizer": "scripts/autodl/launch_tastemolnet_globalgce_valid_zero_finalizer_v1.sh",
     "llm_ablation": "scripts/autodl/launch_llm_ablation_core_v1.sh",
     "gnn_ablation": "scripts/autodl/launch_gnn_five_backbone_ablation_v1.sh",
