@@ -423,6 +423,10 @@ class TasteResearchPolicy:
         return self.authorization_state == ACTIVE_STATE
 
     @property
+    def policy_id(self) -> str:
+        return str(self.payload["policy_id"])
+
+    @property
     def version(self) -> int:
         return int(self.payload["policy_version"])
 
