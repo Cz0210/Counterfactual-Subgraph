@@ -16888,3 +16888,28 @@ part of this handoff.
   frozen T3/T7/NeuroSED/replay inputs.  Do not claim a step-279 resume and do
   not change the GCF scientific configuration, sample budget, or checkpoint
   semantics.
+
+# 2026-09-02: Fail T8 salvage before inference when every RHS is chemically unusable
+
+- Motivation: both sealed Taste T8 branches passed the historical tensor/LHS
+  validator and exposed three target-0 plus four target-2 rules, but native
+  application produced zero candidates.  An all-train diagnostic showed the
+  LHS patterns match thousands of Sweet parents; the failure is instead
+  parent-independent RHS chemistry.  Target-0 contains contradictory internal
+  adjacency/no-edge labels, while target-2 decodes internally over-valent
+  halogen/chalcogen structures.  Expanding the frozen parent cohort therefore
+  cannot produce a legitimate strict flip.
+- Decision: before native parent application or GINE inference, emit a
+  per-rule RHS preflight with the catalog identity, source artifact, decoded
+  internal bond evidence, and standalone sanitization result.  Internal
+  contradictions that attachment cannot repair fail closed.  Patterns whose
+  atom context can legitimately be inherited from the parent are not rejected
+  solely for lacking that context.  If either target branch has no usable RHS,
+  write a typed `T8_RHS_PREFLIGHT_NO_USABLE_RULES` receipt and retain the
+  existing non-single-branch recovery gate.  Preserve the original native
+  merge and application semantics for any preflight-valid path.
+- Consequence: the present artifacts remain valid training evidence but cannot
+  satisfy the T8 requirement of at least one real untargeted strict flip, so
+  T13 is not launched.  A second dual-branch retrain, a new seed/epoch budget,
+  chemical projection, or publication as a zero-result would change the
+  frozen scientific protocol and requires a new explicit project decision.
