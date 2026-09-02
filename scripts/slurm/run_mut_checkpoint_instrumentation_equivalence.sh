@@ -17,9 +17,10 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "AutoDL-only provenance gate; do not submit this Slurm wrapper."
-exit 2
+echo "The AutoDL one-shot must bind --semantic-finalizer-project-root to exact commit 582bc4b."
 
 python scripts/autodl/run_mut_checkpoint_instrumentation_equivalence.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
   run-pair --help
+exit 2

@@ -41,7 +41,10 @@ from scripts.autodl.run_mut_checkpoint_instrumentation_equivalence import (  # n
     INSTRUMENTATION_COMMIT,
     INSTRUMENTATION_SOURCE_INVENTORY_SHA256,
     LEGACY_SOURCE_INVENTORY_SHA256,
+    SEMANTIC_FINALIZER_COMMIT,
+    SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256,
     SOURCE_COMMIT,
+    _validate_semantic_finalizer_receipt,
 )
 from scripts.autodl.run_mut_fast_accurate_v2 import (  # noqa: E402
     _publish_matrix_queue,
@@ -1602,7 +1605,11 @@ def _wait_for_64g_parent_headroom(
 
 
 def _instrumentation_command(
-    spec: Mapping[str, Any], *, run_root: Path, output_dir: Path
+    spec: Mapping[str, Any],
+    *,
+    run_root: Path,
+    output_dir: Path,
+    semantic_finalizer_project_root: Path,
 ) -> list[str]:
     replay = dict(spec["replay"])
     return [
@@ -1626,7 +1633,57 @@ def _instrumentation_command(
         "--parent-limit", str(int(replay.get("parent_limit", 1448))),
         "--device", "cuda:0",
         "--batch-size", str(int(replay.get("batch_size", 128))),
+        "--semantic-finalizer-project-root", str(semantic_finalizer_project_root),
     ]
+
+
+def _validate_semantic_finalizer_gate(gate: Mapping[str, Any]) -> dict[str, Any]:
+    value = gate.get("semantic_lineage_finalizer")
+    failures: list[str] = []
+    required = {
+        "status": "PASS",
+        "commit": SEMANTIC_FINALIZER_COMMIT,
+        "graph_trace_sha256": SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256,
+        "delegation_scope": "post_walk_lineage_materialization_only",
+        "generation_algorithm_changed": False,
+        "candidate_universe_changed": False,
+        "semantic_transition_sequence_exact": True,
+    }
+    if not isinstance(value, Mapping):
+        failures.append("semantic_lineage_finalizer")
+        resolved: dict[str, Any] = {}
+    else:
+        resolved = dict(value)
+        failures.extend(
+            key for key, expected in required.items() if value.get(key) != expected
+        )
+        for role in ("legacy", "instrumented"):
+            receipt = Path(str(value.get(f"{role}_receipt") or ""))
+            claimed_sha = str(value.get(f"{role}_receipt_sha256") or "")
+            if (
+                not receipt.is_absolute()
+                or not receipt.is_file()
+                or receipt.is_symlink()
+                or sha256_file(receipt) != claimed_sha
+            ):
+                failures.append(f"{role}_receipt")
+                continue
+            try:
+                _validate_semantic_finalizer_receipt(
+                    receipt,
+                    role=role,
+                    science_project_commit=(
+                        SOURCE_COMMIT if role == "legacy" else INSTRUMENTATION_COMMIT
+                    ),
+                )
+            except (OSError, TypeError, ValueError):
+                failures.append(f"{role}_receipt_content")
+    if failures:
+        raise MutTraceWorkerError(
+            "Semantic finalizer gate failed closed: "
+            + ",".join(sorted(set(failures)))
+        )
+    return resolved
 
 
 def _trace_mode_command(
@@ -1972,6 +2029,7 @@ def _verify_adoption(args: argparse.Namespace) -> int:
         expected_legacy_inventory_sha256=LEGACY_SOURCE_INVENTORY_SHA256,
         expected_instrumentation_inventory_sha256=INSTRUMENTATION_SOURCE_INVENTORY_SHA256,
     )
+    semantic_finalizer = _validate_semantic_finalizer_gate(instrumentation)
     final = _absolute(args.output_dir, exists=False, label="adoption output")
     if final.exists():
         raise FileExistsError(f"Adoption output must be fresh: {final}")
@@ -2006,6 +2064,11 @@ def _verify_adoption(args: argparse.Namespace) -> int:
             "instrumentation_commit": INSTRUMENTATION_COMMIT,
             "instrumentation_gate_path": instrumentation["path"],
             "instrumentation_gate_sha256": instrumentation["sha256"],
+            "semantic_lineage_finalizer": semantic_finalizer,
+            "semantic_lineage_finalizer_commit": SEMANTIC_FINALIZER_COMMIT,
+            "semantic_lineage_finalizer_graph_trace_sha256": (
+                SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256
+            ),
             "trace_mode_gate_path": str(_absolute(args.trace_mode_gate)),
             "trace_mode_gate_sha256": sha256_file(_absolute(args.trace_mode_gate)),
             "memory_receipt_path": str(_absolute(args.memory_receipt)),
@@ -2247,6 +2310,10 @@ def _run(args: argparse.Namespace) -> int:
             )
             instrumentation_review = _absolute(
                 args.instrumentation_project_root, label="instrumentation worktree"
+            )
+            semantic_finalizer_review = _absolute(
+                args.semantic_finalizer_project_root,
+                label="semantic finalizer worktree",
             )
             if historical_review != _absolute(
                 spec["legacy_project_root"], label="spec historical worktree"
@@ -2544,6 +2611,9 @@ def _run(args: argparse.Namespace) -> int:
                                         spec,
                                         run_root=instrumentation_run,
                                         output_dir=instrumentation_output,
+                                        semantic_finalizer_project_root=(
+                                            semantic_finalizer_review
+                                        ),
                                     ),
                                     cwd=PROJECT_ROOT,
                                     environment=environment,
@@ -2563,6 +2633,12 @@ def _run(args: argparse.Namespace) -> int:
                                 expected_instrumentation_inventory_sha256=(
                                     INSTRUMENTATION_SOURCE_INVENTORY_SHA256
                                 ),
+                            )
+                            _validate_semantic_finalizer_gate(
+                                _physical_json(
+                                    instrumentation_gate,
+                                    label="instrumentation gate",
+                                )
                             )
                             trace_run = output / "trace-mode-equivalence-run"
                             trace_output = output / "trace-mode-equivalence"
@@ -2735,6 +2811,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--protected-manifest", type=Path, required=True)
     run.add_argument("--historical-project-root", type=Path, required=True)
     run.add_argument("--instrumentation-project-root", type=Path, required=True)
+    run.add_argument("--semantic-finalizer-project-root", type=Path, required=True)
     run.add_argument("--output-root", type=Path, required=True)
     run.add_argument("--controller-pid", type=int, required=True)
     run.add_argument("--controller-start-ticks", type=int, required=True)

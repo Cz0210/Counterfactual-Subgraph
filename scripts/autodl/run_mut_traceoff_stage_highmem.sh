@@ -119,7 +119,14 @@ case "$MUT_TRACEOFF_STAGE" in
     : "${MUT_DATASET_DIR:?MUT_DATASET_DIR is required}"
     : "${MUT_GNN_CHECKPOINT:?MUT_GNN_CHECKPOINT is required}"
     : "${MUT_DISTANCE_CHECKPOINT:?MUT_DISTANCE_CHECKPOINT is required}"
+    MUT_SEMANTIC_FINALIZER_PROJECT_ROOT="${MUT_SEMANTIC_FINALIZER_PROJECT_ROOT:-/root/autodl-tmp/worktrees/final-five-closeout-582bc4b-20260902T040000Z}"
     : "${MUT_BATCH_SIZE:=128}"
+    if [[ "$MUT_SEMANTIC_FINALIZER_PROJECT_ROOT" != /* \
+      || ! -d "$MUT_SEMANTIC_FINALIZER_PROJECT_ROOT" \
+      || -L "$MUT_SEMANTIC_FINALIZER_PROJECT_ROOT" ]]; then
+      echo "[MUT_TRACEOFF_STAGE_FAIL] exact 582 semantic finalizer worktree is unavailable" >&2
+      exit 2
+    fi
     if [[ "${GPU_REQUIRED:-}" != "1" || "${DEVICE:-}" != "cuda:0" ]]; then
       echo "[MUT_TRACEOFF_STAGE_FAIL] equivalence requires exclusive GPU_REQUIRED=1 DEVICE=cuda:0" >&2
       exit 2
@@ -151,7 +158,8 @@ case "$MUT_TRACEOFF_STAGE" in
       --distance-checkpoint "$MUT_DISTANCE_CHECKPOINT" \
       --parent-limit 1448 \
       --device cuda:0 \
-      --batch-size "$MUT_BATCH_SIZE"
+      --batch-size "$MUT_BATCH_SIZE" \
+      --semantic-finalizer-project-root "$MUT_SEMANTIC_FINALIZER_PROJECT_ROOT"
     ;;
   generation)
     : "${MUT_UPSTREAM_ROOT:?MUT_UPSTREAM_ROOT is required}"

@@ -74,6 +74,9 @@ MUT_UPSTREAM_COMMIT = "122f9341a360e9f06bb58a2f5823bb596021f6bf"
 MUT_GNN_SHA256 = "22045e5a6a833d6ed980cef9834859859136a1e2f644d19d78bd63345585f239"
 MUT_DISTANCE_SHA256 = "bc64c16340c9170388ff1b3951d2ee4cb9a372456b09691ecd6bb2a881f17648"
 MUT_RF_ORACLE_SHA256 = "af213aa766626decaf99876b43ede725412a355adf37f1aa0d56233d8653e204"
+DEFAULT_SEMANTIC_FINALIZER_PROJECT_ROOT = Path(
+    "/root/autodl-tmp/worktrees/final-five-closeout-582bc4b-20260902T040000Z"
+)
 
 
 class MutFastError(RuntimeError):
@@ -1263,6 +1266,12 @@ def run_equivalence_monitored(
     monitor_jsonl = monitor / "memory_monitor.jsonl"
     runner_log = monitor / "equivalence.log"
     replay = dict(spec["replay"])
+    semantic_finalizer_root = _absolute(
+        spec.get("semantic_finalizer_project_root")
+        or os.environ.get("MUT_SEMANTIC_FINALIZER_PROJECT_ROOT")
+        or DEFAULT_SEMANTIC_FINALIZER_PROJECT_ROOT,
+        label="exact 582 semantic finalizer worktree",
+    )
     command = [
         str(spec["python"]),
         str(PROJECT_ROOT / "scripts/autodl/run_mut_checkpoint_instrumentation_equivalence.py"),
@@ -1280,6 +1289,7 @@ def run_equivalence_monitored(
         "--gnn-checkpoint", str(replay["gnn_checkpoint"]),
         "--distance-checkpoint", str(replay["distance_checkpoint"]),
         "--parent-limit", "1448", "--device", "cuda:0", "--batch-size", "128",
+        "--semantic-finalizer-project-root", str(semantic_finalizer_root),
     ]
     cgroup = _absolute(spec["cgroup_memory_root"], label="cgroup memory root")
     proc_root = _absolute(spec["proc_root"], label="proc root")

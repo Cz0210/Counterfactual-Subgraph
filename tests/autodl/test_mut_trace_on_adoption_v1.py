@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from scripts.autodl import run_mut_fast_accurate_v2 as successor
+from scripts.autodl import run_mut_checkpoint_instrumentation_equivalence as checkpoint_equiv
 from scripts.autodl import run_mut_trace_mode_equivalence as equivalence
 from scripts.autodl import run_mut_trace_on_adoption_worker as worker
 from src.baselines.comrecgc.contracts import sha256_file, stable_json_sha256
@@ -18,6 +19,121 @@ from src.utils import autodl_mut_trace_on_adoption_v1 as policy
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def test_instrumentation_command_binds_exact_semantic_finalizer_root(
+    tmp_path: Path,
+) -> None:
+    finalizer = tmp_path / "semantic-finalizer-582bc4b"
+    command = worker._instrumentation_command(
+        {
+            "python": "/python",
+            "legacy_project_root": "/legacy",
+            "instrumentation_project_root": "/instrumented",
+            "replay": {
+                "upstream_root": "/upstream",
+                "dataset_dir": "/dataset",
+                "gnn_checkpoint": "/gnn.pt",
+                "distance_checkpoint": "/distance.pt",
+                "parent_limit": 1448,
+                "batch_size": 128,
+            },
+        },
+        run_root=tmp_path / "run",
+        output_dir=tmp_path / "gate",
+        semantic_finalizer_project_root=finalizer,
+    )
+    index = command.index("--semantic-finalizer-project-root")
+    assert command[index + 1] == str(finalizer)
+    assert worker.SEMANTIC_FINALIZER_COMMIT.startswith("582bc4b")
+
+
+def test_worker_revalidates_semantic_finalizer_receipts(
+    tmp_path: Path,
+) -> None:
+    receipts: dict[str, Path] = {}
+    for role in ("legacy", "instrumented"):
+        path = tmp_path / role / "semantic_lineage_finalizer_receipt.json"
+        value = {
+            "schema_version": checkpoint_equiv.SEMANTIC_FINALIZER_SCHEMA,
+            "status": "PASS",
+            "role": role,
+            "science_project_commit": (
+                worker.SOURCE_COMMIT
+                if role == "legacy"
+                else worker.INSTRUMENTATION_COMMIT
+            ),
+            "source_algorithm_commit": worker.SOURCE_COMMIT,
+            "patched_generation_symbols": [],
+            "random_walk_patched": False,
+            "candidate_generation_patched": False,
+            "candidate_universe_patched": False,
+            "delegation_scope": "post_walk_lineage_materialization_only",
+            "all_lineage_rows_resolved": True,
+            "semantic_finalizer_binding": {
+                "status": "PASS",
+                "commit": worker.SEMANTIC_FINALIZER_COMMIT,
+                "graph_trace_sha256": worker.SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256,
+                "resolver_symbol": "collapse_semantic_transition_aliases",
+                "lineage_symbol": "iter_candidate_lineage_from_selected_trace",
+                "module_namespaces_disjoint": True,
+            },
+            "invocations": [
+                {
+                    "status": "PASS",
+                    "semantic_transition_count": 1,
+                    "unresolved_row_count": 0,
+                }
+            ],
+        }
+        value["receipt_sha256"] = stable_json_sha256(value)
+        _write_json(path, value)
+        receipts[role] = path
+    gate = {
+        "semantic_lineage_finalizer": {
+            "status": "PASS",
+            "commit": worker.SEMANTIC_FINALIZER_COMMIT,
+            "graph_trace_sha256": worker.SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256,
+            "delegation_scope": "post_walk_lineage_materialization_only",
+            "generation_algorithm_changed": False,
+            "candidate_universe_changed": False,
+            "semantic_transition_sequence_exact": True,
+            "legacy_receipt": str(receipts["legacy"]),
+            "legacy_receipt_sha256": sha256_file(receipts["legacy"]),
+            "instrumented_receipt": str(receipts["instrumented"]),
+            "instrumented_receipt_sha256": sha256_file(
+                receipts["instrumented"]
+            ),
+        }
+    }
+    result = worker._validate_semantic_finalizer_gate(gate)
+    assert result["semantic_transition_sequence_exact"] is True
+
+    legacy = json.loads(receipts["legacy"].read_text(encoding="utf-8"))
+    legacy["candidate_universe_patched"] = True
+    legacy["receipt_sha256"] = stable_json_sha256(
+        {key: value for key, value in legacy.items() if key != "receipt_sha256"}
+    )
+    _write_json(receipts["legacy"], legacy)
+    gate["semantic_lineage_finalizer"]["legacy_receipt_sha256"] = sha256_file(
+        receipts["legacy"]
+    )
+    with pytest.raises(worker.MutTraceWorkerError, match="legacy_receipt_content"):
+        worker._validate_semantic_finalizer_gate(gate)
+
+    # Restore a valid gate before checking the explicit universe assertion.
+    legacy["candidate_universe_patched"] = False
+    legacy["receipt_sha256"] = stable_json_sha256(
+        {key: value for key, value in legacy.items() if key != "receipt_sha256"}
+    )
+    _write_json(receipts["legacy"], legacy)
+    gate["semantic_lineage_finalizer"]["legacy_receipt_sha256"] = sha256_file(
+        receipts["legacy"]
+    )
+
+    gate["semantic_lineage_finalizer"]["candidate_universe_changed"] = True
+    with pytest.raises(worker.MutTraceWorkerError, match="candidate_universe_changed"):
+        worker._validate_semantic_finalizer_gate(gate)
 
 
 def _audit_tree(commit: str, classification: str) -> dict[str, Any]:
@@ -1750,7 +1866,26 @@ def test_mut_launchers_pin_the_authorized_900_second_wait() -> None:
     ).read_text(encoding="utf-8")
     assert 'MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS:-900' in launcher
     assert '== "900"' in launcher
+    assert "MUT_TRACE_SEMANTIC_FINALIZER_PROJECT_ROOT" in launcher
+    assert "--semantic-finalizer-project-root" in launcher
+    assert "final-five-closeout-582bc4b-20260902T040000Z" in launcher
     assert "export MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS=900" in slurm
+    assert "MUT_TRACE_SEMANTIC_FINALIZER_PROJECT_ROOT" in slurm
+
+
+def test_legacy_successor_equivalence_call_keeps_semantic_finalizer_binding() -> None:
+    project = Path(__file__).resolve().parents[2]
+    source = (
+        project / "scripts/autodl/run_mut_fast_accurate_v2.py"
+    ).read_text(encoding="utf-8")
+    launcher = (
+        project / "scripts/autodl/launch_mut_fast_accurate_v2.sh"
+    ).read_text(encoding="utf-8")
+    assert "DEFAULT_SEMANTIC_FINALIZER_PROJECT_ROOT" in source
+    assert "--semantic-finalizer-project-root" in source
+    assert "MUT_SEMANTIC_FINALIZER_PROJECT_ROOT" in source
+    assert "MUT_SEMANTIC_FINALIZER_PROJECT_ROOT" in launcher
+    assert "final-five-closeout-582bc4b-20260902T040000Z" in launcher
 
 
 def test_protected_baseline_and_window_fail_closed_without_progress(

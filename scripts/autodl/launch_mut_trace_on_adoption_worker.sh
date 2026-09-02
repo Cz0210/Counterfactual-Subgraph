@@ -14,6 +14,7 @@ source "$SCRIPT_DIR/common.sh"
 : "${MUT_TRACE_INSTRUMENTATION_PROJECT_ROOT:?absolute immutable 66487c0 worktree required}"
 : "${MUT_TRACE_CONTROLLER_PID:?exact live successor PID required}"
 : "${MUT_TRACE_CONTROLLER_START_TICKS:?exact live successor start ticks required}"
+MUT_TRACE_SEMANTIC_FINALIZER_PROJECT_ROOT="${MUT_TRACE_SEMANTIC_FINALIZER_PROJECT_ROOT:-/root/autodl-tmp/worktrees/final-five-closeout-582bc4b-20260902T040000Z}"
 
 export MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS="${MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS:-900}"
 [[ "$MUT_PROTECTED_BASELINE_MAX_WAIT_SECONDS" == "900" ]] || {
@@ -25,7 +26,8 @@ for mut_trace_path in \
   "$MUT_FAST_SPEC" \
   "$MUT_TRACE_PROTECTED_MANIFEST" \
   "$MUT_TRACE_HISTORICAL_PROJECT_ROOT" \
-  "$MUT_TRACE_INSTRUMENTATION_PROJECT_ROOT"; do
+  "$MUT_TRACE_INSTRUMENTATION_PROJECT_ROOT" \
+  "$MUT_TRACE_SEMANTIC_FINALIZER_PROJECT_ROOT"; do
   [[ "$mut_trace_path" == /* && -e "$mut_trace_path" && ! -L "$mut_trace_path" ]] || {
     echo "physical absolute Mut trace path required: $mut_trace_path" >&2
     exit 64
@@ -95,6 +97,7 @@ COMMAND=(
   --protected-manifest "$MUT_TRACE_PROTECTED_MANIFEST"
   --historical-project-root "$MUT_TRACE_HISTORICAL_PROJECT_ROOT"
   --instrumentation-project-root "$MUT_TRACE_INSTRUMENTATION_PROJECT_ROOT"
+  --semantic-finalizer-project-root "$MUT_TRACE_SEMANTIC_FINALIZER_PROJECT_ROOT"
   --output-root "$OUTPUT_ROOT"
   --controller-pid "$MUT_TRACE_CONTROLLER_PID"
   --controller-start-ticks "$MUT_TRACE_CONTROLLER_START_TICKS"

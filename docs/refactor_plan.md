@@ -1,5 +1,21 @@
 # Refactor Plan
 
+## 2026-09-02: Close the Mut semantic-finalizer integration gap
+
+- [x] Preserve the exact historical and checkpoint-instrumented generation
+  commits/inventories while delegating only diagnostic post-walk lineage
+  materialization to the reviewed `582bc4b` semantic alias resolver.
+- [x] Emit per-arm semantic finalizer receipts and require exact semantic-key
+  sequence parity in the 500-step instrumentation gate.
+- [x] Require the independent trace-on adoption verifier to reopen the bound
+  receipts before reusing the existing 50k candidate universe, pair store,
+  and DBSCAN artifacts.
+- [x] Synchronize the one-shot, high-memory fallback, fast-successor, and
+  paired Slurm guard call sites with the exact semantic-finalizer argument.
+- [ ] Run the fresh sequential 500-step one-shot on the first naturally idle
+  main-table GPU and publish Mut only after all existing equivalence/reload and
+  candidate-universe gates pass.
+
 ## 2026-09-01: Persist the maintenance-recovered T14 paper continuation
 
 - [x] Bind the relay to the exact fresh generation root, launcher commit,

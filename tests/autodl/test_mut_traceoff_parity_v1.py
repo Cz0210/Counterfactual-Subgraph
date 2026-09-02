@@ -4,7 +4,9 @@ from collections.abc import Callable
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
+import subprocess
+import sys
+from types import ModuleType, SimpleNamespace
 import tempfile
 
 import pytest
@@ -27,6 +29,188 @@ def _text(path: Path, value: str = "fixture\n") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value, encoding="utf-8")
     return path
+
+
+def test_semantic_finalizer_git_status_ignores_only_untracked_files(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "reviewed-finalizer"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "Test"],
+        check=True,
+    )
+    tracked = _text(repository / "graph_trace.py", "reviewed\n")
+    subprocess.run(["git", "-C", str(repository), "add", "graph_trace.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-q", "-m", "reviewed"],
+        check=True,
+    )
+
+    _text(repository / "diagnostic-receipt.json", "{}\n")
+    assert equiv._git_science_status(repository) == ""
+
+    tracked.write_text("changed\n", encoding="utf-8")
+    assert "graph_trace.py" in equiv._git_science_status(repository)
+
+
+def test_semantic_finalizer_loader_uses_private_582_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(equiv, "_git_head", lambda _root: equiv.SEMANTIC_FINALIZER_COMMIT)
+    monkeypatch.setattr(equiv, "_git_science_status", lambda _root: "")
+    package_name = "_mut_semantic_finalizer_582bc4b"
+    for name in list(sys.modules):
+        if name == package_name or name.startswith(f"{package_name}."):
+            sys.modules.pop(name)
+    try:
+        module, binding = equiv._load_semantic_finalizer(repository)
+        assert module.__name__ == f"{package_name}.graph_trace"
+        assert binding["commit"] == equiv.SEMANTIC_FINALIZER_COMMIT
+        assert binding["module_namespaces_disjoint"] is True
+        assert module.SemanticTransitionKey.__module__.startswith(package_name)
+    finally:
+        for name in list(sys.modules):
+            if name == package_name or name.startswith(f"{package_name}."):
+                sys.modules.pop(name)
+
+
+def test_checkpoint_prefix_delegates_only_lineage_to_582_semantic_resolver(
+    tmp_path: Path,
+) -> None:
+    science = ModuleType("frozen_science_graph_trace")
+    semantic = ModuleType("reviewed_semantic_graph_trace")
+
+    def forbidden_old_iterator(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("legacy raw-cardinality finalizer must be replaced")
+
+    class Resolution:
+        def audit_dict(self) -> dict[str, object]:
+            return {
+                "status": "SELECTED_AUTHORITATIVE_HISTORIC_PIN",
+                "semantic_key": {
+                    "pinned_upstream_graph_hash": "a" * 64,
+                    "normalized_action_type": "NR",
+                    "normalized_single_edit_signature": "b" * 64,
+                    "downstream_graph_hash": "c" * 64,
+                    "action_parameter_digest": "d" * 64,
+                    "source_head_id": "2",
+                    "generation_step": 139,
+                },
+                "action": ["NR", 3, 3],
+                "raw_candidate_count": 3,
+                "raw_unique_candidate_count": 3,
+                "raw_alias_count": 2,
+                "semantic_class_count": 1,
+                "lineage_valid_candidate_count": 1,
+                "authoritative_historic_pin_used": True,
+                "representative_replaced": False,
+            }
+
+    def collapse(*_args: object, **_kwargs: object) -> Resolution:
+        return Resolution()
+
+    def current_iterator(
+        _payload: object,
+        _selected_events: object,
+        *,
+        source_graphs_by_parent_id: object = None,
+        include_actions: bool = True,
+        recovery_audit: dict[str, object],
+    ) -> object:
+        del source_graphs_by_parent_id, include_actions
+        semantic.collapse_semantic_transition_aliases()
+        recovery_audit.update(
+            {
+                "semantic_transition_failure_count": 0,
+                "semantic_transition_excluded_count": 0,
+            }
+        )
+        yield {"candidate_index": 0, "action_lineage_resolved": True}
+
+    science.iter_candidate_lineage_from_selected_trace = forbidden_old_iterator
+    semantic.collapse_semantic_transition_aliases = collapse
+    semantic.iter_candidate_lineage_from_selected_trace = current_iterator
+    receipt = tmp_path / "semantic_lineage_finalizer_receipt.json"
+    binding = {
+        "status": "PASS",
+        "commit": equiv.SEMANTIC_FINALIZER_COMMIT,
+        "graph_trace_sha256": equiv.SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256,
+        "resolver_symbol": "collapse_semantic_transition_aliases",
+        "lineage_symbol": "iter_candidate_lineage_from_selected_trace",
+        "module_namespaces_disjoint": True,
+    }
+    equiv._install_semantic_lineage_finalizer(
+        science_graph_trace=science,
+        semantic_graph_trace=semantic,
+        binding=binding,
+        receipt_path=receipt,
+        role="legacy",
+        science_project_commit=equiv.SOURCE_COMMIT,
+    )
+
+    rows = list(
+        science.iter_candidate_lineage_from_selected_trace({}, [], include_actions=False)
+    )
+    assert rows == [{"candidate_index": 0, "action_lineage_resolved": True}]
+    value = equiv._validate_semantic_finalizer_receipt(
+        receipt,
+        role="legacy",
+        science_project_commit=equiv.SOURCE_COMMIT,
+    )
+    assert value["patched_generation_symbols"] == []
+    assert value["random_walk_patched"] is False
+    assert value["candidate_universe_patched"] is False
+    assert value["semantic_transition_alias_event_count"] == 1
+    assert value["invocations"][0]["semantic_transition_count"] == 1
+
+
+def test_checkpoint_prefix_semantic_finalizer_receipt_fails_closed_on_tamper(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / "receipt.json"
+    value = {
+        "schema_version": equiv.SEMANTIC_FINALIZER_SCHEMA,
+        "status": "PASS",
+        "role": "legacy",
+        "science_project_commit": equiv.SOURCE_COMMIT,
+        "source_algorithm_commit": equiv.SOURCE_COMMIT,
+        "patched_generation_symbols": [],
+        "random_walk_patched": False,
+        "candidate_generation_patched": False,
+        "candidate_universe_patched": False,
+        "delegation_scope": "post_walk_lineage_materialization_only",
+        "all_lineage_rows_resolved": True,
+        "semantic_finalizer_binding": {
+            "status": "PASS",
+            "commit": equiv.SEMANTIC_FINALIZER_COMMIT,
+            "graph_trace_sha256": "0" * 64,
+            "resolver_symbol": "collapse_semantic_transition_aliases",
+            "lineage_symbol": "iter_candidate_lineage_from_selected_trace",
+            "module_namespaces_disjoint": True,
+        },
+        "invocations": [
+            {
+                "status": "PASS",
+                "semantic_transition_count": 1,
+                "unresolved_row_count": 0,
+            }
+        ],
+    }
+    value["receipt_sha256"] = equiv._stable_json_sha256(value)
+    _json(receipt, value)
+    with pytest.raises(ValueError, match="semantic_finalizer_binding"):
+        equiv._validate_semantic_finalizer_receipt(
+            receipt,
+            role="legacy",
+            science_project_commit=equiv.SOURCE_COMMIT,
+        )
 
 
 def _traced_source(root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
@@ -854,6 +1038,9 @@ def test_wrapper_template_and_slurm_are_fail_closed() -> None:
         "COMRECGC_HIGHMEM_LOCK_PATH",
         "GPU_REQUIRED",
         "MUT_STAGE_OUTPUT",
+        "MUT_SEMANTIC_FINALIZER_PROJECT_ROOT",
+        "--semantic-finalizer-project-root",
+        "final-five-closeout-582bc4b-20260902T040000Z",
     ):
         assert token in wrapper
     template = json.loads(

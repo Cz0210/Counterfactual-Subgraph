@@ -14,6 +14,8 @@ import argparse
 import ast
 from dataclasses import asdict, replace
 import hashlib
+import importlib
+import importlib.util
 import inspect
 import json
 import os
@@ -24,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import ModuleType
 from typing import Any, Mapping, Sequence
 
 
@@ -35,6 +38,11 @@ LEGACY_SOURCE_INVENTORY_SHA256 = (
 INSTRUMENTATION_SOURCE_INVENTORY_SHA256 = (
     "6b3f509ff01059e54006053981c1f8914eacba2bbfd42c3787f9566c626ff1c6"
 )
+SEMANTIC_FINALIZER_COMMIT = "582bc4b44fbc8ab4595a35da78e4f595e0c0dc5b"
+SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256 = (
+    "8933af21d007cbccdb12e01fa1634d4668aba1125d63f54971db31c9d6f36a67"
+)
+SEMANTIC_FINALIZER_SCHEMA = "mut_semantic_lineage_finalizer_receipt_v1"
 UPSTREAM_COMMIT = "122f9341a360e9f06bb58a2f5823bb596021f6bf"
 STEPS = 500
 SCHEMA = "mut_checkpoint_instrumentation_equivalence_v1"
@@ -100,6 +108,33 @@ def _git_head(root: Path) -> str:
     return value
 
 
+def _git_science_status(root: Path) -> str:
+    """Return tracked-worktree drift without treating diagnostic files as code.
+
+    The reviewed 582 worktree may contain unrelated untracked controller
+    receipts after deployment.  Those cannot shadow an explicitly loaded
+    physical ``graph_trace.py`` and therefore are not a reason to invalidate
+    the binding.  Any tracked edit is fatal.
+    """
+
+    try:
+        return subprocess.check_output(
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                str(root),
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ],
+            text=True,
+            timeout=30,
+        ).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("Cannot verify semantic finalizer worktree status") from exc
+
+
 def _plain(value: Any) -> Any:
     if hasattr(value, "detach"):
         value = value.detach().cpu()
@@ -141,6 +176,315 @@ def _install_science_root(science_root: Path) -> None:
     sys.path[:] = [str(science_root), *retained]
 
 
+def _load_semantic_finalizer(
+    project_root: Path,
+) -> tuple[ModuleType, dict[str, Any]]:
+    """Load the reviewed 582 resolver without shadowing frozen science code.
+
+    The 500-step generation continues to import all scientific modules from
+    the exact 7f/664 worktree.  Only the post-walk lineage iterator is loaded
+    under a private package name from the immutable 582 worktree.  Loading it
+    under ``src`` would poison Python's module cache and could silently route
+    the random walk through the controller checkout, so that is forbidden.
+    """
+
+    root = _absolute(project_root)
+    if _git_head(root) != SEMANTIC_FINALIZER_COMMIT:
+        raise ValueError("Semantic finalizer worktree commit changed")
+    if _git_science_status(root):
+        raise ValueError("Semantic finalizer worktree has dirty/shadow source")
+    source = root / "src/baselines/comrecgc/graph_trace.py"
+    if not source.is_file() or source.is_symlink():
+        raise ValueError("Semantic finalizer graph_trace.py is absent or indirect")
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    if source_sha256 != SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256:
+        raise ValueError("Semantic finalizer graph_trace.py changed")
+
+    package_name = "_mut_semantic_finalizer_582bc4b"
+    package_root = source.parent
+    if package_name in sys.modules:
+        raise ValueError("Semantic finalizer private package was already imported")
+    package = ModuleType(package_name)
+    package.__file__ = str(package_root / "__init__.py")
+    package.__package__ = package_name
+    package.__path__ = [str(package_root)]  # type: ignore[attr-defined]
+    sys.modules[package_name] = package
+    module_name = f"{package_name}.graph_trace"
+    specification = importlib.util.spec_from_file_location(module_name, source)
+    if specification is None or specification.loader is None:
+        raise ValueError("Cannot load semantic finalizer graph_trace.py")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[module_name] = module
+    try:
+        specification.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        sys.modules.pop(package_name, None)
+        raise
+    loaded_source = Path(str(getattr(module, "__file__", ""))).resolve(strict=True)
+    if loaded_source != source.resolve(strict=True):
+        raise ValueError("Semantic finalizer module escaped its immutable worktree")
+    for symbol in (
+        "SemanticTransitionKey",
+        "collapse_semantic_transition_aliases",
+        "iter_candidate_lineage_from_selected_trace",
+    ):
+        if not callable(getattr(module, symbol, None)):
+            raise ValueError(f"Semantic finalizer lacks reviewed symbol: {symbol}")
+    return module, {
+        "schema_version": "mut_semantic_lineage_finalizer_binding_v1",
+        "status": "PASS",
+        "project_root": str(root),
+        "commit": SEMANTIC_FINALIZER_COMMIT,
+        "graph_trace_path": str(source.resolve(strict=True)),
+        "graph_trace_sha256": source_sha256,
+        "private_module_name": module_name,
+        "resolver_symbol": "collapse_semantic_transition_aliases",
+        "lineage_symbol": "iter_candidate_lineage_from_selected_trace",
+        "generation_module_namespace": "src.baselines.comrecgc",
+        "finalizer_module_namespace": package_name,
+        "module_namespaces_disjoint": True,
+    }
+
+
+def _install_semantic_lineage_finalizer(
+    *,
+    science_graph_trace: ModuleType,
+    semantic_graph_trace: ModuleType,
+    binding: Mapping[str, Any],
+    receipt_path: Path,
+    role: str,
+    science_project_commit: str,
+) -> dict[str, Any]:
+    """Delegate only post-walk lineage materialization to the 582 resolver."""
+
+    symbol = "iter_candidate_lineage_from_selected_trace"
+    original = getattr(science_graph_trace, symbol, None)
+    semantic_iterator = getattr(semantic_graph_trace, symbol, None)
+    original_collapse = getattr(
+        semantic_graph_trace, "collapse_semantic_transition_aliases", None
+    )
+    if not callable(original) or not callable(semantic_iterator):
+        raise ValueError("Frozen science lineage iterator is not patchable")
+    if not callable(original_collapse):
+        raise ValueError("Reviewed semantic alias resolver is absent")
+    state: dict[str, Any] = {
+        "invocations": [],
+        "active_sequence": None,
+    }
+
+    def recording_collapse(*args: Any, **kwargs: Any) -> Any:
+        resolution = original_collapse(*args, **kwargs)
+        active = state.get("active_sequence")
+        if not isinstance(active, list):
+            raise RuntimeError(
+                "Semantic resolver executed outside delegated lineage finalization"
+            )
+        active.append(resolution.audit_dict())
+        return resolution
+
+    def delegated_iterator(
+        payload: Mapping[str, Any],
+        selected_events: Any,
+        *,
+        source_graphs_by_parent_id: Mapping[str, Any] | None = None,
+        include_actions: bool = True,
+        recovery_audit: dict[str, Any] | None = None,
+    ) -> Any:
+        active_recovery_audit: dict[str, Any] = (
+            recovery_audit if recovery_audit is not None else {}
+        )
+        semantic_sequence: list[dict[str, Any]] = []
+        state["active_sequence"] = semantic_sequence
+        row_count = 0
+        unresolved_row_count = 0
+        try:
+            for row in semantic_iterator(
+                payload,
+                selected_events,
+                source_graphs_by_parent_id=source_graphs_by_parent_id,
+                include_actions=include_actions,
+                recovery_audit=active_recovery_audit,
+            ):
+                row_count += 1
+                unresolved_row_count += int(
+                    row.get("action_lineage_resolved") is not True
+                )
+                yield row
+        except BaseException as exc:
+            invocation = {
+                "status": "FAIL",
+                "row_count": row_count,
+                "unresolved_row_count": unresolved_row_count,
+                "include_actions": bool(include_actions),
+                "semantic_transition_count": len(semantic_sequence),
+                "semantic_transition_sequence_sha256": _stable_json_sha256(
+                    semantic_sequence
+                ),
+                "recovery_audit": active_recovery_audit,
+                "error_class": type(exc).__name__,
+                "error": str(exc),
+            }
+            state["invocations"].append(invocation)
+            _write_semantic_finalizer_receipt(
+                receipt_path,
+                status="FAIL",
+                binding=binding,
+                role=role,
+                science_project_commit=science_project_commit,
+                invocations=state["invocations"],
+            )
+            raise
+        else:
+            invocation = {
+                "status": "PASS",
+                "row_count": row_count,
+                "unresolved_row_count": unresolved_row_count,
+                "include_actions": bool(include_actions),
+                "semantic_transition_count": len(semantic_sequence),
+                "semantic_transition_sequence_sha256": _stable_json_sha256(
+                    semantic_sequence
+                ),
+                "semantic_transition_alias_classes": [
+                    {"sequence_index": index, **row}
+                    for index, row in enumerate(semantic_sequence)
+                    if int(row.get("raw_alias_count", 0)) > 0
+                    or int(row.get("semantic_class_count", 0)) > 1
+                ],
+                "recovery_audit": active_recovery_audit,
+            }
+            state["invocations"].append(invocation)
+            _write_semantic_finalizer_receipt(
+                receipt_path,
+                status="PASS",
+                binding=binding,
+                role=role,
+                science_project_commit=science_project_commit,
+                invocations=state["invocations"],
+            )
+        finally:
+            state["active_sequence"] = None
+
+    semantic_graph_trace.collapse_semantic_transition_aliases = recording_collapse
+    setattr(science_graph_trace, symbol, delegated_iterator)
+    return state
+
+
+def _write_semantic_finalizer_receipt(
+    path: Path,
+    *,
+    status: str,
+    binding: Mapping[str, Any],
+    role: str,
+    science_project_commit: str,
+    invocations: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    invocation_rows = [dict(row) for row in invocations]
+    value: dict[str, Any] = {
+        "schema_version": SEMANTIC_FINALIZER_SCHEMA,
+        "status": status,
+        "role": role,
+        "science_project_commit": science_project_commit,
+        "source_algorithm_commit": SOURCE_COMMIT,
+        "semantic_finalizer_binding": dict(binding),
+        "patched_science_symbols": [
+            "src.baselines.comrecgc.graph_trace."
+            "iter_candidate_lineage_from_selected_trace"
+        ],
+        "patched_generation_symbols": [],
+        "random_walk_patched": False,
+        "candidate_generation_patched": False,
+        "candidate_universe_patched": False,
+        "delegation_scope": "post_walk_lineage_materialization_only",
+        "invocation_count": len(invocation_rows),
+        "invocations": invocation_rows,
+        "semantic_transition_count": sum(
+            int(row.get("semantic_transition_count", 0))
+            for row in invocation_rows
+        ),
+        "semantic_transition_alias_event_count": sum(
+            len(row.get("semantic_transition_alias_classes") or [])
+            for row in invocation_rows
+        ),
+        "all_lineage_rows_resolved": all(
+            int(row.get("unresolved_row_count", -1)) == 0
+            and int((row.get("recovery_audit") or {}).get(
+                "semantic_transition_failure_count", 0
+            )) == 0
+            and int((row.get("recovery_audit") or {}).get(
+                "semantic_transition_excluded_count", 0
+            )) == 0
+            for row in invocation_rows
+        ),
+    }
+    value["receipt_sha256"] = _stable_json_sha256(value)
+    _atomic_json(path, value)
+    return value
+
+
+def _validate_semantic_finalizer_receipt(
+    path: Path,
+    *,
+    role: str,
+    science_project_commit: str,
+) -> dict[str, Any]:
+    value = _json(path)
+    failures: list[str] = []
+    required = {
+        "schema_version": SEMANTIC_FINALIZER_SCHEMA,
+        "status": "PASS",
+        "role": role,
+        "science_project_commit": science_project_commit,
+        "source_algorithm_commit": SOURCE_COMMIT,
+        "patched_generation_symbols": [],
+        "random_walk_patched": False,
+        "candidate_generation_patched": False,
+        "candidate_universe_patched": False,
+        "delegation_scope": "post_walk_lineage_materialization_only",
+        "all_lineage_rows_resolved": True,
+    }
+    failures.extend(
+        key for key, expected in required.items() if value.get(key) != expected
+    )
+    binding = value.get("semantic_finalizer_binding")
+    if not isinstance(binding, Mapping) or any(
+        binding.get(key) != expected
+        for key, expected in {
+            "status": "PASS",
+            "commit": SEMANTIC_FINALIZER_COMMIT,
+            "graph_trace_sha256": SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256,
+            "resolver_symbol": "collapse_semantic_transition_aliases",
+            "lineage_symbol": "iter_candidate_lineage_from_selected_trace",
+            "module_namespaces_disjoint": True,
+        }.items()
+    ):
+        failures.append("semantic_finalizer_binding")
+    invocations = value.get("invocations")
+    if (
+        not isinstance(invocations, list)
+        or not invocations
+        or any(
+            not isinstance(row, Mapping)
+            or row.get("status") != "PASS"
+            or int(row.get("semantic_transition_count", 0)) <= 0
+            or int(row.get("unresolved_row_count", -1)) != 0
+            for row in invocations
+        )
+    ):
+        failures.append("invocations")
+    claimed = value.get("receipt_sha256")
+    if claimed != _stable_json_sha256(
+        {key: item for key, item in value.items() if key != "receipt_sha256"}
+    ):
+        failures.append("receipt_sha256")
+    if failures:
+        raise ValueError(
+            "Semantic lineage finalizer receipt failed closed: "
+            + ",".join(sorted(set(failures)))
+        )
+    return value
+
+
 def _run_one(args: argparse.Namespace) -> int:
     science_root = _absolute(args.science_project_root)
     output = _absolute(args.output_root, exists=False)
@@ -157,6 +501,22 @@ def _run_one(args: argparse.Namespace) -> int:
         stable_json_sha256,
     )
     from src.baselines.comrecgc.runtime import run_project_generation
+    science_graph_trace = importlib.import_module(
+        "src.baselines.comrecgc.graph_trace"
+    )
+
+    semantic_graph_trace, semantic_binding = _load_semantic_finalizer(
+        _absolute(args.semantic_finalizer_project_root)
+    )
+    semantic_receipt_path = output / "semantic_lineage_finalizer_receipt.json"
+    _install_semantic_lineage_finalizer(
+        science_graph_trace=science_graph_trace,
+        semantic_graph_trace=semantic_graph_trace,
+        binding=semantic_binding,
+        receipt_path=semantic_receipt_path,
+        role=str(args.role),
+        science_project_commit=expected_commit,
+    )
 
     expected_full = GenerationParameters.for_mode("full")
     parameters = replace(expected_full, steps=STEPS)
@@ -229,6 +589,11 @@ def _run_one(args: argparse.Namespace) -> int:
             }
         )
     manifest = run_project_generation(**kwargs)
+    semantic_receipt = _validate_semantic_finalizer_receipt(
+        semantic_receipt_path,
+        role=str(args.role),
+        science_project_commit=expected_commit,
+    )
     rng = _rng_payload(torch, np)
     diagnostic = {
         "schema_version": "mut_checkpoint_instrumentation_prefix_v1",
@@ -247,6 +612,20 @@ def _run_one(args: argparse.Namespace) -> int:
         "test_loaded": manifest.get("test_loaded"),
         "counterfactuals_sha256": sha256_file(output / "counterfactuals.pt"),
         "run_manifest_sha256": sha256_file(output / "run_manifest.json"),
+        "semantic_lineage_finalizer_receipt": str(semantic_receipt_path),
+        "semantic_lineage_finalizer_receipt_sha256": hashlib.sha256(
+            semantic_receipt_path.read_bytes()
+        ).hexdigest(),
+        "semantic_lineage_finalizer_commit": SEMANTIC_FINALIZER_COMMIT,
+        "semantic_lineage_finalizer_graph_trace_sha256": (
+            SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256
+        ),
+        "semantic_transition_count": semantic_receipt[
+            "semantic_transition_count"
+        ],
+        "semantic_transition_alias_event_count": semantic_receipt[
+            "semantic_transition_alias_event_count"
+        ],
         "rng_state_sha256": stable_json_sha256(rng),
         "rng_state": rng,
     }
@@ -504,6 +883,7 @@ def _run_pair(args: argparse.Namespace) -> int:
     controller_root = Path(__file__).resolve().parents[2]
     legacy_project = _absolute(args.legacy_project_root)
     execution_project = _absolute(args.execution_project_root)
+    semantic_finalizer_project = _absolute(args.semantic_finalizer_project_root)
     if _git_head(legacy_project) != SOURCE_COMMIT:
         raise ValueError("Legacy project is not the exact traced-source commit")
     execution_commit = str(args.execution_commit)
@@ -511,6 +891,8 @@ def _run_pair(args: argparse.Namespace) -> int:
         raise ValueError("Execution commit is not the reviewed checkpoint release")
     if _git_head(execution_project) != execution_commit:
         raise ValueError("Instrumentation execution commit changed")
+    if _git_head(semantic_finalizer_project) != SEMANTIC_FINALIZER_COMMIT:
+        raise ValueError("Semantic finalizer worktree commit changed")
     legacy_source_inventory = _source_inventory(legacy_project)
     instrumentation_source_inventory = _source_inventory(execution_project)
     if (
@@ -564,6 +946,8 @@ def _run_pair(args: argparse.Namespace) -> int:
         str(args.device),
         "--batch-size",
         str(int(args.batch_size)),
+        "--semantic-finalizer-project-root",
+        str(semantic_finalizer_project),
     ]
     environment = {
         **os.environ,
@@ -638,6 +1022,22 @@ def _run_pair(args: argparse.Namespace) -> int:
     instrumented_manifest = _json(instrumented / "run_manifest.json")
     legacy_diagnostic = _json(legacy / "DIAGNOSTIC_ONLY.json")
     instrumented_diagnostic = _json(instrumented / "DIAGNOSTIC_ONLY.json")
+    legacy_semantic_receipt_path = (
+        legacy / "semantic_lineage_finalizer_receipt.json"
+    )
+    instrumented_semantic_receipt_path = (
+        instrumented / "semantic_lineage_finalizer_receipt.json"
+    )
+    legacy_semantic_receipt = _validate_semantic_finalizer_receipt(
+        legacy_semantic_receipt_path,
+        role="legacy",
+        science_project_commit=SOURCE_COMMIT,
+    )
+    instrumented_semantic_receipt = _validate_semantic_finalizer_receipt(
+        instrumented_semantic_receipt_path,
+        role="instrumented",
+        science_project_commit=execution_commit,
+    )
     interruption_proof = _json(interruption_proof_path)
     interruption_marker = Path(str(interruption_proof.get("checkpoint_marker") or ""))
     interruption_marker_valid = (
@@ -681,6 +1081,19 @@ def _run_pair(args: argparse.Namespace) -> int:
         "rng_state_sha256"
     ):
         failures.append("rng_state")
+    legacy_semantic_sequences = [
+        row["semantic_transition_sequence_sha256"]
+        for row in legacy_semantic_receipt["invocations"]
+    ]
+    instrumented_semantic_sequences = [
+        row["semantic_transition_sequence_sha256"]
+        for row in instrumented_semantic_receipt["invocations"]
+    ]
+    semantic_transition_sequence_exact = (
+        legacy_semantic_sequences == instrumented_semantic_sequences
+    )
+    if not semantic_transition_sequence_exact:
+        failures.append("semantic_transition_sequence")
     if (
         legacy_diagnostic.get("resumed") is not False
         or instrumented_diagnostic.get("resumed") is not True
@@ -764,6 +1177,42 @@ def _run_pair(args: argparse.Namespace) -> int:
         "calibration_loaded": False,
         "test_loaded": False,
         "source_audit": source_audit,
+        "semantic_lineage_finalizer": {
+            "status": "PASS",
+            "commit": SEMANTIC_FINALIZER_COMMIT,
+            "project_root": str(semantic_finalizer_project),
+            "graph_trace_sha256": SEMANTIC_FINALIZER_GRAPH_TRACE_SHA256,
+            "delegation_scope": "post_walk_lineage_materialization_only",
+            "generation_algorithm_changed": False,
+            "candidate_universe_changed": False,
+            "legacy_receipt": str(legacy_semantic_receipt_path),
+            "legacy_receipt_sha256": hashlib.sha256(
+                legacy_semantic_receipt_path.read_bytes()
+            ).hexdigest(),
+            "instrumented_receipt": str(instrumented_semantic_receipt_path),
+            "instrumented_receipt_sha256": hashlib.sha256(
+                instrumented_semantic_receipt_path.read_bytes()
+            ).hexdigest(),
+            "legacy_semantic_transition_alias_event_count": (
+                legacy_semantic_receipt[
+                    "semantic_transition_alias_event_count"
+                ]
+            ),
+            "instrumented_semantic_transition_alias_event_count": (
+                instrumented_semantic_receipt[
+                    "semantic_transition_alias_event_count"
+                ]
+            ),
+            "semantic_transition_sequence_exact": (
+                semantic_transition_sequence_exact
+            ),
+            "legacy_semantic_transition_sequence_sha256": (
+                legacy_semantic_sequences
+            ),
+            "instrumented_semantic_transition_sequence_sha256": (
+                instrumented_semantic_sequences
+            ),
+        },
         "failures": failures,
     }
     result["summary_sha256"] = stable_json_sha256(result)
@@ -814,6 +1263,7 @@ def build_parser() -> argparse.ArgumentParser:
         value.add_argument("--parent-limit", type=int, default=1448)
         value.add_argument("--device", default="cuda:0")
         value.add_argument("--batch-size", type=int, default=128)
+        value.add_argument("--semantic-finalizer-project-root", required=True)
     return parser
 
 

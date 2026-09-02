@@ -1,5 +1,29 @@
 # Decisions Log
 
+## [2026-09-02] Bind Mut 500-step lineage finalization to the reviewed semantic resolver
+
+### Decision
+
+- Keep the diagnostic random walk and checkpoint/resume science loaded from
+  the immutable `7f7ed51` and `66487c0` worktrees with their existing source
+  inventory hashes. Do not copy or modify either worktree.
+- Load only `iter_candidate_lineage_from_selected_trace` from the immutable
+  `582bc4b` closeout worktree under a private Python package namespace. This
+  prevents `src` module-cache shadowing and confines the integration to
+  post-walk lineage materialization.
+- Record every invocation of the reviewed
+  `collapse_semantic_transition_aliases` resolver, including a semantic-key
+  sequence digest and typed alias classes. The legacy and instrumented
+  500-step arms must produce the same semantic sequence before the
+  instrumentation gate can pass.
+- The runner receipt explicitly asserts that no generation symbol, random
+  walk, candidate universe, historical 50k artifact, pair store, or DBSCAN
+  artifact was changed. Adoption independently reopens and hashes both
+  finalizer receipts.
+- All existing AutoDL entry points, including the legacy high-memory fallback
+  and fast-successor launcher, pass the same exact 582 worktree binding so the
+  new required CLI contract cannot strand a fallback route.
+
 ## [2026-09-02] Close T8 salvage failures with typed evidence and keep T13 fresh
 
 ### Motivation
