@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -120,6 +121,48 @@ def test_at_12_dispatches_only_missing_main_helpers(
     ]
     assert result["components"]["llm_ablation"]["state"] == "BLOCKED_MAIN_PRIORITY"
     assert result["components"]["gnn_ablation"]["state"] == "BLOCKED_WAITING_FINAL_MAIN"
+
+
+def test_live_mut_owner_is_adopted_without_duplicate_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _policy_env(monkeypatch)
+    matrix = tmp_path / "matrix.json"
+    _matrix(matrix, ["Mutagenicity/Ours"])
+    heartbeat = tmp_path / "mut-heartbeat.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                "state": "PROTECTED_BASELINE_RUNNING",
+                "worker_pid": 4321,
+                "worker_start_ticks": 999,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MUT_CONTINUATION_HEARTBEAT", str(heartbeat))
+    monkeypatch.setattr(
+        module,
+        "_process_identity",
+        lambda pid: {"pid": pid, "alive": True, "start_ticks": 999},
+    )
+    called: list[str] = []
+
+    def fake_dispatch(_state, _project, component: str, **_kwargs):
+        called.append(component)
+        return {"state": "WOULD_DISPATCH"}
+
+    monkeypatch.setattr(module, "_dispatch", fake_dispatch)
+    result = module.observe_and_dispatch(
+        state_root=tmp_path / "state",
+        project_root=PROJECT_ROOT,
+        matrix_path=matrix,
+        policy=module.validate_policy(),
+        dry_run=True,
+    )
+    assert result["components"]["mut_continuation"]["state"] == "ADOPTED_LIVE_OWNER"
+    assert "mut_continuation" not in called
 
 
 def test_gnn_dispatch_requires_16_and_all_final_receipts(

@@ -177,6 +177,49 @@ def _process_identity(pid: int) -> dict[str, Any]:
     return {"pid": pid, "alive": True, "start_ticks": ticks, "command": command}
 
 
+def _adopt_live_mut_owner(
+    path_text: str | None, *, max_age_seconds: int = 120
+) -> dict[str, Any] | None:
+    """Adopt an already-running Mut owner instead of launching a duplicate."""
+
+    if not path_text:
+        return None
+    path = Path(path_text)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        return None
+    try:
+        heartbeat = _load_json(path)
+        worker_pid = heartbeat.get("worker_pid")
+        worker_start_ticks = heartbeat.get("worker_start_ticks")
+        written = datetime.fromisoformat(
+            str(heartbeat["heartbeat_at"]).replace("Z", "+00:00")
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    age = (datetime.now(timezone.utc) - written).total_seconds()
+    if age < 0 or age > max_age_seconds or not isinstance(worker_pid, int):
+        return None
+    identity = _process_identity(worker_pid)
+    if not identity.get("alive"):
+        return None
+    if (
+        not isinstance(worker_start_ticks, int)
+        or identity.get("start_ticks") != worker_start_ticks
+    ):
+        return None
+    state = str(heartbeat.get("state", ""))
+    if state in {"FAILED", "PASS", "BLOCKED", "STOPPED"}:
+        return None
+    return {
+        "state": "ADOPTED_LIVE_OWNER",
+        "heartbeat": str(path.resolve(strict=True)),
+        "heartbeat_age_seconds": age,
+        "worker_pid": worker_pid,
+        "worker_start_ticks": worker_start_ticks,
+        "worker_state": state,
+    }
+
+
 def _launcher(project_root: Path, component: str) -> Path:
     configured = os.environ.get(LAUNCHER_ENV[component], DEFAULT_LAUNCHERS[component])
     candidate = Path(configured)
@@ -286,11 +329,14 @@ def observe_and_dispatch(
     if _cell_present(matrix, "Mutagenicity", "ComRecGC"):
         components["mut_continuation"] = {"state": "MAIN_CELL_PASS"}
     else:
-        components["mut_continuation"] = _dispatch(
+        live_mut = _adopt_live_mut_owner(
+            os.environ.get("MUT_CONTINUATION_HEARTBEAT")
+        )
+        components["mut_continuation"] = live_mut or _dispatch(
             state_root,
             project_root,
             "mut_continuation",
-            reason="P0_MUT_CELL_MISSING",
+            reason="P0_MUT_CELL_MISSING_NO_LIVE_OWNER",
             dry_run=dry_run,
         )
     if _cell_present(matrix, "TasteMolNet", "ComRecGC"):

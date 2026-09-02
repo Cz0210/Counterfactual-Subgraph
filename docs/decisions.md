@@ -17142,3 +17142,16 @@ must not be presented as an actual loaded-parameter count.
 - Impact: the auditor writes only to a fresh external audit root and has no
   signal API.  A two-window PASS creates a receipt for a separate controller
   to consume at a verified safe checkpoint; it does not itself stop T14.
+
+# 2026-09-03: Adopt a live Mut continuation before any scheduler dispatch
+
+- Motivation: the priority sidecar may start after the unique throttled Mut
+  continuation has already acquired its canonical owner lease.  Calling the
+  launcher again is unnecessary and obscures the live owner's state even when
+  the launcher's own lease check would ultimately reject a duplicate.
+- Decision: when the configured Mut heartbeat is fresh, nonterminal, and its
+  PID plus start ticks still match `/proc`, the sidecar records
+  `ADOPTED_LIVE_OWNER` and does not dispatch a launcher.  Missing, stale, or
+  mismatched evidence falls back to the existing lease-protected launcher.
+- Impact: the scheduler preserves one Mut writer and reports the actual owner;
+  it does not weaken the worker's canonical lease or change any science state.
