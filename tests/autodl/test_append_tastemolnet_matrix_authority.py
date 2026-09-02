@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -104,7 +105,7 @@ def _legacy_cell(root: Path, *, dataset: str, method: str) -> None:
     )
 
 
-def _prior_eight(root: Path) -> Path:
+def _prior_eight(root: Path, *, authoritative_annotation: bool = False) -> Path:
     explicit: dict[str, str] = {}
     for dataset in ("AIDS", "Mutagenicity"):
         for method in ("Ours", "GCFExplainer", "GlobalGCE", "ComRecGC"):
@@ -115,6 +116,16 @@ def _prior_eight(root: Path) -> Path:
         AuditConfig(scan_roots=(), output_root=root / "authority", explicit_cells=explicit)
     )
     assert result.matrix_complete_cells == 8
+    if authoritative_annotation:
+        rows = []
+        for source in result.matrix_rows:
+            row = dict(source)
+            if (row["dataset"], row["method"]) == ("AIDS", "ComRecGC"):
+                row["adoption_reason"] = (
+                    "authoritative publication annotation not reconstructed by scanner"
+                )
+            rows.append(row)
+        result = replace(result, matrix_rows=tuple(rows))
     return write_registry_outputs(result, root / "authority")
 
 
@@ -367,6 +378,28 @@ def test_strict_taste_append_preserves_non_target_rows_and_advances_once(tmp_pat
         if key != ("TasteMolNet", "Ours"):
             assert after_rows[key] == row
     assert after_rows[("TasteMolNet", "Ours")]["status"] == "FROZEN_PASS"
+
+
+def test_append_preserves_hash_closed_prior_publication_decision(tmp_path: Path) -> None:
+    prior = _prior_eight(tmp_path, authoritative_annotation=True)
+    t3 = _t3(tmp_path)
+    before = json.loads((prior / "matrix_status.json").read_text())
+    result = _append(
+        tmp_path,
+        method="Ours",
+        prior=prior,
+        destination=tmp_path / "matrix-nine",
+        t3=t3,
+    )
+    after = json.loads(Path(result["matrix_status_path"]).read_text())
+    before_rows = {(row["dataset"], row["method"]): row for row in before["cells"]}
+    after_rows = {(row["dataset"], row["method"]): row for row in after["cells"]}
+    key = ("AIDS", "ComRecGC")
+    assert after_rows[key] == before_rows[key]
+    assert (
+        after_rows[key]["adoption_reason"]
+        == "authoritative publication annotation not reconstructed by scanner"
+    )
 
 
 def test_append_rejects_a_smoke_or_method_marker_masquerading_as_full(tmp_path: Path) -> None:

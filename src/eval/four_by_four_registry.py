@@ -1670,9 +1670,16 @@ def _status_priority(status: CellStatus) -> int:
     }[status]
 
 
-def _build_oracle_registry(
+def build_oracle_registry(
     rows: Sequence[Mapping[str, Any]], expectations: Mapping[str, Any]
 ) -> dict[str, Any]:
+    """Build the classifier registry from already-authoritative matrix rows.
+
+    Matrix appenders use this public helper after preserving predecessor rows
+    byte-for-byte.  This avoids reinterpreting an earlier publication decision
+    (for example, a valid zero-result exception) merely to refresh the derived
+    oracle summary.
+    """
     datasets: dict[str, Any] = {}
     for dataset in DATASETS:
         expected = _expected_oracle(dataset, expectations)
@@ -1809,7 +1816,7 @@ def audit_registry(config: AuditConfig) -> RegistryResult:
         matrix_rows=tuple(matrix),
         inventory_rows=tuple(inventory),
         stale_rows=tuple(stale),
-        oracle_registry=_build_oracle_registry(matrix, config.expectations),
+        oracle_registry=build_oracle_registry(matrix, config.expectations),
         evaluation_contract=build_evaluation_contract(config.expectations),
         threshold_contracts=build_threshold_contracts(config.expectations),
         matrix_complete_cells=complete,
@@ -2039,6 +2046,7 @@ __all__ = [
     "audit_registry",
     "audit_explicit_candidate",
     "build_evaluation_contract",
+    "build_oracle_registry",
     "build_threshold_contracts",
     "canonical_dataset",
     "canonical_method",

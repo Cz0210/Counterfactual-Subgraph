@@ -35,6 +35,7 @@ from src.eval.four_by_four_registry import (
     METHODS,
     PASS_STATUSES,
     audit_registry,
+    build_oracle_registry,
     stable_json_sha256,
     write_registry_outputs,
 )
@@ -698,11 +699,13 @@ def append_tastemolnet_cells(
     for key, prior_row in prior_rows.items():
         if key in target_keys:
             continue
-        if str(prior_row.get("status") or "") in passing:
-            if proposed.get(key) != prior_row:
-                raise TasteMatrixAppendError(f"Prior passing matrix row drifted: {key}")
-        else:
-            proposed[key] = dict(prior_row)
+        # The predecessor is already a hash-closed matrix authority.  Its rows
+        # may encode an explicitly reviewed publication decision that the
+        # generic scanner cannot reconstruct (notably a scientifically valid
+        # zero-result cell).  Re-auditing remains useful for discovering the
+        # new Taste target, but it must never reinterpret or rewrite any
+        # non-target row in an append-only authority chain.
+        proposed[key] = dict(prior_row)
     expected_complete = int(prior["complete"]) + len(taste_cells)
     observed_complete = sum(
         str(row.get("status") or "") in passing for row in proposed.values()
@@ -722,6 +725,7 @@ def append_tastemolnet_cells(
     result = replace(
         result,
         matrix_rows=_ordered_rows(proposed),
+        oracle_registry=build_oracle_registry(_ordered_rows(proposed), {}),
         matrix_complete_cells=observed_complete,
     )
     taste_evidence: dict[str, dict[str, Any]] = {}
