@@ -210,16 +210,30 @@ def test_registry_builds_checked_in_gps_config() -> None:
     from src.utils.env import load_yaml_config
 
     schema = default_molecular_feature_schema()
-    model = build_backbone(
-        "gps",
-        load_yaml_config(PROJECT_ROOT / "configs/gnn/gps.yaml"),
-        feature_schema=schema,
-        expected_feature_schema_sha256=schema.to_dict()["schema_sha256"],
-        num_classes=2,
-    )
-    assert model.config.backbone == "gps"
-    assert model.config.hidden_dim == 160
-    assert model.config.rwpe_walk_length == 16
+    payload = load_yaml_config(PROJECT_ROOT / "configs/gnn/gps.yaml")
+    assert payload["gnn"]["backend"] == "pyg_gpsconv"
+    try:
+        from torch_geometric.nn import GPSConv  # noqa: F401
+    except ImportError:
+        with pytest.raises(RuntimeError, match="requires PyG GPSConv"):
+            build_backbone(
+                "gps",
+                payload,
+                feature_schema=schema,
+                expected_feature_schema_sha256=schema.to_dict()["schema_sha256"],
+                num_classes=2,
+            )
+    else:
+        model = build_backbone(
+            "gps",
+            payload,
+            feature_schema=schema,
+            expected_feature_schema_sha256=schema.to_dict()["schema_sha256"],
+            num_classes=2,
+        )
+        assert model.config.backbone == "gps"
+        assert model.config.hidden_dim == 160
+        assert model.config.rwpe_walk_length == 16
 
 
 def _main_gate(*, complete: int = 16) -> LaunchGateDecision:

@@ -380,6 +380,9 @@ class GraphGPSMolecularConfig:
         if not isinstance(source, Mapping):
             raise ValueError("GraphGPS config must be a mapping")
         fields = set(cls.__dataclass_fields__)
+        unknown = sorted(set(source).difference(fields | {"edge_feature_mode"}))
+        if unknown:
+            raise ValueError(f"Unsupported GraphGPS configuration fields: {unknown}")
         return cls(**{key: source[key] for key in fields if key in source})
 
 

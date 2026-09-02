@@ -11,7 +11,7 @@ gnn:
   attention_heads: 4
   local_mpnn: gine
   global_attention: multihead
-  backend: auto
+  backend: pyg_gpsconv
 training:
   optimizer: adamw
   learning_rate: 0.001

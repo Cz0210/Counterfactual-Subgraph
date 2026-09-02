@@ -258,6 +258,7 @@ def load_five_backbone_config(
         raise FiveBackboneConfigError("exactly five backbone mappings are required")
     model_configs: dict[str, str] = {}
     model_hashes: dict[str, str] = {}
+    model_payloads: dict[str, dict[str, Any]] = {}
     names: list[str] = []
     for index, entry in enumerate(raw_backbones):
         value = _mapping(entry, field=f"backbones[{index}]")
@@ -276,10 +277,59 @@ def load_five_backbone_config(
             raise FiveBackboneConfigError(f"{name} model config points elsewhere")
         model_configs[name] = str(model_path.relative_to(root))
         model_hashes[name] = _sha256_file(model_path)
+        model_payloads[name] = _load_yaml(model_path, field=f"model config {name}")
     if tuple(names) != FIVE_BACKBONES:
         raise FiveBackboneConfigError(
             f"backbones must appear exactly as {FIVE_BACKBONES}"
         )
+
+    reference_training = _mapping(
+        model_payloads["gine"].get("training"), field="gine.training"
+    )
+    reference_calibration = _mapping(
+        model_payloads["gine"].get("calibration"), field="gine.calibration"
+    )
+    common_gnn = {
+        "num_layers": 5,
+        "dropout": 0.2,
+        "pooling": "mean",
+        "readout_layers": 2,
+        "normalization": "batch_norm",
+        "residual": True,
+    }
+    for name, payload in model_payloads.items():
+        gnn = _mapping(payload.get("gnn"), field=f"{name}.gnn")
+        if normalize_gnn_backbone(gnn.get("backbone")) != name:
+            raise FiveBackboneConfigError(f"{name} model config selects another backbone")
+        changed_common = [
+            field for field, expected in common_gnn.items() if gnn.get(field) != expected
+        ]
+        if changed_common:
+            raise FiveBackboneConfigError(
+                f"{name} shared architecture fields changed: {changed_common}"
+            )
+        if _mapping(payload.get("training"), field=f"{name}.training") != reference_training:
+            raise FiveBackboneConfigError(f"{name} training policy differs from GINE")
+        if _mapping(payload.get("calibration"), field=f"{name}.calibration") != reference_calibration:
+            raise FiveBackboneConfigError(f"{name} calibration policy differs from GINE")
+        if name == "gps":
+            gps_expected = {
+                "hidden_dim": GPS_SELECTED_HIDDEN_DIM,
+                "rwpe_walk_length": GRAPHGPS_RWPE_WALK_LENGTH,
+                "attention_heads": GRAPHGPS_ATTENTION_HEADS,
+                "local_mpnn": "gine",
+                "global_attention": "multihead",
+                "backend": "pyg_gpsconv",
+            }
+            changed_gps = [
+                field for field, expected in gps_expected.items() if gnn.get(field) != expected
+            ]
+            if changed_gps:
+                raise FiveBackboneConfigError(
+                    f"GPS executable config differs from the frozen match: {changed_gps}"
+                )
+        elif gnn.get("hidden_dim") != 256:
+            raise FiveBackboneConfigError(f"{name} hidden_dim differs from reference")
 
     graphgps = _mapping(raw.get("graphgps"), field="graphgps")
     frozen_gps = {
