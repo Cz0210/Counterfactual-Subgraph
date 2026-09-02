@@ -10,9 +10,12 @@ import pytest
 import src.baselines.comrecgc.graph_trace as graph_trace_module
 from src.baselines.comrecgc.graph_trace import (
     ActionTraceRecorder,
+    SemanticTransitionStatus,
     TRACE_IMPORTANCE_ABS_TOLERANCE,
     apply_action_to_normalized_payload,
     assert_trace_parity,
+    collapse_semantic_transition_aliases,
+    enumerate_official_single_edits,
     infer_official_single_edit,
     iter_candidate_lineage_from_selected_trace,
     iter_selected_trace,
@@ -673,7 +676,7 @@ def test_missing_recorded_action_invokes_legacy_inference(
     assert audit["legacy_inference_success_count"] == 1
 
 
-def test_missing_recorded_action_ambiguous_legacy_inference_fails_closed() -> None:
+def test_missing_recorded_action_symmetric_alias_uses_unique_lineage() -> None:
     source = Graph(
         x=[[1.0, 0.0], [1.0, 0.0]],
         edge_index=[[], []],
@@ -705,17 +708,257 @@ def test_missing_recorded_action_ambiguous_legacy_inference_fails_closed() -> No
     ]
     audit: dict[str, object] = {}
 
-    with pytest.raises(ValueError, match="not one unique pinned-upstream"):
-        recover_candidate_lineage_from_selected_trace(
-            candidate_payload,
-            selected_events,
-            recovery_audit=audit,
-        )
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        selected_events,
+        recovery_audit=audit,
+    )
 
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert lineage[0]["actions"][0]["action"] == ["INR", 0, 0]
+    assert lineage[0]["actions"][0]["action_recovery"] == (
+        "inferred_semantic_alias_lineage_v1"
+    )
     assert audit["missing_action_fallback_count"] == 1
     assert audit["legacy_inference_invocation_count"] == 1
-    assert audit["legacy_inference_failure_count"] == 1
-    assert audit["legacy_inference_ambiguous_count"] == 1
+    assert audit["legacy_inference_success_count"] == 1
+    assert audit["legacy_inference_failure_count"] == 0
+    assert audit["semantic_transition_raw_alias_event_count"] == 1
+    assert audit["semantic_transition_raw_alias_count"] == 1
+
+
+def _symmetric_nr_transition(
+    alias_indices: tuple[int, ...],
+    *,
+    target_lineage_removed_index: int,
+) -> tuple[Graph, Graph]:
+    first_alias = min(alias_indices)
+    node_count = max(alias_indices) + 1
+    if tuple(range(first_alias, node_count)) != alias_indices:
+        raise AssertionError("Regression fixture aliases must be one final node run.")
+    source_x = [[0.0, 1.0] for _ in range(first_alias)] + [
+        [1.0, 0.0] for _ in alias_indices
+    ]
+    undirected_edges = [
+        (index, index + 1) for index in range(max(0, first_alias - 1))
+    ] + [(0, alias) for alias in alias_indices]
+    source = Graph(
+        x=source_x,
+        edge_index=[
+            [node for edge in undirected_edges for node in (edge[0], edge[1])],
+            [node for edge in undirected_edges for node in (edge[1], edge[0])],
+        ],
+        num_nodes=node_count,
+        comrecgc_trace_node_ids=tuple(
+            f"historic:{index}" for index in range(node_count)
+        ),
+    )
+    target_payload = apply_action_to_normalized_payload(
+        source,
+        ["NR", alias_indices[0], alias_indices[0]],
+    )
+    target_edges = target_payload["directed_edges"]
+    target_ids = list(source.comrecgc_trace_node_ids)
+    target_ids.pop(target_lineage_removed_index)
+    target = Graph(
+        x=target_payload["x"],
+        edge_index=[
+            [int(edge["source"]) for edge in target_edges],
+            [int(edge["target"]) for edge in target_edges],
+        ],
+        num_nodes=int(target_payload["num_nodes"]),
+        comrecgc_trace_node_ids=tuple(target_ids),
+    )
+    return source, target
+
+
+@pytest.mark.parametrize(
+    ("trace_row", "move_index", "aliases", "historic_pin"),
+    [
+        (139, 28, (8, 9), 8),
+        (576, 120, (27, 28, 29), 29),
+        (1151, 243, (11, 12, 13), 12),
+        (1892, 412, (5, 6), 5),
+        (2103, 457, (5, 6), 5),
+    ],
+)
+def test_mut_historical_symmetric_nr_alias_rows_use_authoritative_pin(
+    trace_row: int,
+    move_index: int,
+    aliases: tuple[int, ...],
+    historic_pin: int,
+) -> None:
+    source, target = _symmetric_nr_transition(
+        aliases,
+        target_lineage_removed_index=historic_pin,
+    )
+    assert enumerate_official_single_edits(source, target) == [
+        ["NR", index, index] for index in aliases
+    ]
+    resolution = collapse_semantic_transition_aliases(
+        source,
+        target,
+        authoritative_historic_action=["NR", historic_pin, historic_pin],
+    )
+
+    assert trace_row > move_index
+    assert resolution.status == (
+        SemanticTransitionStatus.SELECTED_AUTHORITATIVE_HISTORIC_PIN
+    )
+    assert resolution.action == ("NR", historic_pin, historic_pin)
+    assert resolution.semantic_class_count == 1
+    assert resolution.raw_unique_candidate_count == len(aliases)
+    assert resolution.raw_alias_count == len(aliases) - 1
+    assert resolution.lineage_valid_candidate_count == 1
+
+    audit: dict[str, object] = {}
+    lineage = recover_candidate_lineage_from_selected_trace(
+        {
+            "graph_map": {"source": [source], "target": [target]},
+            "counterfactual_candidates": [{"graph_hash": "target"}],
+        },
+        [
+            {
+                "move_index": move_index,
+                "head_index": 0,
+                "trace_row": trace_row,
+                "event": "selected_transition",
+                "source_official_hash": "source",
+                "target_official_hash": "target",
+                "source_graph_sha256": stable_untyped_graph_sha256(source),
+                "target_graph_sha256": stable_untyped_graph_sha256(target),
+                "action_resolution": "exact",
+                "action": ["NR", historic_pin, historic_pin],
+                "parent_id": "parent-1",
+            }
+        ],
+        source_graphs_by_parent_id={"parent-1": source},
+        recovery_audit=audit,
+    )
+    recovered = lineage[0]["actions"][0]
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert recovered["action"] == ["NR", historic_pin, historic_pin]
+    assert recovered["semantic_transition_resolution"]["raw_alias_count"] == (
+        len(aliases) - 1
+    )
+    assert audit["semantic_transition_raw_alias_event_count"] == 1
+
+
+def test_semantic_alias_replaces_lineage_invalid_pin_only_with_unique_peer() -> None:
+    source = Graph(
+        x=[[1.0, 0.0], [1.0, 0.0]],
+        edge_index=[[], []],
+        num_nodes=2,
+    )
+    target = Graph(
+        x=[[1.0, 0.0]],
+        edge_index=[[], []],
+        num_nodes=1,
+        comrecgc_trace_node_ids=("source:1",),
+    )
+
+    resolution = collapse_semantic_transition_aliases(
+        source,
+        target,
+        authoritative_historic_action=["INR", 1, 1],
+    )
+
+    assert resolution.status == (
+        SemanticTransitionStatus.SELECTED_SAME_CLUSTER_LINEAGE_REPLACEMENT
+    )
+    assert resolution.action == ("INR", 0, 0)
+    assert resolution.representative_replaced is True
+    assert resolution.lineage_valid_candidate_count == 1
+
+    audit: dict[str, object] = {}
+    lineage = recover_candidate_lineage_from_selected_trace(
+        {
+            "graph_map": {"source": [source], "target": [target]},
+            "counterfactual_candidates": [{"graph_hash": "target"}],
+        },
+        [
+            {
+                "move_index": 1,
+                "head_index": 0,
+                "event": "selected_transition",
+                "source_official_hash": "source",
+                "target_official_hash": "target",
+                "source_graph_sha256": stable_untyped_graph_sha256(source),
+                "target_graph_sha256": stable_untyped_graph_sha256(target),
+                "action_resolution": "exact",
+                "action": ["INR", 1, 1],
+                "parent_id": "parent-1",
+            }
+        ],
+        source_graphs_by_parent_id={"parent-1": source},
+        recovery_audit=audit,
+    )
+    recovered = lineage[0]["actions"][0]
+    assert recovered["recorded_action"] == ["INR", 1, 1]
+    assert recovered["action"] == ["INR", 0, 0]
+    assert recovered["action_recovery"] == (
+        "recorded_exact_semantic_alias_lineage_replacement_v1"
+    )
+    assert audit["semantic_transition_lineage_replacement_count"] == 1
+
+
+def test_semantic_alias_returns_typed_excluded_without_unique_lineage() -> None:
+    source = Graph(
+        x=[[1.0, 0.0], [1.0, 0.0]],
+        edge_index=[[], []],
+        num_nodes=2,
+    )
+    target = Graph(
+        x=[[1.0, 0.0]],
+        edge_index=[[], []],
+        num_nodes=1,
+        comrecgc_trace_node_ids=("foreign:0",),
+    )
+
+    resolution = collapse_semantic_transition_aliases(source, target)
+
+    assert resolution.status == (
+        SemanticTransitionStatus.EXCLUDED_NO_UNIQUE_LINEAGE_VALID_REPRESENTATIVE
+    )
+    assert resolution.excluded is True
+    assert resolution.action is None
+    assert resolution.raw_alias_count == 1
+
+
+def test_multiple_semantic_classes_require_authoritative_historic_pin() -> None:
+    source = graph()
+    target = Graph(
+        x=[list(row) for row in source.x],
+        edge_index=[[], []],
+        num_nodes=2,
+    )
+    candidates = [["ER", 0, 1], ["ERR", 0, 1]]
+
+    with pytest.raises(ValueError, match="multiple pinned-upstream"):
+        collapse_semantic_transition_aliases(
+            source,
+            target,
+            candidate_actions=candidates,
+        )
+    pinned = collapse_semantic_transition_aliases(
+        source,
+        target,
+        candidate_actions=candidates,
+        authoritative_historic_action=["ERR", 0, 1],
+    )
+
+    assert pinned.action == ("ERR", 0, 1)
+    assert pinned.semantic_class_count == 2
+    assert pinned.authoritative_historic_pin_used is True
+
+
+def test_semantic_transition_rejects_inconsistent_action_payload() -> None:
+    with pytest.raises(ValueError, match="does not replay to the exact"):
+        collapse_semantic_transition_aliases(
+            graph(),
+            graph(atom=1),
+            authoritative_historic_action=["NOTHING", 0, 0],
+        )
 
 
 def test_recorded_action_json_round_trip_replays_exact_target(tmp_path) -> None:

@@ -9,6 +9,7 @@ import os
 import tempfile
 import weakref
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
@@ -18,6 +19,81 @@ from .contracts import atomic_write_bytes, sha256_file, stable_json_sha256, writ
 TRACE_IMPORTANCE_ABS_TOLERANCE = 1e-6
 MODEL_CF_IMPORTANCE_THRESHOLD = 0.5
 TRACE_CHECKPOINT_SCHEMA_VERSION = "comrecgc_action_trace_state_v1"
+
+
+@dataclass(frozen=True, order=True)
+class SemanticTransitionKey:
+    """One scientific single-edit class between two exact graph payloads.
+
+    Pinned COMRECGC can enumerate several raw node indices which produce the
+    same normalized graph transition when adjacent, feature-identical nodes
+    are symmetric.  Raw indices are therefore representatives, not separate
+    scientific transitions.  Operation classes remain distinct: for example,
+    ``NR`` and ``INR`` are never collapsed merely because they serialize the
+    same target payload.
+    """
+
+    source_graph_sha256: str
+    target_graph_sha256: str
+    operation_class: str
+
+
+class SemanticTransitionStatus(str, Enum):
+    """Typed outcome of resolving one raw-action alias cluster."""
+
+    SELECTED_UNIQUE_RAW = "SELECTED_UNIQUE_RAW"
+    SELECTED_UNIQUE_LINEAGE_ALIAS = "SELECTED_UNIQUE_LINEAGE_ALIAS"
+    SELECTED_AUTHORITATIVE_HISTORIC_PIN = "SELECTED_AUTHORITATIVE_HISTORIC_PIN"
+    SELECTED_SAME_CLUSTER_LINEAGE_REPLACEMENT = (
+        "SELECTED_SAME_CLUSTER_LINEAGE_REPLACEMENT"
+    )
+    EXCLUDED_NO_UNIQUE_LINEAGE_VALID_REPRESENTATIVE = (
+        "EXCLUDED_NO_UNIQUE_LINEAGE_VALID_REPRESENTATIVE"
+    )
+
+
+@dataclass(frozen=True)
+class SemanticTransitionResolution:
+    """Auditable resolution without silently choosing a raw first element."""
+
+    status: SemanticTransitionStatus
+    semantic_key: SemanticTransitionKey | None
+    action: tuple[Any, ...] | None
+    raw_candidate_count: int
+    raw_unique_candidate_count: int
+    raw_alias_count: int
+    semantic_class_count: int
+    lineage_valid_candidate_count: int
+    authoritative_historic_pin_used: bool
+    representative_replaced: bool
+
+    @property
+    def excluded(self) -> bool:
+        return self.action is None
+
+    def audit_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "semantic_key": (
+                {
+                    "source_graph_sha256": self.semantic_key.source_graph_sha256,
+                    "target_graph_sha256": self.semantic_key.target_graph_sha256,
+                    "operation_class": self.semantic_key.operation_class,
+                }
+                if self.semantic_key is not None
+                else None
+            ),
+            "action": list(self.action) if self.action is not None else None,
+            "raw_candidate_count": self.raw_candidate_count,
+            "raw_unique_candidate_count": self.raw_unique_candidate_count,
+            "raw_alias_count": self.raw_alias_count,
+            "semantic_class_count": self.semantic_class_count,
+            "lineage_valid_candidate_count": self.lineage_valid_candidate_count,
+            "authoritative_historic_pin_used": (
+                self.authoritative_historic_pin_used
+            ),
+            "representative_replaced": self.representative_replaced,
+        }
 
 
 def _plain(value: Any) -> Any:
@@ -1059,6 +1135,279 @@ def enumerate_official_single_edits(
     return []
 
 
+def _normalized_action_tuple(action: Sequence[Any]) -> tuple[Any, ...]:
+    normalized = normalized_action(action)
+    if len(normalized) != 3:
+        raise ValueError("A pinned-upstream COMRECGC action must have three fields.")
+    operation = str(normalized[0])
+    if operation not in {
+        "NLC",
+        "NA",
+        "INA",
+        "NOTHING",
+        "NR",
+        "INR",
+        "ER",
+        "ERR",
+        "EA",
+    }:
+        raise ValueError(f"Unsupported recovered COMRECGC action: {operation}")
+    return tuple(normalized)
+
+
+def _explicit_trace_node_ids(graph: Any) -> tuple[str, ...] | None:
+    """Return only frozen trace IDs, never synthesized representative IDs."""
+
+    raw = getattr(graph, "comrecgc_trace_node_ids", None)
+    if raw is None:
+        return None
+    values = tuple(str(value) for value in raw)
+    if len(values) != int(graph.num_nodes):
+        raise ValueError("COMRECGC trace node IDs are not aligned with graph nodes.")
+    if len(set(values)) != len(values):
+        raise ValueError("COMRECGC trace node IDs are not unique within a graph.")
+    return values
+
+
+def _lineage_action_validity(
+    source_graph: Any,
+    target_graph: Any,
+    action: Sequence[Any],
+) -> bool | None:
+    """Validate an alias against explicit frozen lineage when comparable.
+
+    ``None`` means that one of the payloads has no frozen node IDs or that the
+    two payload representatives use disjoint lineage namespaces.  The latter
+    occurs for a content-identical global-hash representative from another
+    parent and must not invalidate an otherwise exact historic action pin.
+    """
+
+    source_ids = _explicit_trace_node_ids(source_graph)
+    target_ids = _explicit_trace_node_ids(target_graph)
+    if source_ids is None or target_ids is None:
+        return None
+    resolved = _normalized_action_tuple(action)
+    operation = str(resolved[0])
+    expected = list(source_ids)
+    if operation in {"NR", "INR"}:
+        removed = int(resolved[1])
+        if not 0 <= removed < len(expected):
+            return False
+        expected.pop(removed)
+    elif operation in {"NA", "INA"}:
+        # Upstream assigns the appended node's persistent identifier outside
+        # the graph tensor edit.  Its exact text is not part of the action, but
+        # all retained source IDs must stay in order and exactly one new ID
+        # must be appended.
+        if len(target_ids) == len(source_ids) + 1 and tuple(target_ids[:-1]) == source_ids:
+            return True
+        if not set(source_ids).intersection(target_ids):
+            return None
+        return False
+    # NLC, edge edits, and NOTHING retain the same node identities.
+    if tuple(expected) == target_ids:
+        return True
+    if not set(source_ids).intersection(target_ids):
+        return None
+    return False
+
+
+def _semantic_transition_key(
+    source_graph: Any,
+    target_graph: Any,
+    action: Sequence[Any],
+) -> SemanticTransitionKey:
+    resolved = _normalized_action_tuple(action)
+    return SemanticTransitionKey(
+        source_graph_sha256=stable_untyped_graph_sha256(source_graph),
+        target_graph_sha256=stable_untyped_graph_sha256(target_graph),
+        operation_class=str(resolved[0]),
+    )
+
+
+def collapse_semantic_transition_aliases(
+    source_graph: Any,
+    target_graph: Any,
+    *,
+    authoritative_historic_action: Sequence[Any] | None = None,
+    candidate_actions: Sequence[Sequence[Any]] | None = None,
+) -> SemanticTransitionResolution:
+    """Resolve symmetric raw action aliases without relaxing single-edit science.
+
+    Every input action must replay to the exact frozen target.  Actions are
+    collapsed only when source, target, and *exact upstream operation class*
+    agree.  A historic recorded action is authoritative for choosing among
+    multiple operation classes; without such a pin, multiple classes fail
+    closed.  No path chooses an arbitrary first raw node index.
+
+    The typed ``EXCLUDED`` outcome lets a downstream cluster-selection layer
+    skip an unusable representative and fill from the next cluster.  Current
+    lineage reconstruction has no such selection layer, so its caller keeps
+    failing closed on that outcome.
+    """
+
+    target_payload = normalized_untyped_graph_payload(target_graph)
+    raw_candidates = list(
+        candidate_actions
+        if candidate_actions is not None
+        else enumerate_official_single_edits(source_graph, target_graph)
+    )
+    historic_pin = (
+        _normalized_action_tuple(authoritative_historic_action)
+        if authoritative_historic_action is not None
+        else None
+    )
+    # The recorded action is scientific evidence, not merely a hint from the
+    # graph-delta enumerator.  Include it in the class inventory after exact
+    # replay validation, even when a reconstruction implementation omitted its
+    # operation class.
+    if historic_pin is not None and not any(
+        _normalized_action_tuple(candidate) == historic_pin
+        for candidate in raw_candidates
+    ):
+        raw_candidates.append(list(historic_pin))
+
+    unique_actions: dict[str, tuple[Any, ...]] = {}
+    classes: dict[SemanticTransitionKey, list[tuple[Any, ...]]] = {}
+    for candidate in raw_candidates:
+        resolved = _normalized_action_tuple(candidate)
+        replayed = apply_action_to_normalized_payload(source_graph, resolved)
+        if replayed != target_payload:
+            raise ValueError(
+                "Semantic COMRECGC transition candidate does not replay to the exact "
+                "frozen target payload."
+            )
+        serialized = json.dumps(
+            list(resolved), sort_keys=True, ensure_ascii=True, separators=(",", ":")
+        )
+        if serialized in unique_actions:
+            continue
+        unique_actions[serialized] = resolved
+        key = _semantic_transition_key(source_graph, target_graph, resolved)
+        classes.setdefault(key, []).append(resolved)
+
+    raw_unique_count = len(unique_actions)
+    class_count = len(classes)
+    raw_alias_count = max(0, raw_unique_count - class_count)
+    if not classes:
+        raise ValueError(
+            "Selected COMRECGC transition is not one pinned-upstream single-edit class."
+        )
+
+    authoritative_pin_used = historic_pin is not None
+    if historic_pin is not None:
+        pin_key = _semantic_transition_key(source_graph, target_graph, historic_pin)
+        class_actions = classes.get(pin_key)
+        if class_actions is None or historic_pin not in class_actions:
+            raise ValueError(
+                "Historic COMRECGC action pin is absent from the exact semantic class inventory."
+            )
+        lineage_states = {
+            action: _lineage_action_validity(source_graph, target_graph, action)
+            for action in class_actions
+        }
+        valid_actions = [
+            action for action, validity in lineage_states.items() if validity is True
+        ]
+        pin_validity = lineage_states[historic_pin]
+        if pin_validity is not False:
+            return SemanticTransitionResolution(
+                status=SemanticTransitionStatus.SELECTED_AUTHORITATIVE_HISTORIC_PIN,
+                semantic_key=pin_key,
+                action=historic_pin,
+                raw_candidate_count=len(raw_candidates),
+                raw_unique_candidate_count=raw_unique_count,
+                raw_alias_count=raw_alias_count,
+                semantic_class_count=class_count,
+                lineage_valid_candidate_count=len(valid_actions),
+                authoritative_historic_pin_used=authoritative_pin_used,
+                representative_replaced=False,
+            )
+        if len(valid_actions) == 1:
+            return SemanticTransitionResolution(
+                status=(
+                    SemanticTransitionStatus.SELECTED_SAME_CLUSTER_LINEAGE_REPLACEMENT
+                ),
+                semantic_key=pin_key,
+                action=valid_actions[0],
+                raw_candidate_count=len(raw_candidates),
+                raw_unique_candidate_count=raw_unique_count,
+                raw_alias_count=raw_alias_count,
+                semantic_class_count=class_count,
+                lineage_valid_candidate_count=1,
+                authoritative_historic_pin_used=authoritative_pin_used,
+                representative_replaced=True,
+            )
+        return SemanticTransitionResolution(
+            status=(
+                SemanticTransitionStatus.EXCLUDED_NO_UNIQUE_LINEAGE_VALID_REPRESENTATIVE
+            ),
+            semantic_key=pin_key,
+            action=None,
+            raw_candidate_count=len(raw_candidates),
+            raw_unique_candidate_count=raw_unique_count,
+            raw_alias_count=raw_alias_count,
+            semantic_class_count=class_count,
+            lineage_valid_candidate_count=len(valid_actions),
+            authoritative_historic_pin_used=authoritative_pin_used,
+            representative_replaced=False,
+        )
+
+    if class_count != 1:
+        raise ValueError(
+            "Selected COMRECGC transition spans multiple pinned-upstream single-edit "
+            "classes without an authoritative historic action pin."
+        )
+    semantic_key, class_actions = next(iter(classes.items()))
+    lineage_states = {
+        action: _lineage_action_validity(source_graph, target_graph, action)
+        for action in class_actions
+    }
+    valid_actions = [
+        action for action, validity in lineage_states.items() if validity is True
+    ]
+    if len(class_actions) == 1 and lineage_states[class_actions[0]] is not False:
+        return SemanticTransitionResolution(
+            status=SemanticTransitionStatus.SELECTED_UNIQUE_RAW,
+            semantic_key=semantic_key,
+            action=class_actions[0],
+            raw_candidate_count=len(raw_candidates),
+            raw_unique_candidate_count=raw_unique_count,
+            raw_alias_count=raw_alias_count,
+            semantic_class_count=1,
+            lineage_valid_candidate_count=len(valid_actions),
+            authoritative_historic_pin_used=False,
+            representative_replaced=False,
+        )
+    if len(class_actions) > 1 and len(valid_actions) == 1:
+        return SemanticTransitionResolution(
+            status=SemanticTransitionStatus.SELECTED_UNIQUE_LINEAGE_ALIAS,
+            semantic_key=semantic_key,
+            action=valid_actions[0],
+            raw_candidate_count=len(raw_candidates),
+            raw_unique_candidate_count=raw_unique_count,
+            raw_alias_count=raw_alias_count,
+            semantic_class_count=1,
+            lineage_valid_candidate_count=1,
+            authoritative_historic_pin_used=False,
+            representative_replaced=False,
+        )
+    return SemanticTransitionResolution(
+        status=(
+            SemanticTransitionStatus.EXCLUDED_NO_UNIQUE_LINEAGE_VALID_REPRESENTATIVE
+        ),
+        semantic_key=semantic_key,
+        action=None,
+        raw_candidate_count=len(raw_candidates),
+        raw_unique_candidate_count=raw_unique_count,
+        raw_alias_count=raw_alias_count,
+        semantic_class_count=1,
+        lineage_valid_candidate_count=len(valid_actions),
+        authoritative_historic_pin_used=False,
+        representative_replaced=False,
+    )
+
+
 def infer_official_single_edit(source_graph: Any, target_graph: Any) -> list[Any]:
     """Recover one unique pinned-upstream neighbor action from a graph delta."""
 
@@ -1119,6 +1468,36 @@ def _remap_recorded_node_label_change(
     return candidate
 
 
+def _record_semantic_transition_resolution(
+    audit: MutableMapping[str, Any],
+    resolution: SemanticTransitionResolution,
+) -> None:
+    audit["semantic_transition_resolution_count"] += 1
+    audit["semantic_transition_raw_candidate_count"] += int(
+        resolution.raw_candidate_count
+    )
+    audit["semantic_transition_raw_unique_candidate_count"] += int(
+        resolution.raw_unique_candidate_count
+    )
+    audit["semantic_transition_raw_alias_event_count"] += int(
+        resolution.raw_alias_count > 0
+    )
+    audit["semantic_transition_raw_alias_count"] += int(
+        resolution.raw_alias_count
+    )
+    audit["semantic_transition_max_class_count"] = max(
+        int(audit["semantic_transition_max_class_count"]),
+        int(resolution.semantic_class_count),
+    )
+    audit["semantic_transition_authoritative_pin_count"] += int(
+        resolution.authoritative_historic_pin_used
+    )
+    audit["semantic_transition_lineage_replacement_count"] += int(
+        resolution.representative_replaced
+    )
+    audit["semantic_transition_excluded_count"] += int(resolution.excluded)
+
+
 def _lineage_recovery_context(
     payload: Mapping[str, Any],
     selected_events: Any,
@@ -1155,6 +1534,16 @@ def _lineage_recovery_context(
             "legacy_inference_invocation_count": 0,
             "legacy_inference_success_count": 0,
             "legacy_inference_failure_count": 0,
+            "semantic_transition_resolution_count": 0,
+            "semantic_transition_raw_candidate_count": 0,
+            "semantic_transition_raw_unique_candidate_count": 0,
+            "semantic_transition_raw_alias_event_count": 0,
+            "semantic_transition_raw_alias_count": 0,
+            "semantic_transition_max_class_count": 0,
+            "semantic_transition_authoritative_pin_count": 0,
+            "semantic_transition_lineage_replacement_count": 0,
+            "semantic_transition_excluded_count": 0,
+            "semantic_transition_failure_count": 0,
             "predecessor_target_count": 0,
             "predecessor_duplicate_event_count": 0,
             "predecessor_duplicate_exact_transition_count": 0,
@@ -1258,6 +1647,7 @@ def _lineage_recovery_context(
         recorded = event.get("action")
         target_payload = normalized_untyped_graph_payload(target_graph)
         if recorded is not None:
+            semantic_alias_replacement = False
             audit["recorded_action_present_count"] += 1
             audit["recorded_action_selected_count"] += 1
             try:
@@ -1373,9 +1763,56 @@ def _lineage_recovery_context(
                             sort_keys=True,
                         )
                     )
+            try:
+                semantic_resolution = collapse_semantic_transition_aliases(
+                    source_graph,
+                    target_graph,
+                    authoritative_historic_action=resolved_action,
+                )
+            except ValueError:
+                audit["semantic_transition_failure_count"] += 1
+                raise
+            _record_semantic_transition_resolution(audit, semantic_resolution)
+            if (
+                semantic_resolution.raw_alias_count > 0
+                or semantic_resolution.semantic_class_count > 1
+            ):
+                event["semantic_transition_resolution"] = (
+                    semantic_resolution.audit_dict()
+                )
+            if semantic_resolution.excluded:
+                audit["semantic_transition_failure_count"] += 1
+                raise ValueError(
+                    "Selected COMRECGC transition has no unique lineage-valid "
+                    "representative in its pinned semantic class: "
+                    + json.dumps(
+                        semantic_resolution.audit_dict(),
+                        sort_keys=True,
+                    )
+                )
+            selected_semantic_action = list(semantic_resolution.action or ())
+            if selected_semantic_action != resolved_action:
+                event.setdefault("recorded_action", list(resolved_action))
+                resolved_action = selected_semantic_action
+                semantic_alias_replacement = True
+                if (
+                    apply_action_to_normalized_payload(source_graph, resolved_action)
+                    != target_payload
+                ):
+                    raise ValueError(
+                        "Lineage-valid COMRECGC semantic alias replacement does not "
+                        "replay to the exact target graph."
+                    )
             audit["recorded_action_replay_ok_count"] += 1
             audit["recorded_action_replay_verified_count"] += 1
-            if event.get("recorded_action_index_remap") is not None:
+            if semantic_alias_replacement:
+                action_recovery = (
+                    "recorded_exact_semantic_alias_lineage_replacement_v1"
+                )
+                lineage_source = (
+                    "recorded_action_semantic_alias_lineage_replacement_v1"
+                )
+            elif event.get("recorded_action_index_remap") is not None:
                 action_recovery = "recorded_exact_global_index_remap_v1"
                 lineage_source = "recorded_action_global_index_remap_v1"
             else:
@@ -1387,14 +1824,45 @@ def _lineage_recovery_context(
             audit["missing_action_fallback_count"] += 1
             audit["legacy_inference_invocation_count"] += 1
             try:
-                resolved_action = infer_official_single_edit(
-                    source_graph, target_graph
+                raw_candidates = enumerate_official_single_edits(
+                    source_graph,
+                    target_graph,
                 )
-            except ValueError as exc:
-                if "not one unique" in str(exc):
-                    audit["legacy_inference_ambiguous_count"] += 1
+                # Preserve the strict public inference call for its ordinary
+                # one-raw-action contract.  Only the formerly ambiguous path
+                # enters explicit semantic-alias resolution.
+                if len(raw_candidates) == 1:
+                    resolved_action = infer_official_single_edit(
+                        source_graph, target_graph
+                    )
+                semantic_resolution = collapse_semantic_transition_aliases(
+                    source_graph,
+                    target_graph,
+                    candidate_actions=raw_candidates,
+                )
+            except ValueError:
+                audit["legacy_inference_ambiguous_count"] += 1
                 audit["legacy_inference_failure_count"] += 1
+                audit["semantic_transition_failure_count"] += 1
                 raise
+            _record_semantic_transition_resolution(audit, semantic_resolution)
+            if semantic_resolution.raw_alias_count > 0:
+                event["semantic_transition_resolution"] = (
+                    semantic_resolution.audit_dict()
+                )
+            if semantic_resolution.excluded:
+                audit["legacy_inference_ambiguous_count"] += 1
+                audit["legacy_inference_failure_count"] += 1
+                audit["semantic_transition_failure_count"] += 1
+                raise ValueError(
+                    "Selected COMRECGC transition is not one unique "
+                    "lineage-valid pinned-upstream single edit: "
+                    + json.dumps(
+                        semantic_resolution.audit_dict(),
+                        sort_keys=True,
+                    )
+                )
+            resolved_action = list(semantic_resolution.action or ())
             replayed = apply_action_to_normalized_payload(
                 source_graph, resolved_action
             )
@@ -1404,8 +1872,15 @@ def _lineage_recovery_context(
                     "Recovered selected action does not replay to the exact target graph."
                 )
             audit["legacy_inference_success_count"] += 1
-            action_recovery = "inferred_exact_graph_delta_v1"
-            lineage_source = "legacy_graph_diff_inference_v1"
+            if (
+                semantic_resolution.status
+                == SemanticTransitionStatus.SELECTED_UNIQUE_LINEAGE_ALIAS
+            ):
+                action_recovery = "inferred_semantic_alias_lineage_v1"
+                lineage_source = "legacy_graph_diff_semantic_alias_v1"
+            else:
+                action_recovery = "inferred_exact_graph_delta_v1"
+                lineage_source = "legacy_graph_diff_inference_v1"
         event["action"] = resolved_action
         event["action_resolution"] = "exact"
         event["action_recovery"] = action_recovery
