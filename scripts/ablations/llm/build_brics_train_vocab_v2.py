@@ -40,6 +40,30 @@ except ImportError:  # pragma: no cover - runtime dependency
 SCHEMA = "bace_brics_full_train_cpu_v2"
 FORBIDDEN_PATH_TOKENS = ("calibration", "validation", "valid", "test")
 EXPECTED_COHORT_SCHEMA = "bace_frozen_parent_ids_v1"
+MAIN_FILTER_PROVENANCE = {
+    "source_commit": "0ad149420577c683baa2ef03f78f70ee6841f3a1",
+    "bace_frozen_gnn_pool_sha256": (
+        "ed0f6ce93219b09c3fcfb879a3d49cb2eb5383917ef59d98e517d78df32bc3d2"
+    ),
+    "hard_deletion_sha256": (
+        "0a5485aeeff2d24dc01d68f70ee51ceb623f667dc299ce39495e4815dc71b2e5"
+    ),
+    "active_candidate_predicate": [
+        "parse_ok",
+        "valid",
+        "connected",
+        "direct_substructure",
+        "oracle_ok",
+    ],
+    "numeric_size_filter": {
+        "min_fragment_atoms": None,
+        "max_fragment_atoms": None,
+        "min_atom_ratio": None,
+        "max_atom_ratio": None,
+    },
+    "substructure_use_chirality": True,
+    "hard_deletion_downstream_required": True,
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -390,7 +414,11 @@ def _build_proposals(
         parent = Chem.MolFromSmiles(str(source["smiles"]))
         if parent is None:
             raise LLMAblationContractError(f"invalid proposal parent: {parent_id}")
-        matching = [record for record, query in queries if parent.HasSubstructMatch(query)]
+        matching = [
+            record
+            for record, query in queries
+            if parent.HasSubstructMatch(query, useChirality=True)
+        ]
         emitted = min(attempts_per_parent, len(matching))
         shortfall = attempts_per_parent - emitted
         if shortfall:
@@ -406,6 +434,7 @@ def _build_proposals(
                 "fragment_smiles": record.fragment_smiles if record else None,
                 "proposal_shortfall": record is None,
                 "selection_policy": "parent_match_then_train_frequency",
+                "proposal_match_use_chirality": True,
                 "oracle_used": False,
                 "calibration_loaded": False,
                 "test_loaded": False,
@@ -533,6 +562,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "test_loaded": False,
         "oracle_fields_read": [],
         "ranking_policy": "train_frequency_only_no_oracle",
+        "main_filter_provenance": MAIN_FILTER_PROVENANCE,
+        "numeric_size_filter_applied": False,
+        "numeric_size_filter_reason": "MAIN_B10_CONTRACT_HAS_NO_NUMERIC_SIZE_FILTER",
         "vocabulary_size": len(vocabulary.records),
         "vocabulary_contract_sha256": vocabulary.sha256,
         "vocabulary_file": _file_identity(vocab_path),
@@ -573,6 +605,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "attempt_records": _file_identity(attempts_path),
         "shortfall_receipt": _file_identity(receipt_path),
         "selection_policy": "parent_match_then_train_frequency",
+        "proposal_match_use_chirality": True,
+        "main_filter_provenance": MAIN_FILTER_PROVENANCE,
+        "common_downstream_hard_deletion_required": True,
         "oracle_used": False,
         "calibration_loaded": False,
         "test_loaded": False,

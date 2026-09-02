@@ -297,7 +297,10 @@ class BRICSFixedGenerator:
         matching_records = tuple(
             record
             for record in self._vocabulary.records
-            if parent.HasSubstructMatch(Chem.MolFromSmiles(record.fragment_smiles))
+            if parent.HasSubstructMatch(
+                Chem.MolFromSmiles(record.fragment_smiles),
+                useChirality=True,
+            )
         )
         if request.attempt_index >= len(matching_records):
             return ProposalResult(

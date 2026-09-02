@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
-from src.ablations.llm.contracts import canonical_json_sha256
+from src.ablations.llm.contracts import LLMAblationContractError, canonical_json_sha256
 from src.ablations.llm.model_scale_registry import load_model_scale_registry
 from src.ablations.llm.runtime_evidence import (
     evaluate_runtime_model_evidence,
@@ -160,3 +161,55 @@ def test_actual_parameter_report_self_hash_is_required(tmp_path: Path) -> None:
     )
     assert decision["states"]["chemllm_7b_main"] == "RUNTIME_EVIDENCE_PASS"
     assert decision["runtime_science_ready"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("embedding_parameters", 1),
+        ("trainable_fraction", 0.5),
+        ("weight_bytes", 0),
+        ("config_hidden_size", None),
+        ("num_layers", 0),
+        ("num_attention_heads", None),
+        ("vocab_size", 0),
+    ),
+)
+def test_actual_parameter_report_requires_full_numeric_closure(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    registry = load_model_scale_registry(
+        yaml.safe_load(
+            (REPO_ROOT / "configs/ablations/llm/chemllm_model_scale_registry_v2.yaml")
+            .read_text()
+        )
+    )
+    report = {
+        "schema_version": "actual_parameter_count_report_v1",
+        "source": "ACTUAL_LOADED_WEIGHTS",
+        "total_parameters": 7_756_582_912,
+        "trainable_parameters": 18_874_368,
+        "embedding_parameters": 758_120_448,
+        "non_embedding_parameters": 6_998_462_464,
+        "lora_trainable_parameters": 18_874_368,
+        "trainable_fraction": 18_874_368 / 7_756_582_912,
+        "dtype": ["torch.bfloat16", "torch.float32"],
+        "weight_bytes": 15_550_000_000,
+        "config_hidden_size": 4096,
+        "num_layers": 32,
+        "num_attention_heads": 32,
+        "vocab_size": 92544,
+    }
+    report[field] = value
+    report["parameter_report_sha256"] = canonical_json_sha256(report)
+    report_pin = _write(tmp_path / f"report-{field}.json", report)
+    with pytest.raises(LLMAblationContractError):
+        evaluate_runtime_model_evidence(
+            registry,
+            two_b_snapshot=None,
+            two_b_parameter_report=None,
+            seven_b_parameter_report=report_pin,
+            twenty_b_metadata=None,
+        )

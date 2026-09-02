@@ -187,6 +187,17 @@ def test_full_train_vocab_and_source_cohort_proposals_are_separate(tmp_path: Pat
     assert manifest["observed_train_rows"] == 387
     assert manifest["vocabulary_size"] == len(vocab) > 0
     assert manifest["oracle_fields_read"] == []
+    assert manifest["numeric_size_filter_applied"] is False
+    assert manifest["numeric_size_filter_reason"] == (
+        "MAIN_B10_CONTRACT_HAS_NO_NUMERIC_SIZE_FILTER"
+    )
+    assert manifest["main_filter_provenance"]["numeric_size_filter"] == {
+        "min_fragment_atoms": None,
+        "max_fragment_atoms": None,
+        "min_atom_ratio": None,
+        "max_atom_ratio": None,
+    }
+    assert manifest["main_filter_provenance"]["substructure_use_chirality"] is True
     assert "oracle_score" not in manifest["input_columns_read"]
     assert manifest["calibration_loaded"] is False
     assert manifest["test_loaded"] is False
@@ -201,6 +212,7 @@ def test_full_train_vocab_and_source_cohort_proposals_are_separate(tmp_path: Pat
     assert all(row["parent_id"] in {"BACE_0000", "BACE_0001"} for row in pool)
     assert all(row["proposal_shortfall"] is False for row in pool)
     assert len({(row["parent_id"], row["fragment_smiles"]) for row in pool}) == len(pool)
+    assert all(row["proposal_match_use_chirality"] is True for row in attempts)
     assert (output / "brics_vocab_sha256s.txt").is_file()
     assert result["gpu_used"] is False
 

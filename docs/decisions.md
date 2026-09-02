@@ -55,6 +55,16 @@ actual parent match, writes every attempt including shortfalls, and never
 duplicates candidates to fill the budget. Calibration, validation, test, and
 oracle fields are outside the input projection.
 
+The audited BACE/Ours B10 freeze has no active numeric fragment-size or
+atom-ratio threshold. Its active structural predicate is parseable, valid,
+connected, chirality-aware direct-substructure with a valid oracle outcome;
+hard deletion later requires a non-empty, sanitizable, single-component
+residual. Accordingly the BRICS proposer records all numeric size bounds as
+`NONE`, uses `useChirality=True` for its proposal-time parent match, and binds
+the audited B10/hard-deletion source commit and file hashes. PPO-only size
+reward windows and disabled projection thresholds are not imported as final
+candidate filters.
+
 ### Status
 
 Accepted

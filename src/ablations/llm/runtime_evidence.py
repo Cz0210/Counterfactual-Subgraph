@@ -224,9 +224,49 @@ def _validate_parameter_report(
         or payload.get("lora_trainable_parameters") != expected_lora
     ):
         raise LLMAblationContractError(f"{role} parameter counts changed")
+    trainable = payload.get("trainable_parameters")
+    embedding = payload.get("embedding_parameters")
+    non_embedding = payload.get("non_embedding_parameters")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (trainable, embedding, non_embedding)
+    ):
+        raise LLMAblationContractError(
+            f"{role} trainable/embedding parameter counts are invalid"
+        )
+    if (
+        trainable > expected_total
+        or expected_lora > trainable
+        or embedding + non_embedding != expected_total
+    ):
+        raise LLMAblationContractError(
+            f"{role} trainable/embedding parameter counts do not close"
+        )
+    fraction = payload.get("trainable_fraction")
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+        raise LLMAblationContractError(f"{role} trainable fraction is invalid")
+    expected_fraction = trainable / expected_total
+    if abs(float(fraction) - expected_fraction) > 1e-12:
+        raise LLMAblationContractError(f"{role} trainable fraction does not close")
+    weight_bytes = payload.get("weight_bytes")
+    if isinstance(weight_bytes, bool) or not isinstance(weight_bytes, int) or weight_bytes <= 0:
+        raise LLMAblationContractError(f"{role} weight byte count is invalid")
     dtypes = payload.get("dtype")
-    if not isinstance(dtypes, list) or not dtypes:
+    if (
+        not isinstance(dtypes, list)
+        or not dtypes
+        or any(not isinstance(value, str) or not value.strip() for value in dtypes)
+    ):
         raise LLMAblationContractError(f"{role} lacks loaded tensor dtypes")
+    for field in (
+        "config_hidden_size",
+        "num_layers",
+        "num_attention_heads",
+        "vocab_size",
+    ):
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise LLMAblationContractError(f"{role} lacks positive {field}")
     return payload
 
 
