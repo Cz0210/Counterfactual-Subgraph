@@ -7,6 +7,7 @@ step, including its trace event, has completed successfully.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import random
@@ -35,6 +36,7 @@ MANIFEST_FILENAME = "checkpoint_manifest.json"
 COMPLETE_FILENAME = "_CHECKPOINT_COMPLETE.json"
 MIRRORED_FILENAME = "_CHECKPOINT_MIRRORED.json"
 LATEST_FILENAME = "LATEST"
+PENDING_LATEST_FILENAME = "PENDING_LATEST.json"
 RETENTION_HISTORY_DIRNAME = "retention_history"
 _CHECKPOINT_NAME = re.compile(r"^step-(?P<step>[0-9]{12})$")
 
@@ -352,12 +354,39 @@ def _write_latest(root: Path, validation: GenerationCheckpointValidation) -> Non
     )
 
 
-def _torch_load(path: Path) -> dict[str, Any]:
+def _write_pending_latest(
+    root: Path, validation: GenerationCheckpointValidation
+) -> None:
+    atomic_write_bytes(
+        root / PENDING_LATEST_FILENAME,
+        (
+            json.dumps(
+                {
+                    "schema_version": "comrecgc_generation_checkpoint_pending_v1",
+                    "checkpoint_dir": validation.checkpoint_dir.name,
+                    "completed_step": validation.completed_step,
+                    "checkpoint_digest": validation.checkpoint_digest,
+                    "payload_reload_state": "PENDING_INDEPENDENT_RELOAD",
+                },
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+
+def _torch_load(path: Path, *, mmap: bool = False) -> dict[str, Any]:
     torch = _torch()
     try:
-        value = torch.load(path, map_location="cpu", weights_only=False)
-    except TypeError:  # pragma: no cover - older pinned torch
-        value = torch.load(path, map_location="cpu")
+        parameters = inspect.signature(torch.load).parameters
+        options: dict[str, Any] = {"map_location": "cpu"}
+        if "weights_only" in parameters:
+            options["weights_only"] = False
+        if mmap and "mmap" in parameters:
+            options["mmap"] = True
+        value = torch.load(path, **options)
     except Exception as exc:
         raise GenerationCheckpointError(
             f"Checkpoint state payload cannot be loaded: {path}"
@@ -373,6 +402,8 @@ def _checkpoint_digest_payload(manifest: Mapping[str, Any]) -> dict[str, Any]:
 
 def _resolve_reference(
     checkpoint_root_or_dir: str | Path,
+    *,
+    validate_state_payload: bool,
 ) -> tuple[Path, dict[str, Any] | None]:
     raw = Path(checkpoint_root_or_dir).expanduser()
     if raw.is_symlink():
@@ -415,7 +446,12 @@ def _resolve_reference(
             )
             continue
         try:
-            valid.append(validate_generation_checkpoint(candidate))
+            valid.append(
+                validate_generation_checkpoint(
+                    candidate,
+                    _validate_state_payload=validate_state_payload,
+                )
+            )
         except (GenerationCheckpointError, OSError, ValueError) as exc:
             ignored.append({"entry": candidate.name, "reason": str(exc)})
     if not valid:
@@ -458,10 +494,14 @@ def validate_generation_checkpoint(
     expected_command_sha256: str | None = None,
     expected_total_steps: int | None = None,
     expected_completed_step: int | None = None,
+    _validate_state_payload: bool = True,
 ) -> GenerationCheckpointValidation:
     """Validate every checkpoint component and return only on exact success."""
 
-    checkpoint_dir, latest = _resolve_reference(checkpoint_root_or_dir)
+    checkpoint_dir, latest = _resolve_reference(
+        checkpoint_root_or_dir,
+        validate_state_payload=bool(_validate_state_payload),
+    )
     if checkpoint_dir.is_symlink():
         raise GenerationCheckpointError("Checkpoint directory must not be a symlink.")
     match = _CHECKPOINT_NAME.fullmatch(checkpoint_dir.name)
@@ -593,7 +633,50 @@ def validate_generation_checkpoint(
         "sqlite_snapshot"
     ):
         raise GenerationCheckpointError("Checkpoint SQLite snapshot audit mismatch.")
-    state = _torch_load(checkpoint_dir / STATE_FILENAME)
+    if _validate_state_payload:
+        state = _torch_load(checkpoint_dir / STATE_FILENAME, mmap=True)
+        _validate_checkpoint_state_payload(
+            state,
+            manifest=manifest,
+            scientific_argv=scientific_argv,
+            command_sha256=command_sha256,
+            total_steps=total_steps,
+            completed_step=completed_step,
+        )
+    return GenerationCheckpointValidation(
+        checkpoint_dir=checkpoint_dir,
+        completed_step=completed_step,
+        checkpoint_digest=checkpoint_digest,
+        provenance_fingerprints=provenance,
+        scientific_argv=scientific_argv,
+        command_sha256=command_sha256,
+        total_steps=total_steps,
+        manifest=manifest,
+    )
+
+
+def _validate_checkpoint_state_payload(
+    state: Mapping[str, Any],
+    *,
+    manifest: Mapping[str, Any],
+    scientific_argv: tuple[str, ...],
+    command_sha256: str,
+    total_steps: int,
+    completed_step: int,
+) -> None:
+    """Validate one already-loaded state without causing a second load.
+
+    Large T14 checkpoints contain tens of GiB of Python/NumPy state.  The old
+    save path reloaded that state while the live walk and its serialization
+    projection were still resident, and the old load path deserialized it once
+    in ``validate_generation_checkpoint`` and a second time immediately after.
+    Keeping payload validation separate preserves every semantic check while
+    allowing the writer to validate its in-memory payload and the reader to
+    validate the single object it actually restores.
+    """
+
+    if not isinstance(state, Mapping):
+        raise GenerationCheckpointError("Checkpoint state payload must be a dictionary.")
     if state.get("schema_version") != CHECKPOINT_STATE_SCHEMA_VERSION:
         raise GenerationCheckpointError("Checkpoint state schema version is unsupported.")
     if state.get("boundary") != CHECKPOINT_BOUNDARY or state.get(
@@ -633,15 +716,33 @@ def validate_generation_checkpoint(
         raise GenerationCheckpointError(
             "Checkpoint manifest/state CUDA RNG device counts differ."
         )
-    return GenerationCheckpointValidation(
-        checkpoint_dir=checkpoint_dir,
-        completed_step=completed_step,
-        checkpoint_digest=checkpoint_digest,
-        provenance_fingerprints=provenance,
-        scientific_argv=scientific_argv,
-        command_sha256=command_sha256,
-        total_steps=total_steps,
-        manifest=manifest,
+
+
+def validate_generation_checkpoint_envelope(
+    checkpoint_root_or_dir: str | Path,
+    *,
+    expected_provenance: Mapping[str, str] | None = None,
+    expected_scientific_argv: Any | None = None,
+    expected_command_sha256: str | None = None,
+    expected_total_steps: int | None = None,
+    expected_completed_step: int | None = None,
+) -> GenerationCheckpointValidation:
+    """Validate atomicity, exact file hashes and SQLite without deserializing state.
+
+    This is intentionally an envelope check, not an independent reload PASS.
+    Resume and terminal validation continue to use the full validator.  Its
+    narrow purpose is to keep a live high-memory writer from loading a second
+    copy of the state it has just serialized.
+    """
+
+    return validate_generation_checkpoint(
+        checkpoint_root_or_dir,
+        expected_provenance=expected_provenance,
+        expected_scientific_argv=expected_scientific_argv,
+        expected_command_sha256=expected_command_sha256,
+        expected_total_steps=expected_total_steps,
+        expected_completed_step=expected_completed_step,
+        _validate_state_payload=False,
     )
 
 
@@ -658,6 +759,7 @@ def save_generation_checkpoint(
     command_sha256: str,
     total_steps: int,
     rng_state: Mapping[str, Any] | None = None,
+    reload_after_write: bool = True,
 ) -> GenerationCheckpointValidation:
     """Publish one exact checkpoint with directory and LATEST atomicity."""
 
@@ -769,6 +871,19 @@ def save_generation_checkpoint(
         manifest["checkpoint_digest"] = stable_json_sha256(
             _checkpoint_digest_payload(manifest)
         )
+        # Validate the exact in-memory payload before publication.  Reopening
+        # the just-written archive here used to deserialize a second copy of a
+        # 40+ GiB T14 state while the live walk was still resident.  Exact file
+        # hashes below still close the bytes; an independent resume/terminal
+        # verifier performs the ordinary full deserialize check.
+        _validate_checkpoint_state_payload(
+            state,
+            manifest=manifest,
+            scientific_argv=normalized_argv,
+            command_sha256=normalized_command_sha256,
+            total_steps=normalized_total_steps,
+            completed_step=step,
+        )
         manifest_path = temporary / MANIFEST_FILENAME
         write_json(manifest_path, manifest)
         write_json(
@@ -783,7 +898,7 @@ def save_generation_checkpoint(
         os.rename(temporary, final)
         published = True
         _fsync_directory(root)
-        validation = validate_generation_checkpoint(
+        validation = validate_generation_checkpoint_envelope(
             final,
             expected_provenance=provenance,
             expected_scientific_argv=normalized_argv,
@@ -791,18 +906,75 @@ def save_generation_checkpoint(
             expected_total_steps=normalized_total_steps,
             expected_completed_step=step,
         )
-        _write_latest(root, validation)
-        return validate_generation_checkpoint(
-            root,
-            expected_provenance=provenance,
-            expected_scientific_argv=normalized_argv,
-            expected_command_sha256=normalized_command_sha256,
-            expected_total_steps=normalized_total_steps,
-            expected_completed_step=step,
-        )
+        if reload_after_write:
+            validation = validate_generation_checkpoint(
+                final,
+                expected_provenance=provenance,
+                expected_scientific_argv=normalized_argv,
+                expected_command_sha256=normalized_command_sha256,
+                expected_total_steps=normalized_total_steps,
+                expected_completed_step=step,
+            )
+            _write_latest(root, validation)
+        else:
+            _write_pending_latest(root, validation)
+        return validation
     finally:
         if not published and temporary.exists():
             shutil.rmtree(temporary)
+
+
+def promote_generation_checkpoint(
+    checkpoint_dir: str | Path,
+    *,
+    expected_provenance: Mapping[str, str] | None = None,
+    expected_scientific_argv: Any | None = None,
+    expected_command_sha256: str | None = None,
+    expected_total_steps: int | None = None,
+    expected_completed_step: int | None = None,
+) -> GenerationCheckpointValidation:
+    """Independently reload one exact pending checkpoint, then promote LATEST."""
+
+    raw = Path(checkpoint_dir).expanduser()
+    if raw.is_symlink() or not (raw / MANIFEST_FILENAME).is_file():
+        raise GenerationCheckpointError(
+            "Checkpoint promotion requires one exact physical checkpoint directory."
+        )
+    validation = validate_generation_checkpoint(
+        raw,
+        expected_provenance=expected_provenance,
+        expected_scientific_argv=expected_scientific_argv,
+        expected_command_sha256=expected_command_sha256,
+        expected_total_steps=expected_total_steps,
+        expected_completed_step=expected_completed_step,
+    )
+    root = validation.checkpoint_dir.parent
+    pending_path = root / PENDING_LATEST_FILENAME
+    if not pending_path.is_file() or pending_path.is_symlink():
+        raise GenerationCheckpointError("Checkpoint promotion has no physical pending pointer.")
+    pending = _json_object(pending_path)
+    if pending != {
+        "schema_version": "comrecgc_generation_checkpoint_pending_v1",
+        "checkpoint_dir": validation.checkpoint_dir.name,
+        "completed_step": validation.completed_step,
+        "checkpoint_digest": validation.checkpoint_digest,
+        "payload_reload_state": "PENDING_INDEPENDENT_RELOAD",
+    }:
+        raise GenerationCheckpointError("Checkpoint pending pointer differs from payload.")
+    _write_latest(root, validation)
+    write_json(
+        root / f"{validation.checkpoint_dir.name}.promotion.json",
+        {
+            "schema_version": "comrecgc_generation_checkpoint_promotion_v1",
+            "status": "PASS",
+            "checkpoint_dir": validation.checkpoint_dir.name,
+            "completed_step": validation.completed_step,
+            "checkpoint_digest": validation.checkpoint_digest,
+            "payload_reload_pass": True,
+            "promoted_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    return validation
 
 
 def load_generation_checkpoint(
@@ -813,10 +985,25 @@ def load_generation_checkpoint(
     expected_command_sha256: str | None = None,
     expected_total_steps: int | None = None,
     expected_completed_step: int | None = None,
+    single_pass: bool = False,
 ) -> LoadedGenerationCheckpoint:
     """Validate and load checkpoint payloads without mutating runtime state."""
 
-    validation = validate_generation_checkpoint(
+    # Envelope validation closes every persisted byte and the SQLite snapshot
+    # without materializing algorithm state.  The single mmap-capable load is
+    # then validated in-place, eliminating the historical double deserialize.
+    validator = (
+        validate_generation_checkpoint_envelope
+        if single_pass
+        else validate_generation_checkpoint
+    )
+    if single_pass:
+        candidate = Path(checkpoint_root_or_dir).expanduser()
+        if not (candidate / MANIFEST_FILENAME).is_file():
+            raise GenerationCheckpointError(
+                "Single-pass checkpoint load requires one exact checkpoint directory."
+            )
+    validation = validator(
         checkpoint_root_or_dir,
         expected_provenance=expected_provenance,
         expected_scientific_argv=expected_scientific_argv,
@@ -824,7 +1011,15 @@ def load_generation_checkpoint(
         expected_total_steps=expected_total_steps,
         expected_completed_step=expected_completed_step,
     )
-    state = _torch_load(validation.checkpoint_dir / STATE_FILENAME)
+    state = _torch_load(validation.checkpoint_dir / STATE_FILENAME, mmap=True)
+    _validate_checkpoint_state_payload(
+        state,
+        manifest=validation.manifest,
+        scientific_argv=validation.scientific_argv,
+        command_sha256=validation.command_sha256,
+        total_steps=validation.total_steps,
+        completed_step=validation.completed_step,
+    )
     return LoadedGenerationCheckpoint(
         validation=validation,
         algorithm_state=state["algorithm_state"],

@@ -52,6 +52,10 @@ class T14ExternalConvergenceRelayError(RuntimeError):
     """The relay identity or a one-shot audit result is invalid."""
 
 
+class T14FullStateConsumerBusy(T14ExternalConvergenceRelayError):
+    """Science or another auditor owns the dataset-wide full-state lock."""
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -267,7 +271,19 @@ def _run_one_shot(
         "--execution-commit",
         execution_commit,
     ]
-    with log_path.open("xb") as log_handle:
+    full_state_lock_path = checkpoint_root / ".t14-full-state-consumer.lock"
+    with full_state_lock_path.open("a+b") as full_state_lock, log_path.open(
+        "xb"
+    ) as log_handle:
+        try:
+            fcntl.flock(
+                full_state_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+            )
+        except BlockingIOError as exc:
+            log_path.unlink(missing_ok=True)
+            raise T14FullStateConsumerBusy(
+                "T14 science owns the full-state lock; auditor remains metadata-only"
+            ) from exc
         child = subprocess.Popen(
             command,
             cwd=PROJECT_ROOT,
@@ -514,17 +530,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                     / f"step-{trigger_step:012d}"
                     / f"attempt-{uuid.uuid4()}"
                 )
-                audit = _run_one_shot(
-                    script=script,
-                    checkpoint_root=checkpoint_root,
-                    attempt_root=attempt_root,
-                    execution_commit=args.execution_commit,
-                    relay_root=relay_root,
-                    state=state,
-                    available_steps=available_steps,
-                    sequence=sequence,
-                    heartbeat_seconds=args.heartbeat_seconds,
-                )
+                try:
+                    audit = _run_one_shot(
+                        script=script,
+                        checkpoint_root=checkpoint_root,
+                        attempt_root=attempt_root,
+                        execution_commit=args.execution_commit,
+                        relay_root=relay_root,
+                        state=state,
+                        available_steps=available_steps,
+                        sequence=sequence,
+                        heartbeat_seconds=args.heartbeat_seconds,
+                    )
+                except T14FullStateConsumerBusy:
+                    _heartbeat(
+                        relay_root,
+                        state,
+                        phase="WAITING_FULL_STATE_CONSUMER_SERIALIZATION",
+                        sequence=sequence,
+                        available_steps=available_steps,
+                    )
+                    if args.max_polls and polls >= args.max_polls:
+                        return 0
+                    time.sleep(args.poll_seconds)
+                    continue
                 state = _commit_audit_result(
                     relay_root,
                     state,

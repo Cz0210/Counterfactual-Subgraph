@@ -49,6 +49,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--train-csv", type=_absolute, required=True)
     parser.add_argument("--official-root", type=_absolute, required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume-spec", type=_absolute)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--set", action="append", default=[])
     return parser.parse_args(argv)
@@ -58,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.set != ["inference.fallback_to_heuristic=false"]:
         raise ValueError("Taste T14 requires the fail-closed inference override")
+    if bool(args.resume_spec) != bool(args.resume):
+        raise ValueError("Taste T14 resume and --resume-spec must be supplied together")
     with hold_t9_inputs(
         config_path=args.config,
         run_id=args.run_id,
@@ -84,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
                 inputs=inputs,
                 output_root=args.output_dir,
                 resume=args.resume,
+                resume_spec=args.resume_spec,
             )
             inputs.revalidate()
             result = {

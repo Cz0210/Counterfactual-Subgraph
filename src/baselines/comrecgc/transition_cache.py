@@ -47,6 +47,43 @@ def _stack_numeric_rows(values: Sequence[Any], *, field: str) -> np.ndarray:
     return np.array(result, copy=True, order="C")
 
 
+def _checkpoint_numeric_array(values: Any, *, field: str) -> np.ndarray:
+    """Adopt one trusted checkpoint numeric block with at most one copy.
+
+    The runtime never mutates compact transition numerics.  A CPU tensor loaded
+    through ``torch.load(..., mmap=True)`` can therefore be viewed by NumPy
+    directly, and an existing C-contiguous NumPy array can be transferred
+    without the historical ``stack`` plus ``array(copy=True)`` double copy.
+    Legacy row sequences retain the original strict stacking path.
+    """
+
+    tensor = values
+    if hasattr(tensor, "detach") and hasattr(tensor, "device"):
+        try:
+            if str(tensor.device) != "cpu":
+                raise RuntimeError(
+                    f"COMRECGC compact transition {field} checkpoint must be CPU-resident."
+                )
+            tensor = tensor.detach()
+            if hasattr(tensor, "is_contiguous") and not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+            values = tensor.numpy()
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"COMRECGC compact transition {field} tensor is malformed."
+            ) from exc
+    if isinstance(values, np.ndarray):
+        result = values if values.flags.c_contiguous else np.ascontiguousarray(values)
+        if result.dtype == object or not np.isfinite(result).all():
+            raise RuntimeError(
+                f"COMRECGC compact transition {field} must be finite numeric data."
+            )
+        return result
+    return _stack_numeric_rows(values, field=field)
+
+
 @dataclass(frozen=True)
 class _CompactTransition:
     target_hashes: tuple[Any, ...]
@@ -337,7 +374,9 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
     def clear_expanded(self) -> None:
         self._expanded.clear()
 
-    def export_checkpoint_state(self) -> dict[str, Any]:
+    def export_checkpoint_state(
+        self, *, tensor_storage: bool = False
+    ) -> dict[str, Any]:
         """Return an exact, graph-object-free state at a completed move boundary."""
 
         if (
@@ -349,16 +388,35 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
             raise RuntimeError(
                 "COMRECGC transition checkpoint requested inside an active move."
             )
-        entries = [
-            {
-                "source_hash": source_hash,
-                "target_hashes": list(entry.target_hashes),
-                "actions": [list(action) for action in entry.actions],
-                "importance_parts": np.array(entry.importance_parts, copy=True),
-                "embeddings": np.array(entry.embeddings, copy=True),
-            }
-            for source_hash, entry in self._entries.items()
-        ]
+        torch = None
+        if tensor_storage:
+            try:
+                import torch as imported_torch
+            except Exception as exc:  # pragma: no cover - production dependency
+                raise RuntimeError(
+                    "Tensor-backed COMRECGC checkpoints require PyTorch."
+                ) from exc
+            torch = imported_torch
+        entries = []
+        for source_hash, entry in self._entries.items():
+            # Checkpoint publication is synchronous at a completed move
+            # boundary.  These arrays are immutable for the lifetime of an
+            # entry, so sharing their storage avoids a whole-state snapshot
+            # copy without permitting concurrent mutation.
+            importance_parts: Any = entry.importance_parts
+            embeddings: Any = entry.embeddings
+            if torch is not None:
+                importance_parts = torch.from_numpy(importance_parts)
+                embeddings = torch.from_numpy(embeddings)
+            entries.append(
+                {
+                    "source_hash": source_hash,
+                    "target_hashes": list(entry.target_hashes),
+                    "actions": [list(action) for action in entry.actions],
+                    "importance_parts": importance_parts,
+                    "embeddings": embeddings,
+                }
+            )
         counters = {
             name: int(getattr(self, name))
             for name in (
@@ -386,9 +444,15 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
             "counters": counters,
         }
 
-    def restore_checkpoint_state(self, value: Mapping[str, Any]) -> None:
+    def restore_checkpoint_state(
+        self, value: Mapping[str, Any], *, consume: bool = False
+    ) -> None:
         """Restore compact entries without replaying model calls or actions."""
 
+        if consume and type(value) is not dict:
+            raise ValueError(
+                "Consumptive COMRECGC transition restore requires a mutable payload."
+            )
         if value.get("schema_version") != COMPACT_TRANSITION_CHECKPOINT_SCHEMA:
             raise ValueError("Unsupported COMRECGC compact transition checkpoint schema.")
         if int(value.get("seed", -1)) != self._seed or int(
@@ -406,16 +470,23 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
             or self._actions_by_object_id
         ):
             raise RuntimeError("COMRECGC compact transition restore target is not empty.")
-        for row in value.get("entries") or ():
+        raw_entries = value.get("entries")
+        if not isinstance(raw_entries, list):
+            raise ValueError("COMRECGC compact transition checkpoint entries changed.")
+        for row_index, row in enumerate(raw_entries):
+            if not isinstance(row, Mapping):
+                raise ValueError("COMRECGC compact transition checkpoint row changed.")
             source_hash = row["source_hash"]
             if source_hash in self._entries:
                 raise ValueError("Duplicate COMRECGC transition source in checkpoint.")
             target_hashes = tuple(row["target_hashes"])
             actions = tuple(_freeze_action(action) for action in row["actions"])
-            importance_parts = _stack_numeric_rows(
+            importance_parts = _checkpoint_numeric_array(
                 row["importance_parts"], field="importance_parts"
             )
-            embeddings = _stack_numeric_rows(row["embeddings"], field="embeddings")
+            embeddings = _checkpoint_numeric_array(
+                row["embeddings"], field="embeddings"
+            )
             if not (
                 len(target_hashes)
                 == len(actions)
@@ -429,6 +500,12 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
                 importance_parts=importance_parts,
                 embeddings=embeddings,
             )
+            if consume:
+                # Release the legacy row containers incrementally while
+                # preserving insertion order in the restored mapping.
+                raw_entries[row_index] = None
+        if consume:
+            raw_entries.clear()
         expanded_keys = list(value.get("expanded_keys") or ())
         if len(set(expanded_keys)) != len(expanded_keys) or len(
             expanded_keys
@@ -474,3 +551,5 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
             raise ValueError("COMRECGC compact transition move counter is inconsistent.")
         if self.max_transition_size < len(self._entries):
             raise ValueError("COMRECGC compact transition maximum size is inconsistent.")
+        if consume:
+            value.clear()

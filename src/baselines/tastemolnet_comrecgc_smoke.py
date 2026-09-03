@@ -723,7 +723,7 @@ class TasteComRecGCRecord:
     model_graph_payload: Mapping[str, Any]
     embedding_sha256: str
     embedding_dtype: str
-    embedding_values: tuple[float, ...]
+    embedding_values: Sequence[float]
 
     def semantic_payload(self) -> dict[str, Any]:
         return {
@@ -738,7 +738,7 @@ class TasteComRecGCRecord:
             "model_graph_payload": dict(self.model_graph_payload),
             "embedding_sha256": self.embedding_sha256,
             "embedding_dtype": self.embedding_dtype,
-            "embedding_values": list(self.embedding_values),
+            "embedding_values": [float(value) for value in self.embedding_values],
         }
 
 
@@ -842,6 +842,19 @@ class TasteComRecGCMulticlassBridge:
             raise TasteComRecGCSmokeError(
                 "Official COMRECGC did not consume every structural identity"
             )
+
+    def _stored_embedding_values(self, values: Any) -> Sequence[float]:
+        """Own one scored embedding in the historical tuple representation."""
+
+        return tuple(float(value) for value in values.tolist())
+
+    def _restored_embedding_values(self, values: Any) -> Sequence[float]:
+        """Own one validated checkpoint embedding."""
+
+        return self._stored_embedding_values(values)
+
+    def _accepted_checkpoint_schemas(self) -> frozenset[str]:
+        return frozenset({"tastemolnet_comrecgc_bridge_checkpoint_v3"})
 
     def call(
         self,
@@ -966,9 +979,7 @@ class TasteComRecGCMulticlassBridge:
                 model_graph_payload=model_graph_payload,
                 embedding_sha256=embedding_sha,
                 embedding_dtype=raw_embedding.dtype.str,
-                embedding_values=tuple(
-                    float(value) for value in raw_embedding.tolist()
-                ),
+                embedding_values=self._stored_embedding_values(raw_embedding),
             )
             previous = self.records.get(graph_identity_sha256)
             if previous is None:
@@ -1067,7 +1078,9 @@ class TasteComRecGCMulticlassBridge:
             "calculate_hash_count": self.calculate_hash_count,
         }
 
-    def restore_checkpoint_state(self, payload: Mapping[str, Any]) -> None:
+    def restore_checkpoint_state(
+        self, payload: Mapping[str, Any], *, consume: bool = False
+    ) -> None:
         self._assert_idle()
         try:
             import numpy as np
@@ -1075,13 +1088,22 @@ class TasteComRecGCMulticlassBridge:
             raise TasteComRecGCSmokeError(
                 "NumPy is required to restore the COMRECGC bridge"
             ) from exc
-        if (
-            type(payload) is not dict
-            or payload.get("schema_version")
-            != "tastemolnet_comrecgc_bridge_checkpoint_v3"
-        ):
+        if type(payload) is not dict or payload.get(
+            "schema_version"
+        ) not in self._accepted_checkpoint_schemas():
             raise TasteComRecGCSmokeError(
                 "Taste COMRECGC bridge checkpoint schema changed"
+            )
+        checkpoint_schema = str(payload["schema_version"])
+        if checkpoint_schema.endswith("_v4") and payload.get(
+            "embedding_storage"
+        ) != "torch_cpu_tensor_zero_copy_v1":
+            raise TasteComRecGCSmokeError(
+                "Taste COMRECGC tensor checkpoint storage contract changed"
+            )
+        if consume and type(payload) is not dict:
+            raise TasteComRecGCSmokeError(
+                "Consumptive Taste COMRECGC restore requires a mutable payload"
             )
         raw_records = payload.get("records")
         raw_collisions = payload.get("graph_collision_payloads")
@@ -1090,8 +1112,22 @@ class TasteComRecGCMulticlassBridge:
             raise TasteComRecGCSmokeError(
                 "Taste COMRECGC bridge checkpoint is incomplete"
             )
+        record_domain = set(raw_records)
+        collision_domain = set(raw_collisions)
+        lineage_domain = set(raw_lineages)
+        if collision_domain != record_domain or lineage_domain != record_domain:
+            raise TasteComRecGCSmokeError(
+                "Taste COMRECGC checkpoint identity domains differ"
+            )
+        counters = {
+            "call_count": payload.get("call_count"),
+            "evaluated_graph_count": payload.get("evaluated_graph_count"),
+            "calculate_hash_count": payload.get("calculate_hash_count"),
+        }
         records: dict[str, TasteComRecGCRecord] = {}
-        for key, raw in raw_records.items():
+        for raw_key in list(raw_records):
+            raw = raw_records.pop(raw_key) if consume else raw_records[raw_key]
+            key = raw_key
             if type(raw) is not dict:
                 raise TasteComRecGCSmokeError(
                     "Taste COMRECGC checkpoint record is malformed"
@@ -1149,25 +1185,42 @@ class TasteComRecGCMulticlassBridge:
                 )
             embedding_dtype = raw.get("embedding_dtype")
             embedding_values = raw.get("embedding_values")
-            if (
-                type(embedding_dtype) is not str
-                or type(embedding_values) is not list
-                or not embedding_values
-                or any(
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                    or not math.isfinite(float(value))
-                    for value in embedding_values
-                )
-            ):
+            tensor_backed = checkpoint_schema.endswith("_v4")
+            if type(embedding_dtype) is not str:
                 raise TasteComRecGCSmokeError(
                     "Taste COMRECGC checkpoint embedding payload drifted"
                 )
             try:
-                embedding_array = np.asarray(
-                    embedding_values, dtype=np.dtype(embedding_dtype)
-                )
-            except (TypeError, ValueError) as exc:
+                if tensor_backed:
+                    if hasattr(embedding_values, "detach"):
+                        if str(embedding_values.device) != "cpu":
+                            raise ValueError("checkpoint embedding tensor is not on CPU")
+                        tensor = embedding_values.detach()
+                        if not tensor.is_contiguous():
+                            tensor = tensor.contiguous()
+                        embedding_array = tensor.numpy()
+                    elif isinstance(embedding_values, np.ndarray):
+                        embedding_array = embedding_values
+                    else:
+                        raise ValueError("checkpoint embedding is not tensor-backed")
+                else:
+                    if type(embedding_values) is not list or not embedding_values:
+                        raise ValueError("legacy checkpoint embedding is not a list")
+                    if any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        for value in embedding_values
+                    ):
+                        raise ValueError("legacy checkpoint embedding is non-finite")
+                    embedding_array = np.asarray(
+                        embedding_values, dtype=np.dtype(embedding_dtype)
+                    )
+                if embedding_array.dtype != np.dtype(embedding_dtype):
+                    raise ValueError("checkpoint embedding dtype changed")
+                if not embedding_array.flags.c_contiguous:
+                    embedding_array = np.ascontiguousarray(embedding_array)
+            except (TypeError, ValueError, RuntimeError) as exc:
                 raise TasteComRecGCSmokeError(
                     "Taste COMRECGC checkpoint embedding dtype is invalid"
                 ) from exc
@@ -1191,12 +1244,11 @@ class TasteComRecGCMulticlassBridge:
                 model_graph_payload=model_graph_payload,
                 embedding_sha256=embedding_sha,
                 embedding_dtype=embedding_array.dtype.str,
-                embedding_values=tuple(
-                    float(value) for value in embedding_array.tolist()
-                ),
+                embedding_values=self._restored_embedding_values(embedding_array),
             )
         lineages: dict[str, Counter[str]] = {}
-        for key, raw in raw_lineages.items():
+        for key in list(raw_lineages):
+            raw = raw_lineages.pop(key) if consume else raw_lineages[key]
             if key not in records or type(raw) is not dict:
                 raise TasteComRecGCSmokeError(
                     "Taste COMRECGC checkpoint lineage is malformed"
@@ -1214,13 +1266,14 @@ class TasteComRecGCMulticlassBridge:
                     "Taste COMRECGC checkpoint lost graph lineage"
                 )
             lineages[key] = counter
-        if set(raw_collisions) != set(records) or set(lineages) != set(records):
+        if collision_domain != set(records) or lineage_domain != set(records):
             raise TasteComRecGCSmokeError(
                 "Taste COMRECGC checkpoint identity domains differ"
             )
         self.records = records
         collision_payloads: dict[str, dict[str, Any]] = {}
-        for key, raw in raw_collisions.items():
+        for key in list(raw_collisions):
+            raw = raw_collisions.pop(key) if consume else raw_collisions[key]
             if (
                 type(raw) is not dict
                 or set(raw) != {"canonical_graph", "num_nodes", "num_edges"}
@@ -1253,19 +1306,19 @@ class TasteComRecGCMulticlassBridge:
                 raise TasteComRecGCSmokeError(
                     "Taste COMRECGC checkpoint graph identity is not canonical"
                 )
-            collision_payloads[key] = dict(raw)
+            collision_payloads[key] = raw if consume else dict(raw)
         self.graph_collision_payloads = collision_payloads
         self.lineage_occurrences = lineages
         self.call_count = _native_int(
-            payload.get("call_count"), field="call_count", minimum=0
+            counters["call_count"], field="call_count", minimum=0
         )
         self.evaluated_graph_count = _native_int(
-            payload.get("evaluated_graph_count"),
+            counters["evaluated_graph_count"],
             field="evaluated_graph_count",
             minimum=0,
         )
         self.calculate_hash_count = _native_int(
-            payload.get("calculate_hash_count"),
+            counters["calculate_hash_count"],
             field="calculate_hash_count",
             minimum=0,
         )
@@ -1273,6 +1326,8 @@ class TasteComRecGCMulticlassBridge:
             raise TasteComRecGCSmokeError(
                 "Taste COMRECGC checkpoint lost structural hash consumption"
             )
+        if consume:
+            payload.clear()
         prime = getattr(self.adapter, "prime_canonical_replay_cache", None)
         if callable(prime):
             # The bridge payload above has already been schema-, hash-, and

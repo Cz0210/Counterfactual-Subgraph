@@ -34,6 +34,9 @@ case "$TASTEMOLNET_T14_RESUME" in
       || { echo "T14 resume mode requires the existing physical output root" >&2; exit 64; }
     [[ -f "$TASTEMOLNET_T14_OUTPUT/checkpoints/LATEST" ]] \
       || { echo "T14 resume requires a complete 2,500-step checkpoint" >&2; exit 64; }
+    [[ -n "${T14_RESUME_SPEC:-}" && "$T14_RESUME_SPEC" == /* \
+      && -f "$T14_RESUME_SPEC" && ! -L "$T14_RESUME_SPEC" ]] \
+      || { echo "T14 resume requires one absolute physical T14_RESUME_SPEC" >&2; exit 64; }
     ;;
   *)
     echo "TASTEMOLNET_T14_RESUME must be 0 or 1" >&2
@@ -81,7 +84,7 @@ T14_SCIENCE_ARGS=(
   --set inference.fallback_to_heuristic=false
 )
 if [[ "$TASTEMOLNET_T14_RESUME" == "1" ]]; then
-  T14_SCIENCE_ARGS+=(--resume)
+  T14_SCIENCE_ARGS+=(--resume --resume-spec "$T14_RESUME_SPEC")
 fi
 
 exec "$AUTODL_PYTHON" -B "$PROJECT_ROOT/scripts/autodl/gpu_lock.py" \

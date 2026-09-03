@@ -207,8 +207,16 @@ def snapshot_official_state(module: Any) -> dict[str, Any]:
     }
 
 
-def restore_official_state(module: Any, value: Mapping[str, Any]) -> None:
-    """Restore pinned globals before installing project runtime wrappers."""
+def restore_official_state(
+    module: Any, value: Mapping[str, Any], *, consume: bool = False
+) -> None:
+    """Restore pinned globals before installing project runtime wrappers.
+
+    ``consume`` is reserved for a trusted, already hash-validated checkpoint
+    payload.  It transfers the large containers into the runtime and removes
+    them from the deserialized checkpoint as it goes, avoiding a second live
+    copy during T14 resume.  The default retains the historical copy semantics.
+    """
 
     if value.get("schema_version") != OFFICIAL_STATE_SCHEMA_VERSION:
         raise ValueError("Unsupported COMRECGC official runtime checkpoint schema.")
@@ -224,16 +232,41 @@ def restore_official_state(module: Any, value: Mapping[str, Any]) -> None:
     missing = sorted(required - set(value))
     if missing:
         raise ValueError(f"COMRECGC official runtime checkpoint is incomplete: {missing}")
-    module.graph_map = dict(value["graph_map"])
-    module.graph_index_map = dict(value["graph_index_map"])
-    module.counterfactual_candidates = list(value["counterfactual_candidates"])
-    covered = value["input_graphs_covered"]
-    module.input_graphs_covered = covered.clone() if hasattr(covered, "clone") else covered
-    module.covering_graphs = set(value["covering_graphs"])
+    if consume and not isinstance(value, dict):
+        raise ValueError("Consumptive COMRECGC restore requires a mutable state mapping.")
+
+    def take(name: str) -> Any:
+        return value.pop(name) if consume else value[name]  # type: ignore[union-attr]
+
+    graph_map = take("graph_map")
+    graph_index_map = take("graph_index_map")
+    candidates = take("counterfactual_candidates")
+    covered = take("input_graphs_covered")
+    covering_graphs = take("covering_graphs")
+    start = take("start")
+    traversed_hashes = take("traversed_hashes")
+    module.graph_map = graph_map if consume else dict(graph_map)
+    module.graph_index_map = graph_index_map if consume else dict(graph_index_map)
+    module.counterfactual_candidates = candidates if consume else list(candidates)
+    module.input_graphs_covered = (
+        covered
+        if consume
+        else covered.clone() if hasattr(covered, "clone") else covered
+    )
+    module.covering_graphs = covering_graphs if consume else set(covering_graphs)
     module.transitions = {}
-    module.start = dict(value["start"])
+    module.start = start if consume else dict(start)
     module.is_sample = bool(value.get("is_sample", True))
     module.starting_step = int(value.get("starting_step", 1))
-    module.traversed_hashes = list(value["traversed_hashes"])
+    module.traversed_hashes = traversed_hashes if consume else list(traversed_hashes)
     module.sample_size = int(value["sample_size"])
     module.MAX_COUNTERFACTUAL_SIZE = int(value["MAX_COUNTERFACTUAL_SIZE"])
+    if consume:
+        for name in (
+            "schema_version",
+            "is_sample",
+            "starting_step",
+            "sample_size",
+            "MAX_COUNTERFACTUAL_SIZE",
+        ):
+            value.pop(name, None)  # type: ignore[union-attr]

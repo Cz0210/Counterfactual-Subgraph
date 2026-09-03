@@ -29,6 +29,7 @@ from src.baselines.tastemolnet_comrecgc_smoke import (
     TasteComRecGCMulticlassBridge,
     TasteComRecGCSmokeError,
     _common_recourse_summary,
+    _embedding_sha256,
     _identity_graph_sha256,
     _scalar_native_int,
     _seed_all,
@@ -96,6 +97,85 @@ class TasteComRecGCFullBridge(TasteComRecGCMulticlassBridge):
                     "Taste T14 candidate lineage escapes the train cohort"
                 )
         return super().call(graphs, importance_args)
+
+    def _stored_embedding_values(self, values: Any) -> Sequence[float]:
+        """Keep T14 embeddings compact without changing their exact bytes."""
+
+        import numpy as np
+
+        array = np.asarray(values)
+        if array.ndim != 1 or array.dtype.kind != "f" or not np.isfinite(array).all():
+            raise TasteComRecGCFullError("Taste T14 compact embedding is malformed")
+        # Scoring rows are views into a transient batch result; take one owned,
+        # C-contiguous copy rather than expanding every scalar to a Python float.
+        owned = np.array(array, copy=True, order="C")
+        owned.setflags(write=False)
+        return owned
+
+    def _restored_embedding_values(self, values: Any) -> Sequence[float]:
+        """Transfer an immutable mmap/checkpoint row without another copy."""
+
+        import numpy as np
+
+        array = np.asarray(values)
+        if array.ndim != 1 or array.dtype.kind != "f" or not np.isfinite(array).all():
+            raise TasteComRecGCFullError(
+                "Taste T14 restored compact embedding is malformed"
+            )
+        restored = array if array.flags.c_contiguous else np.ascontiguousarray(array)
+        restored.setflags(write=False)
+        return restored
+
+    def _accepted_checkpoint_schemas(self) -> frozenset[str]:
+        return frozenset(
+            {
+                "tastemolnet_comrecgc_bridge_checkpoint_v3",
+                "tastemolnet_comrecgc_bridge_checkpoint_v4",
+            }
+        )
+
+    def checkpoint_state(self) -> dict[str, Any]:
+        """Serialize T14 embedding arrays as tensor storages, not giant pickle data."""
+
+        self._assert_idle()
+        try:
+            import numpy as np
+            import torch
+        except Exception as exc:  # pragma: no cover - AutoDL dependencies
+            raise TasteComRecGCFullError(
+                "Taste T14 compact checkpoints require NumPy and PyTorch"
+            ) from exc
+        records: dict[str, dict[str, Any]] = {}
+        for key, value in sorted(self.records.items()):
+            row = value.semantic_payload()
+            embedding = np.asarray(
+                value.embedding_values, dtype=np.dtype(value.embedding_dtype)
+            )
+            if (
+                embedding.ndim != 1
+                or not embedding.flags.c_contiguous
+                or _embedding_sha256(embedding) != value.embedding_sha256
+            ):
+                raise TasteComRecGCFullError(
+                    "Taste T14 checkpoint embedding bytes changed"
+                )
+            row["embedding_values"] = torch.from_numpy(embedding)
+            records[key] = row
+        return {
+            "schema_version": "tastemolnet_comrecgc_bridge_checkpoint_v4",
+            "records": records,
+            "graph_collision_payloads": dict(
+                sorted(self.graph_collision_payloads.items())
+            ),
+            "lineage_occurrences": {
+                key: dict(sorted(values.items()))
+                for key, values in sorted(self.lineage_occurrences.items())
+            },
+            "call_count": self.call_count,
+            "evaluated_graph_count": self.evaluated_graph_count,
+            "calculate_hash_count": self.calculate_hash_count,
+            "embedding_storage": "torch_cpu_tensor_zero_copy_v1",
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1038,7 +1118,9 @@ def _checkpoint_algorithm_state(
 ) -> dict[str, Any]:
     from src.baselines.comrecgc.generation_loop import snapshot_official_state
 
-    transition_state = handles.transition_map.export_checkpoint_state()
+    transition_state = handles.transition_map.export_checkpoint_state(
+        tensor_storage=True
+    )
     live_state = handles.live_graph_state.export_checkpoint_state()
     required_hashes = {
         *loop_state.start_graph_hashes,
@@ -1081,10 +1163,14 @@ def _restore_checkpoint_state(
     state = loaded.algorithm_state
     if state.get("schema_version") != RUNTIME_STATE_SCHEMA:
         raise TasteComRecGCFullError("Taste T14 runtime checkpoint schema changed")
-    handles.transition_map.restore_checkpoint_state(state["transition_state"])
-    handles.live_graph_state.restore_checkpoint_state(state["live_graph_state"])
-    bridge.restore_checkpoint_state(state["bridge_state"])
-    loop_state = GenerationLoopState.from_checkpoint_state(state["loop_state"])
+    transition_state = state.pop("transition_state")
+    live_graph_state = state.pop("live_graph_state")
+    bridge_state = state.pop("bridge_state")
+    loop_payload = state.pop("loop_state")
+    handles.transition_map.restore_checkpoint_state(transition_state, consume=True)
+    handles.live_graph_state.restore_checkpoint_state(live_graph_state)
+    bridge.restore_checkpoint_state(bridge_state, consume=True)
+    loop_state = GenerationLoopState.from_checkpoint_state(loop_payload)
     if (
         handles.transition_map.move_count != loop_state.completed_step
         or handles.live_graph_state.move_count != loop_state.completed_step
@@ -1093,6 +1179,9 @@ def _restore_checkpoint_state(
         raise TasteComRecGCFullError("Taste T14 restored move counters changed")
     # RNG restoration is deliberately the final mutation before next_step.
     restore_rng_state(loaded.rng_state)
+    loaded.rng_state.clear()
+    loaded.trace_state.clear()
+    state.clear()
     return loop_state
 
 
@@ -1131,6 +1220,10 @@ def _write_checkpoint(
         scientific_argv=scientific_argv,
         command_sha256=command_sha256,
         total_steps=M_FALLBACK_MAX,
+        # The live T14 state is hundreds of GiB.  The exact bytes and the
+        # already-live state are validated here; the SERIAL_ONLY owner runs
+        # the independent reload after science releases memory.
+        reload_after_write=False,
     )
     evidence = {
         "schema_version": "tastemolnet_t14_checkpoint_v2",
@@ -1141,6 +1234,8 @@ def _write_checkpoint(
         "checkpoint_persisted_in_output": True,
         "bounded_transition_state": True,
         "authoritative_graph_store_snapshot": True,
+        "payload_reload_state": "PENDING_INDEPENDENT_RELOAD",
+        "latest_promoted": False,
         "written_at": _utc_now(),
     }
     _atomic_json(checkpoint_root / f"checkpoint-{completed:06d}.json", evidence)
@@ -1157,20 +1252,52 @@ def _load_latest_checkpoint(
 ) -> Any | None:
     from src.baselines.comrecgc.generation_checkpoint import load_generation_checkpoint
 
-    if not (checkpoint_root / "LATEST").is_file():
+    latest_path = checkpoint_root / "LATEST"
+    if not latest_path.is_file():
         return None
+    try:
+        pointer = json.loads(latest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TasteComRecGCFullError("Taste T14 checkpoint pointer is unreadable") from exc
+    checkpoint_name = pointer.get("checkpoint_dir") if type(pointer) is dict else None
+    completed_pointer = pointer.get("completed_step") if type(pointer) is dict else None
+    digest_pointer = pointer.get("checkpoint_digest") if type(pointer) is dict else None
+    if (
+        pointer.get("schema_version")
+        != "comrecgc_generation_checkpoint_latest_v1"
+        or type(checkpoint_name) is not str
+        or not checkpoint_name.startswith("step-")
+        or len(checkpoint_name) != len("step-000000000000")
+        or not checkpoint_name[5:].isdigit()
+        or type(completed_pointer) is not int
+        or completed_pointer != int(checkpoint_name[5:])
+        or type(digest_pointer) is not str
+        or len(digest_pointer) != 64
+        or any(character not in "0123456789abcdef" for character in digest_pointer)
+    ):
+        raise TasteComRecGCFullError("Taste T14 checkpoint pointer changed")
+    checkpoint_dir = checkpoint_root / checkpoint_name
+    if (
+        not checkpoint_dir.is_dir()
+        or checkpoint_dir.is_symlink()
+        or checkpoint_dir.resolve(strict=True).parent != checkpoint_root.resolve(strict=True)
+    ):
+        raise TasteComRecGCFullError("Taste T14 latest checkpoint path is unsafe")
     loaded = load_generation_checkpoint(
-        checkpoint_root,
+        checkpoint_dir,
         expected_provenance=provenance,
         expected_scientific_argv=scientific_argv,
         expected_command_sha256=command_sha256,
         expected_total_steps=M_FALLBACK_MAX,
+        expected_completed_step=completed_pointer,
+        single_pass=True,
     )
     completed = loaded.completed_step
     if (
         completed % CHECK_INTERVAL != 0
         or not CHECK_INTERVAL <= completed <= M_FALLBACK_MAX
         or loaded.algorithm_state.get("schema_version") != RUNTIME_STATE_SCHEMA
+        or loaded.validation.checkpoint_digest != digest_pointer
     ):
         raise TasteComRecGCFullError("Taste T14 checkpoint payload changed")
     return loaded
@@ -1305,6 +1432,7 @@ def run_t14_full(
     inputs: Any,
     output_root: str | Path,
     resume: bool,
+    resume_spec: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run or resume the train-only native full generation and postprocessing."""
 
@@ -1451,6 +1579,31 @@ def run_t14_full(
         "raw_neighbor_graphs_retained_unbounded": False,
     }
     checkpoint_identity_path = root / "checkpoint_identity.json"
+    resume_transport_receipt: dict[str, Any] | None = None
+    if resume_spec is not None:
+        if not resume:
+            raise TasteComRecGCFullError(
+                "Taste T14 resume spec is forbidden for a fresh generation"
+            )
+        from src.baselines.tastemolnet_t14_resume import (
+            T14ResumeError,
+            bind_resume_identity,
+        )
+
+        try:
+            checkpoint_identity, resume_transport_receipt = bind_resume_identity(
+                spec_path=resume_spec,
+                output_root=root,
+                current_execution_commit=str(authority["execution"]["commit"]),
+                current_checkpoint_identity=checkpoint_identity,
+            )
+        except T14ResumeError as exc:
+            raise TasteComRecGCFullError(
+                "Taste T14 low-memory resume binding failed"
+            ) from exc
+        provenance = dict(checkpoint_identity["provenance"])
+        scientific_argv = tuple(checkpoint_identity["scientific_argv"])
+        command_sha256 = str(checkpoint_identity["command_sha256"])
     if checkpoint_identity_path.exists():
         if json.loads(checkpoint_identity_path.read_text(encoding="utf-8")) != (
             checkpoint_identity
@@ -1460,6 +1613,17 @@ def run_t14_full(
             )
     else:
         _atomic_json(checkpoint_identity_path, checkpoint_identity)
+    if resume_transport_receipt is not None:
+        receipt_path = root / "resume_transport_receipt.json"
+        if receipt_path.exists():
+            if json.loads(receipt_path.read_text(encoding="utf-8")) != (
+                resume_transport_receipt
+            ):
+                raise TasteComRecGCFullError(
+                    "Taste T14 resume transport receipt changed"
+                )
+        else:
+            _atomic_json(receipt_path, resume_transport_receipt)
     _progress(root, phase="COHORT_FROZEN", completed_step=0, cohort_count=len(cohort))
 
     # The cohort-selection adapter and all-Sweet graph materialization are no
@@ -1533,7 +1697,11 @@ def run_t14_full(
         runtime_state = latest.algorithm_state
         if runtime_state.get("schema_version") != RUNTIME_STATE_SCHEMA:
             raise TasteComRecGCFullError("Taste T14 checkpoint runtime changed")
-        restore_official_state(module, runtime_state["official_state"])
+        restore_official_state(
+            module,
+            runtime_state.pop("official_state"),
+            consume=True,
+        )
     graph_store_path = _prepare_runtime_store(root, latest)
     with _bounded_t14_runtime(
         module=module,
@@ -1697,6 +1865,49 @@ def run_t14_full(
         bridge_evidence = bridge.report()
         transition_evidence = runtime_handles.transition_map.audit()
         graph_state_evidence = runtime_handles.live_graph_state.runtime_diagnostics()
+    # Release the hundreds-of-GiB live walk before independently reopening the
+    # final archive.  Only a payload-valid checkpoint may become LATEST.
+    effective_step = int(decision["m_effective"])
+    reset_official_state(
+        module,
+        candidate_capacity=parameters.candidate_capacity,
+        sample_size=parameters.sample_size,
+    )
+    bridge.records.clear()
+    bridge.graph_collision_payloads.clear()
+    bridge.lineage_occurrences.clear()
+    del source_graphs, dataset, adapter, bridge, latest
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    from src.baselines.comrecgc.generation_checkpoint import (
+        promote_generation_checkpoint,
+    )
+
+    promoted = promote_generation_checkpoint(
+        checkpoint_root / f"step-{effective_step:012d}",
+        expected_provenance=provenance,
+        expected_scientific_argv=scientific_argv,
+        expected_command_sha256=command_sha256,
+        expected_total_steps=M_FALLBACK_MAX,
+        expected_completed_step=effective_step,
+    )
+    checkpoint_receipt_path = checkpoint_root / f"checkpoint-{effective_step:06d}.json"
+    checkpoint_receipt = json.loads(checkpoint_receipt_path.read_text(encoding="utf-8"))
+    checkpoint_receipt.update(
+        {
+            "payload_reload_state": "PASS",
+            "latest_promoted": True,
+            "checkpoint_digest": promoted.checkpoint_digest,
+            "promoted_at": _utc_now(),
+        }
+    )
+    _atomic_json(checkpoint_receipt_path, checkpoint_receipt)
     inputs.revalidate()
     final = {
         "schema_version": "tastemolnet_t14_comrecgc_full_v1",
@@ -1721,6 +1932,8 @@ def run_t14_full(
             ),
             "raw_neighbor_graphs_retained_unbounded": False,
             "process_peak_rss_bytes": _process_peak_rss_bytes(),
+            "final_checkpoint_payload_reload_pass": True,
+            "final_checkpoint_latest_promoted": True,
         },
         "same_frozen_three_class_gine": True,
         "rf_oracle_used": False,
