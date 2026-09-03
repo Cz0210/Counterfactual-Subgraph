@@ -1,6 +1,6 @@
 # AutoDL main-table and ablation handoff (v1)
 
-Last live audit: 2026-09-03 00:47--01:02 CST.  Re-run the status commands below;
+Last live audit: 2026-09-03 14:19--14:39 CST.  Re-run the status commands below;
 the values in this note are a handoff snapshot, not a substitute for the unique
 matrix authority.
 
@@ -17,27 +17,40 @@ At the audit time it reported 12/16.  The missing cells were
 `Mutagenicity/ComRecGC`, `TasteMolNet/GCFExplainer`,
 `TasteMolNet/GlobalGCE`, and `TasteMolNet/ComRecGC`.
 
-## Live main owners
+## Live main owners and recovery gates
 
-- Mut continuation: PID 104363, start ticks 10141317, state
-  `PROTECTED_BASELINE_RUNNING`, robust-v2 1800-second baseline.  It must remain
-  the only Mut owner.  It will run trace-on and trace-off sequentially and does
-  not rebuild the historical 50k, pair store, or DBSCAN unless adoption fails.
-- Taste GlobalGCE recovery: manager PID 82588 and science PID 82680, start
-  ticks 7319071, GPU1.  This is the sole seed-7/100-epoch recovery and must not
-  be restarted.  The valid-zero fallback is permitted only after both targets
-  finish, no writer remains, and typed chemistry replay proves zero valid
-  rules with no engineering error.
-- Taste GCF T12: PID 66459, start ticks 5586300, GPU3.  It has no early
-  checkpoint suitable for a restart; observe PID and output growth only.
-- Taste ComRecGC T14: PID 7224, start ticks 361595, GPU2.  The latest audit saw
-  step 11000 and committed checkpoints through 10000.  The external auditor
-  must never open the active SQLite writer and first becomes numerically useful
-  when the committed 12500 checkpoint exists.
+- Mut continuation owner PID 139038, start ticks 14835914, has one live
+  instrumented/B child on GPU0.  It adopted the complete A arm, restarted only
+  B from step zero, and remains in the 500-step equivalence route.  Historical
+  50k generation, pair store, and DBSCAN are not being rebuilt.
+- Taste GlobalGCE manager PID 82588 and science PID 82680 (start ticks 7319071)
+  remain the sole seed-7/100-epoch recovery on GPU1.  Target 0 is still inside
+  gSpan root 0/50; its live SQLite had about 4.67 million pattern rows at this
+  audit.  The old worker remains protected.  A real-input exact sharding canary
+  is separately bound to production fingerprint
+  `ab67a7a92fe1bab62cd8be1ef29e0dc427b946de51e6b4acedf55302eb8391e3`;
+  it is preliminary evidence only and cannot authorize replacement.
+- The old Taste GCF T12 PID 66459 is no longer live.  It failed at step 417
+  before a durable generation checkpoint because recomputing one evicted
+  embedding changed low-order GINE/NeuroSED values.  Existing buffered-I/O
+  code is fixture-level only.  A real 500+10 production parity route must bind
+  first-seen embedding bytes into the bridge/checkpoint before any new full
+  launch; GPU3 being physically idle is not permission to start an ablation.
+- The old Taste ComRecGC T14 science is no longer live.  Its complete step
+  12,500 checkpoint is hash-bound by resume spec
+  `455f63cd3b4c1311cacf3f01dd81b8e8c03556f02d8a4def1145434d9209148e`.
+  Historical admission needs 512.175 GiB, above the 480 GiB cgroup limit, so
+  GPU2 remains reserved but science is fail-closed at
+  `WAITING_T14_PARITY_CANARY`.  A real <=50-step save/reload parity and memory
+  receipt is required; the heavyweight auditor PID 107645 was gracefully
+  stopped under `SERIAL_ONLY`.
 
-All four owners are protected.  A missing cell whose exact PID/start ticks no
-longer match is conservatively treated as `READY_WAITING_GPU`; this blocks
-early LLM admission until the relevant publisher appends the cell.
+The repaired v1 sidecar successor runs from commit `b65bc403` with PID 141824
+and a fresh state root `control/main-and-ablations-v1-b65bc40`.  It adopts the
+live Mut owner, reports missing T14/T8 evidence rather than inventing owners,
+and keeps both ablations blocked.  The superseded PID 109258 had no science
+child and was stopped with SIGTERM after exact PID/start-ticks/cwd/command
+verification.
 
 ## LLM proposer ablation
 
@@ -47,14 +60,15 @@ project SFT checkpoint.  The four core rows are:
 ```text
 BRICS_FIXED
 CHEMLLM_7B_OFF_THE_SHELF
-CHEMLLM_7B_PPO_MAIN
+CHEMLLM_7B_PPO_LORA_MAIN
 CHEMLLM_2B_OFF_THE_SHELF
 ```
 
 The 7B PPO row is adoption-only.  The scale claim is limited to 2B versus 7B
 off-the-shelf under the same proposal budget and downstream evaluation.  The
 matched-SFT study stays disabled and must be reported as not applicable to the
-current main pipeline.
+current main pipeline (`state=N/A`,
+`reason=NO_INDEPENDENT_MATCHED_PROJECT_SFT_CHECKPOINT`).
 
 The train-only BRICS vocabulary has 472 entries.  Its candidate pool and
 shortfall receipt are already present under the BACE stage-v2 output root.
@@ -74,11 +88,15 @@ run at its next committed stage boundary.
 
 ## GNN proposal-fixed ablation
 
-The five rows are `gine,gin,gcn,gatv2,gps`.  GraphGPS uses PyG `GPSConv`, local
-GINE, four-head global attention, five layers, dropout 0.2, mean pooling, and
-topology-only random-walk PE length 16.  Parameter-only dry-run selected hidden
-dimension 160: 1,608,327 parameters versus the reloaded GINE's 1,432,583
-(12.2676% difference).  No validation/test metric selected this width.
+The five core rows are `gine,gin,gcn,gatv2,gatedgcn_plus`.  GatedGCN+ is a
+project-specific molecular adaptation of edge-gated message passing, residual
+FFN, normalization, dropout, and RWSE components pinned from
+`LUOyk1999/GNNPlus` commit `0e02ad9a`.  Its five layers, hidden width 160,
+dropout 0.2, RWSE length 16, and two-layer readout are parameter-matched project
+choices, not an upstream BACE recipe.  The CPU dry-run counted 1,219,138
+parameters versus the reloaded GINE's 1,432,583 (14.8993% difference); no
+validation or test metric selected the width.  GraphGPS remains an optional
+registered backbone and is not one of the five core rows.
 
 GNN science remains blocked until matrix 16/16 and final matrix audit, Figure
 3, Figure 4, and Table 2 receipts are all PASS.  Seed 7 runs first with at most
@@ -86,15 +104,57 @@ two GPUs; seeds 17 and 27 are extensions only when the measured per-model ETA
 is no more than two hours.  Graph-Mamba is pinned metadata only and never runs
 under this controller.
 
+## Recovery task-spec and dispatch contract
+
+The repaired sidecar no longer forwards its ambient shell to component
+launchers.  Bind each component through its corresponding absolute JSON path:
+
+```text
+MUT_CONTINUATION_TASK_SPEC
+T14_RESUME_TASK_SPEC
+T8_ZERO_FINALIZER_TASK_SPEC
+LLM_ABLATION_TASK_SPEC
+GNN_ABLATION_TASK_SPEC
+```
+
+Every `main_and_ablations_task_spec_v1` object names the exact task ID/type,
+immutable repository and commit, Python/config, manifest, input/output root,
+GPU/CPU/memory request, complete `required_environment`, owner heartbeat, and
+terminal receipt.  Fresh outputs and run IDs may contain `{attempt_uuid}` and
+`{attempt_number}`.  If the science command contains those tokens, specify its
+exact argv as `owner.command_argv`; the sidecar resolves it and hashes the raw
+Linux `/proc/<pid>/cmdline` byte contract before launch.  A fixed live command
+may instead provide `owner.command_sha256`.
+
+Mut specs must include every variable required by
+`launch_mut_throttled_continuation_v1.sh`, request GPU0/two CPU workers, and
+bind `MUT_TRACE_OUTPUT_ROOT` to the task output.  T14 specs must include
+`T14_AUDITOR_REPO_ROOT`, `T14_CHECKPOINT_ROOT`, `T14_RESUME_SPEC`, the complete
+existing T14 full-run environment, physical GPU2, resume mode, and measured
+cgroup headroom paths/requirement.  `serial_auditor.active=true` binds the
+existing heavy relay heartbeat and start ticks; while that process is live the
+science resume remains `BLOCKED_SERIAL_AUDITOR_ACTIVE`.
+
+An attempt is not accepted because `launch.json` exists.  The sidecar waits 60
+seconds for the true science owner and jointly verifies live PID, start ticks,
+fresh heartbeat, output root/cwd, and command SHA.  Missing ownership produces
+`FAILED_TO_START` and preserved evidence, then 60/120/300-second backoff.  The
+third failed attempt becomes `BLOCKED_LAUNCHER_RETRY_EXHAUSTED`.  A strict
+terminal receipt, a held GPU lease, any prior-output writer, or invalid owner
+evidence prevents another launch.
+
 ## Status commands
 
 After deployment, use the immutable execution worktree recorded in the
 controller receipt:
 
 ```bash
-scripts/autodl/launch_main_and_ablations_v1.sh status
-python scripts/autodl/status_llm_ablation_core_v1.py --help
-scripts/autodl/status_gnn_five_backbone_ablation_v1.py --help
+MAIN_AND_ABLATIONS_STATE_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/control/main-and-ablations-v1-b65bc40 \
+  /root/autodl-tmp/worktrees/main-acceleration-and-ablations-b65bc40/scripts/autodl/launch_main_and_ablations_v1.sh status
+/root/miniconda3/envs/smiles_pip118/bin/python \
+  /root/autodl-tmp/worktrees/main-acceleration-and-ablations-b65bc40/scripts/autodl/status_llm_ablation_core_v1.py --help
+/root/miniconda3/envs/smiles_pip118/bin/python \
+  /root/autodl-tmp/worktrees/main-acceleration-and-ablations-b65bc40/scripts/autodl/status_gnn_five_backbone_ablation_v1.py --help
 ```
 
 The active science PIDs must be checked by exact PID plus `/proc/<pid>/stat`

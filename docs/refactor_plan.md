@@ -1,9 +1,61 @@
 # Refactor Plan
 
+## 2026-09-03: Real T12 deterministic acceleration parity
+
+- [x] Isolate and test the buffered single-writer, ordered collector, and
+  bit-exact first-seen embedding store without claiming production parity.
+- [x] Confirm that the prior T12 ended at step 417 without a resumable
+  generation checkpoint.
+- [ ] Integrate the authoritative embedding-byte store with the production
+  T12 bridge and checkpoint manifest.
+- [ ] Add a dedicated 510-step canary purpose that exports/restores the
+  external transition store at step 500.
+- [ ] Run formal serial and accelerated 500-step arms plus independent
+  501--510 replay on the frozen 3,778-parent configuration.
+- [ ] Launch a fresh full replacement only after exact discrete parity,
+  bounded oracle tolerance, reload, >=3x speedup, and <=72-hour 10k ETA pass.
+
+## 2026-09-03: Low-peak T14 checkpoint transport
+
+- [x] Eliminate T14's duplicate checkpoint deserialize and live-state writer
+  reload while preserving the generic checkpoint default.
+- [x] Transfer validated official, transition, and bridge payloads
+  incrementally; serialize future numeric arrays as tensor storage.
+- [x] Bind the exact step-12,500 checkpoint to a transport-only resume spec.
+- [x] Serialize T14 science and the external full-state auditor on one
+  checkpoint-root lock and verify the old auditor by PID/start ticks.
+- [x] Keep the 480 GiB admission fail-closed when the measured parity-canary
+  receipt is absent.
+- [ ] Run the real 12,500 -> at-most-12,550 parity canary, force a compact
+  checkpoint save/reload, and record resume/save cgroup peaks.
+- [ ] Start T14 science only if the measured formula leaves the fixed 64 GiB
+  safety margin.
+
+## 2026-09-03: GatedGCN+ fifth-backbone route
+
+- [x] Pin the canonical `LUOyk1999/GNNPlus` commit and MIT license evidence.
+- [x] Adapt its edge-gated message passing, residual FFN, normalization, and
+  topology-only RWSE components to the project's molecular feature schema.
+- [x] Label the five-layer/hidden-160/dropout-0.2 configuration as a
+  project-specific parameter match rather than an official BACE recipe.
+- [x] Verify the 1,219,138 actual loaded parameter count against the
+  1,432,583-parameter GINE reference without validation/test selection.
+- [ ] Run the proposal-fixed science only after main 16/16 and the final
+  artifact gates.
+
 ## 2026-09-03: Fixed-priority main and ablation closeout sidecar
 
 - [x] Enforce main > LLM > GNN priorities and the frozen experiment rows.
-- [x] Dispatch only dataset-specific helpers with one durable component receipt.
+- [x] Dispatch only dataset-specific helpers from explicit immutable task specs;
+  never inherit scientific inputs from the sidecar's ambient shell.
+- [x] Replace receipt-exists dispatch suppression with a bounded
+  `READY -> LAUNCHING -> OWNER_CONFIRMED` recovery state machine, 60/120/300
+  second backoff, and at most three attempts.
+- [x] Confirm the true science owner by PID generation, continuing heartbeat,
+  output root, cwd, and exact command hash; a launcher PID is not an owner.
+- [x] Keep the full-state T14 convergence auditor serial with T14 science and
+  dispatch the 12,500-step science resume rather than treating the auditor as
+  the missing ComRecGC cell's owner.
 - [x] Keep early LLM fail-closed until its independent live receipt passes.
 - [x] Keep five-backbone GNN science blocked until 16/16 and final artifacts.
 - [x] Add status, paired Slurm guards, focused tests, and durable heartbeat.
@@ -3926,6 +3978,10 @@ Mutagenicity roadmaps.
 - [x] Register Graph-Mamba metadata only and fail closed on execution.
 - [x] Add the post-16/16 five-backbone gate/status entrypoints and exact two-lane
   schedule without starting science or creating a duplicate task writer.
+- [x] Add a separate, status-authorized execution-spec orchestrator that adopts
+  GINE, runs the four non-reference backbones in at most two fixed GPU lanes,
+  checkpoints on a new main-table waiter, and fails closed when any real
+  science command is absent.
 - [ ] Supply the runtime BACE/Ours candidate-universe receipt and obtain a
   separate explicit GNN run authorization after the main matrix closes.
 

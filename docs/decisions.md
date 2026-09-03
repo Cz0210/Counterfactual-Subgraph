@@ -1,17 +1,106 @@
 # Decisions Log
 
+## [2026-09-03] Keep T12 blocked after the step-417 bit-exactness failure
+
+### Decision
+
+Do not treat the fixture-level buffered ordered-I/O canary as production
+science parity.  The previous T12 route exited at step 417 before a durable
+generation checkpoint after an evicted graph embedding was recomputed with a
+low-order GINE/NeuroSED difference.  A replacement must first persist the
+first-seen embedding bytes in the real T12 bridge/checkpoint, add a dedicated
+510-step external-transition checkpoint purpose, and compare a formal
+500-step serial arm with a bounded ordered arm plus independent 501--510
+reload replay.
+
+### Impact
+
+The buffered writer and ordered collector remain useful isolated building
+blocks, but their reports continue to set `scientific_parity_claimed=false`
+and `replacement_authorized=false`.  No fresh T12 full run or ablation may use
+the physically idle GPU3 until the real parity, reload, >=3x speedup, and <=72h
+projected-10k gates pass.
+
+---
+
+## [2026-09-03] Use a parameter-matched molecular adaptation of GNNPlus
+
+### Decision
+
+The fifth core proposal-fixed backbone is `gatedgcn_plus`.  Its edge-gated
+message/update equations, residual feed-forward block, normalization, and RWSE
+components are pinned to the canonical `LUOyk1999/GNNPlus` repository at
+commit `0e02ad9acc2f1e54b5ad71c051bf5dfb1fcb4f28` (MIT).  The former
+`LUOyk1999/tunedGNN-G` URL is retained only as a redirecting legacy alias.
+
+The molecular feature adapters and parameter-matched settings—five layers,
+hidden width 160, dropout 0.2, RWSE length 16, and a two-layer readout—are
+project-specific.  They are not described as an official upstream BACE
+recipe.  Width selection uses only the actual 1,432,583-parameter GINE
+reference and the frozen candidate widths; the resulting model has 1,219,138
+parameters (14.8993% difference), without loading validation or test metrics.
+
+### Impact
+
+The core GNN rows are now GINE, GIN, GCN, GATv2, and GatedGCN+.  GraphGPS stays
+available as an optional registered implementation, while Graph-Mamba remains
+metadata-only.  No GNN science or GPU lock is started before the final 16/16
+gate.
+
+---
+
+## [2026-09-03] Gate the T14 12,500 resume on measured low-memory parity
+
+### Decision
+
+Keep the committed step-12,500 scientific identity, RNG state, cohort, and
+candidate ordering unchanged while changing checkpoint transport only.  T14
+uses a single deserialization, consumptive transfer of already validated state,
+tensor-backed future numeric payloads, and no live-state reload in the writer.
+The normal COMRECGC checkpoint API retains its strict reload behavior.
+
+The resume owner and external full-state auditor share one checkpoint-root lock.
+The owner must also verify the frozen auditor PID/start ticks and a hash-bound,
+at-most-50-step parity canary that includes a forced checkpoint save and
+independent reload.  Admission remains
+`max(checkpoint_peak + 64 GiB, resume_peak * 1.15)` against live cgroup
+headroom.  A missing canary is `WAITING_T14_PARITY_CANARY`, never permission to
+launch science.
+
+### Impact
+
+The historical evidence requires about 512.175 GiB and therefore does not fit
+the 480 GiB cgroup cap.  No production resume may start until the same-checkpoint
+optimized canary measures a lower peak and passes scientific parity.  The
+existing step-12,500 files remain read-only resume authority.
+
+### Status
+
+Implementation and tiny-fixture tests are complete; the real AutoDL parity and
+save-peak canary is still required.
+
+---
+
 ## [2026-09-03] Keep one fixed-priority main/ablation closeout owner
 
 ### Decision
 
 Use one small, dataset-delegating sidecar with the immutable priority order
 main table (100), LLM ablation (50), then GNN ablation (20).  The sidecar does
-not implement scientific algorithms: it dispatches the existing Mut, T14, and
-Taste GlobalGCE dataset-specific helpers once, retains their independent
-single-writer gates, and publishes a durable heartbeat.  Early LLM execution
-requires the independent 13-cell/main-ready/runtime receipt; GNN requires the
-16-cell authority and PASS receipts for the final audit, Figure 3, Figure 4,
-and Table 2.  Missing evidence fails closed.
+not implement scientific algorithms: it dispatches existing dataset-specific
+helpers only from explicit immutable task specs and publishes a durable
+heartbeat.  A dispatch is not owned merely because a launcher receipt exists:
+the true science PID generation, continuing owner heartbeat, output root, cwd,
+and exact command hash must all agree, or a strict terminal receipt must exist.
+Startup failures use bounded 60/120/300-second backoff and at most three
+attempts; every failed attempt and log remains preserved.
+
+The T14 full-state convergence auditor is diagnostic evidence, never the Taste
+ComRecGC science owner.  It remains serial with T14 generation and blocks the
+12,500-step resume while live.  Early LLM execution requires the independent
+13-cell/main-ready/runtime receipt; GNN requires the 16-cell authority and PASS
+receipts for the final audit, Figure 3, Figure 4, and Table 2.  Missing evidence
+fails closed without blocking unrelated higher-priority components.
 
 ### Impact
 
@@ -17086,12 +17175,13 @@ must not be presented as an actual loaded-parameter count.
   earlier framework correctly blocked the invented SFT rows but still lacked
   an executable, resumable path for the scientifically meaningful rows.
 - Decision: the core table is exactly `BRICS_FIXED`,
-  `CHEMLLM_7B_OFF_THE_SHELF`, `CHEMLLM_7B_PPO_MAIN`, and
+  `CHEMLLM_7B_OFF_THE_SHELF`, `CHEMLLM_7B_PPO_LORA_MAIN`, and
   `CHEMLLM_2B_OFF_THE_SHELF`.  The main adaptation path is
   `BASE_PLUS_PPO_LORA`; the 7B PPO row adopts the completed BACE/Ours artifacts
   and may not retrain.  The scale claim is limited to off-the-shelf 2B versus
   off-the-shelf 7B.  SFT remains an explicitly disabled auxiliary study with
-  state `SFT_ABLATION_NOT_APPLICABLE_TO_CURRENT_MAIN_PIPELINE`.
+  state `N/A` and reason
+  `NO_INDEPENDENT_MATCHED_PROJECT_SFT_CHECKPOINT`.
 - Execution: a run spec binds a fresh UUID/root, reference, matrix authority,
   adapter topology, and fixed generation/verification/selector/test/audit
   stage order.  Commands execute without a shell, each stage commits a
@@ -17275,3 +17365,46 @@ has exited, no writable descriptor remains, and the independent replay passes.
 - Impact: no 50k generation, pair store, or DBSCAN artifact is recomputed, and
   no partial B output is treated as resumable.  Missing or changed A evidence
   fails closed before the new B arm starts.
+
+# 2026-09-03: Keep T8/T12 acceleration experiments isolated behind exact canaries
+
+- Motivation: T8 gSpan is dominated by a large root and T12 is dominated by
+  fine-grained persistent I/O.  Neither observation is evidence that a
+  sharded or buffered replacement preserves the active run's science.  T12
+  additionally observed low-bit GINE embedding drift after a complete row was
+  evicted, so recomputation cannot serve as a bit-exact identity authority.
+- Decision: add an isolated T8 canary that compares exhaustive serial mining
+  on explicitly selected real roots with disjoint process-level root shards
+  and a deterministic exact-top-k union.  Add an isolated T12 canary with a
+  single ordered collector, buffered authenticated journal, durable reload,
+  and a first-seen embedding byte store keyed by canonical graph identity.
+  Re-entry always reloads the authoritative bytes; it never widens a floating
+  tolerance.  Both reports state that scientific parity is not claimed and
+  that replacement is not authorized.
+- Impact: operators can measure and validate the two implementation ideas on
+  frozen real captures without writing an active output root.  Production
+  T8/T12 runners, controllers, budgets, RNG, models, and live checkpoints are
+  unchanged until the separately required full semantic parity gates pass.
+
+# 2026-09-03: Execute the authorized five-backbone plan through two resumable lanes
+
+- Motivation: the existing five-backbone launcher intentionally stops after a
+  read-only launch decision, so an allowed status did not yet provide a real,
+  fail-closed route to the four non-reference science commands.
+- Decision: add a separate execution-spec-driven orchestrator.  It requires a
+  byte-pinned `science_launch_allowed=true` status, adopts the hash-bound GINE
+  classifier/temperature/manifest without retraining, and runs only
+  `GIN -> GatedGCN+` and `GCN -> GATv2` in two fixed lanes.  Seed 7 is a hard
+  barrier before optional seeds 17 and 27.  Every child is a physical script
+  launched with `shell=False`; incomplete command templates fail before a
+  fresh output root is created.
+- Main-priority behavior: the executor continuously reopens the live
+  `READY_GPU` queue.  A new main waiter creates an explicit checkpoint request;
+  a child may yield only with a self-hashed safe-checkpoint receipt.  No next
+  backbone or seed starts after that request.  The main matrix authority is
+  hash-checked at launch and every task boundary and is never passed to a
+  child.
+- Impact: the status/launch/config/model/contract files remain unchanged.  The
+  new runner and two-GPU Slurm wrapper do not launch anything until an operator
+  supplies the complete immutable science run spec and existing post-16/16
+  authorization evidence.
