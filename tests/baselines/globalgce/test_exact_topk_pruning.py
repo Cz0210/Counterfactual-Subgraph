@@ -241,6 +241,31 @@ def test_exact_topk_antimonotone_pruning_matches_stable_reference(
     )["status"] == "PASS"
 
 
+def test_exact_topk_can_select_one_global_root_without_renumbering(
+    tmp_path, monkeypatch
+) -> None:
+    _disable_storage_floor(monkeypatch)
+    candidate = _ExactTopKFakeGSpan()
+    with resumable_gspan_root_chunks(
+        _module(),
+        checkpoint_root=tmp_path,
+        top_k=3,
+        flush_every=1,
+        exact_top_k_pruning=True,
+        selected_root_indices=(1,),
+    ):
+        graphs, supports = candidate.run()
+
+    assert supports == [10, 9, 8]
+    assert graphs == ["D", "b-1", "b-1-1"]
+    checkpoint = json.loads(
+        next(tmp_path.glob("support_*/checkpoint.json")).read_text(encoding="utf-8")
+    )
+    assert checkpoint["root_count"] == 1
+    assert checkpoint["full_root_count"] == 2
+    assert checkpoint["selected_root_indices"] == [1]
+
+
 def test_external_scratch_publishes_self_contained_persistent_proof(
     tmp_path, monkeypatch
 ) -> None:

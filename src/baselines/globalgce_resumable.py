@@ -20,7 +20,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 
 GLOBALGCE_TRAINING_RESUME_IDENTITY_SCHEMA_VERSION = (
@@ -1109,6 +1109,7 @@ def resumable_gspan_root_chunks(
     flush_every: int | None = None,
     max_in_memory_candidates: int | None = None,
     exact_top_k_pruning: bool = False,
+    selected_root_indices: Sequence[int] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Spill deterministic gSpan root reports and retain only official top-k.
 
@@ -1121,6 +1122,19 @@ def resumable_gspan_root_chunks(
     from its beginning; neither adopts a partial traversal.
     """
 
+    selected_roots: tuple[int, ...] | None = None
+    if selected_root_indices is not None:
+        raw_selected = tuple(selected_root_indices)
+        if (
+            not raw_selected
+            or any(type(value) is not int or value < 0 for value in raw_selected)
+            or tuple(sorted(set(raw_selected))) != raw_selected
+        ):
+            raise ValueError(
+                "GlobalGCE selected root indices must be a non-empty, "
+                "strictly increasing sequence of unique non-negative integers."
+            )
+        selected_roots = raw_selected
     root = _descriptor_path_or_resolve(checkpoint_root)
     scratch = (
         root
@@ -1318,6 +1332,15 @@ def resumable_gspan_root_chunks(
                 else "sqlite_stable_support_topk_v2"
             ),
         }
+        # Preserve the production fingerprint byte-for-byte unless this
+        # isolated sharding surface is explicitly selected.
+        if selected_roots is not None:
+            settings["selected_root_indices"] = list(selected_roots)
+        if selected_roots is not None and selected_roots[-1] >= len(top_roots):
+            raise ValueError(
+                "GlobalGCE selected root index exceeds the frozen root universe."
+            )
+        selected_root_set = set(selected_roots or range(len(top_roots)))
         fingerprint = _graph_input_fingerprint(self._nx_graph_list, settings)
         support_name = f"support_{int(self._min_support)}_{fingerprint[:16]}"
         support_root = root / support_name
@@ -1398,7 +1421,9 @@ def resumable_gspan_root_chunks(
             ),
             "stage": "mining",
             "input_fingerprint": fingerprint,
-            "root_count": len(top_roots),
+            "root_count": len(selected_root_set),
+            "full_root_count": len(top_roots),
+            "selected_root_indices": sorted(selected_root_set),
             "completed_root_count": 0,
             "current_root_index": None,
             "frequent_subgraph_count": 0,
@@ -1413,6 +1438,8 @@ def resumable_gspan_root_chunks(
         try:
             with _Heartbeat(support_root / "heartbeat.json", state):
                 for root_index, (vevlb, projected) in enumerate(top_roots.items()):
+                    if root_index not in selected_root_set:
+                        continue
                     state["current_root_index"] = root_index
                     completed = connection.execute(
                         "SELECT complete, pattern_count FROM roots WHERE root_index=?",
