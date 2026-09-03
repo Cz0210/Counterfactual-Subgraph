@@ -83,8 +83,10 @@ is
 Its owner PID is 162844 (start ticks 18577652) and science PID 162847 is
 running on GPU3 from the fresh root
 `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/gcfexplainer/t12-production/reference-500-firstseen-c6fdce9f-7e01-4481-b97e-372ae851a0f8`.
-The child remained healthy beyond the old failure point and held 748 MiB VRAM
-in the final startup snapshot.
+At the final post-fix canary snapshot the child had remained healthy for 254
+seconds, held 23,022 MiB VRAM, and its first-seen segment contained exactly
+11,817 complete records (14,736,512 bytes).  It therefore passed both the old
+511-record limit and the previous failure window.
 
 ## Main-line blockers
 
