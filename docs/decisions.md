@@ -17409,3 +17409,43 @@ has exited, no writable descriptor remains, and the independent replay passes.
   new runner and two-GPU Slurm wrapper do not launch anything until an operator
   supplies the complete immutable science run spec and existing post-16/16
   authorization evidence.
+
+# 2026-09-03: Offload only exhaustive Taste GlobalGCE mining to HPC
+
+- Motivation: the sole authorized seed-7, 100-epoch Taste GlobalGCE recovery
+  is dominated by exhaustive root-0 gSpan traversal on AutoDL.  Tongji HPC has
+  ample CPU/RAM, but the path-specific free-space view under
+  `/share/home/u20526/czx` is constrained and `/ssdfs/datahome/u20526` is full.
+  Parallel CPU traversal is useful only if it preserves the exact
+  scientific event stream and does not interfere with protected AutoDL jobs.
+- Decision: transport one minimal, project-owner-authorized train-only graph
+  bundle through the external Mac disk and execute one exact project commit in
+  an isolated HPC worktree.  Partition only at typed deterministic DFS
+  prefixes, resume only at committed prefix boundaries, perform no scientific
+  pruning, and require exhaustive serial-versus-sharded equality of ordered
+  patterns/support, candidate inputs, rejection accounting, catalog, and
+  deterministic K=20 output before a full Slurm array can start.
+- Input boundary: transfer exactly six allowlisted payloads (the frozen graph
+  JSONL plus five manifests/receipts).  Do not transfer the native train CSV;
+  bind only its expected SHA-256 through the source manifest, authorization,
+  and builder CLI.  Require graph IDs to equal zero-based row order, integer
+  typed labels, connected graphs, and a stable whole-file hash.
+- Canary boundary: compare exactly the complete small root 22 and one real
+  root-0 `PREFIX_SUBTREE`.  Accept an explicitly pinned prefix ID or select the
+  minimum `(support_hint, partition_id)` from a pinned shallow catalog, then
+  publish a self-hashed selection receipt.  The canary uses at most 64 GiB for
+  one hour; mining and merge stage transient writes on node-local temporary
+  storage and persist only verified sealed artifacts.
+- Authority: the HPC creates only an immutable result bundle.  It never opens
+  calibration/test data, runs the GINE, writes an AutoDL output root, or sees a
+  matrix-authority path.  AutoDL must independently verify/import into a fresh
+  root and remains the sole publisher through `fast16_matrix_authority`.
+- Handover: neither canary nor full-array submission permits a signal to the
+  existing AutoDL T8 workers.  A later graceful `SIGTERM` is eligible only
+  after verified import plus exact PID/start-ticks/command/cwd/root/controller
+  revalidation and a final progress snapshot; fuzzy matching, process-group
+  signals, `SIGKILL`, and deletion of the old root remain forbidden.
+- Operations: use `/share` and Slurm-provided node-local temporary storage,
+  never `/ssdfs`; do not poll hour-scale jobs from an active Codex turn.  Git
+  fetch through the existing Mac reverse proxy is preferred, with a
+  SHA-verified Git bundle carrying the same commit as the bounded fallback.

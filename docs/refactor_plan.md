@@ -4024,3 +4024,31 @@ Mutagenicity roadmaps.
   import, main GPU lock, or main output-root write is used.
 - [ ] Run the real CPU-load audit on AutoDL only after an operator supplies the
   current manifest byte hash and a fresh non-main evidence root.
+
+## 2026-09-03: Exact Taste GlobalGCE T8 CPU offload to Tongji HPC
+
+- [x] Inventory the Mac proxy/SSH relay, AutoDL T8 inputs and protected jobs,
+  and the HPC CPU, Slurm, Python, memory, and filesystem surfaces.
+- [x] Reserve one exact project commit and pinned official GlobalGCE commit as
+  the only execution source; never execute from either dirty ordinary checkout.
+- [x] Define a minimal, train-only, hash-closed AutoDL -> external Mac disk ->
+  HPC bundle that excludes active SQLite/journals, weights, calibration/test,
+  credentials, and whole-runtime copies.
+- [x] Exclude the raw train CSV from transfer, bind its provenance SHA only,
+  and enforce graph insertion order, integer labels, and connectivity at both
+  bundle and HPC load boundaries.
+- [x] Define exhaustive typed-DFS prefix sharding, boundary-only resume,
+  deterministic merge, and a full semantic serial-versus-sharded canary gate.
+- [x] Bound the real canary to root 22 plus one deterministically selected or
+  explicitly pinned root-0 prefix, and stage active/merge writes on node-local
+  temporary storage.
+- [x] Add a read-only, redacted Mac status command and an operator handoff that
+  keeps `/ssdfs` forbidden and the unique matrix authority AutoDL-only.
+- [ ] Transfer and independently verify the frozen bundle on HPC at the exact
+  implementation commit.
+- [ ] Submit the bounded exact canary; submit the full CPU array and dependent
+  merge only after the independent parity verifier passes.
+- [ ] Import a verified result bundle into a fresh AutoDL root and use the
+  existing T8/T13 verifier/finalizer.  Gracefully stop an old worker only after
+  exact PID/start-ticks/command/root ownership revalidation and verified
+  handover eligibility.
