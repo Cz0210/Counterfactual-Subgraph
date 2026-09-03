@@ -4,8 +4,9 @@
 
 - [x] Isolate and test the buffered single-writer, ordered collector, and
   bit-exact first-seen embedding store without claiming production parity.
-- [x] Confirm that the prior T12 ended at step 417 without a resumable
-  generation checkpoint.
+- [x] Record the read-only runtime evidence that the prior T12 ended at step
+  417 without a resumable generation checkpoint in audit
+  `main_acceleration_and_ablations_20260903T064546Z`.
 - [ ] Integrate the authoritative embedding-byte store with the production
   T12 bridge and checkpoint manifest.
 - [ ] Add a dedicated 510-step canary purpose that exports/restores the
@@ -21,9 +22,11 @@
   reload while preserving the generic checkpoint default.
 - [x] Transfer validated official, transition, and bridge payloads
   incrementally; serialize future numeric arrays as tensor storage.
-- [x] Bind the exact step-12,500 checkpoint to a transport-only resume spec.
-- [x] Serialize T14 science and the external full-state auditor on one
-  checkpoint-root lock and verify the old auditor by PID/start ticks.
+- [x] Implement and write the exact step-12,500 transport-only resume spec;
+  its runtime status remains `AUTHORIZED_TRANSPORT_ONLY_PENDING_MEMORY_CANARY`
+  in audit `main_acceleration_and_ablations_20260903T064546Z`.
+- [x] Support serialization of T14 science and the external full-state auditor
+  on one checkpoint-root lock, including exact PID/start-ticks verification.
 - [x] Keep the 480 GiB admission fail-closed when the measured parity-canary
   receipt is absent.
 - [ ] Run the real 12,500 -> at-most-12,550 parity canary, force a compact
@@ -51,15 +54,18 @@
 - [x] Replace receipt-exists dispatch suppression with a bounded
   `READY -> LAUNCHING -> OWNER_CONFIRMED` recovery state machine, 60/120/300
   second backoff, and at most three attempts.
-- [x] Confirm the true science owner by PID generation, continuing heartbeat,
-  output root, cwd, and exact command hash; a launcher PID is not an owner.
-- [x] Keep the full-state T14 convergence auditor serial with T14 science and
-  dispatch the 12,500-step science resume rather than treating the auditor as
-  the missing ComRecGC cell's owner.
+- [x] Require true science-owner verification by PID generation, continuing
+  heartbeat, output root, cwd, and exact command hash; a launcher PID is not an
+  owner.
+- [x] Support serial exclusion between the full-state T14 convergence auditor
+  and T14 science, and dispatch the 12,500-step resume only after its task spec
+  and parity receipt exist; never treat the auditor as the missing cell owner.
 - [x] Keep early LLM fail-closed until its independent live receipt passes.
 - [x] Keep five-backbone GNN science blocked until 16/16 and final artifacts.
 - [x] Add status, paired Slurm guards, focused tests, and durable heartbeat.
-- [ ] Deploy the immutable combined commit and revalidate every active PID/root.
+- [x] Deploy immutable commit `5b37ce0c` and record a one-shot revalidation of
+  every active PID/root in audit
+  `main_acceleration_and_ablations_20260903T064546Z`.
 
 ## 2026-09-02: Close the Mut semantic-finalizer integration gap
 

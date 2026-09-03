@@ -1,8 +1,10 @@
 # AutoDL main-table and ablation handoff (v1)
 
-Last live audit: 2026-09-03 14:19--14:39 CST.  Re-run the status commands below;
-the values in this note are a handoff snapshot, not a substitute for the unique
-matrix authority.
+Last live audit: 2026-09-03 14:49:01 CST.  The immutable evidence snapshot is
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/main_acceleration_and_ablations_20260903T064546Z`
+(30 files plus `SHA256SUMS`).  Re-run the status commands below; the values in
+this note are a handoff snapshot, not a substitute for the unique matrix
+authority.
 
 ## Priority and authority
 
@@ -19,23 +21,26 @@ At the audit time it reported 12/16.  The missing cells were
 
 ## Live main owners and recovery gates
 
-- Mut continuation owner PID 139038, start ticks 14835914, has one live
-  instrumented/B child on GPU0.  It adopted the complete A arm, restarted only
-  B from step zero, and remains in the 500-step equivalence route.  Historical
-  50k generation, pair store, and DBSCAN are not being rebuilt.
+- At 14:49:01 CST, Mut continuation owner PID 139038, start ticks 14835914,
+  had one live instrumented/B science child PID 141424 on GPU0.  It had reached
+  step 425/500, adopted the complete A arm, restarted only B from step zero,
+  and remained in the equivalence route.  Historical 50k generation, pair
+  store, and DBSCAN were not being rebuilt.
 - Taste GlobalGCE manager PID 82588 and science PID 82680 (start ticks 7319071)
   remain the sole seed-7/100-epoch recovery on GPU1.  Target 0 is still inside
-  gSpan root 0/50; its live SQLite had about 4.67 million pattern rows at this
+  gSpan root 0/50; its heartbeat reported 5,235,200 frequent subgraphs at this
   audit.  The old worker remains protected.  A real-input exact sharding canary
   is separately bound to production fingerprint
   `ab67a7a92fe1bab62cd8be1ef29e0dc427b946de51e6b4acedf55302eb8391e3`;
   it is preliminary evidence only and cannot authorize replacement.
-- The old Taste GCF T12 PID 66459 is no longer live.  It failed at step 417
-  before a durable generation checkpoint because recomputing one evicted
-  embedding changed low-order GINE/NeuroSED values.  Existing buffered-I/O
-  code is fixture-level only.  A real 500+10 production parity route must bind
-  first-seen embedding bytes into the bridge/checkpoint before any new full
-  launch; GPU3 being physically idle is not permission to start an ablation.
+- The old Taste GCF T12 processes are no longer live.  The run failed at step
+  417 before a durable generation checkpoint after one evicted identity's
+  recomputed GINE embedding bytes/hash differed.  The probability difference
+  was only `2.9802322387695312e-08`; NeuroSED drift was not established.
+  Existing buffered-I/O code is fixture-level only.  A real 500+10 production
+  parity route must bind first-seen embedding bytes into the bridge/checkpoint
+  before any new full launch; GPU3 being physically idle is not permission to
+  start an ablation.
 - The old Taste ComRecGC T14 science is no longer live.  Its complete step
   12,500 checkpoint is hash-bound by resume spec
   `455f63cd3b4c1311cacf3f01dd81b8e8c03556f02d8a4def1145434d9209148e`.
@@ -45,12 +50,14 @@ At the audit time it reported 12/16.  The missing cells were
   receipt is required; the heavyweight auditor PID 107645 was gracefully
   stopped under `SERIAL_ONLY`.
 
-The repaired v1 sidecar successor runs from commit `b65bc403` with PID 141824
-and a fresh state root `control/main-and-ablations-v1-b65bc40`.  It adopts the
-live Mut owner, reports missing T14/T8 evidence rather than inventing owners,
-and keeps both ablations blocked.  The superseded PID 109258 had no science
-child and was stopped with SIGTERM after exact PID/start-ticks/cwd/command
-verification.
+At the 14:49:01 CST snapshot, the repaired v1 sidecar successor ran from commit
+`b65bc403` with PID 141824/start ticks 15172670 and state root
+`control/main-and-ablations-v1-b65bc40`.  It adopted the live Mut owner,
+reported missing T14/T8 evidence rather than inventing owners, and kept both
+ablations blocked.  The superseded PID 109258 had no science child and was
+stopped with SIGTERM after exact PID/start-ticks/cwd/command verification.  Do
+not reuse any PID in this paragraph for a signal; re-read `/proc` and the audit
+snapshot first.
 
 ## LLM proposer ablation
 
@@ -145,16 +152,17 @@ evidence prevents another launch.
 
 ## Status commands
 
-After deployment, use the immutable execution worktree recorded in the
-controller receipt:
+For the live snapshot sidecar, use its recorded state root and execution
+worktree.  For code-only LLM/GNN status, use the final immutable worktree at
+commit `5b37ce0c81105cc6649213a0ddc60ca8d87025cd`:
 
 ```bash
 MAIN_AND_ABLATIONS_STATE_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/control/main-and-ablations-v1-b65bc40 \
   /root/autodl-tmp/worktrees/main-acceleration-and-ablations-b65bc40/scripts/autodl/launch_main_and_ablations_v1.sh status
 /root/miniconda3/envs/smiles_pip118/bin/python \
-  /root/autodl-tmp/worktrees/main-acceleration-and-ablations-b65bc40/scripts/autodl/status_llm_ablation_core_v1.py --help
+  /root/autodl-tmp/worktrees/main-acceleration-and-ablations-5b37ce0/scripts/autodl/status_llm_ablation_core_v1.py --help
 /root/miniconda3/envs/smiles_pip118/bin/python \
-  /root/autodl-tmp/worktrees/main-acceleration-and-ablations-b65bc40/scripts/autodl/status_gnn_five_backbone_ablation_v1.py --help
+  /root/autodl-tmp/worktrees/main-acceleration-and-ablations-5b37ce0/scripts/autodl/status_gnn_five_backbone_ablation_v1.py --help
 ```
 
 The active science PIDs must be checked by exact PID plus `/proc/<pid>/stat`

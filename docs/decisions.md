@@ -6,12 +6,13 @@
 
 Do not treat the fixture-level buffered ordered-I/O canary as production
 science parity.  The previous T12 route exited at step 417 before a durable
-generation checkpoint after an evicted graph embedding was recomputed with a
-low-order GINE/NeuroSED difference.  A replacement must first persist the
-first-seen embedding bytes in the real T12 bridge/checkpoint, add a dedicated
-510-step external-transition checkpoint purpose, and compare a formal
-500-step serial arm with a bounded ordered arm plus independent 501--510
-reload replay.
+generation checkpoint after an evicted identity's recomputed GINE embedding
+bytes/hash differed.  The associated probability difference was
+`2.9802322387695312e-08`; no NeuroSED drift was established.  A replacement
+must first persist the first-seen embedding bytes in the real T12
+bridge/checkpoint, add a dedicated 510-step external-transition checkpoint
+purpose, and compare a formal 500-step serial arm with a bounded ordered arm
+plus independent 501--510 reload replay.
 
 ### Impact
 
