@@ -56,7 +56,9 @@ for name in \
   require_env "$name"
 done
 
+set +u
 source ~/.bashrc
+set -u
 conda activate "${T8_CONDA_ENV:-smiles_pip118}"
 cd "$T8_EXECUTION_WORKTREE"
 export PYTHONPATH="$PWD"

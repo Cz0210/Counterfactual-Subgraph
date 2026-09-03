@@ -39,7 +39,9 @@ for name in T8_EXECUTION_WORKTREE T8_EXPECTED_COMMIT T8_PYTHON T8_INPUT_MANIFEST
   require_env "$name"
 done
 
+set +u
 source ~/.bashrc
+set -u
 conda activate "${T8_CONDA_ENV:-smiles_pip118}"
 cd "$T8_EXECUTION_WORKTREE"
 export PYTHONPATH="$PWD"

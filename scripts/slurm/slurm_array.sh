@@ -15,7 +15,9 @@
 #SBATCH --error=logs/%x-%A_%a.err
 
 set -euo pipefail
+set +u
 source ~/.bashrc
+set -u
 conda activate smiles_pip118
 cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH="$PWD"

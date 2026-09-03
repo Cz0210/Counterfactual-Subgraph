@@ -29,6 +29,7 @@ def test_hpc_jobs_are_cpu_only_and_hash_bound(name: str) -> None:
     assert "HPC_FALLBACK_PARTITION:-intel" in text
     assert "#SBATCH --partition=intel" in text
     assert "--config configs/hpc.yaml" in text
+    assert "set +u\nsource ~/.bashrc\nset -u" in text
     subprocess.run(["bash", "-n", str(script)], check=True)
 
 
