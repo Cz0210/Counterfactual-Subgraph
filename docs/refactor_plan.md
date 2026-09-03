@@ -4052,3 +4052,25 @@ Mutagenicity roadmaps.
   existing T8/T13 verifier/finalizer.  Gracefully stop an old worker only after
   exact PID/start-ticks/command/root ownership revalidation and verified
   handover eligibility.
+
+## 2026-09-03: Maintenance continuation for the final four matrix cells
+
+- [x] Add immutable, self-hashed Mut/T12/T14 task-spec contracts, atomic pointer
+  publication, read-only status, and a bounded one-shot dispatch fallback.
+- [x] Keep the existing sidecar and single matrix authority alive; reject
+  duplicate owners and writers by PID/start-ticks/command/heartbeat/root.
+- [x] Route Mut through fresh same-commit trace-on/off and separate checkpoint
+  parity before reusing the historical 50k candidate/pair/DBSCAN universe.
+- [x] Add a fail-closed T14 step-12,500 archive audit that never imports torch
+  or opens SQLite/WAL/SHM and reports when the checkpoint layout cannot support
+  the authorized low-memory canary.
+- [x] Add a first-seen raw embedding authority and 250/500/510 reference
+  schedule for the Taste GCF parity route.
+- [x] Add an idempotent HPC `afterany` continuation for stress timeout,
+  deterministic depth+1 refinement, and dependent full/merge/package release.
+- [ ] Deploy the immutable integration commit, bind the three AutoDL owners,
+  and record their live owner evidence without restarting the sidecar.
+- [ ] Submit one HPC continuation for job 2535373 and let Slurm, rather than an
+  interactive Codex turn, wait for each hour-scale refinement.
+- [ ] Publish each of the four remaining cells through the sole matrix
+  authority, then build the final four-dataset Figure 3, Figure 4, and Table 2.

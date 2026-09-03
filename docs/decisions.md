@@ -17449,3 +17449,53 @@ has exited, no writable descriptor remains, and the independent replay passes.
   never `/ssdfs`; do not poll hour-scale jobs from an active Codex turn.  Git
   fetch through the existing Mac reverse proxy is preferred, with a
   SHA-verified Git bundle carrying the same commit as the bounded fallback.
+
+# 2026-09-03: Bind recovered main-table owners with immutable task specs
+
+- Motivation: after host maintenance the long-lived AutoDL sidecar remained
+  healthy, but Mut, Taste GCF, and Taste ComRecGC had no resolved task-spec
+  paths.  Ambient launcher variables were therefore correctly rejected, while
+  three GPUs appeared free despite queued main-table work.
+- Decision: publish self-hashed, fully resolved task specs and one atomic
+  pointer in the existing control namespace.  A bounded one-shot dispatcher is
+  permitted only when the old sidecar does not acknowledge that pointer.  It
+  confirms PID/start-ticks/command/heartbeat/root identity, refuses an unknown
+  writer, starts no duplicate owner, and exits after recording evidence; it is
+  not a second scheduler or matrix authority.
+- Impact: recovered work is attached to the existing matrix authority without
+  restarting the sidecar.  Mut reruns fresh same-commit trace modes before any
+  50k adoption.  Taste GCF starts from a fresh root with durable 250/500
+  boundaries.  Taste ComRecGC first performs a metadata-only sealed-checkpoint
+  audit and fails closed if a low-memory scientific restore is not proven.
+
+# 2026-09-03: Preserve first-seen Taste GCF embedding bytes
+
+- Motivation: recomputing an evicted GINE embedding produced low-bit drift and
+  cannot establish exact reference/accelerated parity after process restart.
+- Decision: persist the first observation in a separate append-only binary
+  authority keyed by canonical graph hash.  Each record binds dtype, shape,
+  raw bytes and raw-byte SHA-256 to the frozen model and feature schema.  A
+  checkpoint binds only committed segment prefixes and compact locators; an
+  eviction/reload reads those original bytes rather than running the model
+  again.
+- Impact: the production planner, graph transitions, oracle, NeuroSED scoring,
+  and candidate semantics are unchanged.  Reference checkpoints at 250 and
+  500 can be resumed without treating numerically close recomputation as byte
+  identity.
+
+# 2026-09-03: Continue a timed-out T8 HPC stress canary by exact refinement
+
+- Motivation: stress job 2535373 exhausted its one-hour wall time inside the
+  selected depth-3 root-0 prefix and produced no completed prefix boundary.
+  Requeueing the same prefix would repeat work without establishing an
+  admissible upper bound.
+- Decision: submit exactly one lightweight `afterany` continuation.  A timeout
+  deterministically replaces the parent subtree with its canonical parent
+  header plus all depth+1 child subtrees, proves a disjoint complete cut, and
+  tests only the heaviest child in a fresh canary.  Mining remains pinned to
+  commit `481475c31d809577b791f4dd9002f5d2894c65b4`; newer code owns only
+  orchestration, receipts, resource telemetry, merge, and packaging.
+- Impact: no search space is pruned or approximated, and no GPU or AutoDL
+  matrix permission is introduced.  Refinement is bounded to four additional
+  levels.  Full-array submission still requires exact parity plus wall-time
+  and path-local storage admission.
