@@ -26,7 +26,15 @@ case "$*" in
       'hpc_python_version=Python_3.10.0' \
       'hpc_runtime_free_kib=123456' \
       'hpc_slurm_state=AVAILABLE' \
-      'hpc_t8_jobs=41,t8-hpc-canary,RUNNING,00:02,node01'
+      'hpc_t8_jobs=41,t8-hpc-canary,RUNNING,00:02,node01' \
+      'hpc_t8_current_pointer_state=PASS' \
+      'hpc_t8_chain_state=REFINEMENT_CANARY_SUBMITTED' \
+      'hpc_t8_chain_stage=REFINEMENT_CANARY' \
+      'hpc_t8_chain_refinement_depth=6' \
+      'hpc_t8_chain_job_ids=41,42' \
+      'hpc_t8_chain_dependency=afterany:41' \
+      'hpc_t8_chain_jobs=41,42' \
+      'hpc_t8_chain_slurm=41,RUNNING,00:02,node01,(null);42,PENDING,0:00,(Dependency),afterany:41(unfulfilled)'
     ;;
   *test-autodl*)
     printf '%s\n' \
@@ -63,6 +71,7 @@ def _environment(tmp_path: Path, fake_ssh: Path) -> dict[str, str]:
         "LOCAL_TRANSFER_ROOT": str(transfer),
         "HPC_EXECUTION_WORKTREE": "/share/test/worktree",
         "HPC_RUNTIME_ROOT": "/share/test/runtime",
+        "HPC_T8_CURRENT_POINTER": "/share/test/runtime/control/t8-hpc-current-chain/current.json",
         "HPC_PYTHON": "/share/test/python",
         "AUTODL_MATRIX_AUTHORITY": "/autodl/test/matrix",
         "AUTODL_PYTHON": "/autodl/test/python",
@@ -88,6 +97,9 @@ def test_status_is_redacted_and_has_no_filesystem_side_effects(tmp_path: Path) -
     assert "hpc_ssh_state=PASS" in result.stdout
     assert "autodl_ssh_state=PASS" in result.stdout
     assert "autodl_matrix_complete_cells=12" in result.stdout
+    assert "hpc_t8_current_pointer_state=PASS" in result.stdout
+    assert "hpc_t8_chain_dependency=afterany:41" in result.stdout
+    assert "hpc_t8_chain_slurm=41,RUNNING" in result.stdout
     assert "status_side_effects=NONE" in result.stdout
     lowered = result.stdout.lower()
     assert "password" not in lowered
@@ -136,3 +148,13 @@ def test_status_script_has_no_mutating_or_secret_dump_commands() -> None:
     )
     for token in forbidden:
         assert token not in source
+
+
+def test_status_defaults_to_pinned_science_worktree_and_dynamic_pointer() -> None:
+    source = STATUS_SCRIPT.read_text(encoding="utf-8")
+    assert "/share/home/u20526/czx/worktrees/t8-hpc-481475c3" in source
+    assert "$HPC_RUNTIME_ROOT/control/t8-hpc-current-chain/current.json" in source
+    assert "hpc_t8_chain_dependency" in source
+    assert "hpc_t8_chain_slurm" in source
+    for stale_job_id in ("2535373", "2536033", "2536034", "2536148", "2536149"):
+        assert stale_job_id not in source

@@ -13,8 +13,9 @@ LOCAL_TRANSFER_ROOT=${LOCAL_TRANSFER_ROOT:-/Volumes/DireRaven/counterfactual-hpc
 HPC_ALIAS=${HPC_ALIAS:-tongji-hpc}
 AUTODL_ALIAS=${AUTODL_ALIAS:-autodl-a800}
 HPC_CONTROL_SOCKET=${HPC_CONTROL_SOCKET:-/tmp/tongji-codex.sock}
-HPC_EXECUTION_WORKTREE=${HPC_EXECUTION_WORKTREE:-/share/home/u20526/czx/worktrees/t8-hpc-cpu-offload-v1}
 HPC_RUNTIME_ROOT=${HPC_RUNTIME_ROOT:-/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime}
+HPC_EXECUTION_WORKTREE=${HPC_EXECUTION_WORKTREE:-/share/home/u20526/czx/worktrees/t8-hpc-481475c3}
+HPC_T8_CURRENT_POINTER=${HPC_T8_CURRENT_POINTER:-$HPC_RUNTIME_ROOT/control/t8-hpc-current-chain/current.json}
 HPC_PYTHON=${HPC_PYTHON:-/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python}
 AUTODL_MATRIX_AUTHORITY=${AUTODL_MATRIX_AUTHORITY:-/autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority}
 AUTODL_PYTHON=${AUTODL_PYTHON:-/root/miniconda3/envs/smiles_pip118/bin/python}
@@ -62,6 +63,7 @@ for status_path in \
   "$HPC_CONTROL_SOCKET" \
   "$HPC_EXECUTION_WORKTREE" \
   "$HPC_RUNTIME_ROOT" \
+  "$HPC_T8_CURRENT_POINTER" \
   "$HPC_PYTHON" \
   "$AUTODL_MATRIX_AUTHORITY" \
   "$AUTODL_PYTHON" \
@@ -121,12 +123,13 @@ hpc_status=$(
     -o BatchMode=yes \
     -o "ConnectTimeout=$STATUS_CONNECT_TIMEOUT_SECONDS" \
     "$HPC_ALIAS" \
-    "bash -s -- '$HPC_EXECUTION_WORKTREE' '$HPC_RUNTIME_ROOT' '$HPC_PYTHON'" \
+    "bash -s -- '$HPC_EXECUTION_WORKTREE' '$HPC_RUNTIME_ROOT' '$HPC_PYTHON' '$HPC_T8_CURRENT_POINTER'" \
     2>/dev/null <<'HPC_STATUS_REMOTE'
 set -u
 worktree=$1
 runtime_root=$2
 python_bin=$3
+current_pointer=$4
 printf 'hpc_ssh_state=PASS\n'
 printf 'hpc_hostname=%s\n' "$(hostname -s 2>/dev/null || printf UNKNOWN)"
 if [ -d "$worktree" ] && git -C "$worktree" rev-parse HEAD >/dev/null 2>&1; then
@@ -159,13 +162,108 @@ else
   printf 'hpc_slurm_state=NOT_AVAILABLE\n'
   printf 'hpc_t8_jobs=UNKNOWN\n'
 fi
+if [ ! -x "$python_bin" ]; then
+  printf 'hpc_t8_current_pointer_state=PYTHON_UNAVAILABLE\n'
+  printf 'hpc_t8_chain_state=UNKNOWN\n'
+  printf 'hpc_t8_chain_jobs=UNKNOWN\n'
+else
+  pointer_status=$(
+    "$python_bin" - "$current_pointer" <<'PY_POINTER'
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+
+def emit(key, value):
+    text = str(value).replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    print(f"{key}={''.join(ch for ch in text if ch.isprintable())[:256]}")
+
+
+path = Path(sys.argv[1])
+if path.is_symlink() or not path.is_file():
+    emit("hpc_t8_current_pointer_state", "MISSING")
+    emit("hpc_t8_chain_state", "UNKNOWN")
+    emit("hpc_t8_chain_jobs", "NONE")
+    raise SystemExit(0)
+try:
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    claimed = payload.pop("current_sha256")
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    detached = path.with_suffix(path.suffix + ".sha256").read_text(
+        encoding="ascii"
+    ).strip()
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", str(claimed))
+        or hashlib.sha256(canonical).hexdigest() != claimed
+        or detached != hashlib.sha256(raw).hexdigest()
+        or payload.get("schema_version") != "t8_hpc_current_chain_v1"
+    ):
+        raise ValueError("pointer hash/schema mismatch")
+    jobs = []
+    for key in (
+        "canary_job_id",
+        "followup_job_id",
+        "array_job_id",
+        "merge_job_id",
+        "package_job_id",
+    ):
+        value = payload.get(key)
+        if value is not None:
+            if not re.fullmatch(r"[0-9]+", str(value)):
+                raise ValueError("pointer job id is invalid")
+            jobs.append(str(value))
+    dependencies = [
+        str(payload[key])
+        for key in (
+            "followup_dependency",
+            "merge_dependency",
+            "package_dependency",
+        )
+        if payload.get(key)
+    ]
+    emit("hpc_t8_current_pointer_state", "PASS")
+    emit("hpc_t8_chain_state", payload.get("state", "UNKNOWN"))
+    emit("hpc_t8_chain_stage", payload.get("active_stage", "UNKNOWN"))
+    emit("hpc_t8_chain_refinement_depth", payload.get("refinement_depth", "NONE"))
+    emit("hpc_t8_chain_job_ids", ",".join(jobs) if jobs else "NONE")
+    emit("hpc_t8_chain_dependency", ",".join(dependencies) if dependencies else "NONE")
+    emit("hpc_t8_chain_jobs", ",".join(jobs) if jobs else "NONE")
+except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+    emit("hpc_t8_current_pointer_state", "INVALID")
+    emit("hpc_t8_chain_state", "UNKNOWN")
+    emit("hpc_t8_chain_jobs", "NONE")
+PY_POINTER
+  )
+  printf '%s\n' "$pointer_status"
+  chain_job_ids=$(printf '%s\n' "$pointer_status" | awk -F= '$1 == "hpc_t8_chain_job_ids" {print $2}')
+  valid_chain_ids=$(printf '%s\n' "$chain_job_ids" \
+    | awk '/^[0-9]+(,[0-9]+)*$/ {print "yes"}')
+  if [ "$valid_chain_ids" != yes ]; then
+    chain_rows=NONE
+  else
+    chain_rows=$(squeue -h -j "$chain_job_ids" -o '%i,%T,%M,%R,%E' 2>/dev/null \
+      | head -n 20 \
+      | paste -sd ';' -)
+    chain_rows=${chain_rows:-NO_ACTIVE_ROWS}
+  fi
+  printf 'hpc_t8_chain_slurm=%s\n' "$chain_rows"
+fi
 HPC_STATUS_REMOTE
 )
 hpc_rc=$?
 if [ "$hpc_rc" -eq 0 ]; then
   printf '%s\n' "$hpc_status" | while IFS='=' read -r key value; do
     case "$key" in
-      hpc_ssh_state|hpc_hostname|hpc_execution_worktree_state|hpc_execution_commit|hpc_python_state|hpc_python_version|hpc_runtime_free_kib|hpc_slurm_state|hpc_t8_jobs)
+      hpc_ssh_state|hpc_hostname|hpc_execution_worktree_state|hpc_execution_commit|hpc_python_state|hpc_python_version|hpc_runtime_free_kib|hpc_slurm_state|hpc_t8_jobs|hpc_t8_current_pointer_state|hpc_t8_chain_state|hpc_t8_chain_stage|hpc_t8_chain_refinement_depth|hpc_t8_chain_job_ids|hpc_t8_chain_dependency|hpc_t8_chain_jobs|hpc_t8_chain_slurm)
         print_kv "$key" "$value"
         ;;
     esac
@@ -176,6 +274,10 @@ else
   print_kv hpc_execution_commit UNKNOWN
   print_kv hpc_slurm_state UNKNOWN
   print_kv hpc_t8_jobs UNKNOWN
+  print_kv hpc_t8_current_pointer_state UNKNOWN
+  print_kv hpc_t8_chain_state UNKNOWN
+  print_kv hpc_t8_chain_jobs UNKNOWN
+  print_kv hpc_t8_chain_slurm UNKNOWN
 fi
 
 autodl_status=$(

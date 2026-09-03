@@ -202,7 +202,11 @@ def main(argv: list[str] | None = None) -> int:
         "--terminal-controller-evidence", str(contract["terminal_controller_evidence"]),
         "--successor-guard-script", "run_mut_checkpoint_instrumentation_equivalence.py",
         "--successor-guard-action", "run-pair",
-        "--throttle-profile", "legacy-v1",
+        # This successor remains fresh-vs-fresh, but inherits the reviewed
+        # low-priority protection policy.  The earlier legacy-v1 owner was
+        # stopped by a coarse T8 throughput fluctuation even though neither
+        # semantic gate had failed.
+        "--throttle-profile", "robust-v2",
     ]
     environment = dict(os.environ)
     environment.update(spec["required_environment"])

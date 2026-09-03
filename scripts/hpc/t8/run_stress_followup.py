@@ -42,6 +42,12 @@ from src.baselines.globalgce_hpc_exact import (  # noqa: E402
     validate_merge_result,
     validate_partition_manifest,
 )
+from src.utils.hpc_t8_chain_pointer import (  # noqa: E402
+    T8ChainPointerError,
+    chain_lock,
+    followup_for_canary,
+    write_current_pointer,
+)
 
 
 FOLLOWUP_SCHEMA = "t8_hpc_stress_followup_v1"
@@ -75,7 +81,8 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 JOB_ID_RE = re.compile(r"^[0-9]+$")
 PINNED_SCIENCE_COMMIT = "481475c31d809577b791f4dd9002f5d2894c65b4"
 INITIAL_STRESS_DEPTH = 3
-MAX_REFINEMENT_LEVELS = 4
+MAX_REFINEMENT_DEPTH = 8
+MAX_REFINEMENT_LEVELS = MAX_REFINEMENT_DEPTH - INITIAL_STRESS_DEPTH
 MIN_STORAGE_RESERVE_BYTES = 2 * 1024**3
 STORAGE_RESERVE_FRACTION = 0.20
 MAX_ARRAY_CONCURRENCY = 8
@@ -838,6 +845,7 @@ def _followup_cli(args: argparse.Namespace, *, job_id: str, canary_root: Path) -
         "--upstream-canary-root", str(canary_root),
         "--output-root", str(args.output_root),
         "--continuation-root", str(args.continuation_root),
+        "--current-pointer", str(args.current_pointer),
         "--controller-worktree", str(args.controller_worktree),
         "--expected-controller-commit", args.expected_controller_commit,
         "--science-worktree", str(args.science_worktree),
@@ -901,6 +909,7 @@ def _handle_timeout(
                 "current_refinement_level": current_refinement_level,
                 "requested_refinement_level": next_refinement_level,
                 "max_refinement_levels": MAX_REFINEMENT_LEVELS,
+                "max_refinement_depth": MAX_REFINEMENT_DEPTH,
                 "action": "NO_SUBMISSION",
                 "matrix_write_enabled": False,
                 "gpu_requested": False,
@@ -948,6 +957,7 @@ def _handle_timeout(
             "initial_stress_depth": INITIAL_STRESS_DEPTH,
             "refinement_level": next_refinement_level,
             "max_refinement_levels": MAX_REFINEMENT_LEVELS,
+            "max_refinement_depth": MAX_REFINEMENT_DEPTH,
             "parent_header": parent_header,
             "catalog_file_sha256": sha256_file(catalog_path),
             "catalog_manifest_sha256": catalog["manifest_sha256"],
@@ -1003,6 +1013,7 @@ def _handle_timeout(
         "telemetry_root": str(telemetry_root),
         "refinement_level": next_refinement_level,
         "max_refinement_levels": MAX_REFINEMENT_LEVELS,
+        "max_refinement_depth": MAX_REFINEMENT_DEPTH,
         "submit_requested": args.submit,
         "matrix_write_enabled": False,
         "gpu_requested": False,
@@ -1070,8 +1081,18 @@ def _handle_timeout(
     followup_job_id = (
         str(progress["afterany_followup_job_id"])
         if progress is not None and progress.get("afterany_followup_job_id")
-        else submit_sbatch(followup_command)
+        else followup_for_canary(args.current_pointer, canary_job_id)
+        or submit_sbatch(followup_command)
     )
+    if (
+        progress is not None
+        and progress.get("afterany_followup_job_id")
+        and followup_for_canary(args.current_pointer, canary_job_id) not in
+        {None, str(progress["afterany_followup_job_id"])}
+    ):
+        raise GlobalGCEHPCExactError(
+            "the current chain pointer binds this canary to another follow-up"
+        )
     atomic_write_self_hashed(
         progress_path,
         {
@@ -1389,6 +1410,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sacct-file", type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--continuation-root", required=True, type=Path)
+    parser.add_argument("--current-pointer", type=Path)
     parser.add_argument("--controller-worktree", required=True, type=Path)
     parser.add_argument("--expected-controller-commit", required=True)
     parser.add_argument(
@@ -1433,6 +1455,20 @@ def _normalize_paths(args: argparse.Namespace) -> None:
         setattr(args, name, value.expanduser().absolute())
     if args.sacct_file is not None:
         args.sacct_file = args.sacct_file.expanduser().absolute()
+    if args.current_pointer is None:
+        continuation = args.continuation_root
+        if (
+            continuation.name == "artifacts"
+            and continuation.parent.parent.name == "continuations"
+        ):
+            runtime_root = continuation.parents[2]
+            args.current_pointer = (
+                runtime_root / "control" / "t8-hpc-current-chain" / "current.json"
+            )
+        else:
+            args.current_pointer = args.output_root / "current.json"
+    else:
+        args.current_pointer = args.current_pointer.expanduser().absolute()
     if (
         args.full_shard_count < 1
         or args.array_concurrency < 1
@@ -1445,6 +1481,60 @@ def _normalize_paths(args: argparse.Namespace) -> None:
         raise GlobalGCEHPCExactError("Slurm resource arguments are invalid")
 
 
+def _publish_submitted_chain_pointer(
+    args: argparse.Namespace,
+    terminal: Mapping[str, Any],
+    decision_root: Path,
+    report: Mapping[str, Any],
+) -> None:
+    if not args.submit:
+        return
+    state = report.get("state")
+    common = {
+        "schema_version": "t8_hpc_current_chain_v1",
+        "state": str(state),
+        "updated_at": utc_now(),
+        "output_root": str(args.output_root),
+        "continuation_root": str(args.continuation_root),
+        "decision_root": str(decision_root),
+        "upstream_job_id": str(terminal["job_id"]),
+        "controller_commit": args.expected_controller_commit,
+        "science_commit": args.expected_science_commit,
+        "matrix_write_enabled": False,
+        "gpu_requested": False,
+    }
+    if state == "REFINEMENT_CANARY_SUBMITTED":
+        canary_job_id = str(report["refinement_canary_job_id"])
+        write_current_pointer(
+            args.current_pointer,
+            {
+                **common,
+                "active_stage": "REFINEMENT_CANARY",
+                "refinement_depth": INITIAL_STRESS_DEPTH
+                + int(report["refinement_level"]),
+                "canary_job_id": canary_job_id,
+                "followup_job_id": str(report["afterany_followup_job_id"]),
+                "followup_dependency": f"afterany:{canary_job_id}",
+                "canary_root": str(report["fresh_canary_root"]),
+            },
+        )
+    elif state == "FULL_CHAIN_SUBMITTED":
+        write_current_pointer(
+            args.current_pointer,
+            {
+                **common,
+                "active_stage": "FULL_CHAIN",
+                "array_job_id": str(report["array_job_id"]),
+                "merge_job_id": str(report["merge_job_id"]),
+                "package_job_id": str(report["package_job_id"]),
+                "array_dependency": None,
+                "merge_dependency": f"afterok:{report['array_job_id']}",
+                "package_dependency": f"afterok:{report['merge_job_id']}",
+                "full_root": str(report["full_root"]),
+            },
+        )
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     _normalize_paths(args)
     _validate_execution_inputs(args)
@@ -1455,45 +1545,50 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         sacct_command = ["SACCT_EVIDENCE_FILE", str(args.sacct_file)]
     terminal = parse_sacct(sacct_text, args.upstream_job_id)
     decision_root = args.output_root / f"upstream-{args.upstream_job_id}"
-    with decision_lock(args.output_root, args.upstream_job_id):
-        submission_path = decision_root / "submission_receipt.json"
-        if submission_path.exists():
-            return load_self_hashed(
-                submission_path, hash_field="submission_receipt_sha256"
-            )
-        atomic_write_self_hashed(
-            decision_root / "terminal_evidence.json",
-            {
-                "schema_version": "t8_hpc_slurm_terminal_evidence_v1",
-                "state": "PASS",
-                "captured_at": utc_now(),
-                "sacct_argv": sacct_command,
-                "sacct_stdout_sha256": hashlib.sha256(sacct_text.encode()).hexdigest(),
-                "terminal": terminal,
-            },
-            hash_field="terminal_evidence_sha256",
-        )
-        if terminal["state"] == "TIMEOUT":
-            return _handle_timeout(args, terminal, decision_root)
-        if terminal["state"] == "COMPLETED":
-            return _handle_pass(args, terminal, decision_root)
-        return _record_plan(
-            decision_root / "plan.json",
-            {
-                "schema_version": FOLLOWUP_SCHEMA,
-                "state": "BLOCKED_UPSTREAM_TERMINAL_FAILURE",
-                "created_at": utc_now(),
-                "dry_run": not args.submit,
-                "upstream_terminal": terminal,
-                "controller_worktree": str(args.controller_worktree),
-                "controller_commit": args.expected_controller_commit,
-                "science_worktree": str(args.science_worktree),
-                "science_commit": args.expected_science_commit,
-                "action": "NO_SUBMISSION",
-                "matrix_write_enabled": False,
-                "gpu_requested": False,
-            },
-        )
+    with chain_lock(args.current_pointer):
+        with decision_lock(args.output_root, args.upstream_job_id):
+            submission_path = decision_root / "submission_receipt.json"
+            if submission_path.exists():
+                report = load_self_hashed(
+                    submission_path, hash_field="submission_receipt_sha256"
+                )
+            else:
+                atomic_write_self_hashed(
+                    decision_root / "terminal_evidence.json",
+                    {
+                        "schema_version": "t8_hpc_slurm_terminal_evidence_v1",
+                        "state": "PASS",
+                        "captured_at": utc_now(),
+                        "sacct_argv": sacct_command,
+                        "sacct_stdout_sha256": hashlib.sha256(sacct_text.encode()).hexdigest(),
+                        "terminal": terminal,
+                    },
+                    hash_field="terminal_evidence_sha256",
+                )
+                if terminal["state"] == "TIMEOUT":
+                    report = _handle_timeout(args, terminal, decision_root)
+                elif terminal["state"] == "COMPLETED":
+                    report = _handle_pass(args, terminal, decision_root)
+                else:
+                    report = _record_plan(
+                        decision_root / "plan.json",
+                        {
+                            "schema_version": FOLLOWUP_SCHEMA,
+                            "state": "BLOCKED_UPSTREAM_TERMINAL_FAILURE",
+                            "created_at": utc_now(),
+                            "dry_run": not args.submit,
+                            "upstream_terminal": terminal,
+                            "controller_worktree": str(args.controller_worktree),
+                            "controller_commit": args.expected_controller_commit,
+                            "science_worktree": str(args.science_worktree),
+                            "science_commit": args.expected_science_commit,
+                            "action": "NO_SUBMISSION",
+                            "matrix_write_enabled": False,
+                            "gpu_requested": False,
+                        },
+                    )
+            _publish_submitted_chain_pointer(args, terminal, decision_root, report)
+            return dict(report)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1509,7 +1604,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(normalized_argv)
     try:
         report = run(args)
-    except (GlobalGCEHPCExactError, OSError, subprocess.CalledProcessError, ValueError) as exc:
+    except (
+        GlobalGCEHPCExactError,
+        T8ChainPointerError,
+        OSError,
+        subprocess.CalledProcessError,
+        ValueError,
+    ) as exc:
         print(f"T8_STRESS_FOLLOWUP_BLOCKED: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(report, sort_keys=True), flush=True)

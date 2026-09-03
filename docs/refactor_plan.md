@@ -1,5 +1,26 @@
 # Refactor Plan
 
+## 2026-09-04: Mut fresh successor ownership
+
+- [x] Require a terminal operational failure and no live Mut writer.
+- [x] Bind a fresh task UUID, output root, owner root, and GPU lease.
+- [x] Preserve science inputs while switching the owner to the reviewed
+  two-CPU `robust-v2` protection profile.
+- [ ] Deploy one immutable AutoDL worktree and launch exactly one successor.
+
+## 2026-09-04: Dynamic T8 HPC continuation pointer
+
+- [x] Add one stable, atomic, self-hashed `current.json` outside per-job
+  decision roots and serialize updates with one chain-level `flock`.
+- [x] Reject two follow-up jobs for the same canary and ignore stale shallower
+  pointer replays.
+- [x] Extend deterministic exact prefix refinement through depth 8 without
+  changing the mining/search contract.
+- [x] Make the read-only Mac status command validate the pointer and query the
+  current Slurm jobs/dependencies dynamically, with no historical job ID.
+- [ ] Deploy from a new immutable HPC worktree; let the already queued chain
+  finish naturally before using the new pointer writer.
+
 ## 2026-09-03: Real T12 deterministic acceleration parity
 
 - [x] Isolate and test the buffered single-writer, ordered collector, and

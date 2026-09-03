@@ -1,5 +1,51 @@
 # Decisions Log
 
+## [2026-09-04] Replace the failed Mut owner with one throttled fresh successor
+
+### Decision
+
+Treat the terminal `legacy-v1` watchdog stop as an operational failure, not a
+scientific equivalence failure.  A successor is admitted only after the prior
+PID generation is gone and no Mut writer exists.  It uses fresh trace-on and
+trace-off roots, two non-SMT CPUs, `nice 10`, best-effort ionice 7, and the
+reviewed `robust-v2` protected-task gate.  No prior arm, pair store, DBSCAN, or
+matrix output is silently adopted or recomputed.
+
+### Impact
+
+The failed owner is not restarted and its partial output remains sealed.  The
+new owner preserves every scientific input hash while avoiding the coarse
+five-minute slowdown false positive that stopped the prior attempt.
+
+---
+
+## [2026-09-04] Publish one dynamic pointer for the T8 HPC continuation chain
+
+### Decision
+
+Keep per-upstream immutable receipts, but add one stable
+`control/t8-hpc-current-chain/current.json` status pointer.  Every submitted
+refinement or full chain updates it through a chain-level advisory lock, an
+atomic rename, an embedded canonical SHA-256, and a detached file SHA-256.
+The pointer is monotonic: a shallower replay cannot replace a newer stage, and
+one canary cannot be rebound to a different `afterany` follow-up.
+
+Permit deterministic exact prefix refinement through depth 8.  This changes
+only the partition granularity and continuation bound; support, DFS semantics,
+search coverage, no-prune/no-approximation requirements, and AutoDL-only
+publication remain unchanged.  The local status command reads the validated
+pointer and queries the referenced Slurm jobs/dependencies instead of naming a
+historical job.
+
+### Impact
+
+Concurrent follow-up processes serialize on one chain authority, while
+immutable job-specific receipts remain the recovery evidence.  Status follows
+future child jobs without code edits.  This implementation does not cancel,
+resubmit, or mutate any currently running HPC science.
+
+---
+
 ## [2026-09-03] Keep T12 blocked after the step-417 bit-exactness failure
 
 ### Decision

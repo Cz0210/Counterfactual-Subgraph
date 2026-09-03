@@ -329,11 +329,11 @@ def test_dry_run_timeout_never_calls_sbatch(tmp_path: Path, monkeypatch: pytest.
     assert result["fresh_canary_root"].endswith("DRY_RUN_FRESH_UUID")
 
 
-def test_refinement_is_hard_bounded_to_four_levels(
+def test_refinement_is_hard_bounded_to_depth_eight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     edge = {"frm": 0, "to": 1, "labels": [1, 1, 1]}
-    parent = _unit("depth-seven", [edge] * 7, support=10)
+    parent = _unit("depth-eight", [edge] * 8, support=10)
     parent_manifest = {"manifest_sha256": "m" * 64}
     monkeypatch.setattr(
         followup,
@@ -360,8 +360,9 @@ def test_refinement_is_hard_bounded_to_four_levels(
         tmp_path / "decisions" / "upstream-2535373",
     )
     assert report["state"] == "BLOCKED_MAX_REFINEMENT_LEVELS"
-    assert report["requested_refinement_level"] == 5
-    assert report["max_refinement_levels"] == 4
+    assert report["requested_refinement_level"] == 6
+    assert report["max_refinement_levels"] == 5
+    assert report["max_refinement_depth"] == 8
 
 
 def test_telemetry_is_atomic_observational_and_reports_unavailable_dfs(
