@@ -32,6 +32,7 @@ from src.baselines.tastemolnet_gcf_full_resume import (
     NEUROSED_QUERY_PERMUTATION_CONTRACT,
     PINNED_CANDIDATE_CAPACITY,
     PINNED_SAMPLE_SIZE,
+    PRODUCTION_CHECKPOINT_CURSORS,
     PRODUCTION_TOTAL_STEPS,
     STAGE,
     T12ProductionCheckpointOrchestrator,
@@ -264,7 +265,7 @@ def _production_identity(
             "attempt_id": attempt_id,
             "generation_token": generation_token,
             "total_steps": PRODUCTION_TOTAL_STEPS,
-            "checkpoint_cursor": 10_000,
+            "checkpoint_cursor": min(PRODUCTION_CHECKPOINT_CURSORS),
             "source_cohort_sha256": source_cohort_sha256,
             "train_split_sha256": sources.pins.train_split_sha,
             "model_checkpoint_sha256": sources.pins.t3_calibrated_gine_sha,
@@ -324,7 +325,7 @@ def _run_identity(
         "rf_oracle_used": False,
         "production_parameters": {
             "M": PRODUCTION_TOTAL_STEPS,
-            "checkpoint_cursors": [10_000, 20_000],
+            "checkpoint_cursors": sorted(PRODUCTION_CHECKPOINT_CURSORS),
             "sample_size": PINNED_SAMPLE_SIZE,
             "candidate_capacity": PINNED_CANDIDATE_CAPACITY,
             "expanded_transition_lru": 1,
@@ -556,7 +557,24 @@ def run_t12_generation_segment(
             identity_template=identity,
             bounds=bounds,
         )
-        plan = orchestrator.plan(resume_cursor=0 if mode == "fresh" else 10_000)
+        configured_cursors = tuple(sorted(PRODUCTION_CHECKPOINT_CURSORS))
+        if mode == "fresh":
+            resume_cursor = 0
+        else:
+            try:
+                resume_manifest = json.loads(
+                    Path(str(checkpoint_manifest)).read_text(encoding="utf-8")
+                )
+                resume_cursor = int(resume_manifest["checkpoint_cursor"])
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                raise TasteGCFFullResumeError(
+                    "T12 resume checkpoint cursor is unreadable"
+                ) from exc
+            if resume_cursor not in configured_cursors[:-1]:
+                raise TasteGCFFullResumeError(
+                    "T12 resume checkpoint cursor is not a nonterminal configured boundary"
+                )
+        plan = orchestrator.plan(resume_cursor=resume_cursor)
         runtime_root = root / (
             f"segment-{plan['segment_start']:05d}-{plan['segment_end']:05d}"
         )
@@ -569,7 +587,7 @@ def run_t12_generation_segment(
                 )
             loaded_checkpoint = reopen_checkpoint(
                 checkpoint_manifest,
-                expected_identity=orchestrator.identity_at(10_000),
+                expected_identity=orchestrator.identity_at(resume_cursor),
                 torch=torch,
             )
             history_snapshot = loaded_checkpoint["state"]["bridge"]["history"]
@@ -635,7 +653,7 @@ def run_t12_generation_segment(
                     assert loaded_checkpoint is not None
                     current_graph = restore_checkpoint_payload(
                         loaded_checkpoint,
-                        expected_identity=orchestrator.identity_at(10_000),
+                        expected_identity=orchestrator.identity_at(resume_cursor),
                         vrrw=vrrw,
                         bridge=bridge,
                         adapter=adapter,

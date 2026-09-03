@@ -4,10 +4,12 @@ The bounded replay canary intentionally keeps every complete bridge row in
 memory.  That is useful for exact replay evidence, but it is not a production
 layout: the pinned 20,000-step walk may score as many as 200,000,001 rows at
 the official ``sample_size=10000``.  This module is the production-only
-substrate.  It retains no historical graph payload, embedding vector, coverage
-vector, or lineage payload.  Instead it appends one fixed-size observation to
-an authenticated chain and keeps the first compact semantic row in a derived
-SQLite index with a bounded page cache.
+substrate.  It retains no historical graph payload, coverage vector, or lineage
+payload.  It appends one fixed-size observation to an authenticated chain and
+keeps the first compact semantic row in a derived SQLite index with a bounded
+page cache.  First-seen GINE embedding bytes are the one deliberate exception:
+they live in a separate, bounded append-only binary authority so eviction and
+process restart never make a new GPU reduction the canonical value.
 
 The journal is the authority; SQLite is only a disposable lookup index and is
 rebuilt from the committed journal prefix after a process restart.  A
@@ -43,6 +45,17 @@ HISTORY_INDEX_CACHE_KIB = 64 * 1024
 HISTORY_INDEX_BUSY_TIMEOUT_MILLISECONDS = 120_000
 HISTORY_INDEX_RETRY_INITIAL_SECONDS = 0.05
 HISTORY_INDEX_RETRY_MAX_SECONDS = 0.5
+
+FIRST_EMBEDDING_STORE_SCHEMA = "tastemolnet_t12_first_embedding_store_v1"
+FIRST_EMBEDDING_SEGMENT_SCHEMA = "tastemolnet_t12_first_embedding_segment_v1"
+FIRST_EMBEDDING_SNAPSHOT_SCHEMA = "tastemolnet_t12_first_embedding_snapshot_v1"
+FIRST_EMBEDDING_MAGIC = b"T12EMB1\n"
+FIRST_EMBEDDING_HEADER_LIMIT_BYTES = 4096
+FIRST_EMBEDDING_DTYPE_LIMIT_BYTES = 64
+FIRST_EMBEDDING_MAX_NDIM = 8
+# sequence; graph/raw/semantic-embedding/model/feature SHA-256; dtype length;
+# ndim; raw length.
+_FIRST_EMBEDDING_PREFIX = struct.Struct(">Q32s32s32s32s32sHHQ")
 
 PINNED_TOTAL_STEPS = 20_000
 PINNED_CHECKPOINT_CURSORS = (10_000, 20_000)
@@ -307,6 +320,7 @@ class T12ProductionBounds:
             "full_checkpoint_hard_cap_bytes": self.max_full_checkpoint_bytes,
             "history_payload_retained": False,
             "history_embedding_values_retained": False,
+            "first_seen_embedding_raw_bytes_retained_append_only": True,
             "history_lineage_payload_retained": False,
             "history_neurosed_query_sha256_retained": True,
             "bound_pass": (
@@ -360,6 +374,640 @@ def compact_semantic_sha256(
             }
         )
     )
+
+
+@dataclass(frozen=True, slots=True)
+class FirstSeenEmbedding:
+    """One exact first-seen embedding reconstructed from the binary authority."""
+
+    graph_identity_sha256: str
+    dtype: str
+    shape: tuple[int, ...]
+    raw_bytes: bytes
+    raw_sha256: str
+    embedding_sha256: str
+    model_sha256: str
+    feature_schema_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _FirstEmbeddingLocator:
+    path: Path
+    raw_offset: int
+    raw_length: int
+    dtype: str
+    shape: tuple[int, ...]
+    raw_sha256: str
+    embedding_sha256: str
+
+
+def _validate_first_embedding_payload(
+    *, dtype: Any, shape: Sequence[int], raw_bytes: Any
+) -> tuple[str, tuple[int, ...], bytes, str, str]:
+    """Normalize one NumPy-compatible embedding without changing its bytes."""
+
+    import numpy as np
+
+    if (
+        type(dtype) is not str
+        or not dtype
+        or not dtype.isascii()
+        or len(dtype) > FIRST_EMBEDDING_DTYPE_LIMIT_BYTES
+    ):
+        raise TasteT12ProductionStateError("T12 first embedding dtype is invalid")
+    try:
+        normalized_dtype = np.dtype(dtype)
+    except TypeError as exc:
+        raise TasteT12ProductionStateError(
+            "T12 first embedding dtype is invalid"
+        ) from exc
+    if normalized_dtype.str != dtype or normalized_dtype.kind != "f":
+        raise TasteT12ProductionStateError(
+            "T12 first embedding dtype must be one canonical float dtype"
+        )
+    if not isinstance(shape, (tuple, list)):
+        raise TasteT12ProductionStateError("T12 first embedding shape is invalid")
+    normalized_shape = tuple(shape)
+    if (
+        not 1 <= len(normalized_shape) <= FIRST_EMBEDDING_MAX_NDIM
+        or any(type(value) is not int or value <= 0 for value in normalized_shape)
+    ):
+        raise TasteT12ProductionStateError("T12 first embedding shape is invalid")
+    if type(raw_bytes) is not bytes:
+        raise TasteT12ProductionStateError("T12 first embedding raw value is not bytes")
+    expected_bytes = math.prod(normalized_shape) * int(normalized_dtype.itemsize)
+    if len(raw_bytes) != expected_bytes:
+        raise TasteT12ProductionStateError(
+            "T12 first embedding byte length differs from dtype/shape"
+        )
+    raw_sha256 = _sha256_bytes(raw_bytes)
+    semantic = hashlib.sha256()
+    semantic.update(str(normalized_dtype).encode("ascii"))
+    semantic.update(_canonical_bytes(list(normalized_shape)))
+    semantic.update(raw_bytes)
+    return (
+        dtype,
+        normalized_shape,
+        raw_bytes,
+        raw_sha256,
+        semantic.hexdigest(),
+    )
+
+
+class T12FirstSeenEmbeddingStore:
+    """Bounded append-only authority for exact first-seen GINE bytes.
+
+    The in-memory index contains only file offsets and compact metadata.  Raw
+    values are read from their authenticated segment on demand, so keeping the
+    first observation stable does not turn the 20k production bridge into an
+    unbounded RAM cache.
+    """
+
+    def __init__(
+        self,
+        *,
+        root: str | Path,
+        bounds: T12ProductionBounds,
+        contract_sha256: str,
+        attempt_id: str,
+        generation_token: str,
+        model_sha256: str,
+        feature_schema_sha256: str,
+        resume_snapshot: Mapping[str, Any] | None = None,
+        open_writer: bool = True,
+    ) -> None:
+        self.root = _normalized_absolute(root, field="T12 first embedding root")
+        self.bounds = bounds
+        self.contract_sha256 = _require_sha256(
+            contract_sha256, field="T12 first embedding contract"
+        )
+        self.attempt_id = attempt_id
+        self.generation_token = _require_sha256(
+            generation_token, field="T12 first embedding generation token"
+        )
+        self.model_sha256 = _require_sha256(
+            model_sha256, field="T12 first embedding model"
+        )
+        self.feature_schema_sha256 = _require_sha256(
+            feature_schema_sha256, field="T12 first embedding feature schema"
+        )
+        if resume_snapshot is None:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        elif (
+            not self.root.is_dir()
+            or self.root.is_symlink()
+            or self.root.resolve(strict=True) != self.root
+        ):
+            raise TasteT12ProductionStateError(
+                "T12 resume first embedding root is not one physical directory"
+            )
+        self._segments: list[dict[str, Any]] = []
+        self._locators: dict[str, _FirstEmbeddingLocator] = {}
+        self.sequence = 0
+        self.chain_head = "0" * 64
+        self._active_stream: Any | None = None
+        self._active_path: Path | None = None
+        self._active_header: dict[str, Any] | None = None
+        self._active_header_bytes = b""
+        self._active_record_count = 0
+        self._active_prefix_digest: Any | None = None
+        if resume_snapshot is not None:
+            self._restore_snapshot(resume_snapshot)
+        if open_writer:
+            self.start_writer()
+
+    @property
+    def record_count(self) -> int:
+        return self.sequence
+
+    @property
+    def graph_hashes(self) -> frozenset[str]:
+        return frozenset(self._locators)
+
+    def start_writer(self) -> None:
+        if self._active_stream is not None:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding segment is already open"
+            )
+        if len(self._segments) >= HISTORY_MAX_SEGMENTS:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding store exceeded the two process segments"
+            )
+        segment_id = str(uuid.uuid4())
+        header = {
+            "schema_version": FIRST_EMBEDDING_SEGMENT_SCHEMA,
+            "segment_id": segment_id,
+            "contract_sha256": self.contract_sha256,
+            "attempt_id": self.attempt_id,
+            "generation_token": self.generation_token,
+            "model_sha256": self.model_sha256,
+            "feature_schema_sha256": self.feature_schema_sha256,
+            "bounds_sha256": self.bounds.sha256,
+            "anchor_sequence": self.sequence,
+            "anchor_chain_head": self.chain_head,
+        }
+        header_bytes = _canonical_bytes(header)
+        if len(header_bytes) > FIRST_EMBEDDING_HEADER_LIMIT_BYTES:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding header exceeded its cap"
+            )
+        path = self.root / f"embeddings-{segment_id}.bin"
+        stream = path.open("xb", buffering=0)
+        prefix = (
+            FIRST_EMBEDDING_MAGIC
+            + struct.pack(">I", len(header_bytes))
+            + header_bytes
+        )
+        stream.write(prefix)
+        os.fsync(stream.fileno())
+        _fsync_directory(self.root)
+        self._active_stream = stream
+        self._active_path = path
+        self._active_header = header
+        self._active_header_bytes = header_bytes
+        self._active_record_count = 0
+        self._active_prefix_digest = hashlib.sha256(prefix)
+
+    def raw_sha256_for(self, graph_identity_sha256: str) -> str | None:
+        graph_hash = _require_sha256(
+            graph_identity_sha256, field="T12 first embedding graph identity"
+        )
+        locator = self._locators.get(graph_hash)
+        return None if locator is None else locator.raw_sha256
+
+    def embedding_sha256_for(self, graph_identity_sha256: str) -> str | None:
+        graph_hash = _require_sha256(
+            graph_identity_sha256, field="T12 first embedding graph identity"
+        )
+        locator = self._locators.get(graph_hash)
+        return None if locator is None else locator.embedding_sha256
+
+    def lookup(self, graph_identity_sha256: str) -> FirstSeenEmbedding | None:
+        graph_hash = _require_sha256(
+            graph_identity_sha256, field="T12 first embedding graph identity"
+        )
+        locator = self._locators.get(graph_hash)
+        if locator is None:
+            return None
+        with locator.path.open("rb", buffering=0) as stream:
+            stream.seek(locator.raw_offset)
+            raw = stream.read(locator.raw_length)
+        if len(raw) != locator.raw_length or _sha256_bytes(raw) != locator.raw_sha256:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding raw bytes changed after indexing"
+            )
+        return FirstSeenEmbedding(
+            graph_identity_sha256=graph_hash,
+            dtype=locator.dtype,
+            shape=locator.shape,
+            raw_bytes=raw,
+            raw_sha256=locator.raw_sha256,
+            embedding_sha256=locator.embedding_sha256,
+            model_sha256=self.model_sha256,
+            feature_schema_sha256=self.feature_schema_sha256,
+        )
+
+    def append(
+        self,
+        *,
+        graph_identity_sha256: str,
+        dtype: str,
+        shape: Sequence[int],
+        raw_bytes: bytes,
+    ) -> FirstSeenEmbedding:
+        if (
+            self._active_stream is None
+            or self._active_path is None
+            or self._active_prefix_digest is None
+        ):
+            raise TasteT12ProductionStateError(
+                "T12 first embedding writer is closed"
+            )
+        graph_hash = _require_sha256(
+            graph_identity_sha256, field="T12 first embedding graph identity"
+        )
+        if graph_hash in self._locators:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding was appended more than once"
+            )
+        (
+            dtype,
+            normalized_shape,
+            raw,
+            raw_sha,
+            embedding_sha,
+        ) = _validate_first_embedding_payload(
+            dtype=dtype, shape=shape, raw_bytes=raw_bytes
+        )
+        dtype_bytes = dtype.encode("ascii")
+        shape_bytes = b"".join(
+            struct.pack(">Q", dimension) for dimension in normalized_shape
+        )
+        sequence = self.sequence + 1
+        prefix = _FIRST_EMBEDDING_PREFIX.pack(
+            sequence,
+            bytes.fromhex(graph_hash),
+            bytes.fromhex(raw_sha),
+            bytes.fromhex(embedding_sha),
+            bytes.fromhex(self.model_sha256),
+            bytes.fromhex(self.feature_schema_sha256),
+            len(dtype_bytes),
+            len(normalized_shape),
+            len(raw),
+        )
+        body = prefix + shape_bytes + dtype_bytes + raw
+        if len(body) + 32 > self.bounds.max_live_record_serialized_bytes:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding record exceeds the per-row disk bound"
+            )
+        projected = (
+            sum(int(row["committed_bytes"]) for row in self._segments)
+            + int(self._active_stream.tell())
+            + len(body)
+            + 32
+        )
+        if sequence > self.bounds.max_full_live_records:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding count exceeded the 20k graph bound"
+            )
+        if projected > self.bounds.max_history_bytes:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding store exceeded its disk cap"
+            )
+        chain = hashlib.sha256(bytes.fromhex(self.chain_head) + body).digest()
+        record_start = int(self._active_stream.tell())
+        self._active_stream.write(body + chain)
+        self._active_prefix_digest.update(body + chain)
+        raw_offset = (
+            record_start
+            + _FIRST_EMBEDDING_PREFIX.size
+            + len(shape_bytes)
+            + len(dtype_bytes)
+        )
+        self._locators[graph_hash] = _FirstEmbeddingLocator(
+            path=self._active_path,
+            raw_offset=raw_offset,
+            raw_length=len(raw),
+            dtype=dtype,
+            shape=normalized_shape,
+            raw_sha256=raw_sha,
+            embedding_sha256=embedding_sha,
+        )
+        self.sequence = sequence
+        self.chain_head = chain.hex()
+        self._active_record_count += 1
+        return FirstSeenEmbedding(
+            graph_identity_sha256=graph_hash,
+            dtype=dtype,
+            shape=normalized_shape,
+            raw_bytes=raw,
+            raw_sha256=raw_sha,
+            embedding_sha256=embedding_sha,
+            model_sha256=self.model_sha256,
+            feature_schema_sha256=self.feature_schema_sha256,
+        )
+
+    def _active_manifest(self) -> dict[str, Any] | None:
+        if self._active_stream is None or self._active_path is None:
+            return None
+        if self._active_record_count == 0:
+            return None
+        self._active_stream.flush()
+        os.fsync(self._active_stream.fileno())
+        _fsync_directory(self.root)
+        return {
+            "schema_version": FIRST_EMBEDDING_SEGMENT_SCHEMA,
+            "segment_file": self._active_path.name,
+            "header_sha256": _sha256_bytes(self._active_header_bytes),
+            "anchor_sequence": int(self._active_header["anchor_sequence"]),
+            "anchor_chain_head": str(self._active_header["anchor_chain_head"]),
+            "record_count": self._active_record_count,
+            "terminal_sequence": self.sequence,
+            "terminal_chain_head": self.chain_head,
+            "committed_bytes": int(self._active_stream.tell()),
+            "committed_prefix_sha256": (
+                self._active_prefix_digest.copy().hexdigest()
+            ),
+        }
+
+    def checkpoint_state(self) -> dict[str, Any]:
+        segments = [dict(row) for row in self._segments]
+        active = self._active_manifest()
+        if active is not None:
+            segments.append(active)
+        return {
+            "schema_version": FIRST_EMBEDDING_SNAPSHOT_SCHEMA,
+            "store_root": str(self.root),
+            "contract_sha256": self.contract_sha256,
+            "attempt_id": self.attempt_id,
+            "generation_token": self.generation_token,
+            "model_sha256": self.model_sha256,
+            "feature_schema_sha256": self.feature_schema_sha256,
+            "bounds_sha256": self.bounds.sha256,
+            "segments": segments,
+            "record_count": self.sequence,
+            "chain_head": self.chain_head,
+            "raw_bytes_authoritative": True,
+            "append_only_hash_chain": True,
+            "sqlite_index_authoritative": False,
+        }
+
+    def _read_committed_segment(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        expected_sequence: int,
+        expected_head: str,
+    ) -> tuple[int, str]:
+        expected_keys = {
+            "schema_version", "segment_file", "header_sha256",
+            "anchor_sequence", "anchor_chain_head", "record_count",
+            "terminal_sequence", "terminal_chain_head", "committed_bytes",
+            "committed_prefix_sha256",
+        }
+        if type(manifest) is not dict or set(manifest) != expected_keys:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding segment manifest keys changed"
+            )
+        name = manifest.get("segment_file")
+        if (
+            type(name) is not str
+            or Path(name).name != name
+            or not name.startswith("embeddings-")
+        ):
+            raise TasteT12ProductionStateError(
+                "T12 first embedding segment name is invalid"
+            )
+        path = self.root / name
+        if path.is_symlink() or path.resolve(strict=True) != path:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding segment is an alias"
+            )
+        committed_bytes = _require_native_int(
+            manifest.get("committed_bytes"),
+            field="T12 committed first embedding bytes",
+            minimum=len(FIRST_EMBEDDING_MAGIC) + 4,
+        )
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size < committed_bytes:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding committed prefix is incomplete"
+            )
+        with path.open("rb", buffering=0) as stream:
+            magic = stream.read(len(FIRST_EMBEDDING_MAGIC))
+            raw_header_length = stream.read(4)
+            if magic != FIRST_EMBEDDING_MAGIC or len(raw_header_length) != 4:
+                raise TasteT12ProductionStateError(
+                    "T12 first embedding header is invalid"
+                )
+            header_length = struct.unpack(">I", raw_header_length)[0]
+            if not 0 < header_length <= FIRST_EMBEDDING_HEADER_LIMIT_BYTES:
+                raise TasteT12ProductionStateError(
+                    "T12 first embedding header length is invalid"
+                )
+            header_bytes = stream.read(header_length)
+            try:
+                header = json.loads(header_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise TasteT12ProductionStateError(
+                    "T12 first embedding header is unreadable"
+                ) from exc
+            if (
+                type(header) is not dict
+                or header.get("schema_version") != FIRST_EMBEDDING_SEGMENT_SCHEMA
+                or header.get("contract_sha256") != self.contract_sha256
+                or header.get("attempt_id") != self.attempt_id
+                or header.get("generation_token") != self.generation_token
+                or header.get("model_sha256") != self.model_sha256
+                or header.get("feature_schema_sha256")
+                != self.feature_schema_sha256
+                or header.get("bounds_sha256") != self.bounds.sha256
+                or header.get("anchor_sequence") != expected_sequence
+                or header.get("anchor_chain_head") != expected_head
+                or manifest.get("anchor_sequence") != expected_sequence
+                or manifest.get("anchor_chain_head") != expected_head
+                or _sha256_bytes(header_bytes) != manifest.get("header_sha256")
+            ):
+                raise TasteT12ProductionStateError(
+                    "T12 first embedding header semantics changed"
+                )
+            digest = hashlib.sha256(magic + raw_header_length + header_bytes)
+            sequence = expected_sequence
+            chain_head = expected_head
+            record_count = _require_native_int(
+                manifest.get("record_count"),
+                field="T12 first embedding record count",
+                minimum=1,
+            )
+            for _ in range(record_count):
+                record_start = int(stream.tell())
+                prefix = stream.read(_FIRST_EMBEDDING_PREFIX.size)
+                if len(prefix) != _FIRST_EMBEDDING_PREFIX.size:
+                    raise TasteT12ProductionStateError(
+                        "T12 first embedding record prefix is incomplete"
+                    )
+                (
+                    observed_sequence,
+                    graph_raw,
+                    raw_sha,
+                    embedding_sha,
+                    model_raw,
+                    feature_raw,
+                    dtype_length,
+                    ndim,
+                    raw_length,
+                ) = _FIRST_EMBEDDING_PREFIX.unpack(prefix)
+                if (
+                    observed_sequence != sequence + 1
+                    or not 0 < dtype_length <= FIRST_EMBEDDING_DTYPE_LIMIT_BYTES
+                    or not 1 <= ndim <= FIRST_EMBEDDING_MAX_NDIM
+                    or raw_length <= 0
+                    or model_raw.hex() != self.model_sha256
+                    or feature_raw.hex() != self.feature_schema_sha256
+                ):
+                    raise TasteT12ProductionStateError(
+                        "T12 first embedding record metadata changed"
+                    )
+                shape_bytes = stream.read(ndim * 8)
+                dtype_bytes = stream.read(dtype_length)
+                if len(shape_bytes) != ndim * 8 or len(dtype_bytes) != dtype_length:
+                    raise TasteT12ProductionStateError(
+                        "T12 first embedding dtype/shape is incomplete"
+                    )
+                shape = tuple(
+                    struct.unpack(">Q", shape_bytes[index : index + 8])[0]
+                    for index in range(0, len(shape_bytes), 8)
+                )
+                try:
+                    dtype = dtype_bytes.decode("ascii")
+                except UnicodeDecodeError as exc:
+                    raise TasteT12ProductionStateError(
+                        "T12 first embedding dtype is unreadable"
+                    ) from exc
+                raw_offset = int(stream.tell())
+                raw = stream.read(raw_length)
+                observed_chain = stream.read(32)
+                if len(raw) != raw_length or len(observed_chain) != 32:
+                    raise TasteT12ProductionStateError(
+                        "T12 first embedding record is incomplete"
+                    )
+                validated = _validate_first_embedding_payload(
+                    dtype=dtype, shape=shape, raw_bytes=raw
+                )
+                if (
+                    validated[3] != raw_sha.hex()
+                    or validated[4] != embedding_sha.hex()
+                ):
+                    raise TasteT12ProductionStateError(
+                        "T12 first embedding raw/semantic SHA changed"
+                    )
+                body = prefix + shape_bytes + dtype_bytes + raw
+                expected_chain = hashlib.sha256(
+                    bytes.fromhex(chain_head) + body
+                ).digest()
+                if observed_chain != expected_chain:
+                    raise TasteT12ProductionStateError(
+                        "T12 first embedding hash chain changed"
+                    )
+                record = body + observed_chain
+                digest.update(record)
+                graph_hash = graph_raw.hex()
+                if graph_hash in self._locators:
+                    raise TasteT12ProductionStateError(
+                        "T12 first embedding graph was serialized twice"
+                    )
+                self._locators[graph_hash] = _FirstEmbeddingLocator(
+                    path=path,
+                    raw_offset=raw_offset,
+                    raw_length=raw_length,
+                    dtype=dtype,
+                    shape=shape,
+                    raw_sha256=raw_sha.hex(),
+                    embedding_sha256=embedding_sha.hex(),
+                )
+                sequence = int(observed_sequence)
+                chain_head = observed_chain.hex()
+                if int(stream.tell()) <= record_start:
+                    raise AssertionError("T12 first embedding reader did not advance")
+            if int(stream.tell()) != committed_bytes:
+                raise TasteT12ProductionStateError(
+                    "T12 first embedding committed byte boundary changed"
+                )
+            if (
+                digest.hexdigest()
+                != _require_sha256(
+                    manifest.get("committed_prefix_sha256"),
+                    field="T12 first embedding prefix SHA",
+                )
+                or manifest.get("terminal_sequence") != sequence
+                or manifest.get("terminal_chain_head") != chain_head
+            ):
+                raise TasteT12ProductionStateError(
+                    "T12 first embedding committed prefix digest changed"
+                )
+        return sequence, chain_head
+
+    def _restore_snapshot(self, value: Mapping[str, Any]) -> None:
+        expected = {
+            "schema_version", "store_root", "contract_sha256", "attempt_id",
+            "generation_token", "model_sha256", "feature_schema_sha256",
+            "bounds_sha256", "segments", "record_count", "chain_head",
+            "raw_bytes_authoritative", "append_only_hash_chain",
+            "sqlite_index_authoritative",
+        }
+        if type(value) is not dict or set(value) != expected:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding snapshot keys changed"
+            )
+        if (
+            value.get("schema_version") != FIRST_EMBEDDING_SNAPSHOT_SCHEMA
+            or value.get("store_root") != str(self.root)
+            or value.get("contract_sha256") != self.contract_sha256
+            or value.get("attempt_id") != self.attempt_id
+            or value.get("generation_token") != self.generation_token
+            or value.get("model_sha256") != self.model_sha256
+            or value.get("feature_schema_sha256") != self.feature_schema_sha256
+            or value.get("bounds_sha256") != self.bounds.sha256
+            or value.get("raw_bytes_authoritative") is not True
+            or value.get("append_only_hash_chain") is not True
+            or value.get("sqlite_index_authoritative") is not False
+        ):
+            raise TasteT12ProductionStateError(
+                "T12 first embedding snapshot semantics changed"
+            )
+        segments = value.get("segments")
+        if (
+            type(segments) is not list
+            or len(segments) > HISTORY_MAX_SEGMENTS
+            or (not segments and value.get("record_count") != 0)
+        ):
+            raise TasteT12ProductionStateError(
+                "T12 first embedding segment count is invalid"
+            )
+        sequence = 0
+        chain_head = "0" * 64
+        restored: list[dict[str, Any]] = []
+        for manifest in segments:
+            sequence, chain_head = self._read_committed_segment(
+                manifest, expected_sequence=sequence, expected_head=chain_head
+            )
+            restored.append(dict(manifest))
+        if (
+            value.get("record_count") != sequence
+            or value.get("chain_head") != chain_head
+            or len(self._locators) != sequence
+        ):
+            raise TasteT12ProductionStateError(
+                "T12 first embedding snapshot counters changed"
+            )
+        self.sequence = sequence
+        self.chain_head = chain_head
+        self._segments = restored
+
+    def close(self) -> None:
+        if self._active_stream is not None:
+            self._active_stream.close()
+            self._active_stream = None
 
 
 class T12CompactHistoryJournal:
@@ -468,9 +1116,14 @@ class T12CompactHistoryJournal:
         self._active_header_bytes = b""
         self._active_record_count = 0
         self._active_prefix_digest: Any | None = None
+        self._first_embedding_store: T12FirstSeenEmbeddingStore | None = None
+        self._first_embedding_store_required = False
+        self._open_writer_requested = bool(open_writer)
         if resume_snapshot is not None:
             self._restore_snapshot(resume_snapshot)
         if open_writer:
+            if self._first_embedding_store is not None:
+                self._first_embedding_store.start_writer()
             self._start_segment()
 
     @property
@@ -480,6 +1133,97 @@ class T12CompactHistoryJournal:
     @property
     def first_seen_strict_counterfactual_count(self) -> int:
         return self.candidate_first_seen_count
+
+    @property
+    def first_seen_embedding_store(self) -> T12FirstSeenEmbeddingStore | None:
+        return self._first_embedding_store
+
+    def bind_first_seen_embedding_authority(
+        self, *, model_sha256: str, feature_schema_sha256: str
+    ) -> None:
+        """Bind this production journal to one frozen GINE byte authority."""
+
+        model_hash = _require_sha256(
+            model_sha256, field="T12 first embedding model"
+        )
+        feature_hash = _require_sha256(
+            feature_schema_sha256, field="T12 first embedding feature schema"
+        )
+        if self._first_embedding_store is None:
+            self._first_embedding_store = T12FirstSeenEmbeddingStore(
+                root=(self.root / "first-seen-embeddings").resolve(),
+                bounds=self.bounds,
+                contract_sha256=self.contract_sha256,
+                attempt_id=self.attempt_id,
+                generation_token=self.generation_token,
+                model_sha256=model_hash,
+                feature_schema_sha256=feature_hash,
+                open_writer=self._open_writer_requested,
+            )
+        elif (
+            self._first_embedding_store.model_sha256 != model_hash
+            or self._first_embedding_store.feature_schema_sha256 != feature_hash
+        ):
+            raise TasteT12ProductionStateError(
+                "T12 first embedding model/feature authority changed"
+            )
+        self._first_embedding_store_required = True
+        self._validate_first_embedding_alignment()
+
+    def lookup_first_embedding(
+        self, graph_identity_sha256: str
+    ) -> FirstSeenEmbedding | None:
+        if not self._first_embedding_store_required or self._first_embedding_store is None:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding authority is not bound"
+            )
+        return self._first_embedding_store.lookup(graph_identity_sha256)
+
+    def append_first_embedding(
+        self,
+        *,
+        graph_identity_sha256: str,
+        dtype: str,
+        shape: Sequence[int],
+        raw_bytes: bytes,
+    ) -> FirstSeenEmbedding:
+        if not self._first_embedding_store_required or self._first_embedding_store is None:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding authority is not bound"
+            )
+        graph_hash = _require_sha256(
+            graph_identity_sha256, field="T12 first embedding graph identity"
+        )
+        if self._first_observation(graph_hash) is not None:
+            raise TasteT12ProductionStateError(
+                "T12 compact first observation exists without first embedding bytes"
+            )
+        return self._first_embedding_store.append(
+            graph_identity_sha256=graph_hash,
+            dtype=dtype,
+            shape=shape,
+            raw_bytes=raw_bytes,
+        )
+
+    def _validate_first_embedding_alignment(self) -> None:
+        store = self._first_embedding_store
+        if store is None:
+            if self._first_embedding_store_required:
+                raise TasteT12ProductionStateError(
+                    "T12 required first embedding store is absent"
+                )
+            return
+        rows = self._connection.execute(
+            "SELECT graph_hash,embedding_sha256 FROM first_observation"
+        ).fetchall()
+        indexed = {str(graph_hash): str(raw_sha) for graph_hash, raw_sha in rows}
+        if set(indexed) != set(store.graph_hashes) or any(
+            store.embedding_sha256_for(graph_hash) != raw_sha
+            for graph_hash, raw_sha in indexed.items()
+        ):
+            raise TasteT12ProductionStateError(
+                "T12 compact history and first embedding authority differ"
+            )
 
     def _commit_index(self, *, begin_next: bool = True) -> None:
         deadline = (
@@ -598,6 +1342,14 @@ class T12CompactHistoryJournal:
         query_hash = _require_sha256(
             neurosed_query_sha256, field="T12 history NeuroSED query digest"
         )
+        if self._first_embedding_store_required:
+            if self._first_embedding_store is None or (
+                self._first_embedding_store.embedding_sha256_for(graph_hash)
+                != embedding_hash
+            ):
+                raise TasteT12ProductionStateError(
+                    "T12 observation is not bound to its first embedding bytes"
+                )
         if (
             type(probabilities) not in (list, tuple)
             or len(probabilities) != 3
@@ -741,10 +1493,17 @@ class T12CompactHistoryJournal:
 
     def checkpoint_state(self) -> dict[str, Any]:
         self._commit_index()
+        if self._first_embedding_store_required:
+            self._validate_first_embedding_alignment()
         segments = [dict(row) for row in self._segments]
         active = self._active_manifest()
         if active is not None:
             segments.append(active)
+        embedding_snapshot = (
+            None
+            if self._first_embedding_store is None
+            else self._first_embedding_store.checkpoint_state()
+        )
         return {
             "schema_version": HISTORY_SNAPSHOT_SCHEMA,
             "history_root": str(self.root),
@@ -764,7 +1523,10 @@ class T12CompactHistoryJournal:
                 for key, value in sorted(self.destination_first_seen_counts.items())
             },
             "historical_payload_retained": False,
-            "historical_embedding_values_retained": False,
+            "historical_embedding_values_retained": (
+                embedding_snapshot is not None
+            ),
+            "first_seen_embedding_store": embedding_snapshot,
             "historical_lineage_payload_retained": False,
             "historical_neurosed_query_sha256_retained": True,
             "sqlite_index_authoritative": False,
@@ -931,6 +1693,7 @@ class T12CompactHistoryJournal:
             "first_seen_lineage_count", "candidate_first_seen_count",
             "destination_first_seen_counts", "historical_payload_retained",
             "historical_embedding_values_retained",
+            "first_seen_embedding_store",
             "historical_lineage_payload_retained",
             "historical_neurosed_query_sha256_retained",
             "sqlite_index_authoritative",
@@ -938,6 +1701,11 @@ class T12CompactHistoryJournal:
         }
         if type(value) is not dict or set(value) != expected:
             raise TasteT12ProductionStateError("T12 history snapshot keys changed")
+        embedding_snapshot = value.get("first_seen_embedding_store")
+        if embedding_snapshot is not None and type(embedding_snapshot) is not dict:
+            raise TasteT12ProductionStateError(
+                "T12 first embedding snapshot is invalid"
+            )
         if (
             value.get("schema_version") != HISTORY_SNAPSHOT_SCHEMA
             or value.get("history_root") != str(self.root)
@@ -947,7 +1715,8 @@ class T12CompactHistoryJournal:
             or value.get("bounds_sha256") != self.bounds.sha256
             or T12ProductionBounds.from_dict(value.get("bounds")) != self.bounds
             or value.get("historical_payload_retained") is not False
-            or value.get("historical_embedding_values_retained") is not False
+            or value.get("historical_embedding_values_retained")
+            is not (embedding_snapshot is not None)
             or value.get("historical_lineage_payload_retained") is not False
             or value.get("historical_neurosed_query_sha256_retained") is not True
             or value.get("sqlite_index_authoritative") is not False
@@ -983,11 +1752,29 @@ class T12CompactHistoryJournal:
         self.sequence = sequence
         self.chain_head = chain_head
         self._segments = restored
+        if embedding_snapshot is not None:
+            self._first_embedding_store = T12FirstSeenEmbeddingStore(
+                root=(self.root / "first-seen-embeddings").resolve(),
+                bounds=self.bounds,
+                contract_sha256=self.contract_sha256,
+                attempt_id=self.attempt_id,
+                generation_token=self.generation_token,
+                model_sha256=embedding_snapshot.get("model_sha256"),
+                feature_schema_sha256=embedding_snapshot.get(
+                    "feature_schema_sha256"
+                ),
+                resume_snapshot=embedding_snapshot,
+                open_writer=False,
+            )
+            self._first_embedding_store_required = True
+            self._validate_first_embedding_alignment()
 
     def close(self, *, commit_index: bool = True) -> None:
         if self._active_stream is not None:
             self._active_stream.close()
             self._active_stream = None
+        if self._first_embedding_store is not None:
+            self._first_embedding_store.close()
         try:
             if commit_index:
                 self._commit_index(begin_next=False)
@@ -1004,6 +1791,8 @@ class T12CompactHistoryJournal:
 __all__ = [
     "BOUNDS_SCHEMA",
     "CompactFirstObservation",
+    "FIRST_EMBEDDING_SNAPSHOT_SCHEMA",
+    "FirstSeenEmbedding",
     "HISTORY_RECORD_BYTES",
     "HISTORY_SCHEMA",
     "HISTORY_SNAPSHOT_SCHEMA",
@@ -1012,6 +1801,7 @@ __all__ = [
     "PINNED_SAMPLE_SIZE",
     "PINNED_TOTAL_STEPS",
     "T12CompactHistoryJournal",
+    "T12FirstSeenEmbeddingStore",
     "T12ProductionBounds",
     "TasteT12ProductionStateError",
     "compact_semantic_sha256",

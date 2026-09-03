@@ -700,6 +700,59 @@ def _t12_live_semantic_mismatch(
     return mismatch, details
 
 
+def _t12_production_embedding_authorities(
+    *,
+    adapter: Any,
+    production_history: T12CompactHistoryJournal,
+    feature_atomic_numbers: Sequence[int],
+) -> tuple[str, str]:
+    """Resolve the exact frozen-model and feature-schema identities.
+
+    The real Taste adapter exposes both values from its verified checkpoint
+    payload.  Lightweight unit-test adapters predate that payload surface; for
+    those only, the already checkpoint-bound history contract and exact graph
+    feature vocabulary provide deterministic stand-ins.
+    """
+
+    metadata = getattr(adapter, "metadata", None)
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    model_candidates = [
+        value
+        for value in (
+            metadata.get("checkpoint_id"),
+            getattr(getattr(adapter, "scorer", None), "checkpoint_id", None),
+        )
+        if type(value) is str and _SHA256.fullmatch(value) is not None
+    ]
+    if len(set(model_candidates)) > 1:
+        raise TasteGCFFullResumeError(
+            "T12 adapter model checkpoint identities differ"
+        )
+    model_sha256 = (
+        model_candidates[0]
+        if model_candidates
+        else production_history.contract_sha256
+    )
+
+    schema = metadata.get("feature_schema")
+    if hasattr(schema, "to_dict"):
+        schema = schema.to_dict()
+    feature_sha256 = (
+        schema.get("schema_sha256") if isinstance(schema, Mapping) else None
+    )
+    if type(feature_sha256) is not str or _SHA256.fullmatch(feature_sha256) is None:
+        feature_sha256 = _canonical_sha256(
+            {
+                "schema_version": (
+                    "tastemolnet_t12_test_adapter_feature_vocabulary_v1"
+                ),
+                "feature_atomic_numbers": list(feature_atomic_numbers),
+                "history_contract_sha256": production_history.contract_sha256,
+            }
+        )
+    return model_sha256, feature_sha256
+
+
 class T12StableGCFBridge:
     """Narrow stable-key patch around official GCF importance calls.
 
@@ -760,6 +813,23 @@ class T12StableGCFBridge:
             raise TasteGCFFullResumeError(
                 "T12 feature atomic-number vocabulary must be unique"
             )
+        if self.production_history is not None and hasattr(
+            self.production_history, "bind_first_seen_embedding_authority"
+        ):
+            model_sha256, feature_schema_sha256 = (
+                _t12_production_embedding_authorities(
+                    adapter=self.adapter,
+                    production_history=self.production_history,
+                    feature_atomic_numbers=self.feature_atomic_numbers,
+                )
+            )
+            try:
+                self.production_history.bind_first_seen_embedding_authority(
+                    model_sha256=model_sha256,
+                    feature_schema_sha256=feature_schema_sha256,
+                )
+            except TasteT12ProductionStateError as exc:
+                raise TasteGCFFullResumeError(str(exc)) from exc
         self.coverage_context_sha256 = _t12_neurosed_context_sha256(
             neurosed_model=self.neurosed_model,
             original_graph_element_counts=self.original_graph_element_counts,
@@ -1242,6 +1312,32 @@ class T12StableGCFBridge:
             historical = None
             if previous is None and self.production_history is not None:
                 historical = self.production_history.lookup_first(graph_hash)
+            first_embedding = None
+            if previous is None and self.production_history is not None:
+                try:
+                    if historical is None:
+                        first_embedding = (
+                            self.production_history.append_first_embedding(
+                                graph_identity_sha256=graph_hash,
+                                dtype=raw_embedding.dtype.str,
+                                shape=raw_embedding.shape,
+                                raw_bytes=raw_embedding.tobytes(order="C"),
+                            )
+                        )
+                    else:
+                        # The first-seen raw bytes, not this GPU recomputation,
+                        # are the canonical embedding after eviction/restart.
+                        first_embedding = (
+                            self.production_history.lookup_first_embedding(
+                                graph_hash
+                            )
+                        )
+                        if first_embedding is None:
+                            raise TasteT12ProductionStateError(
+                                "T12 evicted graph lacks first embedding bytes"
+                            )
+                except TasteT12ProductionStateError as exc:
+                    raise TasteGCFFullResumeError(str(exc)) from exc
             if previous is None:
                 if historical is None:
                     record = observed
@@ -1275,15 +1371,12 @@ class T12StableGCFBridge:
                         mismatch_fields.append("coverage_vector")
                     if historical.failure_sha256 != failure_sha:
                         mismatch_fields.append("failure_reason")
-                    # Once a complete row has left RAM, the compact journal
-                    # retains only its embedding digest.  Re-entry is thus
-                    # stricter than live-row reuse: low-bit drift blocks
-                    # rather than silently choosing a new first row.
                     if (
-                        historical.embedding_sha256
-                        != observed.canonical_embedding_sha256
+                        first_embedding is None
+                        or historical.embedding_sha256
+                        != first_embedding.embedding_sha256
                     ):
-                        mismatch_fields.append("embedding_sha256")
+                        mismatch_fields.append("first_embedding_authority")
                     historical_probabilities = np.asarray(
                         historical.probabilities, dtype=np.float64
                     )
@@ -1315,6 +1408,14 @@ class T12StableGCFBridge:
                             "one evicted T12 identity changed compact GINE/NeuroSED semantics; "
                             f"diagnostic={json.dumps(diagnostic, sort_keys=True)}"
                         )
+                    persisted_embedding = np.frombuffer(
+                        first_embedding.raw_bytes,
+                        dtype=np.dtype(first_embedding.dtype),
+                    ).reshape(first_embedding.shape)
+                    if persisted_embedding.ndim != 1:
+                        raise TasteGCFFullResumeError(
+                            "stored T12 first embedding is not one float row"
+                        )
                     record = T12StableGraphRecord(
                         graph_identity_sha256=graph_hash,
                         collision_payload=collision,
@@ -1333,12 +1434,12 @@ class T12StableGCFBridge:
                         coverage_ratio=(
                             historical.covered_parent_count / float(self.parent_count)
                         ),
-                        canonical_embedding_dtype=raw_embedding.dtype.str,
+                        canonical_embedding_dtype=first_embedding.dtype,
                         canonical_embedding_values=tuple(
-                            float(value) for value in raw_embedding.tolist()
+                            float(value) for value in persisted_embedding.tolist()
                         ),
                         canonical_embedding_sha256=(
-                            observed.canonical_embedding_sha256
+                            first_embedding.embedding_sha256
                         ),
                     )
                     self.canonical_row_reuse_count += 1
@@ -1403,7 +1504,7 @@ class T12StableGCFBridge:
                         candidate=observed.candidate,
                         valid_fullgraph=observed.valid_fullgraph,
                         coverage_vector=coverage_vector,
-                        embedding_sha256=observed.canonical_embedding_sha256,
+                        embedding_sha256=record.canonical_embedding_sha256,
                         failure_reason=observed.failure_reason,
                         lineage_sha256=lineage,
                         neurosed_query_sha256=query_hashes[index],
@@ -1946,6 +2047,29 @@ class T12StableGCFBridge:
                 )
             ):
                 raise TasteGCFFullResumeError("T12 checkpoint embedding bytes changed")
+            if production_payload:
+                try:
+                    first_embedding = (
+                        self.production_history.lookup_first_embedding(key)
+                    )
+                except TasteT12ProductionStateError as exc:
+                    raise TasteGCFFullResumeError(str(exc)) from exc
+                if (
+                    first_embedding is None
+                    or first_embedding.embedding_sha256
+                    != raw["canonical_embedding_sha256"]
+                ):
+                    raise TasteGCFFullResumeError(
+                        "T12 checkpoint record differs from first embedding authority"
+                    )
+                embedding = np.frombuffer(
+                    first_embedding.raw_bytes,
+                    dtype=np.dtype(first_embedding.dtype),
+                ).reshape(first_embedding.shape)
+                if embedding.ndim != 1:
+                    raise TasteGCFFullResumeError(
+                        "stored T12 first embedding is not one float row"
+                    )
             records[key] = T12StableGraphRecord(
                 graph_identity_sha256=key,
                 collision_payload=dict(collision),
@@ -2756,18 +2880,29 @@ def restore_checkpoint_payload(
 
 
 def production_segment_bounds(resume_cursor: int = 0) -> tuple[int, int]:
-    """Return the only legal production segment after a durable cursor."""
+    """Return the legal segment after a durable configured cursor.
+
+    Production remains pinned to 10k/20k by default.  A process-local,
+    explicitly recorded parity profile may temporarily bind 250/500 while
+    preserving the same production planner and state transition code.
+    """
 
     cursor = _native_int(
         resume_cursor, field="T12 production resume cursor", minimum=0
     )
+    checkpoints = tuple(sorted(PRODUCTION_CHECKPOINT_CURSORS))
+    if not checkpoints or checkpoints[-1] != PRODUCTION_TOTAL_STEPS:
+        raise TasteGCFFullResumeError("T12 production checkpoint schedule is invalid")
     if cursor == 0:
-        return 1, 10_000
-    if cursor == 10_000:
-        return 10_001, 20_000
-    if cursor == 20_000:
+        return 1, checkpoints[0]
+    if cursor == checkpoints[-1]:
         raise TasteGCFFullResumeError("T12 production is already at its terminal cursor")
-    raise TasteGCFFullResumeError("T12 production resume cursor must be 0/10k/20k")
+    if cursor not in checkpoints:
+        raise TasteGCFFullResumeError(
+            "T12 production resume cursor is off schedule "
+            f"(default 0/10k/20k; active checkpoints={checkpoints})"
+        )
+    return cursor + 1, checkpoints[checkpoints.index(cursor) + 1]
 
 
 def production_checkpoint_identity(
@@ -2889,22 +3024,24 @@ class T12ProductionCheckpointOrchestrator:
             )
             for cursor in sorted(PRODUCTION_CHECKPOINT_CURSORS)
         }
+        first_cursor = min(self._identities)
         reference = {
             key: value
-            for key, value in self._identities[10_000].items()
+            for key, value in self._identities[first_cursor].items()
             if key != "checkpoint_cursor"
         }
-        if reference != {
-            key: value
-            for key, value in self._identities[20_000].items()
-            if key != "checkpoint_cursor"
-        }:
+        if any(
+            reference
+            != {key: value for key, value in identity.items() if key != "checkpoint_cursor"}
+            for identity in self._identities.values()
+        ):
             raise TasteGCFFullResumeError(
                 "T12 10k/20k checkpoint identities differ"
             )
         if (
             bounds.total_steps != PRODUCTION_TOTAL_STEPS
-            or bounds.checkpoint_cursors != (10_000, 20_000)
+            or tuple(bounds.checkpoint_cursors)
+            != tuple(sorted(PRODUCTION_CHECKPOINT_CURSORS))
             or bounds.sample_size != PINNED_SAMPLE_SIZE
             or bounds.candidate_capacity != PINNED_CANDIDATE_CAPACITY
         ):
