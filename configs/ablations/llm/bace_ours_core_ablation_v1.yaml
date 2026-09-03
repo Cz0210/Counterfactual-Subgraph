@@ -16,7 +16,7 @@ variants:
     exact_revision: b8b2ea19e48f53d190fe8dced94572717f8e89a2
     candidate_pool_action: GENERATE
   - id: A2
-    variant: CHEMLLM_7B_PPO_MAIN
+    variant: CHEMLLM_7B_PPO_LORA_MAIN
     adapter_topology: BASE_PLUS_PPO_LORA_ADOPT_MAIN
     exact_revision: b8b2ea19e48f53d190fe8dced94572717f8e89a2
     candidate_pool_action: ADOPT_EXISTING_BACE_OURS_MAIN
@@ -36,7 +36,8 @@ scale_comparison:
 
 sft_auxiliary:
   enabled: false
-  state: SFT_ABLATION_NOT_APPLICABLE_TO_CURRENT_MAIN_PIPELINE
+  state: N/A
+  reason: NO_INDEPENDENT_MATCHED_PROJECT_SFT_CHECKPOINT
   activation_requires: NEW_USER_AUTHORIZATION_AND_MATCHED_TRAIN_ONLY_SFT_MANIFEST
 
 execution:
@@ -56,4 +57,7 @@ execution:
 entrypoints:
   runner: scripts/autodl/run_llm_ablation_variant.py
   launcher: scripts/autodl/launch_llm_ablation_core_v1.sh
+  launcher_slurm: scripts/slurm/launch_llm_ablation_core_v1.sh
   status: scripts/autodl/status_llm_ablation_core_v1.py
+  chemllm_2b_isolated_load: scripts/ablations/llm/audit_chemllm_2b_isolated_load.py
+  chemllm_2b_isolated_load_slurm: scripts/slurm/audit_chemllm_2b_isolated_load.sh

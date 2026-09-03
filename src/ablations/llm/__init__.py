@@ -31,6 +31,7 @@ from .contracts import (
 from .core_execution import (
     CORE_VARIANT_ORDER,
     MAIN_ADAPTATION_PATH,
+    SFT_AUXILIARY_REASON,
     SFT_AUXILIARY_STATE,
     CoreLLMVariant,
     CoreRunSpec,
@@ -124,7 +125,7 @@ __all__ = [
     "ParameterCountReport", "ParentInput", "ProposalBudget", "ProposalGenerator",
     "ProposalParent", "ProposalRequest", "ProposalResult", "RuntimeGeneratorIdentity",
     "ScaleFallbackAssetTopology", "SeedManifest", "StageAssetTopology", "StageScaleProposalGenerator",
-    "SFT_AUXILIARY_STATE",
+    "SFT_AUXILIARY_REASON", "SFT_AUXILIARY_STATE",
     "TrainingMolecule", "artifact_sha256", "assert_matched_adaptation",
     "audit_remote_code", "build_common_downstream_plan", "build_isolated_child_command",
     "build_isolated_child_environment", "build_proposal_record",

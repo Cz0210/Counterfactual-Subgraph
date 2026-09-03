@@ -12,6 +12,7 @@ import yaml
 from src.ablations.llm.contracts import LLMAblationContractError, canonical_json_sha256
 from src.ablations.llm.core_execution import (
     CORE_VARIANT_ORDER,
+    SFT_AUXILIARY_REASON,
     SFT_AUXILIARY_STATE,
     CoreLLMVariant,
     CoreRunSpec,
@@ -117,7 +118,7 @@ def _spec_payload(tmp_path: Path, *, variant: CoreLLMVariant) -> dict:
             "adopted_artifacts": [source],
         }
         topology = "NO_MODEL"
-    elif variant is CoreLLMVariant.CHEMLLM_7B_PPO_MAIN:
+    elif variant is CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN:
         topology = "BASE_PLUS_PPO_LORA_ADOPT_MAIN"
         for index, stage in enumerate(stages):
             source = _write(tmp_path / f"main-{index}.json", {"status": "PASS"})
@@ -166,7 +167,22 @@ def test_reference_truthfully_exposes_base_plus_ppo_and_no_sft() -> None:
     assert core["main_adaptation_path"] == "BASE_PLUS_PPO_LORA"
     assert core["project_sft_checkpoint_exists"] is False
     assert list(core["variants"]) == list(CORE_VARIANT_ORDER)
-    assert core["sft_auxiliary"]["state"] == SFT_AUXILIARY_STATE
+    assert core["sft_auxiliary"] == {
+        "enabled": False,
+        "state": "N/A",
+        "reason": SFT_AUXILIARY_REASON,
+    }
+
+
+def test_core_variant_names_are_exact_and_legacy_sft_rows_are_absent() -> None:
+    assert CORE_VARIANT_ORDER == (
+        "BRICS_FIXED",
+        "CHEMLLM_7B_OFF_THE_SHELF",
+        "CHEMLLM_7B_PPO_LORA_MAIN",
+        "CHEMLLM_2B_OFF_THE_SHELF",
+    )
+    assert "CHEMLLM_7B_PPO_MAIN" not in CORE_VARIANT_ORDER
+    assert all("SFT" not in variant for variant in CORE_VARIANT_ORDER)
 
 
 def test_core_config_has_only_four_real_rows_and_sft_auxiliary_disabled() -> None:
@@ -179,8 +195,12 @@ def test_core_config_has_only_four_real_rows_and_sft_auxiliary_disabled() -> Non
     assert config["sft_auxiliary"] == {
         "enabled": False,
         "state": SFT_AUXILIARY_STATE,
+        "reason": SFT_AUXILIARY_REASON,
         "activation_requires": "NEW_USER_AUTHORIZATION_AND_MATCHED_TRAIN_ONLY_SFT_MANIFEST",
     }
+    assert config["entrypoints"]["launcher_slurm"] == (
+        "scripts/slurm/launch_llm_ablation_core_v1.sh"
+    )
 
 
 def test_core_entrypoints_and_required_slurm_pairs_are_real() -> None:
@@ -188,15 +208,23 @@ def test_core_entrypoints_and_required_slurm_pairs_are_real() -> None:
         "scripts/autodl/run_llm_ablation_variant.py",
         "scripts/autodl/status_llm_ablation_core_v1.py",
         "scripts/autodl/launch_llm_ablation_core_v1.sh",
+        "scripts/ablations/llm/audit_chemllm_2b_isolated_load.py",
         "scripts/slurm/run_llm_ablation_variant.sh",
         "scripts/slurm/status_llm_ablation_core_v1.sh",
+        "scripts/slurm/launch_llm_ablation_core_v1.sh",
+        "scripts/slurm/audit_chemllm_2b_isolated_load.sh",
     )
     for name in files:
         assert (REPO_ROOT / name).is_file()
     launcher = (REPO_ROOT / files[2]).read_text(encoding="utf-8")
     assert "run_llm_ablation_variant.py" in launcher
+    assert 'exec "${run_args[@]}"' in launcher
     assert "BLOCKED_CONFIG_ONLY_NO_SCIENCE_ENTRYPOINT" not in launcher
-    for name in files[3:]:
+    runner = (REPO_ROOT / files[0]).read_text(encoding="utf-8")
+    assert "run_core_variant(" in runner
+    isolated = (REPO_ROOT / files[3]).read_text(encoding="utf-8")
+    assert 'choices=("metadata", "cpu-load")' in isolated
+    for name in files[4:]:
         text = (REPO_ROOT / name).read_text(encoding="utf-8")
         assert "#SBATCH --partition=A800" in text
         assert "#SBATCH --gres=gpu:a800:1" in text
@@ -238,7 +266,9 @@ def test_main_priority_pauses_at_safe_boundary_then_resumes(tmp_path: Path) -> N
 
 
 def test_main_ppo_row_can_only_adopt_existing_artifacts(tmp_path: Path) -> None:
-    payload = _spec_payload(tmp_path, variant=CoreLLMVariant.CHEMLLM_7B_PPO_MAIN)
+    payload = _spec_payload(
+        tmp_path, variant=CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN
+    )
     CoreRunSpec.from_mapping(payload)
     payload["stages"][0].update(action="EXECUTE", argv=_stage_command(), adopted_artifacts=[])
     payload["run_spec_sha256"] = canonical_json_sha256(
@@ -246,6 +276,22 @@ def test_main_ppo_row_can_only_adopt_existing_artifacts(tmp_path: Path) -> None:
     )
     with pytest.raises(LLMAblationContractError, match="adopted without retraining"):
         CoreRunSpec.from_mapping(payload)
+
+
+def test_main_ppo_lora_row_adopts_without_executing_or_retraining(tmp_path: Path) -> None:
+    spec = CoreRunSpec.from_mapping(
+        _spec_payload(
+            tmp_path, variant=CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN
+        )
+    )
+    result = run_core_variant(spec, resume=False)
+    assert result["state"] == "PASS"
+    assert not (Path(spec.output_root) / "executed.txt").exists()
+    manifest = json.loads((Path(spec.output_root) / "run_manifest.json").read_text())
+    assert manifest["science_retrained"] is False
+    assert manifest["main_result_adopted"] is True
+    assert manifest["main_result_retraining_permitted"] is False
+    assert manifest["sft_auxiliary_state"] == "N/A"
 
 
 def test_selector_must_freeze_before_test(tmp_path: Path) -> None:

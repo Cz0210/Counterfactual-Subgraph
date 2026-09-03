@@ -3,6 +3,17 @@
 
 set -euo pipefail
 
+PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+PY=${AUTODL_PYTHON:-/root/miniconda3/envs/smiles_pip118/bin/python}
+STATUS_ENTRYPOINT="$PROJECT_ROOT/scripts/autodl/status_llm_ablation_core_v1.py"
+SCIENCE_ENTRYPOINT="$PROJECT_ROOT/scripts/autodl/run_llm_ablation_variant.py"
+if [[ ! -f "$STATUS_ENTRYPOINT" || ! -x "$SCIENCE_ENTRYPOINT" ]]; then
+  echo "BLOCKED_MISSING_EXECUTABLE_LLM_CORE_ENTRYPOINT" >&2
+  exit 66
+fi
+cd "$PROJECT_ROOT"
+export PYTHONPATH=$PWD
+
 : "${LLM_CORE_RUN_SPEC:?set exact core run-spec JSON}"
 : "${LLM_CORE_RUN_SPEC_SHA256:?set exact core run-spec file SHA256}"
 : "${LLM_ABLATION_MAIN_SNAPSHOT:?set current main-state snapshot JSON}"
@@ -12,8 +23,9 @@ set -euo pipefail
 
 decision="${LLM_CORE_LAUNCH_DECISION:-$(mktemp /tmp/llm-core-launch-decision.XXXXXX.json)}"
 status_args=(
-  python scripts/autodl/status_llm_ablation_core_v1.py
+  "$PY" "$STATUS_ENTRYPOINT"
   --config configs/hpc.yaml
+  --set inference.fallback_to_heuristic=false
   --run-spec "$LLM_CORE_RUN_SPEC"
   --run-spec-sha256 "$LLM_CORE_RUN_SPEC_SHA256"
   --main-snapshot "$LLM_ABLATION_MAIN_SNAPSHOT"
@@ -28,15 +40,16 @@ status_args=(
 [[ -n "${CHEMLLM_20B_METADATA_MANIFEST:-}" ]] && status_args+=(--twenty-b-metadata-manifest "$CHEMLLM_20B_METADATA_MANIFEST" --twenty-b-metadata-manifest-sha256 "${CHEMLLM_20B_METADATA_MANIFEST_SHA256:?}")
 
 "${status_args[@]}"
-allowed="$(python -c 'import json,sys; print("1" if json.load(open(sys.argv[1]))["science_launch_allowed"] else "0")' "$decision")"
+allowed="$("$PY" -c 'import json,sys; print("1" if json.load(open(sys.argv[1]))["science_launch_allowed"] else "0")' "$decision")"
 if [[ "$allowed" != "1" ]]; then
   echo "BLOCKED_MAIN_PRIORITY_OR_RUNTIME_EVIDENCE"
   exit 78
 fi
 decision_sha="$(sha256sum "$decision" | awk '{print $1}')"
 run_args=(
-  python scripts/autodl/run_llm_ablation_variant.py
+  "$PY" "$SCIENCE_ENTRYPOINT"
   --config configs/hpc.yaml
+  --set inference.fallback_to_heuristic=false
   --run-spec "$LLM_CORE_RUN_SPEC"
   --run-spec-sha256 "$LLM_CORE_RUN_SPEC_SHA256"
   --launch-decision "$decision"

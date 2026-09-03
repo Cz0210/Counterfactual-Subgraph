@@ -175,7 +175,7 @@ def main() -> int:
         seven_b_ots_state = "RUNTIME_EVIDENCE_PASS"
     target_state = {
         CoreLLMVariant.BRICS_FIXED: "ARTIFACT_BOUND",
-        CoreLLMVariant.CHEMLLM_7B_PPO_MAIN: "MAIN_RESULT_BOUND",
+        CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN: "MAIN_RESULT_BOUND",
         CoreLLMVariant.CHEMLLM_7B_OFF_THE_SHELF: seven_b_ots_state,
         CoreLLMVariant.CHEMLLM_2B_OFF_THE_SHELF: evidence["states"]["chemllm_2b_1_5"],
     }[spec.variant]
@@ -255,6 +255,7 @@ def main() -> int:
         "assigned_gpu": gate.assigned_gpu,
         "run_status": status_core_run(spec),
         "sft_auxiliary_state": core_reference["sft_auxiliary"]["state"],
+        "sft_auxiliary_reason": core_reference["sft_auxiliary"]["reason"],
         "science_started_by_status": False,
     }
     payload["launch_decision_sha256"] = canonical_json_sha256(payload)

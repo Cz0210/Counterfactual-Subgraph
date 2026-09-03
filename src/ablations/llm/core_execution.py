@@ -31,12 +31,13 @@ class CoreLLMVariant(str, Enum):
 
     BRICS_FIXED = "BRICS_FIXED"
     CHEMLLM_7B_OFF_THE_SHELF = "CHEMLLM_7B_OFF_THE_SHELF"
-    CHEMLLM_7B_PPO_MAIN = "CHEMLLM_7B_PPO_MAIN"
+    CHEMLLM_7B_PPO_LORA_MAIN = "CHEMLLM_7B_PPO_LORA_MAIN"
     CHEMLLM_2B_OFF_THE_SHELF = "CHEMLLM_2B_OFF_THE_SHELF"
 
 
 CORE_VARIANT_ORDER = tuple(item.value for item in CoreLLMVariant)
-SFT_AUXILIARY_STATE = "SFT_ABLATION_NOT_APPLICABLE_TO_CURRENT_MAIN_PIPELINE"
+SFT_AUXILIARY_STATE = "N/A"
+SFT_AUXILIARY_REASON = "NO_INDEPENDENT_MATCHED_PROJECT_SFT_CHECKPOINT"
 MAIN_ADAPTATION_PATH = "BASE_PLUS_PPO_LORA"
 
 STAGE_ORDER = (
@@ -129,7 +130,9 @@ def derive_core_reference(reference: BACEReferenceEvidence) -> dict[str, Any]:
             CoreLLMVariant.CHEMLLM_7B_OFF_THE_SHELF.value: (
                 "READY_AFTER_7B_RUNTIME_EVIDENCE"
             ),
-            CoreLLMVariant.CHEMLLM_7B_PPO_MAIN.value: "ADOPT_EXISTING_MAIN_RESULT",
+            CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN.value: (
+                "ADOPT_EXISTING_MAIN_RESULT"
+            ),
             CoreLLMVariant.CHEMLLM_2B_OFF_THE_SHELF.value: (
                 "BLOCKED_UNTIL_2B_ISOLATED_LOAD_AND_PARAMETER_REPORT_PASS"
             ),
@@ -137,6 +140,7 @@ def derive_core_reference(reference: BACEReferenceEvidence) -> dict[str, Any]:
         "sft_auxiliary": {
             "enabled": False,
             "state": SFT_AUXILIARY_STATE,
+            "reason": SFT_AUXILIARY_REASON,
         },
         "scale_comparison": (
             "CHEMLLM_2B_OFF_THE_SHELF_vs_CHEMLLM_7B_OFF_THE_SHELF"
@@ -231,7 +235,9 @@ class CoreRunSpec:
         expected_topology = {
             CoreLLMVariant.BRICS_FIXED: "NO_MODEL",
             CoreLLMVariant.CHEMLLM_7B_OFF_THE_SHELF: "BASE_ONLY_NO_ADAPTER",
-            CoreLLMVariant.CHEMLLM_7B_PPO_MAIN: "BASE_PLUS_PPO_LORA_ADOPT_MAIN",
+            CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN: (
+                "BASE_PLUS_PPO_LORA_ADOPT_MAIN"
+            ),
             CoreLLMVariant.CHEMLLM_2B_OFF_THE_SHELF: "BASE_ONLY_NO_ADAPTER",
         }[variant]
         if topology != expected_topology:
@@ -242,7 +248,7 @@ class CoreRunSpec:
         stages = tuple(StagePlan.from_mapping(item) for item in raw_stages)
         if tuple(item.name for item in stages) != STAGE_ORDER:
             raise LLMAblationContractError("core stages must use the fixed scientific order")
-        if variant is CoreLLMVariant.CHEMLLM_7B_PPO_MAIN:
+        if variant is CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN:
             if any(item.action != "ADOPT" for item in stages):
                 raise LLMAblationContractError("main PPO row must be adopted without retraining")
         elif variant is CoreLLMVariant.BRICS_FIXED:
@@ -368,7 +374,7 @@ def validate_variant_artifact_bindings(
             raise LLMAblationContractError("BRICS manifest does not bind the BACE reference")
         return
 
-    if spec.variant is not CoreLLMVariant.CHEMLLM_7B_PPO_MAIN:
+    if spec.variant is not CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN:
         return
     allowed = _reference_identities(reference.payload)
     final_root = Path(str(reference.payload.get("main_final_root") or ""))
@@ -609,12 +615,18 @@ def run_core_variant(
                 "main_adaptation_path": MAIN_ADAPTATION_PATH,
                 "project_sft_checkpoint_exists": False,
                 "sft_auxiliary_state": SFT_AUXILIARY_STATE,
+                "sft_auxiliary_reason": SFT_AUXILIARY_REASON,
                 "run_spec_sha256": spec.run_spec_sha256,
                 "checkpoint_sha256": terminal["checkpoint_sha256"],
                 "stage_order": list(STAGE_ORDER),
                 "selector_frozen_before_heldout_test": True,
-                "science_retrained": spec.variant is not CoreLLMVariant.CHEMLLM_7B_PPO_MAIN,
-                "main_result_adopted": spec.variant is CoreLLMVariant.CHEMLLM_7B_PPO_MAIN,
+                "science_retrained": (
+                    spec.variant is not CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN
+                ),
+                "main_result_adopted": (
+                    spec.variant is CoreLLMVariant.CHEMLLM_7B_PPO_LORA_MAIN
+                ),
+                "main_result_retraining_permitted": False,
                 "stage_receipts": terminal["stage_receipts"],
             }
             manifest["run_manifest_sha256"] = canonical_json_sha256(manifest)
@@ -640,6 +652,7 @@ __all__ = [
     "CoreLLMVariant",
     "CoreRunSpec",
     "MAIN_ADAPTATION_PATH",
+    "SFT_AUXILIARY_REASON",
     "SFT_AUXILIARY_STATE",
     "STAGE_ORDER",
     "derive_core_reference",
