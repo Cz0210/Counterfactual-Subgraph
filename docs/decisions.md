@@ -17262,3 +17262,16 @@ has exited, no writable descriptor remains, and the independent replay passes.
   observer and admission gate, while zero-result publication waits for the
   sole recovery owner to emit or reconcile an authoritative receipt through
   its normal lifecycle.
+
+# 2026-09-03: Reuse the completed Mut equivalence A arm after maintenance
+
+- Motivation: the exact 500-step legacy/A arm is complete and immutable, while
+  the instrumented/B arm stopped at step 225 without a committed checkpoint.
+  Recomputing A would consume scarce main-table time without adding evidence.
+- Decision: a fresh B attempt may bind a physical completed A root through a
+  hash-closed adoption receipt.  The normal equivalence verifier still opens
+  and validates every A artifact and compares it with the fresh B result; only
+  the A computation itself is skipped.  B always starts from step zero.
+- Impact: no 50k generation, pair store, or DBSCAN artifact is recomputed, and
+  no partial B output is treated as resumable.  Missing or changed A evidence
+  fails closed before the new B arm starts.

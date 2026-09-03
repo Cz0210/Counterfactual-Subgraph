@@ -17,6 +17,7 @@ source "$SCRIPT_DIR/common.sh"
 : "${MUT_TRACE_CONTROLLER_PID:?terminal/live controller PID identity required}"
 : "${MUT_TRACE_CONTROLLER_START_TICKS:?controller start ticks required}"
 : "${MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE:?terminal attachment receipt required}"
+: "${MUT_COMPLETED_A_ARM_ROOT:?completed read-only Mut A/legacy arm required}"
 
 for mut_path in \
   "$MUT_FAST_SPEC" \
@@ -25,7 +26,8 @@ for mut_path in \
   "$MUT_TRACE_HISTORICAL_PROJECT_ROOT" \
   "$MUT_TRACE_INSTRUMENTATION_PROJECT_ROOT" \
   "$MUT_TRACE_SEMANTIC_FINALIZER_PROJECT_ROOT" \
-  "$MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE"; do
+  "$MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE" \
+  "$MUT_COMPLETED_A_ARM_ROOT"; do
   [[ "$mut_path" == /* && -e "$mut_path" && ! -L "$mut_path" ]] || {
     echo "physical absolute Mut continuation input required: $mut_path" >&2
     exit 64
@@ -91,6 +93,7 @@ COMMAND=(
   --instrumentation-project-root "$MUT_TRACE_INSTRUMENTATION_PROJECT_ROOT"
   --semantic-finalizer-project-root "$MUT_TRACE_SEMANTIC_FINALIZER_PROJECT_ROOT"
   --output-root "$OUTPUT_ROOT"
+  --adopt-complete-legacy-root "$MUT_COMPLETED_A_ARM_ROOT"
   --controller-pid "$MUT_TRACE_CONTROLLER_PID"
   --controller-start-ticks "$MUT_TRACE_CONTROLLER_START_TICKS"
   --terminal-controller-evidence "$MUT_TRACE_TERMINAL_CONTROLLER_EVIDENCE"

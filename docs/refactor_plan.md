@@ -3903,6 +3903,16 @@ Mutagenicity roadmaps.
 - [ ] Start science only after a matching project-owner authorization receipt
   and a fresh live gate PASS; main-table GPU demand remains preemptive.
 
+## 2026-09-03: Maintenance recovery of the Mut equivalence gate
+
+- [x] Add a read-only completed-A adoption input to the 500-step equivalence
+  runner and bind it with streaming SHA-256 evidence.
+- [x] Thread that input through the dataset-specific worker and launcher.
+- [x] Keep the incomplete B arm non-resumable and restart B from step zero in a
+  fresh output root.
+- [ ] Deploy the tested immutable commit and confirm one live Mut owner on
+  GPU0 before starting any ablation workload.
+
 ## 2026-09-03: Five-backbone BACE proposal-fixed framework
 
 - [x] Add GraphGPS to the molecular backbone registry with explicit local-GINE

@@ -48,6 +48,67 @@ def test_instrumentation_command_binds_exact_semantic_finalizer_root(
     assert worker.SEMANTIC_FINALIZER_COMMIT.startswith("582bc4b")
 
 
+def test_instrumentation_command_adopts_completed_a_arm_without_recompute(
+    tmp_path: Path,
+) -> None:
+    completed_a = tmp_path / "completed-a"
+    command = worker._instrumentation_command(
+        {
+            "python": "/python",
+            "legacy_project_root": "/legacy",
+            "instrumentation_project_root": "/instrumented",
+            "replay": {
+                "upstream_root": "/upstream",
+                "dataset_dir": "/dataset",
+                "gnn_checkpoint": "/gnn.pt",
+                "distance_checkpoint": "/distance.pt",
+                "parent_limit": 1448,
+                "batch_size": 128,
+            },
+        },
+        run_root=tmp_path / "run",
+        output_dir=tmp_path / "gate",
+        semantic_finalizer_project_root=tmp_path / "finalizer",
+        adopted_legacy_root=completed_a,
+    )
+    index = command.index("--adopt-complete-legacy-root")
+    assert command[index + 1] == str(completed_a)
+    assert command.count("--adopt-complete-legacy-root") == 1
+
+
+def test_mut_worker_exposes_completed_a_arm_adoption_flag() -> None:
+    args = worker.build_parser().parse_args(
+        [
+            "run",
+            "--spec",
+            "/spec.json",
+            "--authorization-receipt",
+            "/authorization.json",
+            "--protected-manifest",
+            "/protected.json",
+            "--historical-project-root",
+            "/historical",
+            "--instrumentation-project-root",
+            "/instrumented",
+            "--semantic-finalizer-project-root",
+            "/finalizer",
+            "--output-root",
+            "/output",
+            "--adopt-complete-legacy-root",
+            "/completed-a",
+            "--controller-pid",
+            "123",
+            "--controller-start-ticks",
+            "456",
+            "--successor-guard-script",
+            "run_mut_checkpoint_instrumentation_equivalence.py",
+            "--successor-guard-action",
+            "run-pair",
+        ]
+    )
+    assert args.adopt_complete_legacy_root == Path("/completed-a")
+
+
 def test_worker_revalidates_semantic_finalizer_receipts(
     tmp_path: Path,
 ) -> None:

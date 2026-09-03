@@ -18,6 +18,7 @@ python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "AutoDL-only attached one-shot worker; do not submit this Slurm wrapper."
 echo "The AutoDL one-shot must bind --semantic-finalizer-project-root to exact commit 582bc4b."
+echo "Maintenance recovery must bind --adopt-complete-legacy-root; only B restarts from step zero."
 python scripts/autodl/run_mut_trace_on_adoption_worker.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \

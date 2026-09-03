@@ -99,6 +99,14 @@ def _stable_json_sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _git_head(root: Path) -> str:
     value = subprocess.check_output(
         ["git", "-C", str(root), "rev-parse", "HEAD"], text=True, timeout=30
@@ -924,7 +932,12 @@ def _run_pair(args: argparse.Namespace) -> int:
     if gate_root.exists() or gate_root.is_symlink():
         raise FileExistsError(f"Equivalence gate output must be fresh: {gate_root}")
     run_root.mkdir(parents=True, exist_ok=True)
-    legacy = run_root / "legacy"
+    adopted_legacy = (
+        _absolute(args.adopt_complete_legacy_root)
+        if args.adopt_complete_legacy_root
+        else None
+    )
+    legacy = adopted_legacy or (run_root / "legacy")
     instrumented = run_root / "instrumented"
     mirror = run_root / "instrumented-checkpoint-mirror"
     interruption_proof_path = run_root / "instrumented-interruption-proof.json"
@@ -956,7 +969,54 @@ def _run_pair(args: argparse.Namespace) -> int:
         "MKL_NUM_THREADS": "1",
         "TOKENIZERS_PARALLELISM": "false",
     }
-    if not (legacy / "_RUN_COMPLETE.json").is_file():
+    if adopted_legacy is not None:
+        if not (legacy / "_RUN_COMPLETE.json").is_file():
+            raise ValueError("Adopted legacy arm is not complete")
+        required_legacy_files = (
+            "run_manifest.json",
+            "DIAGNOSTIC_ONLY.json",
+            "counterfactuals.pt",
+            "semantic_lineage_finalizer_receipt.json",
+            "trace/selected_action_trace_manifest.json",
+        )
+        missing = [
+            relative
+            for relative in required_legacy_files
+            if not (legacy / relative).is_file()
+            or (legacy / relative).is_symlink()
+        ]
+        if missing:
+            raise ValueError(
+                "Adopted legacy arm is incomplete: " + ",".join(missing)
+            )
+        adoption = {
+            "schema_version": "mut_complete_legacy_arm_adoption_v1",
+            "status": "PASS",
+            "role": "legacy",
+            "source_root": str(legacy),
+            "source_project_commit": SOURCE_COMMIT,
+            "source_run_complete_sha256": _sha256_path(
+                legacy / "_RUN_COMPLETE.json"
+            ),
+            "source_run_manifest_sha256": _sha256_path(
+                legacy / "run_manifest.json"
+            ),
+            "source_diagnostic_sha256": _sha256_path(
+                legacy / "DIAGNOSTIC_ONLY.json"
+            ),
+            "source_counterfactuals_sha256": _sha256_path(
+                legacy / "counterfactuals.pt"
+            ),
+            "source_trace_manifest_sha256": _sha256_path(
+                legacy / "trace/selected_action_trace_manifest.json"
+            ),
+            "source_arm_recomputed": False,
+            "instrumented_arm_restart_step": 0,
+            "source_root_write_allowed": False,
+        }
+        adoption["receipt_sha256"] = _stable_json_sha256(adoption)
+        _atomic_json(run_root / "legacy_arm_adoption.json", adoption)
+    elif not (legacy / "_RUN_COMPLETE.json").is_file():
         if legacy.exists():
             raise FileExistsError("Incomplete legacy prefix is not resumable")
         _run_child(
@@ -1255,6 +1315,13 @@ def build_parser() -> argparse.ArgumentParser:
     pair.add_argument("--expected-instrumentation-inventory-sha256", required=True)
     pair.add_argument("--run-root", required=True)
     pair.add_argument("--output-dir", required=True)
+    pair.add_argument(
+        "--adopt-complete-legacy-root",
+        help=(
+            "read-only completed legacy/A arm to adopt while restarting only the "
+            "instrumented/B arm from step zero"
+        ),
+    )
     for value in (one, pair):
         value.add_argument("--upstream-root", required=True)
         value.add_argument("--dataset-dir", required=True)

@@ -1721,9 +1721,10 @@ def _instrumentation_command(
     run_root: Path,
     output_dir: Path,
     semantic_finalizer_project_root: Path,
+    adopted_legacy_root: Path | None = None,
 ) -> list[str]:
     replay = dict(spec["replay"])
-    return [
+    command = [
         str(spec["python"]),
         str(PROJECT_ROOT / "scripts/autodl/run_mut_checkpoint_instrumentation_equivalence.py"),
         "--config", "configs/hpc.yaml",
@@ -1746,6 +1747,11 @@ def _instrumentation_command(
         "--batch-size", str(int(replay.get("batch_size", 128))),
         "--semantic-finalizer-project-root", str(semantic_finalizer_project_root),
     ]
+    if adopted_legacy_root is not None:
+        command.extend(
+            ["--adopt-complete-legacy-root", str(adopted_legacy_root)]
+        )
+    return command
 
 
 def _validate_semantic_finalizer_gate(gate: Mapping[str, Any]) -> dict[str, Any]:
@@ -2774,6 +2780,14 @@ def _run(args: argparse.Namespace) -> int:
                                         semantic_finalizer_project_root=(
                                             semantic_finalizer_review
                                         ),
+                                        adopted_legacy_root=(
+                                            _absolute(
+                                                args.adopt_complete_legacy_root,
+                                                label="completed Mut legacy/A arm",
+                                            )
+                                            if args.adopt_complete_legacy_root
+                                            else None
+                                        ),
                                     ),
                                     cwd=PROJECT_ROOT,
                                     environment=environment,
@@ -2998,6 +3012,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--instrumentation-project-root", type=Path, required=True)
     run.add_argument("--semantic-finalizer-project-root", type=Path, required=True)
     run.add_argument("--output-root", type=Path, required=True)
+    run.add_argument("--adopt-complete-legacy-root", type=Path)
     run.add_argument("--controller-pid", type=int, required=True)
     run.add_argument("--controller-start-ticks", type=int, required=True)
     run.add_argument("--terminal-controller-evidence", type=Path)
