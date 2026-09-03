@@ -26,7 +26,9 @@ from src.ablations.launch_gate import (  # noqa: E402
     evaluate_launch_gate,
     load_json_object,
 )
-from src.models.graphgps_backbone import graphgps_runtime_capabilities  # noqa: E402
+from src.models.gatedgcn_plus_backbone import (  # noqa: E402
+    gatedgcn_plus_runtime_capabilities,
+)
 
 
 DEFAULT_ABLATION_CONFIG = (
@@ -78,7 +80,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         # its exact environment flag is evaluated by the dedicated gate below.
         run_requested=bool(args.run_requested),
     )
-    capabilities = graphgps_runtime_capabilities()
+    capabilities = gatedgcn_plus_runtime_capabilities()
     decision = evaluate_five_backbone_launch(
         config=config,
         main_gate=main_gate,
@@ -86,7 +88,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         run_requested=bool(args.run_requested),
         main_ready_gpu_tasks=_optional(args.main_ready_gpu_tasks),
         proposal_manifest=_optional(args.proposal_manifest),
-        gps_runtime_capabilities=capabilities,
+        gatedgcn_plus_runtime_capabilities=capabilities,
     )
     plan = build_five_backbone_plan(config)
     payload = {
@@ -95,7 +97,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "ablation_config": config.source_path,
         "ablation_config_sha256": config.source_sha256,
         "plan_sha256": plan["plan_sha256"],
-        "gps_runtime_capabilities": capabilities,
+        "gatedgcn_plus_runtime_capabilities": capabilities,
         "authorization_source": (
             "USER_DIRECTIVE_ALLOW_GNN_ABLATION_RUN_AFTER_16"
             if args.allow_after_16

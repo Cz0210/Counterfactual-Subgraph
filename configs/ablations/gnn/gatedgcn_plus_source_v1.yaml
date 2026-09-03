@@ -1,0 +1,41 @@
+schema_version: gatedgcn_plus_source_mapping_v1
+status: PASS
+official_repository: https://github.com/LUOyk1999/GNNPlus
+legacy_repository_alias: https://github.com/LUOyk1999/tunedGNN-G
+official_commit: 0e02ad9acc2f1e54b5ad71c051bf5dfb1fcb4f28
+license: MIT
+license_file: LICENSE
+license_sha256: a09fa408be8fa4a095f18b6f241dae744af059771984a22dbfd6afa5d1765fd7
+audited_at: "2026-09-03"
+adapted_hyperparameters_not_official_bace_recipe: true
+relevant_files:
+  - GNNPlus/layer/gatedgcn_layer.py
+  - GNNPlus/network/custom_gnn.py
+  - GNNPlus/encoder/kernel_pos_encoder.py
+  - GNNPlus/encoder/composed_encoders.py
+  - GNNPlus/transform/posenc_stats.py
+  - GNNPlus/config/custom_gnn_config.py
+  - configs/gatedgcn/hiv.yaml
+adaptation:
+  implementation: src/models/gatedgcn_plus_backbone.py
+  graphgym_dependency_removed: true
+  torch_scatter_dependency_removed: true
+  scatter_replacement: torch.index_add
+  node_features: project_categorical_atom_schema
+  edge_features: project_categorical_bond_schema
+  message_equation: sigmoid(Dx_destination+Ex_source+Ce)
+  aggregation: normalized_edge_gated_sum
+  node_and_edge_batch_normalization: true
+  residual_node_and_edge_updates: true
+  residual_feed_forward_network: true
+  positional_encoding: topology_only_random_walk_landing_probability
+  rwpe_walk_length: 16
+  rwpe_dim: 16
+  label_or_cross_split_statistics_used_for_pe: false
+  project_specific_hyperparameters:
+    num_layers: 5
+    hidden_dim: 160
+    dropout: 0.2
+    rwpe_walk_length: 16
+    readout_layers: 2
+moving_main_executed: false

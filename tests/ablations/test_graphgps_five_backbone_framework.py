@@ -43,7 +43,9 @@ MATCH = (
 
 
 def test_gps_backbone_registry_discloses_edge_conditioning() -> None:
-    assert set(available_gnn_backbones()) == set(FIVE_BACKBONES)
+    # GraphGPS remains available for optional studies, but GatedGCN+ replaces
+    # it in the paper's core five-backbone table.
+    assert set(FIVE_BACKBONES).issubset(available_gnn_backbones())
     assert normalize_gnn_backbone("GraphGPS") == "gps"
     spec = get_gnn_backbone_spec("gps")
     assert spec.display_name == "GraphGPS"
@@ -102,7 +104,7 @@ def test_five_backbone_config_and_plan_keep_test_after_all_selectors() -> None:
     assert config.primary_seed == 7
     assert config.optional_seeds == (17, 27)
     assert config.max_concurrent_gpus == 2
-    assert config.graphgps_receipts["selected_hidden_dim"] == 160
+    assert config.gatedgcn_plus_receipts["selected_hidden_dim"] == 160
     plan = build_five_backbone_plan(config)
     assert plan["science_started"] is False
     assert plan["gpu_lock_acquired"] is False
@@ -271,12 +273,12 @@ def _proposal_manifest() -> dict[str, object]:
     }
 
 
-def _gps_runtime() -> dict[str, object]:
+def _gatedgcn_plus_runtime() -> dict[str, object]:
     return {
         "torch_available": True,
-        "torch_geometric_available": True,
-        "gpsconv_available": True,
-        "add_random_walk_pe_available": True,
+        "model_build_pass": True,
+        "rwpe_available": True,
+        "parameter_count_matches_receipt": True,
     }
 
 
@@ -289,7 +291,7 @@ def test_five_backbone_waits_for_16_and_user_run_flags() -> None:
         run_requested=True,
         main_ready_gpu_tasks=None,
         proposal_manifest=_proposal_manifest(),
-        gps_runtime_capabilities=_gps_runtime(),
+        gatedgcn_plus_runtime_capabilities=_gatedgcn_plus_runtime(),
     )
     assert blocked.science_launch_allowed is False
     assert "WAITING_HASH_CLOSED_MAIN_16_OF_16_AND_FINAL_EXPORTS" in blocked.blockers
@@ -300,7 +302,7 @@ def test_five_backbone_waits_for_16_and_user_run_flags() -> None:
         run_requested=False,
         main_ready_gpu_tasks=None,
         proposal_manifest=_proposal_manifest(),
-        gps_runtime_capabilities=_gps_runtime(),
+        gatedgcn_plus_runtime_capabilities=_gatedgcn_plus_runtime(),
     )
     assert no_run.science_launch_allowed is False
     assert "RUN_GNN_ABLATION_NOT_SET" in no_run.blockers
@@ -315,19 +317,19 @@ def test_five_backbone_gate_emits_exact_two_lane_schedule() -> None:
         run_requested=True,
         main_ready_gpu_tasks={"status": "PASS", "ready_waiting_gpu": []},
         proposal_manifest=_proposal_manifest(),
-        gps_runtime_capabilities=_gps_runtime(),
+        gatedgcn_plus_runtime_capabilities=_gatedgcn_plus_runtime(),
     )
     assert decision.science_launch_allowed is True
     assert decision.max_concurrent_gpus == 2
     assert decision.phase1_seed == 7
     assert decision.schedule == {
-        "lane0": ("gine", "gin", "gps"),
+        "lane0": ("gine", "gin", "gatedgcn_plus"),
         "lane1": ("gcn", "gatv2"),
     }
     assert decision.graph_mamba_run_enabled is False
 
 
-def test_main_ready_gpu_task_and_missing_pyg_block_launch() -> None:
+def test_main_ready_gpu_task_and_missing_gated_runtime_block_launch() -> None:
     config = load_five_backbone_config(CONFIG, project_root=PROJECT_ROOT)
     decision = evaluate_five_backbone_launch(
         config=config,
@@ -339,11 +341,14 @@ def test_main_ready_gpu_task_and_missing_pyg_block_launch() -> None:
             "ready_waiting_gpu": [{"task_id": "main-task"}],
         },
         proposal_manifest=_proposal_manifest(),
-        gps_runtime_capabilities={**_gps_runtime(), "gpsconv_available": False},
+        gatedgcn_plus_runtime_capabilities={
+            **_gatedgcn_plus_runtime(),
+            "parameter_count_matches_receipt": False,
+        },
     )
     assert decision.science_launch_allowed is False
     assert "MAIN_TASK_READY_WAITING_GPU" in decision.blockers
-    assert "PYG_GPSCONV_OR_RANDOM_WALK_PE_UNAVAILABLE" in decision.blockers
+    assert "GATEDGCN_PLUS_RUNTIME_OR_PARAMETER_RECEIPT_UNAVAILABLE" in decision.blockers
 
 
 def test_five_backbone_launcher_and_status_have_slurm_pairing() -> None:

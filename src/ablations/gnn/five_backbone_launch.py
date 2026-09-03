@@ -22,7 +22,7 @@ class FiveBackboneLaunchDecision:
     run_requested: bool
     no_main_task_waiting_for_gpu: bool
     proposal_fixed_manifest_pass: bool
-    gps_runtime_pass: bool
+    gatedgcn_plus_runtime_pass: bool
     max_concurrent_gpus: int
     phase1_seed: int
     backbones: tuple[str, ...]
@@ -63,7 +63,7 @@ def evaluate_five_backbone_launch(
     run_requested: bool,
     main_ready_gpu_tasks: Mapping[str, Any] | None,
     proposal_manifest: Mapping[str, Any] | None,
-    gps_runtime_capabilities: Mapping[str, Any],
+    gatedgcn_plus_runtime_capabilities: Mapping[str, Any],
 ) -> FiveBackboneLaunchDecision:
     """Combine the hash-closed main gate with five-backbone runtime gates."""
 
@@ -86,11 +86,11 @@ def evaluate_five_backbone_launch(
             proposal_pass = True
         except ValueError:
             proposal_pass = False
-    gps_pass = bool(
-        gps_runtime_capabilities.get("torch_available")
-        and gps_runtime_capabilities.get("torch_geometric_available")
-        and gps_runtime_capabilities.get("gpsconv_available")
-        and gps_runtime_capabilities.get("add_random_walk_pe_available")
+    gated_pass = bool(
+        gatedgcn_plus_runtime_capabilities.get("torch_available")
+        and gatedgcn_plus_runtime_capabilities.get("model_build_pass")
+        and gatedgcn_plus_runtime_capabilities.get("rwpe_available")
+        and gatedgcn_plus_runtime_capabilities.get("parameter_count_matches_receipt")
     )
     blockers: list[str] = []
     if not main_gate_pass:
@@ -103,8 +103,8 @@ def evaluate_five_backbone_launch(
         blockers.append("MAIN_TASK_READY_WAITING_GPU")
     if not proposal_pass:
         blockers.append("BACE_OURS_PROPOSAL_FIXED_MANIFEST_MISSING_OR_INVALID")
-    if not gps_pass:
-        blockers.append("PYG_GPSCONV_OR_RANDOM_WALK_PE_UNAVAILABLE")
+    if not gated_pass:
+        blockers.append("GATEDGCN_PLUS_RUNTIME_OR_PARAMETER_RECEIPT_UNAVAILABLE")
     if config.backbones != FIVE_BACKBONES or config.max_concurrent_gpus != 2:
         blockers.append("FIVE_BACKBONE_CONFIG_CHANGED")
     if config.graph_mamba_metadata.get("run_enabled") is not False:
@@ -122,12 +122,12 @@ def evaluate_five_backbone_launch(
         run_requested=bool(run_requested),
         no_main_task_waiting_for_gpu=no_main_waiter,
         proposal_fixed_manifest_pass=proposal_pass,
-        gps_runtime_pass=gps_pass,
+        gatedgcn_plus_runtime_pass=gated_pass,
         max_concurrent_gpus=config.max_concurrent_gpus,
         phase1_seed=config.primary_seed,
         backbones=config.backbones,
         schedule={
-            "lane0": ("gine", "gin", "gps"),
+            "lane0": ("gine", "gin", "gatedgcn_plus"),
             "lane1": ("gcn", "gatv2"),
         },
         blockers=tuple(blockers),

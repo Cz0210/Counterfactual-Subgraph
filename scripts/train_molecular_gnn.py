@@ -42,6 +42,10 @@ from src.models.graphgps_backbone import (  # noqa: E402
     GraphGPSMolecularConfig,
     GraphGPSMolecularGNN,
 )
+from src.models.gatedgcn_plus_backbone import (  # noqa: E402
+    GatedGCNPlusConfig,
+    GatedGCNPlusMolecularGNN,
+)
 from src.models.gnn_backbone_registry import normalize_gnn_backbone  # noqa: E402
 from src.models.molecular_gnn import MolecularGNN, MolecularGNNConfig  # noqa: E402
 from src.oracles.gnn_oracle import (  # noqa: E402
@@ -1632,6 +1636,9 @@ def main(argv: list[str] | None = None) -> int:
     if configured_backbone == "gps":
         model_config = GraphGPSMolecularConfig.from_mapping(gnn_values)
         random_walk_pe_length: int | None = model_config.rwpe_walk_length
+    elif configured_backbone == "gatedgcn_plus":
+        model_config = GatedGCNPlusConfig.from_mapping(gnn_values)
+        random_walk_pe_length = model_config.rwpe_walk_length
     else:
         model_config = MolecularGNNConfig.from_mapping(gnn_values)
         random_walk_pe_length = None
@@ -1657,6 +1664,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if model_config.backbone == "gps":
         model = GraphGPSMolecularGNN(
+            model_config,
+            node_cardinalities=schema.node_cardinalities,
+            edge_cardinalities=schema.edge_cardinalities,
+        ).to(device)
+    elif model_config.backbone == "gatedgcn_plus":
+        model = GatedGCNPlusMolecularGNN(
             model_config,
             node_cardinalities=schema.node_cardinalities,
             edge_cardinalities=schema.edge_cardinalities,

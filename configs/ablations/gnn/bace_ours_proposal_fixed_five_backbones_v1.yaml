@@ -27,20 +27,23 @@ backbones:
     role: ablation
     model_config: configs/gnn/gatv2.yaml
     checkpoint_policy: train
-  - name: gps
+  - name: gatedgcn_plus
     role: ablation
-    model_config: configs/gnn/gps.yaml
+    model_config: configs/gnn/gatedgcn_plus.yaml
     checkpoint_policy: train
-graphgps:
+gatedgcn_plus:
+  official_commit: 0e02ad9acc2f1e54b5ad71c051bf5dfb1fcb4f28
+  source_mapping: configs/ablations/gnn/gatedgcn_plus_source_v1.yaml
   rwpe_walk_length: 16
+  rwpe_dim: 16
   rwpe_source: topology_only_preprocessing
-  local_mpnn: gine
-  global_attention: multihead
+  edge_feature_integration: native_residual_edge_gates
+  ffn: true
   num_layers: 5
-  attention_heads: 4
   dropout: 0.2
   pooling: mean
   allowed_hidden_dims:
+    - 64
     - 96
     - 128
     - 160
@@ -49,7 +52,7 @@ graphgps:
   selected_hidden_dim: 160
   max_parameter_difference_fraction: 0.15
   reference_parameter_receipt: configs/ablations/gnn/bace_gine_reference_parameter_receipt_v1.json
-  parameter_match_receipt: configs/ablations/gnn/bace_graphgps_parameter_match_v1.json
+  parameter_match_receipt: configs/ablations/gnn/bace_gatedgcn_plus_parameter_match_v1.json
 proposal_fixed:
   source: bace_ours_main_candidate_pool
   candidate_identity_hash_required: true
@@ -87,7 +90,7 @@ scheduling:
   gpu0:
     - gine
     - gin
-    - gps
+    - gatedgcn_plus
   gpu1:
     - gcn
     - gatv2

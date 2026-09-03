@@ -486,7 +486,7 @@ def _build_model_from_frozen_config(
     *,
     feature_schema: MolecularFeatureSchema,
 ) -> tuple[Any, Any]:
-    """Reconstruct either the legacy message-passing model or GraphGPS."""
+    """Reconstruct a registered legacy or positional molecular backbone."""
 
     if not isinstance(payload, Mapping):
         raise ValueError("Frozen molecular GNN model_config must be a mapping")
@@ -504,6 +504,19 @@ def _build_model_from_frozen_config(
 
         config = GraphGPSMolecularConfig.from_mapping(payload)
         model = GraphGPSMolecularGNN(
+            config,
+            node_cardinalities=feature_schema.node_cardinalities,
+            edge_cardinalities=feature_schema.edge_cardinalities,
+        )
+        return model, config
+    if backbone == "gatedgcn_plus":
+        from src.models.gatedgcn_plus_backbone import (
+            GatedGCNPlusConfig,
+            GatedGCNPlusMolecularGNN,
+        )
+
+        config = GatedGCNPlusConfig.from_mapping(payload)
+        model = GatedGCNPlusMolecularGNN(
             config,
             node_cardinalities=feature_schema.node_cardinalities,
             edge_cardinalities=feature_schema.edge_cardinalities,
@@ -825,7 +838,11 @@ class GNNOracle(BaseOracle):
             yield collate_molecular_graphs(
                 values[start : start + size],
                 edge_feature_dim=self.edge_feature_dim,
-                random_walk_pe_length=(16 if self.backbone == "gps" else None),
+                random_walk_pe_length=(
+                    16
+                    if self.backbone in {"gps", "gatedgcn_plus"}
+                    else None
+                ),
             )
 
     def _known_graph_count(self, graphs: Any) -> int | None:

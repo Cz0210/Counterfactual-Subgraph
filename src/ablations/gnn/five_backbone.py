@@ -19,22 +19,25 @@ from src.models.gnn_backbone_registry import (
     get_gnn_backbone_spec,
     normalize_gnn_backbone,
 )
-from src.models.graphgps_backbone import (
-    GRAPHGPS_ALLOWED_HIDDEN_DIMS,
-    GRAPHGPS_ATTENTION_HEADS,
-    GRAPHGPS_DROPOUT,
-    GRAPHGPS_NUM_LAYERS,
-    GRAPHGPS_PARAMETER_MATCH_MAX_RELATIVE_DIFFERENCE,
-    GRAPHGPS_RWPE_WALK_LENGTH,
-    match_graphgps_hidden_dim,
+from src.models.gatedgcn_plus_backbone import (
+    GATEDGCN_PLUS_ALLOWED_HIDDEN_DIMS,
+    GATEDGCN_PLUS_DROPOUT,
+    GATEDGCN_PLUS_NUM_LAYERS,
+    GATEDGCN_PLUS_OFFICIAL_COMMIT,
+    GATEDGCN_PLUS_OFFICIAL_REPOSITORY,
+    GATEDGCN_PLUS_LICENSE_SHA256,
+    GATEDGCN_PLUS_PARAMETER_MATCH_MAX_RELATIVE_DIFFERENCE,
+    GATEDGCN_PLUS_RWPE_DIM,
+    GATEDGCN_PLUS_RWPE_WALK_LENGTH,
+    match_gatedgcn_plus_hidden_dim,
 )
 
 
-FIVE_BACKBONES = ("gine", "gin", "gcn", "gatv2", "gps")
+FIVE_BACKBONES = ("gine", "gin", "gcn", "gatv2", "gatedgcn_plus")
 FIVE_BACKBONE_CONFIG_SCHEMA = "gnn_five_backbone_proposal_fixed_v1"
 FIVE_BACKBONE_PLAN_SCHEMA = "gnn_five_backbone_plan_v1"
 GINE_REFERENCE_PARAMETERS = 1_432_583
-GPS_SELECTED_HIDDEN_DIM = 160
+GATEDGCN_PLUS_SELECTED_HIDDEN_DIM = 160
 
 
 class FiveBackboneConfigError(ValueError):
@@ -85,19 +88,39 @@ def _load_yaml(path: Path, *, field: str) -> dict[str, Any]:
     return _mapping(payload, field=field)
 
 
-def _load_graphgps_receipts(
-    *, project_root: Path, graphgps: Mapping[str, Any]
+def _load_gatedgcn_plus_receipts(
+    *, project_root: Path, gatedgcn_plus: Mapping[str, Any]
 ) -> dict[str, Any]:
     reference_path = _project_file(
         project_root,
-        graphgps.get("reference_parameter_receipt"),
-        field="graphgps.reference_parameter_receipt",
+        gatedgcn_plus.get("reference_parameter_receipt"),
+        field="gatedgcn_plus.reference_parameter_receipt",
     )
     match_path = _project_file(
         project_root,
-        graphgps.get("parameter_match_receipt"),
-        field="graphgps.parameter_match_receipt",
+        gatedgcn_plus.get("parameter_match_receipt"),
+        field="gatedgcn_plus.parameter_match_receipt",
     )
+    source_path = _project_file(
+        project_root,
+        gatedgcn_plus.get("source_mapping"),
+        field="gatedgcn_plus.source_mapping",
+    )
+    source = _load_yaml(source_path, field="GatedGCN+ source mapping")
+    if (
+        source.get("schema_version") != "gatedgcn_plus_source_mapping_v1"
+        or source.get("status") != "PASS"
+        or source.get("official_repository")
+        != f"https://github.com/{GATEDGCN_PLUS_OFFICIAL_REPOSITORY}"
+        or source.get("official_commit") != GATEDGCN_PLUS_OFFICIAL_COMMIT
+        or source.get("license") != "MIT"
+        or source.get("license_sha256") != GATEDGCN_PLUS_LICENSE_SHA256
+        or source.get("adapted_hyperparameters_not_official_bace_recipe") is not True
+        or source.get("moving_main_executed") is not False
+        or not isinstance(source.get("relevant_files"), list)
+        or not source.get("relevant_files")
+    ):
+        raise FiveBackboneConfigError("GatedGCN+ pinned source mapping changed")
     reference = _load_json(reference_path, field="GINE parameter receipt")
     if (
         reference.get("schema_version")
@@ -113,8 +136,8 @@ def _load_graphgps_receipts(
         or reference.get("test_metrics_loaded_for_parameter_count") is not False
     ):
         raise FiveBackboneConfigError("GINE reference parameter receipt changed")
-    match = _load_json(match_path, field="GraphGPS parameter-match receipt")
-    recomputed = match_graphgps_hidden_dim(reference["total_parameters"])
+    match = _load_json(match_path, field="GatedGCN+ parameter-match receipt")
+    recomputed = match_gatedgcn_plus_hidden_dim(reference["total_parameters"])
     candidate_projection = [
         {
             "hidden_dim": candidate.hidden_dim,
@@ -126,12 +149,18 @@ def _load_graphgps_receipts(
         for candidate in recomputed.candidates
     ]
     if (
-        match.get("schema_version") != "graphgps_parameter_match_v1"
+        match.get("schema_version") != "gatedgcn_plus_parameter_match_v1"
         or match.get("status") != "PASS"
         or match.get("reference_parameter_count") != recomputed.reference_parameter_count
-        or match.get("allowed_hidden_dims") != list(GRAPHGPS_ALLOWED_HIDDEN_DIMS)
+        or match.get("candidate_backbone") != "gatedgcn_plus"
+        or match.get("official_repository")
+        != f"https://github.com/{GATEDGCN_PLUS_OFFICIAL_REPOSITORY}"
+        or match.get("official_commit") != GATEDGCN_PLUS_OFFICIAL_COMMIT
+        or match.get("adapted_hyperparameters_not_official_bace_recipe") is not True
+        or match.get("allowed_hidden_dims")
+        != list(GATEDGCN_PLUS_ALLOWED_HIDDEN_DIMS)
         or match.get("max_relative_difference")
-        != GRAPHGPS_PARAMETER_MATCH_MAX_RELATIVE_DIFFERENCE
+        != GATEDGCN_PLUS_PARAMETER_MATCH_MAX_RELATIVE_DIFFERENCE
         or match.get("selected_hidden_dim") != recomputed.selected_hidden_dim
         or match.get("selected_parameter_count") != recomputed.selected_parameter_count
         or match.get("selected_relative_difference")
@@ -141,13 +170,16 @@ def _load_graphgps_receipts(
         or match.get("test_metrics_loaded") is not False
     ):
         raise FiveBackboneConfigError(
-            "GraphGPS parameter-match receipt differs from the parameter-only recomputation"
+            "GatedGCN+ parameter-match receipt differs from the parameter-only recomputation"
         )
     return {
         "reference_receipt_path": str(reference_path.relative_to(project_root)),
         "reference_receipt_sha256": _sha256_file(reference_path),
         "match_receipt_path": str(match_path.relative_to(project_root)),
         "match_receipt_sha256": _sha256_file(match_path),
+        "source_mapping_path": str(source_path.relative_to(project_root)),
+        "source_mapping_sha256": _sha256_file(source_path),
+        "official_commit": GATEDGCN_PLUS_OFFICIAL_COMMIT,
         "reference_parameters": recomputed.reference_parameter_count,
         "selected_hidden_dim": recomputed.selected_hidden_dim,
         "selected_parameters": recomputed.selected_parameter_count,
@@ -198,7 +230,7 @@ class FiveBackboneConfig:
     max_concurrent_gpus: int
     model_configs: Mapping[str, str]
     model_config_sha256s: Mapping[str, str]
-    graphgps_receipts: Mapping[str, Any]
+    gatedgcn_plus_receipts: Mapping[str, Any]
     graph_mamba_metadata: Mapping[str, Any]
     output_root_template: str
 
@@ -218,7 +250,7 @@ class FiveBackboneConfig:
             "max_concurrent_gpus": self.max_concurrent_gpus,
             "model_configs": dict(self.model_configs),
             "model_config_sha256s": dict(self.model_config_sha256s),
-            "graphgps_receipts": dict(self.graphgps_receipts),
+            "gatedgcn_plus_receipts": dict(self.gatedgcn_plus_receipts),
             "graph_mamba_metadata": dict(self.graph_mamba_metadata),
             "output_root_template": self.output_root_template,
         }
@@ -312,45 +344,52 @@ def load_five_backbone_config(
             raise FiveBackboneConfigError(f"{name} training policy differs from GINE")
         if _mapping(payload.get("calibration"), field=f"{name}.calibration") != reference_calibration:
             raise FiveBackboneConfigError(f"{name} calibration policy differs from GINE")
-        if name == "gps":
-            gps_expected = {
-                "hidden_dim": GPS_SELECTED_HIDDEN_DIM,
-                "rwpe_walk_length": GRAPHGPS_RWPE_WALK_LENGTH,
-                "attention_heads": GRAPHGPS_ATTENTION_HEADS,
-                "local_mpnn": "gine",
-                "global_attention": "multihead",
-                "backend": "pyg_gpsconv",
+        if name == "gatedgcn_plus":
+            gated_expected = {
+                "hidden_dim": GATEDGCN_PLUS_SELECTED_HIDDEN_DIM,
+                "rwpe_walk_length": GATEDGCN_PLUS_RWPE_WALK_LENGTH,
+                "rwpe_dim": GATEDGCN_PLUS_RWPE_DIM,
+                "rwpe_raw_normalization": "batch_norm",
+                "ffn": True,
             }
-            changed_gps = [
-                field for field, expected in gps_expected.items() if gnn.get(field) != expected
+            changed_gated = [
+                field
+                for field, expected in gated_expected.items()
+                if gnn.get(field) != expected
             ]
-            if changed_gps:
+            if changed_gated:
                 raise FiveBackboneConfigError(
-                    f"GPS executable config differs from the frozen match: {changed_gps}"
+                    "GatedGCN+ executable config differs from the frozen match: "
+                    f"{changed_gated}"
                 )
         elif gnn.get("hidden_dim") != 256:
             raise FiveBackboneConfigError(f"{name} hidden_dim differs from reference")
 
-    graphgps = _mapping(raw.get("graphgps"), field="graphgps")
-    frozen_gps = {
-        "rwpe_walk_length": GRAPHGPS_RWPE_WALK_LENGTH,
+    gatedgcn_plus = _mapping(raw.get("gatedgcn_plus"), field="gatedgcn_plus")
+    frozen_gated = {
+        "official_commit": GATEDGCN_PLUS_OFFICIAL_COMMIT,
+        "rwpe_walk_length": GATEDGCN_PLUS_RWPE_WALK_LENGTH,
+        "rwpe_dim": GATEDGCN_PLUS_RWPE_DIM,
         "rwpe_source": "topology_only_preprocessing",
-        "local_mpnn": "gine",
-        "global_attention": "multihead",
-        "num_layers": GRAPHGPS_NUM_LAYERS,
-        "attention_heads": GRAPHGPS_ATTENTION_HEADS,
-        "dropout": GRAPHGPS_DROPOUT,
+        "edge_feature_integration": "native_residual_edge_gates",
+        "ffn": True,
+        "num_layers": GATEDGCN_PLUS_NUM_LAYERS,
+        "dropout": GATEDGCN_PLUS_DROPOUT,
         "pooling": "mean",
-        "allowed_hidden_dims": list(GRAPHGPS_ALLOWED_HIDDEN_DIMS),
-        "selected_hidden_dim": GPS_SELECTED_HIDDEN_DIM,
+        "allowed_hidden_dims": list(GATEDGCN_PLUS_ALLOWED_HIDDEN_DIMS),
+        "selected_hidden_dim": GATEDGCN_PLUS_SELECTED_HIDDEN_DIM,
         "max_parameter_difference_fraction": (
-            GRAPHGPS_PARAMETER_MATCH_MAX_RELATIVE_DIFFERENCE
+            GATEDGCN_PLUS_PARAMETER_MATCH_MAX_RELATIVE_DIFFERENCE
         ),
     }
-    changed = [key for key, value in frozen_gps.items() if graphgps.get(key) != value]
+    changed = [
+        key for key, value in frozen_gated.items() if gatedgcn_plus.get(key) != value
+    ]
     if changed:
-        raise FiveBackboneConfigError(f"frozen GraphGPS config changed: {changed}")
-    gps_receipts = _load_graphgps_receipts(project_root=root, graphgps=graphgps)
+        raise FiveBackboneConfigError(f"frozen GatedGCN+ config changed: {changed}")
+    gated_receipts = _load_gatedgcn_plus_receipts(
+        project_root=root, gatedgcn_plus=gatedgcn_plus
+    )
 
     proposal = _mapping(raw.get("proposal_fixed"), field="proposal_fixed")
     expected_proposal = {
@@ -400,7 +439,7 @@ def load_five_backbone_config(
         raise FiveBackboneConfigError("16/16 launch gate changed")
     scheduling = _mapping(raw.get("scheduling"), field="scheduling")
     if scheduling != {
-        "gpu0": ["gine", "gin", "gps"],
+        "gpu0": ["gine", "gin", "gatedgcn_plus"],
         "gpu1": ["gcn", "gatv2"],
         "phase1_seeds": [7],
         "optional_seed_expansion": [17, 27],
@@ -430,7 +469,7 @@ def load_five_backbone_config(
         max_concurrent_gpus=2,
         model_configs=model_configs,
         model_config_sha256s=model_hashes,
-        graphgps_receipts=gps_receipts,
+        gatedgcn_plus_receipts=gated_receipts,
         graph_mamba_metadata=graph_mamba_metadata,
         output_root_template=root_template,
     )
@@ -530,7 +569,10 @@ def build_five_backbone_plan(config: FiveBackboneConfig) -> dict[str, Any]:
         },
         "cohort_contract": {
             "native": True,
-            "common": "intersection_of_gine_gin_gcn_gatv2_gps_correct_parents",
+            "common": (
+                "intersection_of_gine_gin_gcn_gatv2_"
+                "gatedgcn_plus_correct_parents"
+            ),
             "common_is_primary": True,
         },
         "resource_receipt_required_per_backbone": [

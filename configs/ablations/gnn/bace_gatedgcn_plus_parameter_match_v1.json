@@ -1,0 +1,45 @@
+{
+  "schema_version": "gatedgcn_plus_parameter_match_v1",
+  "status": "PASS",
+  "dataset": "bace",
+  "method": "ours",
+  "reference_backbone": "gine",
+  "candidate_backbone": "gatedgcn_plus",
+  "reference_receipt": "configs/ablations/gnn/bace_gine_reference_parameter_receipt_v1.json",
+  "reference_parameter_count": 1432583,
+  "allowed_hidden_dims": [64, 96, 128, 160, 192, 256],
+  "max_relative_difference": 0.15,
+  "selected_hidden_dim": 160,
+  "selected_parameter_count": 1219138,
+  "selected_relative_difference": 0.14899311244095456,
+  "candidates": [
+    {"hidden_dim": 64, "parameter_count": 203554, "absolute_difference": 1229029, "relative_difference": 0.8579111995605141, "within_tolerance": false},
+    {"hidden_dim": 96, "parameter_count": 447874, "absolute_difference": 984709, "relative_difference": 0.6873661072342754, "within_tolerance": false},
+    {"hidden_dim": 128, "parameter_count": 786402, "absolute_difference": 646181, "relative_difference": 0.45106007819442223, "within_tolerance": false},
+    {"hidden_dim": 160, "parameter_count": 1219138, "absolute_difference": 213445, "relative_difference": 0.14899311244095456, "within_tolerance": true},
+    {"hidden_dim": 192, "parameter_count": 1746082, "absolute_difference": 313499, "relative_difference": 0.21883479002612763, "within_tolerance": false},
+    {"hidden_dim": 256, "parameter_count": 3082594, "absolute_difference": 1650011, "relative_difference": 1.1517734051011355, "within_tolerance": false}
+  ],
+  "parameter_formula": {
+    "schema_version": "gatedgcn_plus_parameter_formula_v1",
+    "expression_bace_binary": "46*hidden_dim^2 + 275*hidden_dim - 2462",
+    "node_embedding_cardinality_sum": 173,
+    "edge_embedding_cardinality_sum": 19,
+    "rwpe_walk_length": 16,
+    "rwpe_dim": 16,
+    "num_layers": 5,
+    "num_classes": 2,
+    "ffn": true
+  },
+  "official_repository": "https://github.com/LUOyk1999/GNNPlus",
+  "legacy_repository_alias": "https://github.com/LUOyk1999/tunedGNN-G",
+  "official_commit": "0e02ad9acc2f1e54b5ad71c051bf5dfb1fcb4f28",
+  "adapted_hyperparameters_not_official_bace_recipe": true,
+  "runtime_verification": {
+    "environment": "local smiles_local CPU dry-run",
+    "all_candidate_counts_equal_actual_loaded_model": true
+  },
+  "selection_inputs": ["reference_parameter_count", "allowed_hidden_dims", "model_architecture"],
+  "validation_metrics_loaded": false,
+  "test_metrics_loaded": false
+}

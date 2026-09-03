@@ -457,6 +457,9 @@ def build_molecular_gnn(
     local_mpnn: str = "gine",
     global_attention: str = "multihead",
     backend: str = "auto",
+    ffn: bool = True,
+    rwpe_dim: int = 16,
+    rwpe_raw_normalization: str = "batch_norm",
 ) -> Any:
     """Build a classifier through the only public backbone-selection API."""
 
@@ -480,6 +483,28 @@ def build_molecular_gnn(
             local_mpnn=local_mpnn,
             global_attention=global_attention,
             backend=backend,
+        )
+
+    if canonical == "gatedgcn_plus":
+        from src.models.gatedgcn_plus_backbone import (
+            build_gatedgcn_plus_molecular_gnn,
+        )
+
+        return build_gatedgcn_plus_molecular_gnn(
+            num_classes=int(num_classes),
+            node_feature_schema=node_feature_schema,
+            edge_feature_schema=edge_feature_schema,
+            num_layers=int(num_layers),
+            hidden_dim=int(hidden_dim),
+            dropout=float(dropout),
+            pooling=pooling,
+            readout_layers=int(readout_layers),
+            normalization=normalization,
+            residual=bool(residual),
+            ffn=bool(ffn),
+            rwpe_walk_length=int(rwpe_walk_length),
+            rwpe_dim=int(rwpe_dim),
+            rwpe_raw_normalization=rwpe_raw_normalization,
         )
 
     config = MolecularGNNConfig(

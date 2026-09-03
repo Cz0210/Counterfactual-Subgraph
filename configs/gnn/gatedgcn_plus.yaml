@@ -1,0 +1,38 @@
+gnn:
+  backbone: gatedgcn_plus
+  num_layers: 5
+  hidden_dim: 160
+  dropout: 0.2
+  pooling: mean
+  readout_layers: 2
+  normalization: batch_norm
+  residual: true
+  ffn: true
+  rwpe_walk_length: 16
+  rwpe_dim: 16
+  rwpe_raw_normalization: batch_norm
+training:
+  optimizer: adamw
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  max_epochs: 200
+  early_stopping_patience: 20
+  batch_size: 64
+  primary_seed: 7
+  selection_metric: macro_f1
+  class_weighted_loss: true
+  weighted_sampler: false
+  gradient_clip_norm: 5.0
+calibration:
+  method: temperature_scaling
+  split: validation
+  max_iter: 100
+parameter_match:
+  reference_receipt: configs/ablations/gnn/bace_gine_reference_parameter_receipt_v1.json
+  match_receipt: configs/ablations/gnn/bace_gatedgcn_plus_parameter_match_v1.json
+  allowed_hidden_dims: "64,96,128,160,192,256"
+  max_relative_difference: 0.15
+  selection_uses_validation: false
+  selection_uses_test: false
+source:
+  mapping: configs/ablations/gnn/gatedgcn_plus_source_v1.yaml

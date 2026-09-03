@@ -180,7 +180,14 @@ def test_validation_selection_uses_macro_f1_only_for_primary_ties() -> None:
 
 @pytest.mark.parametrize("backbone", ["gine", "gin", "gcn", "gatv2"])
 def test_registered_backbones_share_input_and_output_contract(backbone: str) -> None:
-    assert set(available_gnn_backbones()) == {"gine", "gin", "gcn", "gatv2", "gps"}
+    assert set(available_gnn_backbones()) == {
+        "gine",
+        "gin",
+        "gcn",
+        "gatv2",
+        "gps",
+        "gatedgcn_plus",
+    }
     assert "edge" in get_gnn_backbone_spec(backbone).edge_feature_mode
     model, _schema = _model(backbone)
     batch = collate_molecular_graphs([_graph("a", 0), _graph("b", 1)], edge_feature_dim=4)

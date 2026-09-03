@@ -110,7 +110,7 @@ def validate_backbone_feature_schema(
 
     The import is lazy because :mod:`molecular_gnn` itself consumes this
     registry.  Returning the project's typed schema keeps feature handling
-    identical for GINE, GIN, GCN, and GATv2.
+    identical for GINE, GIN, GCN, GATv2, and GatedGCN+.
     """
 
     from src.data.molecular_graph_featurizer import MolecularFeatureSchema
@@ -203,6 +203,15 @@ def build_backbone(
                 "local_mpnn",
                 "global_attention",
                 "backend",
+            }
+        )
+    if canonical == "gatedgcn_plus":
+        allowed.update(
+            {
+                "ffn",
+                "rwpe_walk_length",
+                "rwpe_dim",
+                "rwpe_raw_normalization",
             }
         )
     unknown = sorted(set(values) - allowed)
@@ -614,6 +623,20 @@ register_gnn_backbone(
             "random-walk positional encodings, and global multi-head attention."
         ),
         aliases=("graphgps", "gpsconv"),
+    )
+)
+register_gnn_backbone(
+    GNNBackboneSpec(
+        name="gatedgcn_plus",
+        display_name="GatedGCN+",
+        edge_feature_mode=(
+            "native_residual_edge_gates_plus_ffn_and_topology_only_rwpe"
+        ),
+        description=(
+            "Pinned GNN+ graph-level GatedGCN recipe with learned bond gates, "
+            "node/edge normalization, residual FFN blocks, and topology-only RWPE."
+        ),
+        aliases=("gatedgcnplus", "gatedgcn+", "gatedgcn"),
     )
 )
 register_gnn_backbone(
