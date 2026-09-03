@@ -17499,3 +17499,24 @@ has exited, no writable descriptor remains, and the independent replay passes.
   matrix permission is introduced.  Refinement is bounded to four additional
   levels.  Full-array submission still requires exact parity plus wall-time
   and path-local storage admission.
+
+# 2026-09-03: Bound T12 first-seen embeddings by scored observations
+
+- Motivation: the fresh 510-step T12 reference run failed before step one
+  after persisting exactly 511 embeddings.  The implementation incorrectly
+  capped an append-only history of every distinct scored graph with
+  `max_full_live_records=min(candidate_capacity, M+1)`, which only bounds the
+  simultaneously resident official graph map.  Transient neighbour graphs
+  are scored and then evicted from that live map, but their first observed
+  bytes remain required for exact replay.
+- Decision: cap the first-seen embedding record count with the existing finite
+  `max_scored_observations=1+M*sample_size` bound.  Keep the live and transient
+  bridge-memory bounds unchanged, and retain the independent per-record and
+  actual-byte disk caps.  The failed root has no committed checkpoint and is
+  never resumed; any retry uses a new UUID and fresh output root.
+- Impact: the 510-step reference count bound is 5,100,001 instead of 511,
+  without changing the walk, candidate capacity, RNG, model, split, or
+  checkpoint schema.  This repair does not assert that the later 20k route
+  fits the current first-embedding disk cap; full production still requires
+  measured storage admission and must fail closed rather than truncate the
+  scientific history.

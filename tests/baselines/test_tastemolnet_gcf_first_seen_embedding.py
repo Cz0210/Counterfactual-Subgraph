@@ -142,6 +142,53 @@ def test_first_embedding_committed_raw_tamper_fails_reload(tmp_path):
         _history(tmp_path, snapshot=snapshot, index_name="tamper-index")
 
 
+def test_first_embedding_count_uses_scored_bound_not_live_cache_bounds(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(production, "PINNED_TOTAL_STEPS", 2)
+    monkeypatch.setattr(production, "PINNED_CHECKPOINT_CURSORS", (1, 2))
+    monkeypatch.setattr(production, "PINNED_SAMPLE_SIZE", 3)
+    monkeypatch.setattr(production, "PINNED_CANDIDATE_CAPACITY", 100)
+    bounds = production.T12ProductionBounds.pinned(parent_count=2)
+    assert bounds.max_full_live_records == 3
+    assert bounds.max_transient_full_records == 6
+    assert bounds.max_scored_observations == 7
+
+    store = production.T12FirstSeenEmbeddingStore(
+        root=(tmp_path / "first-embeddings").resolve(),
+        bounds=bounds,
+        contract_sha256="e" * 64,
+        attempt_id=str(uuid.uuid4()),
+        generation_token="f" * 64,
+        model_sha256=MODEL_SHA,
+        feature_schema_sha256=FEATURE_SCHEMA_SHA,
+    )
+    row = np.asarray([1.0, 2.0], dtype=np.float32)
+    try:
+        for index in range(bounds.max_scored_observations):
+            store.append(
+                graph_identity_sha256=hashlib.sha256(
+                    f"graph-{index}".encode("ascii")
+                ).hexdigest(),
+                dtype=row.dtype.str,
+                shape=row.shape,
+                raw_bytes=row.tobytes(order="C"),
+            )
+        assert store.record_count == 7
+        with pytest.raises(
+            production.TasteT12ProductionStateError,
+            match="scored observation bound",
+        ):
+            store.append(
+                graph_identity_sha256=hashlib.sha256(b"graph-overflow").hexdigest(),
+                dtype=row.dtype.str,
+                shape=row.shape,
+                raw_bytes=row.tobytes(order="C"),
+            )
+    finally:
+        store.close()
+
+
 def test_evicted_reloaded_bridge_uses_first_raw_bytes_not_gpu_recomputation(
     monkeypatch, tmp_path
 ):

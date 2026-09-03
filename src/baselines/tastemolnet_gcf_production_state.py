@@ -666,9 +666,9 @@ class T12FirstSeenEmbeddingStore:
             + len(body)
             + 32
         )
-        if sequence > self.bounds.max_full_live_records:
+        if sequence > self.bounds.max_scored_observations:
             raise TasteT12ProductionStateError(
-                "T12 first embedding count exceeded the 20k graph bound"
+                "T12 first embedding count exceeded the scored observation bound"
             )
         if projected > self.bounds.max_history_bytes:
             raise TasteT12ProductionStateError(
