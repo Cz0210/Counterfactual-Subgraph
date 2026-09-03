@@ -1,6 +1,6 @@
 # AutoDL main-16 and HPC T8 continuation handoff
 
-Snapshot time: 2026-09-03 23:30 CST. This file records a live operational
+Snapshot time: 2026-09-04 00:05 CST. This file records a live operational
 snapshot, not a substitute for the status commands below.
 
 ## Authority and code identities
@@ -57,12 +57,34 @@ It did not acknowledge the new pointer after two native poll intervals, so
 the hot-bind result is `HOT_BIND_UNSUPPORTED_FALLBACK_REQUIRED`. It was not
 restarted.
 
-The one-shot binder invocation was rejected by the Codex automatic approval
-review before remote execution. A subsequent read-only status check confirms
-all three owner PID files remain absent, all three terminals remain absent,
-and none of the three fresh science roots exists. Therefore no duplicate or
-partial launch occurred. A new explicit user approval is required before
-running the already reviewed one-shot binder command.
+After explicit user approval, the sealed one-shot binder completed with status
+`PASS`. All three outcomes report `duplicate_started=false`, no failures, and
+`OWNER_CONFIRMED`. The healthy existing sidecar was not restarted.
+
+- Mut owner PID 161697 (start ticks 18437020) launched reviewed worker PID
+  161700. Its heartbeat phase is `RUNNING_REVIEWED_MUT_ADOPTION_WORKER`; fresh
+  trace-on/off arms are bound and neither pair-store nor DBSCAN is recomputed.
+- T14 owner PID 161704 (start ticks 18437224) completed its no-deserialization
+  audit and published `BLOCKED_LOW_MEMORY_CANARY_UNAVAILABLE`.  No science PID
+  or GPU lock was created; Torch and SQLite/WAL were not opened.
+- The original T12 owner PID 161714 reached terminal `FAILED_AT_250` with zero
+  completed steps.  Its child had persisted exactly 511 uncommitted
+  first-seen embeddings before a resource-bound bug rejected record 512.  The
+  failed root is retained read-only and has no resumable checkpoint.
+
+T12 has a fresh repaired successor.  Commit
+`1ad12b560d3ad8533f47e3bc3fd1e6ee315a895a` changes only the first-seen count
+gate from the live-cache bound to the existing cumulative scored-observation
+bound; 11 focused tests pass locally and on AutoDL.  The sealed successor spec
+is
+`/autodl-fs/data/counterfactual-subgraph-runtime/control/main-ready-task-specs/20260903T160132Z-t12-firstseenfix/t12-reference-500-firstseen-c6fdce9f.json`
+(spec SHA
+`9882a3ada23ad79fea0d727c534fdb3d181221ac174274cbdabf1834059873b5`).
+Its owner PID is 162844 (start ticks 18577652) and science PID 162847 is
+running on GPU3 from the fresh root
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/gcfexplainer/t12-production/reference-500-firstseen-c6fdce9f-7e01-4481-b97e-372ae851a0f8`.
+The child remained healthy beyond the old failure point and held 748 MiB VRAM
+in the final startup snapshot.
 
 ## Main-line blockers
 
@@ -70,12 +92,17 @@ running the already reviewed one-shot binder command.
 
 The old mixed-condition comparison is not adopted. The new spec uses fresh
 A/B arms under one algorithm contract and separately checks resume parity.
-It is ready to launch on the main-table GPU path, but currently has no owner
-because the binder was blocked before execution.
+The reviewed adoption worker is now running under the new owner. GPU0 was
+still at zero VRAM in the immediate post-launch snapshot, so its current
+phase is CPU/preflight or internal GPU admission; do not infer a failure from
+that single early snapshot and do not create another owner.
 
 ### TasteMolNet/ComRecGC (T14)
 
-The sealed step-12,500 checkpoint is intact. Its historical safe restore
+The sealed step-12,500 checkpoint is intact.  The completed metadata/archive
+audit confirms its hashes without opening the payload, SQLite, or Torch.  It
+is a PyTorch zip with a 41,863,324,712-byte monolithic `data.pkl`, so safe
+streaming restore is not proven.  Its historical safe restore
 contract requires 549,943,914,496 bytes of cgroup headroom, greater than the
 entire 515,396,075,520-byte cgroup limit. The owner therefore performs only a
 metadata/archive audit and must emit the typed low-memory blocker without
@@ -86,10 +113,15 @@ proven or the job moves to a cgroup with sufficient measured headroom.
 ### TasteMolNet/GCFExplainer (T12)
 
 The previous 417-step root has no durable checkpoint and cannot be resumed.
-The fresh reference task is ready for GPU3 and will commit steps 250, 500,
-and reload 501--510. The measured historical speed is roughly 218 seconds per
-step, so reference step 250 is approximately 15 hours and step 500 is
-approximately 30 hours. Do not poll it continuously after launch.
+The first fresh reference exposed a non-scientific capacity bug: the
+510-step diagnostic profile reduced `max_full_live_records` to 511, and that
+live-cache bound was incorrectly reused for cumulative first-seen embeddings.
+The exact theoretical count bound is instead
+`1 + 510 * 10,000 = 5,100,001`; the independent actual-byte disk cap remains
+in force.  The repaired fresh successor is running on GPU3 and will commit
+steps 250, 500, and reload 501--510. The measured historical speed is roughly
+218 seconds per step, so reference step 250 is approximately 15 hours and
+step 500 is approximately 30 hours. Do not poll it continuously after launch.
 
 ### TasteMolNet/GlobalGCE (T8/T13)
 
@@ -113,9 +145,15 @@ The repaired continuation job 2536032 completed successfully and submitted:
 The selected canonical child remains
 `r0000-prefix_subtree-1fbb8ef323886a1532f9`. Job 2536033 uses the pinned
 science commit, 8 CPUs, 64 GiB, one hour, node-local scratch, and no GPU.
-At this handoff it is running; 2536034 is dependency-pending. Leave this chain
-under Slurm ownership. The follow-up alone may perform wall-time/storage
-admission and submit the full array/merge/package chain.
+At the 23:43 CST read-only snapshot, 2536033 is still running on `cpui048`
+with 8 CPUs and 64 GiB (14:20 elapsed of a one-hour limit). Every recorded
+minute has positive progress: 144,587 pattern lines, 154,818 event lines,
+about 398.6 MiB process-tree RSS, about 288.8 MiB node-local scratch, and only
+15,805 persistent bytes. It requests no GPU and has no matrix-write ability.
+There is not yet a terminal/PASS/FAILED artifact. Job 2536034 remains
+dependency-pending on `afterany:2536033` and will automatically run the next
+admission/submission decision. Leave this chain under Slurm ownership and do
+not poll it continuously.
 
 ## Status commands
 
@@ -143,10 +181,20 @@ ssh -o BatchMode=yes autodl-a800 '
 cd /root/autodl-tmp/worktrees/main-ready-task-spec-binding-5945f127
 /root/miniconda3/envs/smiles_pip118/bin/python -I -B \
   scripts/autodl/status_main_ready_task_specs.py \
-  --config configs/hpc.yaml \
   --task-spec /autodl-fs/data/counterfactual-subgraph-runtime/control/main-ready-task-specs/20260903T143321Z/mut-clean-equivalence-e37666ec.json \
   --task-spec /autodl-fs/data/counterfactual-subgraph-runtime/control/main-ready-task-specs/20260903T143321Z/t14-checkpoint12500-audit-adf09ad9.json \
   --task-spec /autodl-fs/data/counterfactual-subgraph-runtime/control/main-ready-task-specs/20260903T143321Z/t12-reference-500-8de744db.json
+'
+```
+
+Repaired T12 successor:
+
+```bash
+ssh -o BatchMode=yes autodl-a800 '
+cd /root/autodl-tmp/worktrees/t12-firstseen-bound-1ad12b56
+/root/miniconda3/envs/smiles_pip118/bin/python -I -B \
+  scripts/autodl/status_main_ready_task_specs.py \
+  --task-spec /autodl-fs/data/counterfactual-subgraph-runtime/control/main-ready-task-specs/20260903T160132Z-t12-firstseenfix/t12-reference-500-firstseen-c6fdce9f.json
 '
 ```
 
