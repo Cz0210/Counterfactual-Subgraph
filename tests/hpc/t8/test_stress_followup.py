@@ -168,6 +168,45 @@ def test_self_hashed_receipt_is_atomic_and_has_detached_sha(tmp_path: Path) -> N
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_programmatic_slurm_logs_are_precreated_absolute_and_cwd_independent(
+    tmp_path: Path,
+) -> None:
+    """Regression for jobs 2535893/2535894 failing before script startup.
+
+    Their wrappers used ``logs/%x-%j`` while the immutable worktree had no
+    ``logs`` directory.  Programmatic submissions must override that fallback
+    with a directory which already exists before ``sbatch`` is called.
+    """
+
+    log_root = (tmp_path / "continuation" / "control" / "slurm-logs").resolve()
+    assert not log_root.exists()
+    scalar = followup._slurm_log_options(
+        log_root, stem="refinement-canary"
+    )
+    array = followup._slurm_log_options(
+        log_root, stem="full-array", array=True
+    )
+
+    assert log_root.is_dir()
+    assert scalar == [
+        "--output",
+        str(log_root / "refinement-canary-%j.out"),
+        "--error",
+        str(log_root / "refinement-canary-%j.err"),
+    ]
+    assert array == [
+        "--output",
+        str(log_root / "full-array-%A_%a.out"),
+        "--error",
+        str(log_root / "full-array-%A_%a.err"),
+    ]
+    assert all(
+        Path(value).is_absolute()
+        for options in (scalar, array)
+        for value in options[1::2]
+    )
+
+
 def test_execution_input_hash_calls_are_keyword_safe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -392,6 +431,15 @@ def test_slurm_followup_is_cpu_only_scratch_bound_and_separates_chain() -> None:
     assert "refinement-canary" in shell
     assert 'bash "$T8_SCIENCE_WORKTREE/scripts/hpc/t8/slurm_canary.sh"' in shell
     assert "run_stress_followup.py monitor" in shell
+    assert python.count("*_slurm_log_options(") == 5
+    for stem in (
+        "refinement-canary",
+        "refinement-followup",
+        "full-array",
+        "full-merge",
+        "result-package",
+    ):
+        assert f'stem="{stem}"' in python
     subprocess.run(["bash", "-n", str(HPC / "slurm_stress_followup.sh")], check=True)
 
 

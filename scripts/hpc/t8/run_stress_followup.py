@@ -485,6 +485,31 @@ def submit_sbatch(command: Sequence[str]) -> str:
     return job_id
 
 
+def _slurm_log_options(
+    root: Path, *, stem: str, array: bool = False
+) -> list[str]:
+    """Create one durable absolute log directory before submitting a job.
+
+    The wrapper's relative ``logs/%x-%j`` directives are only a local fallback.
+    Every programmatic submission overrides them so Slurm never depends on the
+    worktree containing a pre-created ``logs`` directory.
+    """
+
+    if not root.is_absolute() or re.fullmatch(r"[a-z0-9][a-z0-9-]*", stem) is None:
+        raise GlobalGCEHPCExactError("Slurm log root/stem is invalid")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not root.is_dir() or root.is_symlink() or root.resolve(strict=True) != root:
+        raise GlobalGCEHPCExactError("Slurm log root is not one physical directory")
+    _fsync_directory(root.parent)
+    token = "%A_%a" if array else "%j"
+    return [
+        "--output",
+        str(root / f"{stem}-{token}.out"),
+        "--error",
+        str(root / f"{stem}-{token}.err"),
+    ]
+
+
 def _process_tree_rss_bytes(root_pid: int, proc_root: Path = Path("/proc")) -> int | None:
     if not (proc_root / str(root_pid)).exists():
         return None
@@ -1006,6 +1031,9 @@ def _handle_timeout(
     canary_command = [
         "sbatch", "--parsable", "--partition", args.partition,
         "--cpus-per-task", "8", "--mem", "64G", "--time", "01:00:00",
+        *_slurm_log_options(
+            decision_root / "slurm-logs", stem="refinement-canary"
+        ),
         "--export", _sbatch_export(canary_env),
         str(args.controller_worktree / "scripts/hpc/t8/slurm_stress_followup.sh"),
         "refinement-canary",
@@ -1031,6 +1059,9 @@ def _handle_timeout(
     followup_command = [
         "sbatch", "--parsable", "--partition", args.partition,
         "--dependency", f"afterany:{canary_job_id}",
+        *_slurm_log_options(
+            decision_root / "slurm-logs", stem="refinement-followup"
+        ),
         "--export", _sbatch_export(_controller_export(args)),
         str(args.controller_worktree / "scripts/hpc/t8/slurm_stress_followup.sh"),
         "followup",
@@ -1211,6 +1242,9 @@ def _handle_pass(
         "--cpus-per-task", str(args.array_cpus), "--mem", args.array_memory,
         "--time", f"{args.full_walltime_hours}:00:00",
         "--array", f"0-{args.full_shard_count - 1}%{min(args.array_concurrency, args.full_shard_count)}",
+        *_slurm_log_options(
+            decision_root / "slurm-logs", stem="full-array", array=True
+        ),
         "--export", _sbatch_export(chain_env),
         str(args.science_worktree / "scripts/hpc/t8/slurm_array.sh"),
     ]
@@ -1246,6 +1280,7 @@ def _handle_pass(
         "sbatch", "--parsable", "--partition", args.partition,
         "--dependency", f"afterok:{array_job_id}",
         "--cpus-per-task", "4", "--mem", "64G", "--time", "04:00:00",
+        *_slurm_log_options(decision_root / "slurm-logs", stem="full-merge"),
         "--export", _sbatch_export(merge_env),
         str(args.controller_worktree / "scripts/hpc/t8/slurm_stress_followup.sh"), "merge",
     ]
@@ -1280,6 +1315,9 @@ def _handle_pass(
         "sbatch", "--parsable", "--partition", args.partition,
         "--dependency", f"afterok:{merge_job_id}",
         "--cpus-per-task", "1", "--mem", "8G", "--time", "01:00:00",
+        *_slurm_log_options(
+            decision_root / "slurm-logs", stem="result-package"
+        ),
         "--export", _sbatch_export(package_env),
         str(args.controller_worktree / "scripts/hpc/t8/slurm_stress_followup.sh"), "package",
     ]
