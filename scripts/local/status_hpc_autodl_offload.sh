@@ -12,7 +12,9 @@ LOCAL_REPO_ROOT=${LOCAL_REPO_ROOT:-$DEFAULT_REPO_ROOT}
 LOCAL_TRANSFER_ROOT=${LOCAL_TRANSFER_ROOT:-/Volumes/DireRaven/counterfactual-hpc-offload}
 HPC_ALIAS=${HPC_ALIAS:-tongji-hpc}
 AUTODL_ALIAS=${AUTODL_ALIAS:-autodl-a800}
-HPC_CONTROL_SOCKET=${HPC_CONTROL_SOCKET:-/tmp/tongji-codex.sock}
+# Leave ControlPath resolution to the user's SSH configuration by default.
+# A retired fixed ControlPath must never be assumed implicitly.
+HPC_CONTROL_SOCKET=${HPC_CONTROL_SOCKET:-}
 HPC_RUNTIME_ROOT=${HPC_RUNTIME_ROOT:-/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime}
 HPC_EXECUTION_WORKTREE=${HPC_EXECUTION_WORKTREE:-/share/home/u20526/czx/worktrees/t8-hpc-481475c3}
 HPC_T8_CURRENT_POINTER=${HPC_T8_CURRENT_POINTER:-$HPC_RUNTIME_ROOT/control/t8-production-chain/current.json}

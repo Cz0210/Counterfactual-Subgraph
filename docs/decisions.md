@@ -1,5 +1,72 @@
 # Decisions Log
 
+## [2026-09-04] Use a dataset-specific disk-backed Route C for Taste ComRecGC
+
+### Decision
+
+Replace the failed TasteMolNet T14 Route A/B execution paths with one fresh,
+dataset-specific Route C.  Route C keeps the official ComRecGC transition and
+selection semantics but stores graphs append-only, keeps candidate frequency
+and metadata in memory-mapped arrays, records compact transitions, and
+reconstructs PyG graphs lazily.  Its checkpoints seal the SQLite index, graph
+and candidate byte prefixes, mmap state, RNG state, lineage, and complete
+scientific parity projection.  Recovery may truncate only an uncommitted
+suffix after validating the promoted boundary; the old 12,500-step root is
+read-only and is never loaded.
+
+The first 500 low-memory steps must match a same-contract reference, a
+0-to-250 checkpoint/reload run must match through step 510, and the promotable
+root may continue only after all discrete fields agree.  Generation is
+train-only and terminates as `GENERATION_PASS_PENDING_POSTPROCESS`, not as a
+method-cell PASS.  A sealed continuation then opens calibration/test, reuses
+the existing independent postprocess verifier, and writes the pre-bound
+locator for the one live publisher queue that claims TasteMolNet/ComRecGC.
+
+### Impact
+
+T14 can run within the available cgroup and disk budget without changing the
+scientific contract or repeating its first 500 promoted steps.  Same-root
+owner recovery, process-tree RSS accounting, the existing train-side
+convergence gate, the 20k/25k resource policy, and the single matrix authority
+remain fail closed.  A generation PASS cannot be mistaken for a published
+main-table result.
+
+---
+
+## [2026-09-04] Keep Mut A/B routing diagnostic until its next independent gate
+
+### Decision
+
+Treat trace mode as the single intentional A/B treatment difference while
+requiring every scientific-contract field to remain equal.  A failed verifier
+is classified as scientific divergence only when both observer logs validate,
+the semantic field coverage is complete, and the first differing step is in
+1--500; other failures enter engineering repair.
+
+The post-A/B watcher is not an adoption or launch authority.  Exact bounded
+parity advances only to the remaining historical-adoption gates.  A causal
+divergence advances only to a separately authorized fresh Route B.  That
+authorization is bound to one task ID, attempt UUID, output root, execution
+commit, physical GPU0 UUID, and the exact decision bytes, so it cannot be
+replayed for another 50k run.  Route B is an exact 50,000-step run; no
+unimplemented convergence early-stop claim is recorded.
+
+Both new GPU owners acquire the project-wide physical-UUID lock in addition to
+their task lease, verify the live index-to-UUID mapping, and require GPU0 to
+have no compute process before creating a runtime root.  Editing these tracked
+sources does not alter an already-running owner copied to a temporary immutable
+path or its already imported Python modules; its safety continues to depend on
+the lease and child command it started with.
+
+### Impact
+
+Endpoint parity cannot prematurely authorize adoption, and a malformed or
+incomplete A/B failure cannot prematurely authorize Route B.  Future launches
+are mutually exclusive with project GPU0 owners and preserve a single-use,
+hash-closed provenance chain.
+
+---
+
 ## [2026-09-04] Replace the failed Mut owner with one throttled fresh successor
 
 ### Decision
@@ -17614,12 +17681,24 @@ has exited, no writable descriptor remains, and the independent replay passes.
   history and first-seen raw-byte prefixes, copy those committed prefixes into
   a fresh single-writer root, and retain the reference scientific checkpoint
   identity.  GPU UUID/index are treated only as a separately recorded
-  transport difference and earn no equivalence claim by themselves.  The arm
-  must match the complete checkpoint at 500 and again after independent reload
-  through steps 501--510.  Its launcher is blocked on an immutable Mut GPU0
-  release receipt and never signals the reference.
+  transport difference and earn no equivalence claim by themselves.  The
+  sealed spec binds the Mut GPU0 release-receipt path, and the owner itself
+  validates that physical receipt before taking the lease or creating its
+  science root.  Endpoint checkpoint equality at 500/510 is diagnostic only:
+  the current schema cannot prove every required per-step action, logit, and
+  NeuroSED distance, so it cannot authorize promotion.
 - Impact: GPU0 can be used after Mut releases it without restarting GPU3 or
-  recomputing steps 1--250.  Full/postprocess/publisher paths are prebound, but
-  remain blocked until exact parity.  Diagnostic 510-step resource bounds are
-  not silently relabeled as 20k bounds; a reviewed prefix-reframing promotion
-  is still required before 500 -> 10k execution.
+  recomputing steps 1--250.  Full/postprocess/publisher paths are recorded only
+  as non-executable descriptors with
+  `BLOCKED_PENDING_PRODUCTION_IDENTITY_REFRAME`.  A per-step evidence path and
+  reviewed diagnostic-to-production identity/bounds reframe are still required
+  before 500 -> 10k execution.
+
+The current runner/state schema was inspected before attempting that
+promotion.  Its compact journal does not retain ordered per-step action,
+pre-softmax-logit, or normalized-distance evidence, so the already-running
+reference cannot supply the requested ledger retroactively.  Its binary
+history/embedding headers and transition headers also authenticate the active
+510-step bounds/contract.  Consequently, the implementation emits a
+machine-readable `BLOCKED_UNSUPPORTED_BY_CURRENT_STATE_SCHEMA` receipt rather
+than relabeling diagnostic evidence or creating a non-runnable full owner.

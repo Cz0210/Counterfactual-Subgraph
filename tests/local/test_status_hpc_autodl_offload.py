@@ -153,7 +153,8 @@ def test_status_script_has_no_mutating_or_secret_dump_commands() -> None:
 def test_status_defaults_to_pinned_science_worktree_and_dynamic_pointer() -> None:
     source = STATUS_SCRIPT.read_text(encoding="utf-8")
     assert "/share/home/u20526/czx/worktrees/t8-hpc-481475c3" in source
-    assert "$HPC_RUNTIME_ROOT/control/t8-hpc-current-chain/current.json" in source
+    assert "$HPC_RUNTIME_ROOT/control/t8-production-chain/current.json" in source
+    assert "/tmp/tongji-codex.sock" not in source
     assert "hpc_t8_chain_dependency" in source
     assert "hpc_t8_chain_slurm" in source
     for stale_job_id in ("2535373", "2536033", "2536034", "2536148", "2536149"):

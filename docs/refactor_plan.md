@@ -3992,6 +3992,22 @@ Mutagenicity roadmaps.
 - [ ] Deploy the tested immutable commit and confirm one live Mut owner on
   GPU0 before starting any ablation workload.
 
+## 2026-09-04: Mut first-divergence and post-A/B route closure
+
+- [x] Compare identical scientific contracts modulo the one intentional
+  trace-mode treatment and keep mixed-commit/mixed-resume evidence diagnostic.
+- [x] Require validated observer logs and complete semantic fields before a
+  step-1--500 mismatch is classified as scientific divergence.
+- [x] Make both post-A/B outcomes non-executable: parity proceeds to remaining
+  adoption gates, while divergence proceeds to separate Route-B authorization.
+- [x] Bind Route-B authorization to one attempt/output/commit/GPU0 UUID and
+  remove the unimplemented convergence-stop claim from the exact-50k owner.
+- [x] Acquire the project-wide GPU UUID lock, validate live GPU0 identity and
+  idleness, and retain the separate task lease in both bounded-A/B and Route-B
+  owners.
+- [ ] Deploy only from a new immutable commit; do not replace or mutate any
+  already-running owner copied to a temporary immutable path.
+
 ## 2026-09-03: Five-backbone BACE proposal-fixed framework
 
 - [x] Add GraphGPS to the molecular backbone registry with explicit local-GINE
@@ -4105,12 +4121,25 @@ Mutagenicity roadmaps.
 - [x] Add a fresh-root Taste GCF accelerated owner/spec that copies the sealed
   step-250 history, first-seen and transition prefixes without restarting or
   signaling the healthy reference process.
-- [x] Add exact step-500 and reload-through-510 parity gates, a Mut-release
-  guarded GPU0 launcher, and blocked full/postprocess/publisher prebindings.
-- [ ] Add and review the diagnostic-to-20k prefix-reframing promotion before
-  dispatching the prebound 500 -> 10k full owner.
-- [ ] Validate and promote the dataset-specific disk-backed Taste ComRecGC
-  Route C canary, then continue from its committed step-500 state.
+- [x] Add endpoint step-500/reload-through-510 comparisons, bind the Mut GPU0
+  release receipt into the sealed spec, and enforce it inside the owner.
+- [ ] Add a per-step 251--500 evidence path for action/logit/NeuroSED parity
+  and review the diagnostic-to-20k prefix-reframing promotion before creating
+  or dispatching a 500 -> 10k full owner.
+- [x] Emit a machine-readable fail-closed promotion blocker enumerating the
+  missing shadow-reference ledger, authenticated journal re-emission,
+  scientific/RNG projection check, promotion-seed planner support, and the
+  2500-through-20000 verifier changes; do not start a GPU task from endpoint
+  equality alone.
+- [x] Implement the dataset-specific disk-backed Taste ComRecGC Route C with
+  append-only graph/candidate storage, mmap metadata, compact transitions,
+  full scientific parity projection, suffix-safe checkpoint recovery, and
+  descendant-tree RSS accounting.
+- [x] Add a same-root owner and sealed generation-to-postprocess continuation;
+  generation remains train-only and the existing T14 publisher is the only
+  matrix writer.
+- [ ] Validate and promote the Route C 500/510 remote parity canary, then
+  continue from its committed step-500 state through the 20k/25k policy.
 - [ ] Import the completed HPC T8 bundle into a fresh AutoDL root, finish the
   four missing cells, and render the frozen-protocol paper artifacts.
 - [x] Freeze the final Figure 3/4/Table 2 contract, preserve valid-zero
