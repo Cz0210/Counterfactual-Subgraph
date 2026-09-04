@@ -8,7 +8,7 @@ opening validation, calibration, or test payloads during generation.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import gc
 import hashlib
@@ -1443,8 +1443,32 @@ def _write_checkpoint(
     )
 
     completed = int(loop_state.completed_step)
-    step_parameters = replace(parameters, checkpoint_step=completed)
-    step_parameters.validate()
+    # ``parameters`` is the frozen scientific configuration.  Route C's
+    # checkpoint cadence is a transport/recovery contract and deliberately
+    # includes early boundaries at 50 and 100, which are not legal legacy
+    # full-run checkpoint values.  Validate the two contracts independently;
+    # replacing ``checkpoint_step`` with the live cursor incorrectly reported
+    # a scientific-parameter drift at the first Route C checkpoint.
+    parameters.validate()
+    if handles.route_c_updater is None:
+        checkpoint_steps = range(
+            CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL
+        )
+    else:
+        from src.baselines.tastemolnet_t14_route_c_fresh import (
+            EARLY_CHECKPOINT_STEPS,
+            PROMOTABLE_CHECKPOINT_STEP,
+        )
+
+        checkpoint_steps = (
+            *EARLY_CHECKPOINT_STEPS,
+            PROMOTABLE_CHECKPOINT_STEP,
+            *range(CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL),
+        )
+    if completed not in checkpoint_steps:
+        raise TasteComRecGCFullError(
+            f"Taste T14 checkpoint step is off cadence: {completed}"
+        )
     validation = save_generation_checkpoint(
         checkpoint_root,
         completed_step=completed,

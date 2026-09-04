@@ -1,5 +1,26 @@
 # Decisions Log
 
+## [2026-09-05] Validate T14 Route C checkpoint cadence independently
+
+### Decision
+
+Keep the frozen Taste ComRecGC scientific parameters unchanged and validate
+checkpoint transport cadence separately.  The Route C recovery contract admits
+its registered early boundaries at steps 50, 100, and 250 plus its production
+boundaries; the legacy full route continues to admit only 2,500-step
+boundaries.  Writing a Route C checkpoint must not replace the frozen
+`checkpoint_step` parameter with the current cursor before parameter
+validation.
+
+### Impact
+
+The fresh Route C retry can seal its first step-50 checkpoint without falsely
+reporting scientific parameter drift.  Invalid legacy step-50 checkpoints still
+fail closed, and generation, RNG, candidate, lineage, oracle, split, and
+resource-cap semantics are unchanged.
+
+---
+
 ## [2026-09-05] Bind the T12 checkpoint-250 fork by scientific source content
 
 ### Decision

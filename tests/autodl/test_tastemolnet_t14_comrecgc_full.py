@@ -35,6 +35,7 @@ from src.baselines.comrecgc.generation_checkpoint import (
     save_generation_checkpoint,
     scientific_command_sha256,
 )
+from src.baselines.comrecgc import generation_checkpoint
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -419,6 +420,91 @@ def test_resource_cap_uses_20k_then_one_25k_fallback() -> None:
     assert fallback_checkpoint_targets(22_500) == (25_000,)
     with pytest.raises(TasteComRecGCFullError, match="cursor"):
         fallback_checkpoint_targets(17_500)
+
+
+def test_route_c_step50_checkpoint_does_not_masquerade_as_parameter_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _save_generation_checkpoint(
+        checkpoint_root: Path, **kwargs: object
+    ) -> SimpleNamespace:
+        captured.update(kwargs)
+        checkpoint_dir = checkpoint_root / "step-000000000050"
+        checkpoint_dir.mkdir(parents=True)
+        return SimpleNamespace(
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_digest="a" * 64,
+        )
+
+    monkeypatch.setattr(
+        generation_checkpoint,
+        "save_generation_checkpoint",
+        _save_generation_checkpoint,
+    )
+    monkeypatch.setattr(
+        t14,
+        "_checkpoint_algorithm_state",
+        lambda **_kwargs: {"schema_version": t14.ROUTE_C_RUNTIME_STATE_SCHEMA},
+    )
+    connection = object()
+    handles = SimpleNamespace(
+        route_c_updater=object(),
+        live_graph_state=SimpleNamespace(
+            store=SimpleNamespace(checkpoint_connection=connection)
+        ),
+    )
+    parameters = t14.TasteComRecGCFullParameters(
+        source_pool=1,
+        source_count=1,
+    )
+
+    evidence = t14._write_checkpoint(
+        module=object(),
+        bridge=object(),
+        loop_state=SimpleNamespace(completed_step=50),
+        parameters=parameters,
+        checkpoint_root=tmp_path / "checkpoints",
+        handles=handles,
+        provenance={"identity": "frozen"},
+        scientific_argv=("tastemolnet_t14_comrecgc_full_v1",),
+        command_sha256="b" * 64,
+    )
+
+    assert parameters.checkpoint_step == t14.CHECK_INTERVAL
+    assert captured["completed_step"] == 50
+    assert captured["sqlite_source"] is connection
+    assert evidence["checkpoint_step"] == 50
+    assert evidence["next_step"] == 51
+
+
+def test_legacy_step50_checkpoint_remains_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        t14,
+        "_checkpoint_algorithm_state",
+        lambda **_kwargs: {"schema_version": t14.RUNTIME_STATE_SCHEMA},
+    )
+    handles = SimpleNamespace(route_c_updater=None)
+    parameters = t14.TasteComRecGCFullParameters(
+        source_pool=1,
+        source_count=1,
+    )
+
+    with pytest.raises(TasteComRecGCFullError, match="off cadence: 50"):
+        t14._write_checkpoint(
+            module=object(),
+            bridge=object(),
+            loop_state=SimpleNamespace(completed_step=50),
+            parameters=parameters,
+            checkpoint_root=tmp_path / "checkpoints",
+            handles=handles,
+            provenance={"identity": "frozen"},
+            scientific_argv=("tastemolnet_t14_comrecgc_full_v1",),
+            command_sha256="b" * 64,
+        )
 
 
 def test_full_bridge_rejects_candidate_lineage_outside_frozen_train_cohort() -> None:
