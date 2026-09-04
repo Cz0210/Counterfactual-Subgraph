@@ -674,6 +674,18 @@ def validate_globalgce_gspan_adoption_proof(
     """Deeply revalidate source bytes, immutable SQLite, and selected payload."""
 
     path = _resolve_file(proof_path, description="adoption proof")
+    candidate = _json_object(path, description="adoption proof")
+    # TasteMolNet's HPC route has a different immutable source: a stream-
+    # verified exact bundle rather than the historical BACE SQLite.  Dispatch
+    # by the sealed schema while retaining this function as the one official
+    # training integration point.
+    from src.baselines.globalgce_hpc_autodl_import import (
+        MINING_ADOPTION_SCHEMA,
+        validate_hpc_mining_adoption_proof,
+    )
+
+    if candidate.get("schema_version") == MINING_ADOPTION_SCHEMA:
+        return validate_hpc_mining_adoption_proof(path)
     root = path.parent
     if not (root / "PASS").is_file() or not (root / "ADOPTION_PASS").is_file():
         raise GlobalGCEMiningAdoptionError("Adoption proof lacks PASS-last markers")
@@ -805,6 +817,15 @@ def load_adopted_globalgce_top_k(
     observed = validate_globalgce_gspan_adoption_proof(proof_path)
     if validated_identity is not None and dict(validated_identity) != observed:
         raise GlobalGCEMiningAdoptionError("Prevalidated adoption identity changed")
+    from src.baselines.globalgce_hpc_autodl_import import (
+        MINING_ADOPTION_SCHEMA,
+        load_hpc_adopted_top_k,
+    )
+
+    if observed.get("schema_version") == MINING_ADOPTION_SCHEMA:
+        return load_hpc_adopted_top_k(
+            proof_path, validated_identity=observed
+        )
     selected_path = Path(proof_path).expanduser().resolve(strict=True).parent / "selected_top20.pkl"
     payload = pickle.loads(selected_path.read_bytes())
     return list(payload["graphs"]), [int(value) for value in payload["supports"]]

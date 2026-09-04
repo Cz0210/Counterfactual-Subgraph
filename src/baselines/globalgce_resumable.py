@@ -1739,9 +1739,14 @@ def _get_fs_expanded_data_from_adoption(
         validated_identity=identity,
     )
     expected_top_k = int(model.fsg.topk)
-    if len(graphs) != expected_top_k or len(supports) != expected_top_k:
+    selected_count = int(identity.get("selected_count", identity.get("top_k", -1)))
+    if (
+        len(graphs) != selected_count
+        or len(supports) != selected_count
+        or not 0 < selected_count <= expected_top_k
+    ):
         raise ValueError(
-            "GlobalGCE adopted mining payload does not contain configured top-k"
+            "GlobalGCE adopted mining payload has an invalid selected count"
         )
     normalized_supports = [int(value) for value in supports]
     if normalized_supports != sorted(normalized_supports, reverse=True):

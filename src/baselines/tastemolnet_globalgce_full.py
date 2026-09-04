@@ -240,9 +240,12 @@ class InputAuthority:
     threshold: ThresholdContract
     train_count: int
     train_label_counts: dict[str, int]
+    upstream_kind: str = "managed_t8_pass"
+    gspan_adoption_proof: Path | None = None
+    gspan_adoption_sha256: str | None = None
 
     def resume_identity(self, config: TasteGlobalGCEFullConfig) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": "tastemolnet_t13_resume_identity_v1",
             "dataset": DATASET,
             "method": METHOD,
@@ -261,6 +264,14 @@ class InputAuthority:
             "t8_oracle_checkpoint_hash": self.t8_oracle_checkpoint_hash,
             "threshold_config_hash": self.threshold.config_hash,
         }
+        if self.gspan_adoption_sha256 is not None:
+            result.update(
+                {
+                    "upstream_kind": self.upstream_kind,
+                    "gspan_adoption_sha256": self.gspan_adoption_sha256,
+                }
+            )
+        return result
 
 
 def utc_now() -> str:
@@ -534,8 +545,9 @@ def load_input_authority(
     official_root: str | Path,
     molclr_root: str | Path,
     molclr_checkpoint: str | Path,
-    t8_pass_root: str | Path,
+    t8_pass_root: str | Path | None,
     threshold_contract: str | Path,
+    hpc_import_root: str | Path | None = None,
 ) -> InputAuthority:
     """Validate all pre-test identities without opening the held-out test file."""
 
@@ -550,7 +562,36 @@ def load_input_authority(
     molclr_ckpt = Path(molclr_checkpoint).expanduser().resolve(strict=True)
     threshold_path = Path(threshold_contract).expanduser().resolve(strict=True)
     threshold = load_threshold_contract(threshold_path)
-    t8_root, t8_evidence = validate_t8_pass(t8_pass_root)
+    if (hpc_import_root is None) == (t8_pass_root is None):
+        raise TasteGlobalGCEFullError(
+            "T13 requires exactly one managed-T8 or HPC-import authority"
+        )
+    gspan_adoption_proof: Path | None = None
+    gspan_adoption_sha256: str | None = None
+    upstream_kind = "managed_t8_pass"
+    if hpc_import_root is None:
+        t8_root, t8_evidence = validate_t8_pass(t8_pass_root)
+    else:
+        from src.baselines.globalgce_hpc_autodl_import import (
+            validate_hpc_mining_adoption_proof,
+            validate_imported_hpc_result,
+        )
+
+        t8_root = Path(hpc_import_root).expanduser().resolve(strict=True)
+        imported = validate_imported_hpc_result(t8_root)
+        gspan_adoption_proof = (t8_root / "adoption_proof.json").resolve(strict=True)
+        adoption = validate_hpc_mining_adoption_proof(gspan_adoption_proof)
+        if (
+            imported.get("official_globalgce_commit") != OFFICIAL_GLOBALGCE_COMMIT
+            or adoption.get("selected_count", 0) <= 0
+            or adoption.get("selected_count", 0) > K_MAX
+        ):
+            raise TasteGlobalGCEFullError(
+                "HPC import is not a nonempty exact T13 mining adoption"
+            )
+        t8_evidence = {"adoption_sha256": adoption["adoption_sha256"]}
+        gspan_adoption_sha256 = adoption["adoption_sha256"]
+        upstream_kind = "hpc_exact_gspan_import"
     validate_official_globalgce_root(official)
     payloads = _checkpoint_payloads(checkpoint)
     card = json.loads(payloads["model_card.json"].decode("utf-8"))
@@ -566,13 +607,18 @@ def load_input_authority(
     checkpoint_id = sha256_bytes(payloads["model.pt"])
     if card.get("checkpoint_id") != checkpoint_id:
         raise TasteGlobalGCEFullError("frozen GINE checkpoint_id differs from model.pt")
-    t8_oracle_checkpoint_hash = str(
-        t8_evidence["typed_verification"]["oracle_checkpoint_hash"]
-    )
-    if t8_oracle_checkpoint_hash != checkpoint_id:
-        raise TasteGlobalGCEFullError(
-            "managed-v2 T8 and T13 do not use the same frozen GINE"
+    if upstream_kind == "managed_t8_pass":
+        t8_oracle_checkpoint_hash = str(
+            t8_evidence["typed_verification"]["oracle_checkpoint_hash"]
         )
+        if t8_oracle_checkpoint_hash != checkpoint_id:
+            raise TasteGlobalGCEFullError(
+                "managed-v2 T8 and T13 do not use the same frozen GINE"
+            )
+    else:
+        # HPC intentionally performed no GINE inference.  AutoDL binds the
+        # adopted train-only mining to this frozen GINE before any RHS work.
+        t8_oracle_checkpoint_hash = checkpoint_id
     split = json.loads(payloads["split_manifest.json"].decode("utf-8"))
     files = split.get("files")
     roles = split.get("roles")
@@ -637,6 +683,9 @@ def load_input_authority(
         threshold=threshold,
         train_count=train_count,
         train_label_counts={str(key): int(value) for key, value in train_counts.items()},
+        upstream_kind=upstream_kind,
+        gspan_adoption_proof=gspan_adoption_proof,
+        gspan_adoption_sha256=gspan_adoption_sha256,
     )
 
 
@@ -857,6 +906,7 @@ def _validate_completed_branch(
     expected_checkpoint_id: str,
     expected_parent_cohort_sha256: str,
     expected_parent_count: int,
+    expected_gspan_adoption: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     manifest = read_json(_branch_manifest(branch_root))
     files = manifest.get("files")
@@ -943,7 +993,12 @@ def _validate_completed_branch(
         or training_config.get("gspan_max_in_memory_candidates")
         != config.gspan_max_in_memory_candidates
         or training_config.get("gspan_exact_top_k_pruning") is not False
-        or training_config.get("gspan_adoption_identity") is not None
+        or training_config.get("gspan_adoption_identity")
+        != (dict(expected_gspan_adoption) if expected_gspan_adoption is not None else None)
+        or training.get("gspan_adoption_identity")
+        != (dict(expected_gspan_adoption) if expected_gspan_adoption is not None else None)
+        or manifest.get("gspan_adoption_identity")
+        != (dict(expected_gspan_adoption) if expected_gspan_adoption is not None else None)
         or training.get("gspan_exact_top_k_pruning") is not False
         or training.get("trained_once") is not True
         or training.get("rule_selection_performed_once") is not True
@@ -976,11 +1031,21 @@ def run_native_branch(
     config: TasteGlobalGCEFullConfig,
     expected_checkpoint_id: str,
     expected_parent_cohort_sha256: str,
+    gspan_adoption_proof: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run/resume one real official branch and close its rule artifacts."""
 
     if target_label not in TARGET_BRANCHES or generator.target_label != target_label:
         raise TasteGlobalGCEFullError("T13 branch target identity changed")
+    expected_gspan_adoption: dict[str, Any] | None = None
+    if gspan_adoption_proof is not None:
+        from src.baselines.globalgce_mining_adoption import (
+            validate_globalgce_gspan_adoption_proof,
+        )
+
+        expected_gspan_adoption = validate_globalgce_gspan_adoption_proof(
+            gspan_adoption_proof
+        )
     branch_root.mkdir(parents=True, exist_ok=True)
     existing = _branch_manifest(branch_root)
     if existing.is_file():
@@ -991,6 +1056,7 @@ def run_native_branch(
             expected_checkpoint_id=expected_checkpoint_id,
             expected_parent_cohort_sha256=expected_parent_cohort_sha256,
             expected_parent_count=len(parents),
+            expected_gspan_adoption=expected_gspan_adoption,
         )
     result: NativeGenerationResult = generator.generate(
         parents,
@@ -1008,7 +1074,7 @@ def run_native_branch(
         gspan_flush_every=config.gspan_flush_every,
         gspan_max_in_memory_candidates=config.gspan_max_in_memory_candidates,
         gspan_exact_top_k_pruning=False,
-        gspan_adoption_proof=None,
+        gspan_adoption_proof=gspan_adoption_proof,
         start_parent_offset=0,
         on_training_ready=None,
         on_chunk=None,
@@ -1087,6 +1153,11 @@ def run_native_branch(
         ]["identity_sha256"],
         "official_epoch_checkpoint_resume_enabled": True,
         "trained_model_resumed": bool(summary.get("trained_model_resumed")),
+        "gspan_adoption_identity": (
+            dict(expected_gspan_adoption)
+            if expected_gspan_adoption is not None
+            else None
+        ),
         "files": files,
         "file_inventory_sha256": stable_sha256(files),
         "completed_at": utc_now(),
@@ -1099,6 +1170,7 @@ def run_native_branch(
         expected_checkpoint_id=expected_checkpoint_id,
         expected_parent_cohort_sha256=expected_parent_cohort_sha256,
         expected_parent_count=len(parents),
+        expected_gspan_adoption=expected_gspan_adoption,
     )
 
 
@@ -1978,7 +2050,7 @@ def _common_manifest(
     output: Path,
     test_parent_ids_sha256: str,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "dataset": DATASET,
         "method": METHOD,
         "stage": STAGE,
@@ -2004,6 +2076,18 @@ def _common_manifest(
         "threshold_fitted_on_test": False,
         "raw_output_root": str(output),
     }
+    if authority.gspan_adoption_sha256 is not None:
+        result.update(
+            {
+                "upstream_kind": authority.upstream_kind,
+                "gspan_adoption_sha256": authority.gspan_adoption_sha256,
+                "hpc_mining_only": True,
+                "rhs_chemistry_run_on_autodl": True,
+                "gine_inference_run_on_autodl": True,
+                "calibration_test_run_on_autodl": True,
+            }
+        )
+    return result
 
 
 def run_t13_full(
@@ -2089,6 +2173,7 @@ def run_t13_full(
             config=config,
             expected_checkpoint_id=authority.checkpoint_id,
             expected_parent_cohort_sha256=train_parent_cohort_sha256,
+            gspan_adoption_proof=authority.gspan_adoption_proof,
         )
         if not branch_already_complete:
             write_checkpoint(
@@ -2443,6 +2528,18 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
         target: output / "raw" / f"target_{target}" for target in TARGET_BRANCHES
     }
     validated_branches: dict[int, dict[str, Any]] = {}
+    expected_gspan_adoption: dict[str, Any] | None = None
+    if run_manifest.get("gspan_adoption_sha256") is not None:
+        from src.baselines.globalgce_hpc_autodl_import import (
+            validate_hpc_mining_adoption_proof,
+        )
+
+        adoption_path = Path(str(run_manifest["t8_pass_root"])) / "adoption_proof.json"
+        expected_gspan_adoption = validate_hpc_mining_adoption_proof(adoption_path)
+        if expected_gspan_adoption.get("adoption_sha256") != run_manifest.get(
+            "gspan_adoption_sha256"
+        ):
+            raise TasteGlobalGCEFullError("T13 HPC mining adoption changed")
     for target in TARGET_BRANCHES:
         validated_branches[target] = _validate_completed_branch(
             branch_root=branch_roots[target],
@@ -2453,6 +2550,7 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
                 run_manifest["train_parent_cohort_sha256"]
             ),
             expected_parent_count=int(run_manifest["train_parent_count"]),
+            expected_gspan_adoption=expected_gspan_adoption,
         )
         if sha256_file(_branch_manifest(branch_roots[target])) != (
             run_manifest.get("branch_manifests") or {}
