@@ -28,7 +28,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-archive-sha256", required=True)
     parser.add_argument("--expected-packaging-commit", required=True)
     parser.add_argument("--expected-scientific-input-sha256", required=True)
-    parser.add_argument("--expected-partition-manifest-sha256", required=True)
+    parser.add_argument(
+        "--expected-partition-manifest-file-sha256",
+        required=True,
+        help="SHA-256 of the exact partition_manifest.json file bytes",
+    )
+    parser.add_argument(
+        "--expected-partition-manifest-self-sha256",
+        required=True,
+        help="Canonical self-hash stored in partition_manifest.json",
+    )
     return parser
 
 
@@ -43,7 +52,12 @@ def main() -> int:
         "archive_sha256": args.expected_archive_sha256,
         "packaging_commit": args.expected_packaging_commit,
         "scientific_input_sha256": args.expected_scientific_input_sha256,
-        "partition_manifest_sha256": args.expected_partition_manifest_sha256,
+        "partition_manifest_file_sha256": (
+            args.expected_partition_manifest_file_sha256
+        ),
+        "partition_manifest_sha256": (
+            args.expected_partition_manifest_self_sha256
+        ),
     }
     mismatches = {
         key: {"expected": value, "observed": report.get(key)}

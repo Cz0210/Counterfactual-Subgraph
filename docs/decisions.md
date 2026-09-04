@@ -77,7 +77,13 @@ existing exact merge and its full verifier entirely below Slurm node-local
 scratch.  Create one deterministic gzip/PAX archive there with normalized tar
 metadata and gzip mtime zero.  It contains the complete unmodified event,
 pattern, and rejection JSONL streams, their merge manifest, stable top-K,
-partition/parity evidence, and compact run evidence.
+partition/parity evidence, a compact self-hashed inventory of all source
+shard/partition result hashes, and compact run evidence.  The import verifier
+binds the partition file SHA separately from its canonical self-hash,
+independently reconstructs stable top-K, and proves that rejection JSONL is the
+byte-exact non-accepted projection of event JSONL.  Persistent publication is
+allowed only below the canonical `/share/home/u20526/czx` root after resolving
+symlinks and `..`; `/ssdfs` remains prohibited.
 
 Only after a streaming round-trip verification, calculate admission from the
 exact compressed byte count and path-specific free space, preserving the

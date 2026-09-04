@@ -30,8 +30,10 @@ from src.baselines import globalgce_hpc_exact as exact
 STORAGE_SAFE_BUNDLE_SCHEMA = "globalgce_hpc_storage_safe_bundle_v1"
 STORAGE_SAFE_RECEIPT_SCHEMA = "globalgce_hpc_storage_safe_receipt_v1"
 STORAGE_SAFE_VERIFICATION_SCHEMA = "globalgce_hpc_storage_safe_verification_v1"
+SOURCE_SHARD_INVENTORY_SCHEMA = "globalgce_hpc_source_shard_inventory_v1"
 DEFAULT_MIN_RESERVE_BYTES = 2 * 1024**3
 DEFAULT_RESERVE_FRACTION = 0.20
+DEFAULT_PERSISTENT_ALLOWED_ROOTS = (Path("/share/home/u20526/czx"),)
 MANIFEST_PUBLICATION_ALLOWANCE_BYTES = 1024 * 1024
 STREAM_CHUNK_BYTES = 1024 * 1024
 MAX_RESULT_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -48,6 +50,7 @@ REQUIRED_ARCHIVE_MEMBERS = frozenset(
         "merge/stable_top_k.json",
         "parity_receipt.json",
         "partition_manifest.json",
+        "source_shard_inventory.json",
     }
 )
 
@@ -132,13 +135,31 @@ def filesystem_free_bytes(path: Path) -> int:
     return int(stats.f_bavail) * int(stats.f_frsize)
 
 
-def validate_storage_path_policy(path: str | Path, *, label: str) -> Path:
-    """Reject the explicitly forbidden `/ssdfs` tree before any write."""
+def validate_storage_path_policy(
+    path: str | Path,
+    *,
+    label: str,
+    allowed_roots: Sequence[str | Path] | None = None,
+) -> Path:
+    """Resolve a path, reject ``/ssdfs``, and optionally enforce an allowlist.
+
+    The allowlist comparison happens after resolving existing symlinks and
+    ``..`` components.  A textual shell prefix is therefore never the storage
+    authority.
+    """
 
     value = Path(path).expanduser().resolve(strict=False)
     forbidden = Path("/ssdfs")
     if value == forbidden or forbidden in value.parents:
         raise StorageSafeT8Error(f"{label} may not use /ssdfs")
+    if allowed_roots is not None:
+        roots = tuple(
+            Path(root).expanduser().resolve(strict=False) for root in allowed_roots
+        )
+        if not roots:
+            raise StorageSafeT8Error(f"{label} storage allowlist is empty")
+        if not any(value == root or root in value.parents for root in roots):
+            raise StorageSafeT8Error(f"{label} escapes its canonical allowed roots")
     return value
 
 
@@ -203,6 +224,249 @@ def _partition_payload_inventory(
         "pattern_count": pattern_count,
         "rejection_count": rejection_count,
     }
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_source_shard_inventory(
+    payload: Mapping[str, Any],
+    *,
+    manifest: Mapping[str, Any],
+    merge_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    inventory = dict(payload)
+    _require_self_hash(
+        inventory,
+        "source_shard_inventory_sha256",
+        "source shard inventory",
+    )
+    shards = inventory.get("shards")
+    partitions = inventory.get("partitions")
+    if (
+        inventory.get("schema_version") != SOURCE_SHARD_INVENTORY_SCHEMA
+        or inventory.get("status") != "PASS"
+        or inventory.get("manifest_sha256") != manifest.get("manifest_sha256")
+        or inventory.get("scientific_input_sha256")
+        != manifest.get("scientific_input_sha256")
+        or inventory.get("merge_result_sha256")
+        != merge_manifest.get("result_sha256")
+        or inventory.get("shard_count") != manifest.get("shard_count")
+        or inventory.get("partition_count") != len(manifest.get("partitions", ()))
+        or inventory.get("matrix_write_enabled") is not False
+        or inventory.get("source_payloads_revalidated_before_merge") is not True
+        or type(shards) is not list
+        or type(partitions) is not list
+        or any(type(row) is not dict for row in shards)
+        or any(type(row) is not dict for row in partitions)
+    ):
+        raise StorageSafeT8Error("source shard inventory contract is invalid")
+
+    ordered_units = sorted(
+        manifest["partitions"], key=lambda row: int(row["global_partition_order"])
+    )
+    expected_partition_ids = [str(unit["partition_id"]) for unit in ordered_units]
+    if [row.get("partition_id") for row in partitions] != expected_partition_ids:
+        raise StorageSafeT8Error("source shard partition coverage/order is incomplete")
+    expected_shard_indices = list(range(int(manifest["shard_count"])))
+    if [row.get("shard_index") for row in shards] != expected_shard_indices:
+        raise StorageSafeT8Error("source shard coverage/order is incomplete")
+
+    partitions_by_id = {
+        str(row.get("partition_id")): row for row in partitions if type(row) is dict
+    }
+    if len(partitions_by_id) != len(partitions):
+        raise StorageSafeT8Error("source shard partition IDs are not unique")
+    for unit, row in zip(ordered_units, partitions, strict=True):
+        if (
+            type(row) is not dict
+            or row.get("global_partition_order")
+            != unit.get("global_partition_order")
+            or row.get("shard_index") != unit.get("shard_index")
+            or not _is_sha256(row.get("result_sha256"))
+            or not _is_sha256(row.get("manifest_file_sha256"))
+            or not _is_sha256(row.get("events_sha256"))
+            or not _is_sha256(row.get("patterns_sha256"))
+            or any(
+                type(row.get(field)) is not int or int(row[field]) < 0
+                for field in ("event_count", "pattern_count", "rejection_count")
+            )
+        ):
+            raise StorageSafeT8Error("source partition identity is malformed")
+
+    for shard_index, shard in zip(expected_shard_indices, shards, strict=True):
+        expected_units = [
+            unit for unit in ordered_units if int(unit["shard_index"]) == shard_index
+        ]
+        expected_ids = [str(unit["partition_id"]) for unit in expected_units]
+        shard_partitions = [partitions_by_id[partition_id] for partition_id in expected_ids]
+        if (
+            type(shard) is not dict
+            or shard.get("partition_ids") != expected_ids
+            or shard.get("partition_result_sha256s")
+            != [row["result_sha256"] for row in shard_partitions]
+            or not _is_sha256(shard.get("result_sha256"))
+            or not _is_sha256(shard.get("manifest_file_sha256"))
+            or any(
+                shard.get(field) != sum(int(row[field]) for row in shard_partitions)
+                for field in ("event_count", "pattern_count", "rejection_count")
+            )
+        ):
+            raise StorageSafeT8Error("source shard identity is malformed")
+
+    totals = {
+        field: sum(int(row[field]) for row in partitions)
+        for field in ("event_count", "pattern_count", "rejection_count")
+    }
+    if (
+        any(inventory.get(field) != value for field, value in totals.items())
+        or totals["event_count"] != merge_manifest.get("event_count")
+        or totals["pattern_count"] != merge_manifest.get("pattern_count")
+        or totals["rejection_count"] != merge_manifest.get("rejection_count")
+    ):
+        raise StorageSafeT8Error("source shard totals do not bind the exact merge")
+    return inventory
+
+
+def write_source_shard_inventory(
+    *,
+    partition_manifest: str | Path,
+    shards_root: str | Path,
+    merge_manifest: Mapping[str, Any],
+    output: str | Path,
+) -> dict[str, Any]:
+    """Seal compact identities for source shards already validated by merge.
+
+    ``merge_exact_shards`` reopens every shard and partition payload before it
+    writes the supplied merge manifest.  This writer then reopens all small
+    self-hashed result manifests, without rereading tens of GiB of JSONL, and
+    binds their payload hashes and counts to that validated merge.
+    """
+
+    manifest = exact.validate_partition_manifest(partition_manifest)
+    root = Path(shards_root).expanduser().resolve(strict=True)
+    destination = Path(output).expanduser().absolute()
+    if destination.exists():
+        raise StorageSafeT8Error("source shard inventory output must be fresh")
+    ordered_units = sorted(
+        manifest["partitions"], key=lambda row: int(row["global_partition_order"])
+    )
+    partition_rows: list[dict[str, Any]] = []
+    shard_rows: list[dict[str, Any]] = []
+    for shard_index in range(int(manifest["shard_count"])):
+        shard_root = root / f"shard-{shard_index:03d}"
+        shard_path = shard_root / "shard_manifest.json"
+        shard = _read_json(shard_path)
+        _require_self_hash(shard, "result_sha256", "source shard manifest")
+        expected_units = [
+            unit for unit in ordered_units if int(unit["shard_index"]) == shard_index
+        ]
+        expected_ids = [str(unit["partition_id"]) for unit in expected_units]
+        if (
+            shard.get("schema_version") != exact.SHARD_RESULT_SCHEMA
+            or shard.get("status") != "PASS"
+            or shard.get("manifest_sha256") != manifest["manifest_sha256"]
+            or shard.get("scientific_input_sha256")
+            != manifest["scientific_input_sha256"]
+            or shard.get("provenance_sha256")
+            != manifest["provenance"]["provenance_sha256"]
+            or shard.get("target_branches")
+            != manifest["provenance"]["target_branches"]
+            or shard.get("shard_index") != shard_index
+            or shard.get("partition_ids") != expected_ids
+            or shard.get("scientific_search_pruned") is not False
+            or shard.get("approximation_used") is not False
+            or shard.get("matrix_write_enabled") is not False
+        ):
+            raise StorageSafeT8Error("source shard manifest contract changed")
+        current_partitions: list[dict[str, Any]] = []
+        for unit in expected_units:
+            partition_root = shard_root / "partitions" / str(unit["partition_id"])
+            result_path = partition_root / "partition_manifest.json"
+            result = _read_json(result_path)
+            _require_self_hash(result, "result_sha256", "source partition manifest")
+            if (
+                result.get("schema_version") != exact.UNIT_RESULT_SCHEMA
+                or result.get("status") != "PASS"
+                or result.get("partition") != dict(unit)
+                or result.get("manifest_sha256") != manifest["manifest_sha256"]
+                or result.get("scientific_input_sha256")
+                != manifest["scientific_input_sha256"]
+                or result.get("provenance_sha256")
+                != manifest["provenance"]["provenance_sha256"]
+                or result.get("target_branches")
+                != manifest["provenance"]["target_branches"]
+                or result.get("matrix_write_enabled") is not False
+                or not _is_sha256(result.get("events_sha256"))
+                or not _is_sha256(result.get("patterns_sha256"))
+            ):
+                raise StorageSafeT8Error("source partition manifest contract changed")
+            row = {
+                "partition_id": str(unit["partition_id"]),
+                "global_partition_order": int(unit["global_partition_order"]),
+                "shard_index": shard_index,
+                "result_sha256": result["result_sha256"],
+                "manifest_file_sha256": exact.sha256_file(result_path),
+                "events_sha256": result["events_sha256"],
+                "patterns_sha256": result["patterns_sha256"],
+                "event_count": int(result["event_count"]),
+                "pattern_count": int(result["pattern_count"]),
+                "rejection_count": int(result["rejection_count"]),
+            }
+            current_partitions.append(row)
+            partition_rows.append(row)
+        if shard.get("partition_result_sha256s") != [
+            row["result_sha256"] for row in current_partitions
+        ]:
+            raise StorageSafeT8Error("source shard/partition result binding changed")
+        shard_rows.append(
+            {
+                "shard_index": shard_index,
+                "result_sha256": shard["result_sha256"],
+                "manifest_file_sha256": exact.sha256_file(shard_path),
+                "partition_ids": expected_ids,
+                "partition_result_sha256s": [
+                    row["result_sha256"] for row in current_partitions
+                ],
+                "event_count": int(shard["event_count"]),
+                "pattern_count": int(shard["pattern_count"]),
+                "rejection_count": int(shard["rejection_count"]),
+            }
+        )
+    partition_rows.sort(key=lambda row: int(row["global_partition_order"]))
+    payload = _self_hashed(
+        {
+            "schema_version": SOURCE_SHARD_INVENTORY_SCHEMA,
+            "status": "PASS",
+            "manifest_sha256": manifest["manifest_sha256"],
+            "scientific_input_sha256": manifest["scientific_input_sha256"],
+            "merge_result_sha256": merge_manifest["result_sha256"],
+            "shard_count": int(manifest["shard_count"]),
+            "partition_count": len(ordered_units),
+            "event_count": sum(int(row["event_count"]) for row in partition_rows),
+            "pattern_count": sum(int(row["pattern_count"]) for row in partition_rows),
+            "rejection_count": sum(
+                int(row["rejection_count"]) for row in partition_rows
+            ),
+            "shards": shard_rows,
+            "partitions": partition_rows,
+            "source_payloads_revalidated_before_merge": True,
+            "matrix_write_enabled": False,
+        },
+        "source_shard_inventory_sha256",
+    )
+    _validate_source_shard_inventory(
+        payload,
+        manifest=manifest,
+        merge_manifest=merge_manifest,
+    )
+    exact.atomic_write_json(destination, payload)
+    return payload
 
 
 def node_local_scratch_admission(
@@ -357,6 +621,7 @@ def build_storage_safe_archive(
     environment_manifest: str | Path,
     slurm_inventory: str | Path,
     resource_metrics: str | Path,
+    source_shard_inventory: str | Path,
     packaging_commit: str,
     output_archive: str | Path,
     _prevalidated_merge_manifest: Mapping[str, Any] | None = None,
@@ -382,6 +647,14 @@ def build_storage_safe_archive(
         merge_manifest = dict(_prevalidated_merge_manifest)
         if _read_json(merge / "merge_manifest.json") != merge_manifest:
             raise StorageSafeT8Error("prevalidated merge manifest bytes changed")
+    source_inventory_path = (
+        Path(source_shard_inventory).expanduser().resolve(strict=True)
+    )
+    source_inventory = _validate_source_shard_inventory(
+        _read_json(source_inventory_path),
+        manifest=manifest,
+        merge_manifest=merge_manifest,
+    )
     parity_path = Path(parity_receipt).expanduser().resolve(strict=True)
     parity, canary_path, _canary = _validate_parity_binding(parity_path, manifest)
     evidence_files, evidence_identities = _validated_evidence(
@@ -401,6 +674,7 @@ def build_storage_safe_archive(
             (merge / "rejection_events.jsonl", "merge/rejection_events.jsonl"),
             (merge / "stable_top_k.json", "merge/stable_top_k.json"),
             (parity_path, "parity_receipt.json"),
+            (source_inventory_path, "source_shard_inventory.json"),
             *evidence_files,
         ],
         key=lambda item: item[1],
@@ -416,6 +690,11 @@ def build_storage_safe_archive(
             "merge/stable_top_k.json": merge_manifest["stable_top_k_sha256"],
         },
     )
+    partition_manifest_file_sha256 = next(
+        row["sha256"]
+        for row in inventory
+        if row["name"] == "partition_manifest.json"
+    )
     inner = _self_hashed(
         {
             "schema_version": STORAGE_SAFE_BUNDLE_SCHEMA,
@@ -430,12 +709,20 @@ def build_storage_safe_archive(
             },
             "packaging_commit": packaging_commit,
             "manifest_sha256": manifest["manifest_sha256"],
+            "manifest_file_sha256": partition_manifest_file_sha256,
+            "source_shard_inventory_sha256": source_inventory[
+                "source_shard_inventory_sha256"
+            ],
+            "source_shard_inventory_file_sha256": exact.sha256_file(
+                source_inventory_path
+            ),
             "merge_result_sha256": merge_manifest["result_sha256"],
             "parity_result_sha256": parity["result_sha256"],
             "parity_manifest_sha256": parity["manifest_sha256"],
             "scientific_input_sha256": manifest["scientific_input_sha256"],
             "provenance_sha256": manifest["provenance"]["provenance_sha256"],
             "target_branches": manifest["provenance"]["target_branches"],
+            "top_k": int(manifest["configuration"]["top_k"]),
             "raw_stream_hash_semantics": "UNCHANGED_MERGE_JSONL_BYTES",
             "global_order": "OFFICIAL_ROOT_AND_DFS_PREORDER",
             "event_count": merge_manifest["event_count"],
@@ -500,8 +787,12 @@ def _stream_jsonl_member(
     *,
     name: str,
     target_branches: Sequence[int],
+    top_k: int,
 ) -> dict[str, Any]:
     reader = _HashingLineReader(stream)
+    rejection_projection_digest = hashlib.sha256()
+    rejection_projection_count = 0
+    recomputed_top_k: list[dict[str, Any]] = []
     count = 0
     previous_global_preorder = -1
     for line_number, line in enumerate(reader, start=1):
@@ -525,6 +816,9 @@ def _stream_jsonl_member(
                 raise StorageSafeT8Error(f"{name} has invalid event status")
             if name == "merge/rejection_events.jsonl" and status == "ACCEPTED":
                 raise StorageSafeT8Error("rejection stream contains accepted event")
+            if name == "merge/events.jsonl" and status != "ACCEPTED":
+                rejection_projection_digest.update(line)
+                rejection_projection_count += 1
         if name == "merge/patterns.jsonl":
             expected_pattern = exact.canonical_sha256(
                 {
@@ -536,12 +830,50 @@ def _stream_jsonl_member(
             )
             if row.get("pattern_sha256") != expected_pattern:
                 raise StorageSafeT8Error("pattern identity changed")
+            if type(row.get("support")) is not int or int(row["support"]) < 0:
+                raise StorageSafeT8Error("pattern support is malformed")
+            candidate = {
+                key: row[key]
+                for key in (
+                    "root_index",
+                    "dfs_code",
+                    "dfs_code_sha256",
+                    "pattern_sha256",
+                    "support",
+                    "target_branches",
+                    "global_preorder",
+                )
+            }
+            recomputed_top_k.append(candidate)
+            recomputed_top_k.sort(
+                key=lambda value: (
+                    -int(value["support"]),
+                    int(value["global_preorder"]),
+                )
+            )
+            if len(recomputed_top_k) > top_k:
+                recomputed_top_k.pop()
         count += 1
-    return {
+    result: dict[str, Any] = {
         "bytes": reader.bytes_read,
         "sha256": reader.digest.hexdigest(),
         "rows": count,
     }
+    if name == "merge/events.jsonl":
+        result.update(
+            {
+                "rejection_projection_sha256": (
+                    rejection_projection_digest.hexdigest()
+                ),
+                "rejection_projection_count": rejection_projection_count,
+            }
+        )
+    if name == "merge/patterns.jsonl":
+        result["recomputed_stable_top_k"] = recomputed_top_k
+        result["recomputed_stable_top_k_sha256"] = exact.canonical_sha256(
+            recomputed_top_k
+        )
+    return result
 
 
 def _read_member_bytes(stream: BinaryIO, expected_size: int) -> tuple[bytes, str]:
@@ -616,6 +948,15 @@ def stream_verify_storage_safe_bundle(
                         or inner.get("hpc_calibration_or_test_used") is not False
                         or inner.get("raw_stream_hash_semantics")
                         != "UNCHANGED_MERGE_JSONL_BYTES"
+                        or type(inner.get("top_k")) is not int
+                        or int(inner["top_k"]) < 1
+                        or not _is_sha256(inner.get("manifest_file_sha256"))
+                        or not _is_sha256(
+                            inner.get("source_shard_inventory_sha256")
+                        )
+                        or not _is_sha256(
+                            inner.get("source_shard_inventory_file_sha256")
+                        )
                     ):
                         raise StorageSafeT8Error("bundle manifest contract is invalid")
                     packaging_commit = inner.get("packaging_commit")
@@ -673,6 +1014,7 @@ def stream_verify_storage_safe_bundle(
                         stream,
                         name=member.name,
                         target_branches=inner["target_branches"],
+                        top_k=int(inner["top_k"]),
                     )
                 else:
                     if member.size > MAX_RESULT_MANIFEST_BYTES:
@@ -696,6 +1038,7 @@ def stream_verify_storage_safe_bundle(
     canary_manifest = json_payloads.get("canary_partition_manifest.json")
     parity_receipt = json_payloads.get("parity_receipt.json")
     stable_top_k = json_payloads.get("merge/stable_top_k.json")
+    source_shard_inventory = json_payloads.get("source_shard_inventory.json")
     if any(
         payload is None
         for payload in (
@@ -703,6 +1046,7 @@ def stream_verify_storage_safe_bundle(
             canary_manifest,
             parity_receipt,
             stable_top_k,
+            source_shard_inventory,
         )
     ):
         raise StorageSafeT8Error("bundle scientific manifests are incomplete")
@@ -710,11 +1054,18 @@ def stream_verify_storage_safe_bundle(
     assert canary_manifest is not None
     assert parity_receipt is not None
     assert stable_top_k is not None
+    assert source_shard_inventory is not None
     _require_self_hash(partition_manifest, "manifest_sha256", "partition manifest")
     _require_self_hash(canary_manifest, "manifest_sha256", "canary manifest")
     _require_self_hash(parity_receipt, "result_sha256", "parity receipt")
     if (
         partition_manifest.get("manifest_sha256") != inner.get("manifest_sha256")
+        or observed["partition_manifest.json"]["sha256"]
+        != inner.get("manifest_file_sha256")
+        or observed["source_shard_inventory.json"]["sha256"]
+        != inner.get("source_shard_inventory_file_sha256")
+        or source_shard_inventory.get("source_shard_inventory_sha256")
+        != inner.get("source_shard_inventory_sha256")
         or partition_manifest.get("scope") != "FULL_ROOT_UNIVERSE"
         or partition_manifest.get("scientific_input_sha256")
         != inner.get("scientific_input_sha256")
@@ -738,6 +1089,11 @@ def stream_verify_storage_safe_bundle(
         or parity_receipt.get("target_branches") != inner.get("target_branches")
     ):
         raise StorageSafeT8Error("bundle scientific provenance binding failed")
+    _validate_source_shard_inventory(
+        source_shard_inventory,
+        manifest=partition_manifest,
+        merge_manifest=merge_manifest,
+    )
     canary_identity = parity_receipt.get("canary_partition_manifest")
     if (
         type(canary_identity) is not dict
@@ -782,15 +1138,38 @@ def stream_verify_storage_safe_bundle(
             or details["rows"] != inner.get(count_field)
         ):
             raise StorageSafeT8Error(f"merged stream contract mismatch: {name}")
+    event_details = observed["merge/events.jsonl"]
+    rejection_details = observed["merge/rejection_events.jsonl"]
+    if (
+        event_details.get("rejection_projection_count")
+        != rejection_details["rows"]
+        or event_details.get("rejection_projection_sha256")
+        != rejection_details["sha256"]
+    ):
+        raise StorageSafeT8Error(
+            "rejection stream is not the exact non-ACCEPTED event projection"
+        )
     if merge_manifest.get("result_sha256") != inner.get("merge_result_sha256"):
         raise StorageSafeT8Error("bundle/merge identity mismatch")
+    pattern_details = observed["merge/patterns.jsonl"]
+    recomputed_top_k = pattern_details.get("recomputed_stable_top_k")
     if (
         stable_top_k.get("schema_version")
         != "globalgce_hpc_exact_stable_top_k_v1"
+        or stable_top_k.get("top_k") != inner.get("top_k")
+        or partition_manifest.get("configuration", {}).get("top_k")
+        != inner.get("top_k")
+        or stable_top_k.get("ordering")
+        != "SUPPORT_DESC_OFFICIAL_PREORDER_ASC"
         or stable_top_k.get("selected_count")
         != merge_manifest.get("stable_top_k_selected_count")
+        or stable_top_k.get("selected_count")
+        != min(int(inner["top_k"]), int(pattern_details["rows"]))
         or stable_top_k.get("selected_sha256")
         != merge_manifest.get("stable_top_k_selected_sha256")
+        or stable_top_k.get("selected") != recomputed_top_k
+        or stable_top_k.get("selected_sha256")
+        != pattern_details.get("recomputed_stable_top_k_sha256")
         or exact.canonical_sha256(stable_top_k.get("selected"))
         != stable_top_k.get("selected_sha256")
         or observed["merge/stable_top_k.json"]["sha256"]
@@ -812,6 +1191,14 @@ def stream_verify_storage_safe_bundle(
     if receipt_path is not None:
         receipt = _read_json(Path(receipt_path).expanduser().resolve(strict=True))
         _require_self_hash(receipt, "receipt_sha256", "storage-safe receipt")
+        recorded_verification = receipt.get("prepublication_verification")
+        if type(recorded_verification) is not dict:
+            raise StorageSafeT8Error("receipt lacks prepublication verification")
+        _require_self_hash(
+            recorded_verification,
+            "verification_sha256",
+            "recorded prepublication verification",
+        )
         if (
             receipt.get("schema_version") != STORAGE_SAFE_RECEIPT_SCHEMA
             or receipt.get("status") != "PASS"
@@ -822,8 +1209,21 @@ def stream_verify_storage_safe_bundle(
             or receipt.get("packaging_commit") != inner.get("packaging_commit")
             or receipt.get("partition_manifest_sha256")
             != inner.get("manifest_sha256")
+            or receipt.get("partition_manifest_file_sha256")
+            != inner.get("manifest_file_sha256")
+            or receipt.get("source_shard_inventory_sha256")
+            != inner.get("source_shard_inventory_sha256")
+            or receipt.get("source_shard_inventory_file_sha256")
+            != inner.get("source_shard_inventory_file_sha256")
             or receipt.get("scientific_input_sha256")
             != inner.get("scientific_input_sha256")
+            or recorded_verification.get("archive_sha256") != archive_sha
+            or recorded_verification.get("archive_bytes") != archive_bytes
+            or recorded_verification.get("bundle_content_sha256")
+            != inner.get("bundle_content_sha256")
+            or recorded_verification.get("status") != "PASS"
+            or recorded_verification.get("streaming_verification") is not True
+            or recorded_verification.get("extracted_to_disk") is not False
             or receipt.get("matrix_write_enabled") is not False
         ):
             raise StorageSafeT8Error("storage-safe receipt does not bind the archive")
@@ -836,6 +1236,13 @@ def stream_verify_storage_safe_bundle(
             "bundle_content_sha256": inner["bundle_content_sha256"],
             "merge_result_sha256": inner["merge_result_sha256"],
             "partition_manifest_sha256": inner["manifest_sha256"],
+            "partition_manifest_file_sha256": inner["manifest_file_sha256"],
+            "source_shard_inventory_sha256": inner[
+                "source_shard_inventory_sha256"
+            ],
+            "source_shard_inventory_file_sha256": inner[
+                "source_shard_inventory_file_sha256"
+            ],
             "scientific_input_sha256": inner["scientific_input_sha256"],
             "packaging_commit": inner["packaging_commit"],
             "event_count": inner["event_count"],
@@ -869,6 +1276,9 @@ def publish_storage_safe_archive(
     output_root: str | Path,
     minimum_reserve_bytes: int = DEFAULT_MIN_RESERVE_BYTES,
     reserve_fraction: float = DEFAULT_RESERVE_FRACTION,
+    persistent_allowed_roots: Sequence[
+        str | Path
+    ] = DEFAULT_PERSISTENT_ALLOWED_ROOTS,
 ) -> dict[str, Any]:
     """Atomically publish exactly one compressed bundle and one manifest."""
 
@@ -876,7 +1286,11 @@ def publish_storage_safe_archive(
         Path(scratch_archive).expanduser().resolve(strict=True),
         label="scratch archive",
     )
-    destination = validate_storage_path_policy(output_root, label="persistent result")
+    destination = validate_storage_path_policy(
+        output_root,
+        label="persistent result",
+        allowed_roots=persistent_allowed_roots,
+    )
     if destination.exists():
         raise StorageSafeT8Error("persistent result root must be fresh")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -909,6 +1323,15 @@ def publish_storage_safe_archive(
             "merge_result_sha256": inner_manifest["merge_result_sha256"],
             "packaging_commit": inner_manifest["packaging_commit"],
             "partition_manifest_sha256": inner_manifest["manifest_sha256"],
+            "partition_manifest_file_sha256": inner_manifest[
+                "manifest_file_sha256"
+            ],
+            "source_shard_inventory_sha256": inner_manifest[
+                "source_shard_inventory_sha256"
+            ],
+            "source_shard_inventory_file_sha256": inner_manifest[
+                "source_shard_inventory_file_sha256"
+            ],
             "scientific_input_sha256": inner_manifest["scientific_input_sha256"],
             "event_count": inner_manifest["event_count"],
             "pattern_count": inner_manifest["pattern_count"],
@@ -917,6 +1340,7 @@ def publish_storage_safe_archive(
             "prepublication_verification_sha256": verification[
                 "verification_sha256"
             ],
+            "prepublication_verification": verification,
             "persistent_payload_policy": "COMPRESSED_BUNDLE_AND_MANIFEST_ONLY",
             "matrix_write_enabled": False,
         },
@@ -979,6 +1403,9 @@ def merge_package_storage_safe(
     require_distinct_filesystems: bool = True,
     minimum_reserve_bytes: int = DEFAULT_MIN_RESERVE_BYTES,
     reserve_fraction: float = DEFAULT_RESERVE_FRACTION,
+    persistent_allowed_roots: Sequence[
+        str | Path
+    ] = DEFAULT_PERSISTENT_ALLOWED_ROOTS,
 ) -> dict[str, Any]:
     """Run exact merge/verification locally, then publish the compact result."""
 
@@ -991,7 +1418,11 @@ def merge_package_storage_safe(
         Path(scratch_root).expanduser().resolve(strict=True),
         label="node-local scratch",
     )
-    destination = validate_storage_path_policy(output_root, label="persistent result")
+    destination = validate_storage_path_policy(
+        output_root,
+        label="persistent result",
+        allowed_roots=persistent_allowed_roots,
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise StorageSafeT8Error("persistent result root must be fresh")
@@ -1029,6 +1460,13 @@ def merge_package_storage_safe(
         manifest=manifest,
         allowed_scopes=("FULL_MANIFEST",),
     )
+    source_inventory_path = work / "source_shard_inventory.json"
+    source_inventory = write_source_shard_inventory(
+        partition_manifest=manifest_path,
+        shards_root=shards,
+        merge_manifest=validated_merge,
+        output=source_inventory_path,
+    )
     built = build_storage_safe_archive(
         partition_manifest=manifest_path,
         merge_root=merge_root,
@@ -1036,6 +1474,7 @@ def merge_package_storage_safe(
         environment_manifest=environment_manifest,
         slurm_inventory=slurm_inventory,
         resource_metrics=resource_metrics,
+        source_shard_inventory=source_inventory_path,
         packaging_commit=packaging_commit,
         output_archive=scratch_archive,
         _prevalidated_merge_manifest=validated_merge,
@@ -1048,10 +1487,18 @@ def merge_package_storage_safe(
         output_root=destination,
         minimum_reserve_bytes=minimum_reserve_bytes,
         reserve_fraction=reserve_fraction,
+        persistent_allowed_roots=persistent_allowed_roots,
     )
     return {
         "state": "PASS",
         "partition_manifest_sha256": manifest["manifest_sha256"],
+        "partition_manifest_file_sha256": exact.sha256_file(manifest_path),
+        "source_shard_inventory_sha256": source_inventory[
+            "source_shard_inventory_sha256"
+        ],
+        "source_shard_inventory_file_sha256": exact.sha256_file(
+            source_inventory_path
+        ),
         "source_inventory": inventory,
         "scratch_admission": scratch_admission.to_json(),
         "node_local_merge_root": str(merge_root),
@@ -1064,9 +1511,11 @@ def merge_package_storage_safe(
 
 __all__ = [
     "DEFAULT_MIN_RESERVE_BYTES",
+    "DEFAULT_PERSISTENT_ALLOWED_ROOTS",
     "DEFAULT_RESERVE_FRACTION",
     "STORAGE_SAFE_BUNDLE_SCHEMA",
     "STORAGE_SAFE_RECEIPT_SCHEMA",
+    "SOURCE_SHARD_INVENTORY_SCHEMA",
     "StorageAdmission",
     "StorageSafeT8Error",
     "build_storage_safe_archive",
@@ -1076,4 +1525,5 @@ __all__ = [
     "storage_admission",
     "stream_verify_storage_safe_bundle",
     "validate_storage_path_policy",
+    "write_source_shard_inventory",
 ]

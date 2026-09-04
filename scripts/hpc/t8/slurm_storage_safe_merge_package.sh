@@ -58,11 +58,13 @@ export OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
 [[ "$(sha256_file configs/hpc.yaml)" == "$T8_EXPECTED_HPC_CONFIG_SHA256" ]] || { echo "configs/hpc.yaml SHA mismatch" >&2; exit 69; }
 "$T8_PYTHON" -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["mining_config_sha256"] == sys.argv[2]; assert p["hpc_runtime_config"]["sha256"] == sys.argv[3]; assert p["split_scope"] == "train_only"; assert p["matrix_publication_allowed_from_hpc"] is False' "$T8_INPUT_MANIFEST" "$T8_EXPECTED_CONFIG_SHA256" "$T8_EXPECTED_HPC_CONFIG_SHA256"
 
-case "$T8_STORAGE_SAFE_RESULT_ROOT" in
+canonical_result_root="$("$T8_PYTHON" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().resolve(strict=False))' "$T8_STORAGE_SAFE_RESULT_ROOT")"
+[[ "$canonical_result_root" == "$T8_STORAGE_SAFE_RESULT_ROOT" ]] || { echo "result root must be canonical (no .. or symlink escape)" >&2; exit 70; }
+case "$canonical_result_root" in
   /share/home/u20526/czx/*) ;;
   *) echo "result root must stay below /share/home/u20526/czx" >&2; exit 70 ;;
 esac
-case "$T8_STORAGE_SAFE_RESULT_ROOT" in
+case "$canonical_result_root" in
   /ssdfs/*) echo "/ssdfs is forbidden" >&2; exit 70 ;;
 esac
 [[ ! -e "$T8_STORAGE_SAFE_RESULT_ROOT" ]] || { echo "storage-safe result root must be fresh" >&2; exit 71; }

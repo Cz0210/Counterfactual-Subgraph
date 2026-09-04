@@ -85,8 +85,8 @@ HPC chain (do not resubmit completed shards):
   `/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/control/t8-production-chain/current.json`
 - science commit: `481475c31d809577b791f4dd9002f5d2894c65b4`
 
-At the 2026-09-04 06:31 UTC audit the array had 12 completed, 4 running,
-0 pending, and 0 failed shards (active shard IDs 3, 13, 14, and 15).  AutoDL's
+At the 2026-09-04 08:10 UTC audit the array had 13 completed, 3 running,
+0 pending, and 0 failed shards (active shard IDs 3, 14, and 15).  AutoDL's
 old T8 remains an untouched fallback.
 Only after the package independently passes may AutoDL import it into a fresh
 root and run chemical validation, calibrated GINE inference, calibration,
@@ -103,11 +103,43 @@ finished.  Do not release them.  They must be replaced by a hash-bound,
 node-local exact merge that persists only a deterministic losslessly
 compressed bundle and manifest.  The array itself was not held or changed.
 
-The unused `/share/home/u20526/czx/conda_pkgs_gcfexplainer` package cache is
-being streamed to
-`/Volumes/DireRaven/counterfactual-hpc-offload/hpc-archive-20260904T070000Z/`.
-Do not remove its HPC source until the external `.tar.zst` is finalized and
-the decompressed raw-tar SHA matches the recorded SHA.
+The unused `/share/home/u20526/czx/conda_pkgs_gcfexplainer` package cache was
+archived to
+`/Volumes/DireRaven/counterfactual-hpc-offload/hpc-archive-20260904T070000Z/conda_pkgs_gcfexplainer.tar.zst`.
+The final archive is `6149505055` bytes; its compressed SHA-256 is
+`b31331ff291dd57a73cf83337a9dee675fc69498198b2754940b1a8034e49961`,
+and independently decompressing it reproduced raw-tar SHA-256
+`6a0f28afeb9489a1bdb2bbb70505b7156eb51af3c1e3135bd69b37dab28707f0`.
+After a fresh no-writer/no-Slurm-reference check, only that exact cache path
+was deleted.  The external recovery copy is preserved.  The cleanup receipt
+is under
+`/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/audits/hpc-scoped-cleanup-20260904T072234Z/`.
+Because active array shards grew during the archive, `/share` had only
+`9862594560` bytes free immediately after deletion; the storage-safe
+replacement chain remains mandatory.
+
+`/ssdfs/datahome/u20526/czx` was also audited after explicit authorization.
+The user directory itself contains only about 28 KiB, but the `/ssdfs` mount
+has only `2971754496` bytes free globally.  It is therefore not an available
+T8 scratch or result destination.  No path outside
+`/ssdfs/datahome/u20526/czx` was selected for cleanup or modified.
+
+A second inactive cache,
+`/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/cache`, was archived
+to
+`/Volumes/DireRaven/counterfactual-hpc-offload/hpc-archive-20260904T073000Z/hpc_cache.tar.zst`.
+The 2,113,485,817-byte compressed archive has SHA-256
+`7191f2f354c028a47a55b317e8e5c07367334584a3f964182dc049579353444d`.
+Its decompressed tar SHA-256 and an independently generated remote tar SHA-256
+both equal
+`799dff55719d9a138f7a7dd6291ceb858932a754b1a0e6cbbbc272c1e93f4747`.
+After confirming no post-archive writes and no process or Slurm references,
+only that exact 3,381,518,616-byte source directory was deleted.  The external
+copy remains recoverable and the receipts are under
+`/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/audits/hpc-scoped-cleanup-20260904T081017Z/`.
+The post-delete audit observed `46652133376` bytes free on `/share`; final
+publication must nevertheless use the live dynamic reserve check because the
+shared filesystem changes independently of this project.
 
 ## TasteMolNet / ComRecGC (T14)
 

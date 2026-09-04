@@ -9,9 +9,16 @@
 - [x] Add exact persistent-space admission with a 2 GiB/20 percent reserve and
   atomic bundle-plus-manifest publication.
 - [x] Add one-pass verification that never extracts the large streams.
+- [x] Bind both the partition file SHA and canonical self-hash, and include a
+  compact self-hashed inventory of every source shard and partition result.
+- [x] Independently recompute stable top-K and the byte-exact non-accepted
+  event projection while streaming the archive.
+- [x] Enforce the canonical persistent destination allowlist after resolving
+  `..` and symlinks; retain the complete `/ssdfs` prohibition.
 - [x] Add one CPU-only `afterok` replacement job with no GPU or matrix path.
 - [x] Cover tiny round-trip, byte determinism, ENOSPC, dependency, CPU-only,
-  and corruption failure behavior with focused tests.
+  corruption, self-consistent top-K/rejection tampering, source-coverage, and
+  path-escape failure behavior with focused tests.
 - [ ] Deploy the commit in a new immutable HPC worktree and submit only after
   the current full array succeeds.
 - [ ] Import the independently verified bundle into a fresh AutoDL root; keep

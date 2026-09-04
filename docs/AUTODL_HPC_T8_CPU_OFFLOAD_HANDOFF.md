@@ -49,11 +49,35 @@ input identities.  Optional admission settings default to
 
 After transfer, AutoDL runs
 `scripts/hpc/t8/stream_verify_storage_safe_bundle.py` with externally recorded
-archive SHA, packaging commit, scientific-input SHA, and full-partition SHA.
-It streams every member, recomputes each raw JSONL hash/count, checks typed DFS
+archive SHA, packaging commit, scientific-input SHA, and both the exact file
+SHA and canonical self-hash of the full-partition manifest.  The bundle also
+contains a self-hashed compact inventory of every shard and partition result
+hash.  The verifier streams every member, recomputes each raw JSONL hash/count,
+reconstructs stable top-K from the pattern stream, proves that the rejection
+stream is the byte-exact non-accepted event projection, checks typed DFS
 identities and official preorder, and never extracts the archive.  PASS allows
 only a fresh-root import; it does not authorize GINE inference,
 calibration/test, or matrix publication on HPC.
+
+The two partition arguments are intentionally distinct:
+
+```text
+--expected-partition-manifest-file-sha256 <sha256 of exact file bytes>
+--expected-partition-manifest-self-sha256 <manifest_sha256 JSON field>
+```
+
+Persistent publication is restricted after canonical path resolution to
+`/share/home/u20526/czx`.  `..` and symlink escapes fail before publication;
+`/ssdfs` remains prohibited for both output and scratch.
+
+The 2026-09-04 live mount audit found only `2971754496` bytes free on the
+entire `/ssdfs` filesystem; the authorized
+`/ssdfs/datahome/u20526/czx` subtree itself contained only 28 KiB.  Moving the
+job there would therefore reduce, not increase, usable headroom.  No file
+outside that exact authorized subtree was inventoried for cleanup or changed.
+After two external-disk-verified cache cleanups, `/share` had
+`46652133376` bytes free, but the job must still evaluate its live dynamic
+reserve immediately before the final two-file publication.
 
 ## 1. Purpose and authority boundary
 
