@@ -140,19 +140,18 @@ def _write_prefix_fixture(root: Path) -> None:
     )
 
 
-def test_existing_reference_not_restarted_or_signaled_and_release_is_owner_bound() -> None:
+def test_existing_reference_not_restarted_and_gpu1_authorization_is_owner_bound() -> None:
     runner = Path("scripts/autodl/run_t12_accelerated_from250_v1.py").read_text()
     launcher = Path("scripts/autodl/launch_t12_accelerated_from250_v1.sh").read_text()
     builder = Path("scripts/autodl/build_t12_accelerated_from250_v1.py").read_text()
     assert "kill(" not in runner
     assert "SIGTERM" not in runner
     assert "pkill" not in launcher
-    assert "validate_mut_gpu0_release_receipt" in runner
-    assert runner.index("validate_mut_gpu0_release_receipt(") < runner.index(
-        'root = Path(spec["output_root"])'
-    )
-    assert '"mut_gpu0_release_receipt"' in builder
-    assert 'args.gpu_index != 0' in builder
+    assert "validate_mut_gpu0_release_receipt" not in runner
+    assert '"ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW"' in builder
+    assert 'args.gpu_index != 1' in builder
+    assert "ACCELERATED_CHECKPOINT_CURSORS = (250, 500, 510)" in runner
+    assert "SOURCE_CHECKPOINT_AUTHENTICATES_250_500_510_SCHEDULE" in builder
     assert "reference_signaled\": False" in runner
 
 
@@ -291,7 +290,9 @@ def test_publisher_precreated_but_blocked_until_parity(tmp_path: Path) -> None:
     assert plan["publisher"]["state"] == "PREBOUND_NOT_DISPATCHED"
     assert plan["publisher"]["dispatchable"] is False
     assert plan["publisher"]["matrix_authority_root"] == str(root / "matrix")
-    assert plan["gpu0_mut_priority_gate"] is True
+    assert plan["authorized_parallel_gpu"] == 1
+    assert plan["reference_gpu"] == 3
+    assert plan["reference_must_continue"] is True
 
 
 def test_current_schema_emits_exact_fail_closed_promotion_blocker() -> None:

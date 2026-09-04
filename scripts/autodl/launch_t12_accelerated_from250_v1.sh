@@ -2,9 +2,9 @@
 set -euo pipefail
 
 : "${T12_ACCELERATED_TASK_SPEC:?set the sealed accelerated task spec}"
-: "${T12_ACCELERATED_DISPATCH:?set T12_ACCELERATED_DISPATCH=1 after Mut releases GPU0}"
+: "${ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW:?set the user authorization to 1}"
 
-if [[ "$T12_ACCELERATED_DISPATCH" != "1" ]]; then
+if [[ "$ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW" != "1" ]]; then
   echo "T12 accelerated dispatch is not explicitly enabled" >&2
   exit 64
 fi

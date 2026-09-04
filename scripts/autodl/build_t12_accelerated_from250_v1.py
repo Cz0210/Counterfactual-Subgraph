@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Seal the GPU0 T12 accelerated owner and downstream publication binding."""
+"""Seal the authorized GPU1 T12 accelerated owner and successor binding."""
 
 from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 import sys
 from uuid import uuid4
@@ -46,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", type=_absolute, required=True)
     parser.add_argument("--execution-commit", required=True)
     parser.add_argument("--python", type=_absolute, required=True)
-    parser.add_argument("--gpu-index", type=int, default=0)
+    parser.add_argument("--gpu-index", type=int, default=1)
     parser.add_argument("--gpu-uuid", required=True)
     parser.add_argument("--gpu-lease", type=_absolute, required=True)
     parser.add_argument("--owner-control-root", type=_absolute, required=True)
@@ -56,9 +55,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--publisher-root", type=_absolute, required=True)
     parser.add_argument("--matrix-authority-root", type=_absolute, required=True)
     parser.add_argument("--disposable-index-root", type=_absolute, required=True)
-    parser.add_argument(
-        "--mut-gpu0-release-receipt", type=_absolute, required=True
-    )
     args = parser.parse_args(argv)
     if args.output_root.exists() or args.output_root.is_symlink():
         raise FileExistsError("T12 accelerated spec root must be fresh")
@@ -68,12 +64,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(
             "T12 disposable history index must use /root/autodl-tmp local scratch"
         ) from exc
-    if args.gpu_index != 0:
-        raise ValueError("T12 accelerated branch is bound to GPU0")
-    if args.mut_gpu0_release_receipt != Path(
-        os.path.abspath(args.mut_gpu0_release_receipt)
-    ):
-        raise ValueError("Mut GPU0 release receipt path must be normalized")
+    if args.gpu_index != 1:
+        raise ValueError("T12 accelerated branch is authorized only on GPU1")
     evidence = validate_reference_step250(task_spec_path=args.reference_task_spec)
     reference = json.loads(args.reference_task_spec.read_text(encoding="utf-8"))
     reference_contract = reference["science_contract"]
@@ -120,13 +112,13 @@ def main(argv: list[str] | None = None) -> int:
             "uuid": args.gpu_uuid,
             "lease_path": str(args.gpu_lease),
             "lease_scope": "PROJECT_GPU_LOCK",
-            "selection_policy": "mut_release_then_t12_accelerated_parity",
+            "selection_policy": "authorized_gpu1_parallel_with_reference_gpu3",
         },
         "cpu_request": {"workers": 1, "planner": "serial", "writer": "single"},
         "memory_request": {"minimum_parent_headroom_bytes": 64 * 1024**3},
         "required_environment": {
             **reference["required_environment"],
-            "ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250": "1",
+            "ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW": "1",
             "RUN_GNN_ABLATION": "0",
             "RUN_LLM_ABLATION": "0",
         },
@@ -187,12 +179,9 @@ def main(argv: list[str] | None = None) -> int:
             "threshold_authority": reference_contract["threshold_authority"],
             "replay_gate": reference_contract["replay_gate"],
             "disposable_index_root": str(args.disposable_index_root),
-            "mut_gpu0_release_receipt": str(args.mut_gpu0_release_receipt),
-            "mut_gpu0_release_receipt_contract": {
-                "status": "PASS",
-                "gpu_index": 0,
-                "gpu_released": True,
-            },
+            "dispatch_authorization": (
+                "ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW"
+            ),
             "source_parent_count": 3778,
             "sample_size": 10000,
             "candidate_capacity": 100000,
@@ -200,11 +189,17 @@ def main(argv: list[str] | None = None) -> int:
             "calibration_loaded": False,
             "test_loaded": False,
             "fresh_root_single_writer_reference_read_only": True,
-            "acceleration_profile": "local_nvme_disposable_index_only_v1",
-            "buffered_journal_enabled": False,
-            "pure_executor_enabled": False,
-            "ordered_collector_enabled": False,
-            "warning_aggregation_enabled": False,
+            "acceleration_profile": "gpu1_local_nvme_ordered_single_writer_v2",
+            "buffered_journal_enabled": True,
+            "pure_executor_max_workers": 4,
+            "ordered_collector_enabled": True,
+            "single_writer_enabled": True,
+            "warning_aggregation_enabled": True,
+            "lightweight_progress_interval": 50,
+            "durable_checkpoint_cursors": [500, 510],
+            "intermediate_checkpoint_blocker": (
+                "SOURCE_CHECKPOINT_AUTHENTICATES_250_500_510_SCHEDULE"
+            ),
         },
     }
     raw["config_sha256"] = file_sha256(Path(raw["config_path"]))
@@ -227,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output_root / "task_specs_manifest.json",
         {
             "schema_version": "tastemolnet_t12_accelerated_task_bundle_v1",
-            "status": "READY_WAITING_MUT_GPU0_RELEASE",
+            "status": "READY_AUTHORIZED_GPU1",
             "task_spec": str(spec_path),
             "task_spec_sha256": file_sha256(spec_path),
             "continuation_prebinding": str(
@@ -235,9 +230,8 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "reference_owner_must_not_be_restarted": True,
             "reference_owner_must_not_be_signaled": True,
-            "gpu0_mut_priority": True,
-            "mut_gpu0_release_receipt": str(args.mut_gpu0_release_receipt),
-            "release_receipt_enforced_by_owner": True,
+            "gpu1_parallel_authorized": True,
+            "gpu3_reference_must_continue": True,
             "promotion_state": promotion_blocker["status"],
             "promotion_blocker": str(args.output_root / "promotion_blocker.json"),
             "promotion_allowed": False,

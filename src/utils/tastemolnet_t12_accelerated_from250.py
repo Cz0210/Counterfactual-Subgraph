@@ -601,7 +601,9 @@ def build_prebound_continuation(
             "state": "PREBOUND_NOT_DISPATCHED",
         },
         "reference_must_not_be_signaled": True,
-        "gpu0_mut_priority_gate": True,
+        "authorized_parallel_gpu": 1,
+        "reference_gpu": 3,
+        "reference_must_continue": True,
     }
 
 

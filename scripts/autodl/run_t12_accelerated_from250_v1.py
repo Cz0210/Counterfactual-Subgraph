@@ -25,9 +25,16 @@ from src.utils.tastemolnet_t12_accelerated_from250 import (  # noqa: E402
     compare_checkpoint_payloads,
     file_sha256,
     fork_step250_prefix,
-    validate_mut_gpu0_release_receipt,
     validate_reference_step250,
 )
+
+
+ACCELERATED_TOTAL_STEPS = 510
+# The sealed step-250 checkpoint authenticates this diagnostic schedule.  It
+# cannot be relabelled to add intermediate durable boundaries without a full
+# journal re-emission, so the authorized parallel arm retains the exact source
+# schedule and writes lightweight progress separately.
+ACCELERATED_CHECKPOINT_CURSORS = (250, 500, 510)
 
 
 def _absolute(value: str) -> Path:
@@ -38,9 +45,23 @@ def _absolute(value: str) -> Path:
 
 
 def _configure_profile() -> None:
-    from scripts.autodl.run_t12_reference_500_v1 import _configure_profile
+    from src.baselines import tastemolnet_gcf_full as full
+    from src.baselines import tastemolnet_gcf_full_resume as resume
+    from src.baselines import tastemolnet_gcf_production_state as state
+    from src.baselines import tastemolnet_gcf_transition_store as transitions
 
-    _configure_profile()
+    state.PINNED_TOTAL_STEPS = ACCELERATED_TOTAL_STEPS
+    state.PINNED_CHECKPOINT_CURSORS = ACCELERATED_CHECKPOINT_CURSORS
+    state.HISTORY_MAX_SEGMENTS = len(ACCELERATED_CHECKPOINT_CURSORS)
+    transitions.TRANSITION_MAX_SEGMENTS = len(ACCELERATED_CHECKPOINT_CURSORS)
+    resume.PRODUCTION_TOTAL_STEPS = ACCELERATED_TOTAL_STEPS
+    resume.PRODUCTION_CHECKPOINT_CURSORS = frozenset(
+        ACCELERATED_CHECKPOINT_CURSORS
+    )
+    full.PRODUCTION_TOTAL_STEPS = ACCELERATED_TOTAL_STEPS
+    full.PRODUCTION_CHECKPOINT_CURSORS = frozenset(
+        ACCELERATED_CHECKPOINT_CURSORS
+    )
 
 
 def _expected_identity(run_identity_path: Path, cursor: int) -> dict[str, Any]:
@@ -151,11 +172,15 @@ def _owner(args: argparse.Namespace) -> int:
     if spec["task_kind"] != "T12_ACCELERATED_FROM_CHECKPOINT250":
         raise ValueError("wrong T12 accelerated task kind")
     contract = spec["science_contract"]
-    if spec["gpu_request"].get("index") != 0:
-        raise ValueError("T12 accelerated branch must use GPU0")
-    release_receipt = validate_mut_gpu0_release_receipt(
-        Path(contract["mut_gpu0_release_receipt"])
-    )
+    if spec["gpu_request"].get("index") != 1:
+        raise ValueError("T12 accelerated branch must use authorized GPU1")
+    if (
+        spec.get("required_environment", {}).get(
+            "ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW"
+        )
+        != "1"
+    ):
+        raise ValueError("T12 accelerated GPU1 dispatch is not authorized")
     validate_reference_step250(task_spec_path=Path(contract["source_reference_task_spec"]))
     root = Path(spec["output_root"])
     if root.exists() or root.is_symlink():
@@ -191,7 +216,9 @@ def _owner(args: argparse.Namespace) -> int:
                     "output_root": str(root),
                     "reference_root": contract["source_reference_root"],
                     "reference_signaled": False,
-                    "mut_gpu0_release_receipt": release_receipt,
+                    "dispatch_authorization": (
+                        "ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW"
+                    ),
                     "gpu": spec["gpu_request"],
                     "gpu_lock_held": True,
                     "sequence": sequence,
@@ -222,7 +249,7 @@ def _owner(args: argparse.Namespace) -> int:
         previous = Path(contract["accelerated_checkpoint_250"])
         log_root = heartbeat_path.parent / "logs"
         log_root.mkdir(parents=True, exist_ok=True)
-        for cursor in (500, 510):
+        for cursor in ACCELERATED_CHECKPOINT_CURSORS[1:]:
             state["phase"] = f"ACCELERATED_RESUME_TO_{cursor}"
             command = [
                 str(Path(spec["python"])),
@@ -268,7 +295,9 @@ def _owner(args: argparse.Namespace) -> int:
                 "promotion_allowed": False,
                 "per_step_251_500_parity_proven": False,
                 "production_identity_reframe_implemented": False,
-                "mut_gpu0_release_receipt": release_receipt,
+                "dispatch_authorization": (
+                    "ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW"
+                ),
             },
         )
         exit_code = 0
@@ -290,7 +319,9 @@ def _owner(args: argparse.Namespace) -> int:
                 "output_root": str(root),
                 "gpu_lock_held": False,
                 "reference_signaled": False,
-                "mut_gpu0_release_receipt": release_receipt,
+                "dispatch_authorization": (
+                    "ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW"
+                ),
                 "written_at": datetime.now(timezone.utc).isoformat(),
             },
         )
