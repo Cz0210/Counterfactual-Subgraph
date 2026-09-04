@@ -8,6 +8,7 @@ AUTODL_ALIAS=${AUTODL_ALIAS:-autodl-a800}
 HPC_PACKAGE_ROOT=${HPC_PACKAGE_ROOT:?HPC_PACKAGE_ROOT is required}
 MAC_RELAY_ROOT=${MAC_RELAY_ROOT:-/Volumes/DireRaven/counterfactual-hpc-offload}
 AUTODL_IMPORT_PARENT=${AUTODL_IMPORT_PARENT:-/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/imports/t8-hpc}
+AUTODL_PYTHON=${AUTODL_PYTHON:-/root/miniconda3/envs/smiles_pip118/bin/python}
 RELAY_CONTROL_ROOT=${RELAY_CONTROL_ROOT:-$HOME/.cache/t8-result-relay-v1}
 RELAY_POLL_SECONDS=${RELAY_POLL_SECONDS:-300}
 RELAY_TRANSFER_RETRIES=${RELAY_TRANSFER_RETRIES:-3}
@@ -17,7 +18,7 @@ safe_alias() { case "$1" in ''|*[!A-Za-z0-9_.-]*) return 1;; *) return 0;; esac;
 safe_path() { case "$1" in /*[!A-Za-z0-9_./:+-]*|*[!A-Za-z0-9_./:+-]*|'') return 1;; /*) return 0;; *) return 1;; esac; }
 is_uint() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
 safe_alias "$HPC_ALIAS" && safe_alias "$AUTODL_ALIAS" || { echo "invalid SSH alias" >&2; exit 64; }
-for value in "$HPC_PACKAGE_ROOT" "$MAC_RELAY_ROOT" "$AUTODL_IMPORT_PARENT" "$RELAY_CONTROL_ROOT"; do
+for value in "$HPC_PACKAGE_ROOT" "$MAC_RELAY_ROOT" "$AUTODL_IMPORT_PARENT" "$AUTODL_PYTHON" "$RELAY_CONTROL_ROOT"; do
   safe_path "$value" || { echo "invalid relay path" >&2; exit 64; }
 done
 is_uint "$RELAY_POLL_SECONDS" && is_uint "$RELAY_TRANSFER_RETRIES" && is_uint "$SSH_CONNECT_TIMEOUT" || { echo "invalid numeric relay setting" >&2; exit 64; }
@@ -139,7 +140,7 @@ remote_final="$AUTODL_IMPORT_PARENT/t8-result-$archive_sha"
 remote_partial="$AUTODL_IMPORT_PARENT/.t8-result-$archive_sha.partial"
 write_state COPYING_MAC_TO_AUTODL "$remote_final"
 if ssh -q -o BatchMode=yes -o "ConnectTimeout=$SSH_CONNECT_TIMEOUT" "$AUTODL_ALIAS" \
-  "python3 - '$remote_final' '$archive_sha' '$evidence_sha'" <<'PY_AUTODL_EXISTING'
+  "'$AUTODL_PYTHON' - '$remote_final' '$archive_sha' '$evidence_sha'" <<'PY_AUTODL_EXISTING'
 import hashlib,json,sys
 from pathlib import Path
 root,expected,expected_evidence=Path(sys.argv[1]),sys.argv[2],sys.argv[3]
@@ -173,7 +174,7 @@ retry_transfer rsync -a --partial -e "ssh -o BatchMode=yes -o ConnectTimeout=$SS
 retry_transfer rsync -a --partial -e "ssh -o BatchMode=yes -o ConnectTimeout=$SSH_CONNECT_TIMEOUT" \
   "$local_final/HIERARCHICAL_PACKAGE_READY.json" "$AUTODL_ALIAS:$remote_partial/HIERARCHICAL_PACKAGE_READY.json"
 ssh -q -o BatchMode=yes -o "ConnectTimeout=$SSH_CONNECT_TIMEOUT" "$AUTODL_ALIAS" \
-  "python3 - '$remote_partial' '$remote_final' '$archive_sha' '$evidence_sha'" <<'PY_AUTODL'
+  "'$AUTODL_PYTHON' - '$remote_partial' '$remote_final' '$archive_sha' '$evidence_sha'" <<'PY_AUTODL'
 import hashlib,json,os,sys,tempfile
 from datetime import datetime,timezone
 from pathlib import Path
