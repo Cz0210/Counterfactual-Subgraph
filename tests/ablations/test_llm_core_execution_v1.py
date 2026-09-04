@@ -159,6 +159,13 @@ def _snapshot(*, waiting: bool) -> EarlyLaunchSnapshot:
         minimum_memory_available_gb=64,
         checkpoint_resume_supported=True,
         requested_early_gpus=1,
+        main_owner_registry_path="/runtime/final16-owner-registry.json",
+        main_owner_registry_sha256="d" * 64,
+        main_owner_registry_self_sha256="e" * 64,
+        all_incomplete_main_cells_owned=True,
+        unhealthy_or_unowned_main_cells=(),
+        missing_main_publisher_cells=(),
+        active_early_llm_ablation_gpus=(),
     )
 
 

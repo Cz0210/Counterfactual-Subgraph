@@ -33,6 +33,10 @@ from src.ablations.llm.early_launch_gate import (  # noqa: E402
     EarlyRunAuthorizationReceipt,
     evaluate_early_launch_gate,
 )
+from src.ablations.llm.final16_owner_evidence import (  # noqa: E402
+    assert_snapshot_matches_owner_coverage,
+    evaluate_final16_owner_coverage,
+)
 from src.ablations.llm.model_scale_registry import load_model_scale_registry  # noqa: E402
 from src.ablations.llm.runtime_evidence import (  # noqa: E402
     evaluate_runtime_model_evidence,
@@ -40,6 +44,7 @@ from src.ablations.llm.runtime_evidence import (  # noqa: E402
     sha256_file,
     validate_off_the_shelf_7b_parameter_report,
 )
+from src.ablations.launch_gate import validate_matrix_authority_pointer  # noqa: E402
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -139,6 +144,22 @@ def main() -> int:
     matrix_identity = _identity(Path(snapshot.matrix_authority_path), role="matrix authority")
     if matrix_identity["sha256"] != snapshot.matrix_authority_sha256:
         raise ValueError("snapshot matrix authority SHA changed")
+    matrix_authority = validate_matrix_authority_pointer(
+        _load(Path(snapshot.matrix_authority_path))
+    )
+    matrix_authority["pointer_root"] = str(
+        Path(snapshot.matrix_authority_path).resolve().parent
+    )
+    owner_registry_identity = _identity(
+        Path(snapshot.main_owner_registry_path), role="canonical final16 owner registry"
+    )
+    if owner_registry_identity["sha256"] != snapshot.main_owner_registry_sha256:
+        raise ValueError("snapshot canonical owner-registry file SHA changed")
+    owner_coverage = evaluate_final16_owner_coverage(
+        authority=matrix_authority,
+        owner_registry=_load(Path(snapshot.main_owner_registry_path)),
+    )
+    assert_snapshot_matches_owner_coverage(snapshot, owner_coverage)
     if spec.matrix_authority.sha256 != matrix_identity["sha256"]:
         raise ValueError("run spec matrix authority differs from live authority")
 
@@ -207,6 +228,9 @@ def main() -> int:
             "science_entrypoint_sha256": runner_identity["sha256"],
             "target_runtime_state": target_state,
             "runtime_evidence_files": runtime_evidence_files,
+            "canonical_owner_registry_file_sha256": owner_registry_identity["sha256"],
+            "canonical_owner_registry_self_sha256": owner_coverage.registry_self_sha256,
+            "owner_coverage_sha256": owner_coverage.to_dict()["coverage_sha256"],
         }
     )
     receipt = (
@@ -241,6 +265,8 @@ def main() -> int:
         "target_runtime_state": target_state,
         "core_reference": core_reference,
         "main_snapshot": snapshot_identity,
+        "canonical_owner_registry": owner_registry_identity,
+        "main_owner_coverage": owner_coverage.to_dict(),
         "matrix_authority": matrix_identity,
         "reference_contract": {
             "path": reference.path,

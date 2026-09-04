@@ -33,11 +33,33 @@ class EarlyLaunchSnapshot:
     minimum_memory_available_gb: float
     checkpoint_resume_supported: bool
     requested_early_gpus: int
+    main_owner_registry_path: str
+    main_owner_registry_sha256: str
+    main_owner_registry_self_sha256: str
+    all_incomplete_main_cells_owned: bool
+    unhealthy_or_unowned_main_cells: tuple[str, ...]
+    missing_main_publisher_cells: tuple[str, ...]
+    active_early_llm_ablation_gpus: tuple[int, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "main_ready_waiting_gpu", tuple(self.main_ready_waiting_gpu))
         object.__setattr__(
             self, "main_publishers_waiting_gpu", tuple(self.main_publishers_waiting_gpu)
+        )
+        object.__setattr__(
+            self,
+            "unhealthy_or_unowned_main_cells",
+            tuple(self.unhealthy_or_unowned_main_cells),
+        )
+        object.__setattr__(
+            self,
+            "missing_main_publisher_cells",
+            tuple(self.missing_main_publisher_cells),
+        )
+        object.__setattr__(
+            self,
+            "active_early_llm_ablation_gpus",
+            tuple(self.active_early_llm_ablation_gpus),
         )
         if not 0 <= self.matrix_complete_cells <= 16:
             raise LLMAblationContractError("matrix count must be in [0, 16]")
@@ -50,6 +72,43 @@ class EarlyLaunchSnapshot:
                 self.matrix_authority_sha256, field="matrix_authority_sha256"
             ),
         )
+        if not self.main_owner_registry_path.startswith("/"):
+            raise LLMAblationContractError(
+                "main owner registry evidence path must be absolute"
+            )
+        object.__setattr__(
+            self,
+            "main_owner_registry_sha256",
+            require_sha256(
+                self.main_owner_registry_sha256,
+                field="main_owner_registry_sha256",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "main_owner_registry_self_sha256",
+            require_sha256(
+                self.main_owner_registry_self_sha256,
+                field="main_owner_registry_self_sha256",
+            ),
+        )
+        for cell in (
+            *self.unhealthy_or_unowned_main_cells,
+            *self.missing_main_publisher_cells,
+        ):
+            if not isinstance(cell, str) or cell.count("/") != 1:
+                raise LLMAblationContractError("main owner evidence has an invalid cell")
+        if len(set(self.active_early_llm_ablation_gpus)) != len(
+            self.active_early_llm_ablation_gpus
+        ) or any(
+            not isinstance(gpu, int)
+            or isinstance(gpu, bool)
+            or not 0 <= gpu <= 15
+            for gpu in self.active_early_llm_ablation_gpus
+        ):
+            raise LLMAblationContractError(
+                "active early LLM GPU inventory is invalid"
+            )
         if self.requested_early_gpus < 0:
             raise LLMAblationContractError("requested early GPU count must be non-negative")
 
@@ -133,6 +192,12 @@ def evaluate_early_launch_gate(
     blockers: list[str] = []
     if snapshot.matrix_complete_cells < MIN_MATRIX_CELLS:
         blockers.append("MATRIX_BELOW_13")
+    if not snapshot.all_incomplete_main_cells_owned:
+        blockers.append("MAIN_OWNER_REGISTRY_HAS_UNOWNED_CELL")
+    if snapshot.unhealthy_or_unowned_main_cells:
+        blockers.append("MAIN_OWNER_UNHEALTHY_OR_MISSING")
+    if snapshot.missing_main_publisher_cells:
+        blockers.append("MAIN_CELL_CANONICAL_PUBLISHER_MISSING")
     if snapshot.t8_t13_state not in {"RUNNING", "PASS"}:
         blockers.append("T8_T13_HAS_NO_SCIENCE_OWNER")
     elif snapshot.t8_t13_state == "RUNNING" and not snapshot.t8_t13_science_pid:
@@ -157,6 +222,8 @@ def evaluate_early_launch_gate(
         blockers.append("ABLATION_CHECKPOINT_RESUME_NOT_READY")
     if snapshot.requested_early_gpus != MAX_EARLY_GPUS:
         blockers.append("EARLY_GPU_REQUEST_MUST_EQUAL_ONE")
+    if snapshot.active_early_llm_ablation_gpus:
+        blockers.append("EARLY_LLM_GPU_LIMIT_ALREADY_REACHED")
     if not runtime_evidence_ready:
         blockers.append("LLM_RUNTIME_EVIDENCE_NOT_READY")
     if not science_entrypoint_available:
@@ -194,7 +261,11 @@ def main_priority_runtime_action(
     """Return a checkpoint-first, non-destructive response to new main work."""
 
     main_waiting = bool(
-        snapshot.main_ready_waiting_gpu or snapshot.main_publishers_waiting_gpu
+        snapshot.main_ready_waiting_gpu
+        or snapshot.main_publishers_waiting_gpu
+        or not snapshot.all_incomplete_main_cells_owned
+        or snapshot.unhealthy_or_unowned_main_cells
+        or snapshot.missing_main_publisher_cells
     )
     if not ablation_running or not main_waiting:
         return "NO_ACTION"

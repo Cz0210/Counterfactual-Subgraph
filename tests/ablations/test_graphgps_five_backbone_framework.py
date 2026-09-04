@@ -238,7 +238,9 @@ def test_registry_builds_checked_in_gps_config() -> None:
         assert model.config.rwpe_walk_length == 16
 
 
-def _main_gate(*, complete: int = 16) -> LaunchGateDecision:
+def _main_gate(
+    *, complete: int = 16, combined_audit_sha256: str | None = "2" * 64
+) -> LaunchGateDecision:
     return LaunchGateDecision(
         state="READY_FOR_USER_APPROVAL",
         science_launch_allowed=False,
@@ -253,7 +255,7 @@ def _main_gate(*, complete: int = 16) -> LaunchGateDecision:
         authority_verified=True,
         authority_root="/runtime/authority",
         matrix_status_sha256="1" * 64,
-        combined_audit_sha256="2" * 64,
+        combined_audit_sha256=combined_audit_sha256,
         artifact_receipts_bound=True,
         authorization_receipt_sha256=None,
         evidence_errors=(),
@@ -306,6 +308,21 @@ def test_five_backbone_waits_for_16_and_user_run_flags() -> None:
     )
     assert no_run.science_launch_allowed is False
     assert "RUN_GNN_ABLATION_NOT_SET" in no_run.blockers
+
+
+def test_five_backbone_requires_hash_bound_combined_audit() -> None:
+    config = load_five_backbone_config(CONFIG, project_root=PROJECT_ROOT)
+    decision = evaluate_five_backbone_launch(
+        config=config,
+        main_gate=_main_gate(combined_audit_sha256=None),
+        allow_after_16=True,
+        run_requested=True,
+        main_ready_gpu_tasks={"status": "PASS", "ready_waiting_gpu": []},
+        proposal_manifest=_proposal_manifest(),
+        gatedgcn_plus_runtime_capabilities=_gatedgcn_plus_runtime(),
+    )
+    assert decision.science_launch_allowed is False
+    assert "WAITING_HASH_CLOSED_MAIN_16_OF_16_AND_FINAL_EXPORTS" in decision.blockers
 
 
 def test_five_backbone_gate_emits_exact_two_lane_schedule() -> None:

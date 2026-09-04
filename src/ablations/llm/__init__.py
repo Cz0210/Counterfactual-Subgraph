@@ -50,6 +50,11 @@ from .early_launch_gate import (
     evaluate_early_launch_gate,
     main_priority_runtime_action,
 )
+from .final16_owner_evidence import (
+    Final16OwnerCoverage,
+    assert_snapshot_matches_owner_coverage,
+    evaluate_final16_owner_coverage,
+)
 from .generators import ChemLLMGeneratorAdapter, ProposalGenerator, RuntimeGeneratorIdentity
 from .isolated_chemllm_load import (
     CHEMLLM_2B_REPOSITORY_ID,
@@ -115,7 +120,7 @@ __all__ = [
     "ChemLLMGeneratorAdapter", "CommonDownstreamPlan", "DecodingConfig",
     "CORE_VARIANT_ORDER", "CoreLLMVariant", "CoreRunSpec",
     "DecodingRegime", "EarlyLaunchDecision", "EarlyLaunchSnapshot",
-    "EarlyRunAuthorizationReceipt", "FileIdentity", "GeneratorAssets",
+    "EarlyRunAuthorizationReceipt", "FileIdentity", "Final16OwnerCoverage", "GeneratorAssets",
     "LLMAblationContractError", "LLMProposerVariant", "LLMScaleVariant",
     "LLMScaleFallbackVariant", "LLMStageVariant", "MATCHED_PROJECT_ADAPTATION_COMPATIBLE",
     "MatchedAdaptationPlan", "MatchedAttemptBudget", "ModelComparabilityInput",
@@ -131,6 +136,7 @@ __all__ = [
     "build_isolated_child_environment", "build_proposal_record",
     "build_train_only_brics_vocabulary", "compare_model_scale_inputs",
     "count_actual_loaded_parameters", "evaluate_early_launch_gate",
+    "evaluate_final16_owner_coverage", "assert_snapshot_matches_owner_coverage",
     "derive_core_reference", "load_authorized_launch_decision", "load_core_run_spec",
     "evaluate_runtime_model_evidence", "load_bace_reference_v2",
     "load_model_scale_registry", "main_priority_runtime_action", "pin_chemllm_2b_snapshot",

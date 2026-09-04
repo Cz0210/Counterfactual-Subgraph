@@ -32,6 +32,13 @@ def _snapshot(**overrides) -> EarlyLaunchSnapshot:
         "minimum_memory_available_gb": 64.0,
         "checkpoint_resume_supported": True,
         "requested_early_gpus": 1,
+        "main_owner_registry_path": "/runtime/final16-owner-registry.json",
+        "main_owner_registry_sha256": "d" * 64,
+        "main_owner_registry_self_sha256": "e" * 64,
+        "all_incomplete_main_cells_owned": True,
+        "unhealthy_or_unowned_main_cells": (),
+        "missing_main_publisher_cells": (),
+        "active_early_llm_ablation_gpus": (),
     }
     values.update(overrides)
     return EarlyLaunchSnapshot(**values)
@@ -87,6 +94,12 @@ def test_main_ready_gpu_or_short_idle_blocks_ablation() -> None:
         _snapshot(main_ready_waiting_gpu=("Mut publisher",)),
         _snapshot(idle_gpu_seconds=1199),
         _snapshot(requested_early_gpus=2),
+        _snapshot(active_early_llm_ablation_gpus=(2,)),
+        _snapshot(
+            all_incomplete_main_cells_owned=False,
+            unhealthy_or_unowned_main_cells=("TasteMolNet/GCFExplainer",),
+        ),
+        _snapshot(missing_main_publisher_cells=("TasteMolNet/ComRecGC",)),
     ):
         decision = _evaluate(snapshot, receipt=None)
         assert decision.science_launch_allowed is False
@@ -98,6 +111,16 @@ def test_running_ablation_yields_to_main_only_at_safe_checkpoint() -> None:
     assert main_priority_runtime_action(
         snapshot, ablation_running=True, at_safe_checkpoint=False
     ) == "REQUEST_CHECKPOINT_THEN_PAUSE"
+    assert main_priority_runtime_action(
+        snapshot, ablation_running=True, at_safe_checkpoint=True
+    ) == "GRACEFUL_PAUSE_AND_RELEASE_GPU"
+
+
+def test_running_ablation_yields_when_a_main_owner_becomes_unhealthy() -> None:
+    snapshot = _snapshot(
+        all_incomplete_main_cells_owned=False,
+        unhealthy_or_unowned_main_cells=("TasteMolNet/GlobalGCE",),
+    )
     assert main_priority_runtime_action(
         snapshot, ablation_running=True, at_safe_checkpoint=True
     ) == "GRACEFUL_PAUSE_AND_RELEASE_GPU"

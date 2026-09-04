@@ -24,6 +24,10 @@ from src.ablations.llm.early_launch_gate import (  # noqa: E402
     EarlyRunAuthorizationReceipt,
     evaluate_early_launch_gate,
 )
+from src.ablations.llm.final16_owner_evidence import (  # noqa: E402
+    assert_snapshot_matches_owner_coverage,
+    evaluate_final16_owner_coverage,
+)
 from src.ablations.llm.model_scale_registry import load_model_scale_registry  # noqa: E402
 from src.ablations.llm.runtime_evidence import (  # noqa: E402
     evaluate_runtime_model_evidence,
@@ -37,6 +41,7 @@ from src.ablations.llm.stage_scale import (  # noqa: E402
     LLMStageVariant,
     validate_non_factorial_design,
 )
+from src.ablations.launch_gate import validate_matrix_authority_pointer  # noqa: E402
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -148,6 +153,23 @@ def main() -> int:
     )
     if matrix_identity["sha256"] != snapshot.matrix_authority_sha256:
         raise ValueError("main snapshot matrix-authority SHA changed")
+    matrix_authority = validate_matrix_authority_pointer(
+        _load(Path(snapshot.matrix_authority_path))
+    )
+    matrix_authority["pointer_root"] = str(
+        Path(snapshot.matrix_authority_path).resolve().parent
+    )
+    owner_registry_identity = _physical_identity(
+        Path(snapshot.main_owner_registry_path),
+        role="canonical_final16_owner_registry",
+    )
+    if owner_registry_identity["sha256"] != snapshot.main_owner_registry_sha256:
+        raise ValueError("main snapshot canonical owner-registry SHA changed")
+    owner_coverage = evaluate_final16_owner_coverage(
+        authority=matrix_authority,
+        owner_registry=_load(Path(snapshot.main_owner_registry_path)),
+    )
+    assert_snapshot_matches_owner_coverage(snapshot, owner_coverage)
     model_evidence = evaluate_runtime_model_evidence(
         registry,
         two_b_snapshot=_optional_pair(
@@ -183,6 +205,7 @@ def main() -> int:
             "sha256": reference.file_sha256,
             "size": Path(reference.path).stat().st_size,
         },
+        "canonical_owner_registry": owner_registry_identity,
     }
     for name, path in (
         ("two_b_snapshot", args.two_b_snapshot_manifest),
@@ -237,6 +260,8 @@ def main() -> int:
             "self_sha256": reference.self_sha256,
         },
         "matrix_authority_evidence": matrix_identity,
+        "canonical_owner_registry": owner_registry_identity,
+        "main_owner_coverage": owner_coverage.to_dict(),
         "execution_commit": commit,
         "runtime_run_contract_sha256": run_contract_sha,
         "early_launch": decision.to_dict(),

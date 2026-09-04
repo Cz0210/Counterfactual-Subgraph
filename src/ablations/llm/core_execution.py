@@ -434,6 +434,7 @@ def load_authorized_launch_decision(
     for key, identity in (
         ("run_spec", payload.get("run_spec")),
         ("main_snapshot", payload.get("main_snapshot")),
+        ("canonical_owner_registry", payload.get("canonical_owner_registry")),
         ("matrix_authority", payload.get("matrix_authority")),
         ("reference_contract", payload.get("reference_contract")),
         ("science_entrypoint", payload.get("science_entrypoint")),

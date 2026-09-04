@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import re
 from typing import Any, Mapping
 
 from src.ablations.gnn.five_backbone import (
@@ -11,6 +12,9 @@ from src.ablations.gnn.five_backbone import (
     validate_proposal_fixed_runtime_manifest,
 )
 from src.ablations.launch_gate import LaunchGateDecision
+
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +80,8 @@ def evaluate_five_backbone_launch(
         and main_gate.figure4_pass
         and main_gate.table2_pass
         and main_gate.artifact_receipts_bound
+        and isinstance(main_gate.combined_audit_sha256, str)
+        and _SHA256.fullmatch(main_gate.combined_audit_sha256) is not None
         and not main_gate.evidence_errors
     )
     no_main_waiter = _main_queue_empty(main_ready_gpu_tasks)
