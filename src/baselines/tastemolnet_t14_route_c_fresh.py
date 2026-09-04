@@ -2529,14 +2529,25 @@ def validate_fresh_retry_retirement_receipt(path: Path) -> dict[str, Any]:
             field="failed reference child spec",
         )
         expected_child_sha = str(reference.get("spec_sha256") or "")
-        if file_sha256(child_spec_path) != expected_child_sha:
-            raise T14RouteCFreshError("Route C failed reference child spec changed")
         try:
             child_spec = json.loads(child_spec_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise T14RouteCFreshError(
                 "Route C failed reference child spec is unreadable"
             ) from exc
+        # owner_plan records the task spec's canonical self hash, not the
+        # byte-level hash of the newline-terminated JSON file.  Recompute that
+        # documented self hash and bind both copies; comparing the plan value
+        # to file_sha256() incorrectly rejects every real sealed child spec.
+        child_spec_unsigned = {
+            key: item for key, item in child_spec.items() if key != "spec_sha256"
+        }
+        if (
+            _SHA256.fullmatch(expected_child_sha) is None
+            or child_spec.get("spec_sha256") != expected_child_sha
+            or stable_sha256(child_spec_unsigned) != expected_child_sha
+        ):
+            raise T14RouteCFreshError("Route C failed reference child spec changed")
         preserved_science_root = Path(str(reference.get("output_root", "")))
         if (
             child_spec.get("output_root") != str(preserved_science_root)

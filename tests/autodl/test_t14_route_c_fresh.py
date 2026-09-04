@@ -693,8 +693,10 @@ def test_failed_watchdog_preserves_real_child_when_master_output_was_unused(
         encoding="utf-8",
     )
     child_spec_path = child_owner / "route_c_spec.json"
+    child_spec = {"output_root": str(child_output)}
+    child_spec["spec_sha256"] = stable_sha256(child_spec)
     child_spec_path.write_text(
-        json.dumps({"output_root": str(child_output)}), encoding="utf-8"
+        json.dumps(child_spec), encoding="utf-8"
     )
     (old_owner / "owner_plan.json").write_text(
         json.dumps(
@@ -703,7 +705,7 @@ def test_failed_watchdog_preserves_real_child_when_master_output_was_unused(
                     "REFERENCE_500": {
                         "output_root": str(child_output),
                         "spec_path": str(child_spec_path),
-                        "spec_sha256": file_sha256(child_spec_path),
+                        "spec_sha256": child_spec["spec_sha256"],
                     }
                 }
             }
