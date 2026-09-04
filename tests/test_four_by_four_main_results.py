@@ -71,9 +71,9 @@ def _cell(tmp_path: Path, dataset: str, method: str) -> tuple[Path, dict[str, ob
         }
         for k in range(1, 21)
     ]
-    raw_thresholds = ("0.000000", "0.0123456789012345", "0.0535000000000000")
+    raw_thresholds = tuple(f"{0.0535 * index / 600:.17g}" for index in range(601))
     figure4 = [
-        {"method": method, "threshold": threshold, "coverage": str(index / 10)}
+        {"method": method, "threshold": threshold, "coverage": str(index / 600)}
         for index, threshold in enumerate(raw_thresholds)
     ]
     table2 = [
@@ -264,7 +264,9 @@ def test_complete_export_preserves_raw_thresholds_and_taste_destinations(tmp_pat
     assert [rows[index * 20]["method"] for index in range(4)] == list(METHOD_ORDER)
     with (output / "aids/combined/figure4_coverage_vs_threshold.csv").open(newline="") as handle:
         thresholds = [row["threshold"] for row in csv.DictReader(handle) if row["method"] == "Ours"]
-    assert thresholds == ["0.000000", "0.0123456789012345", "0.0535000000000000"]
+    assert len(thresholds) == 601
+    assert thresholds[0] == "0"
+    assert thresholds[-1] == "0.053499999999999999"
     taste_text = (output / "tastemolnet/combined/destination_distribution.csv").read_text(encoding="utf-8")
     assert "Sweet_to_Bitter_count" in taste_text
     assert '"{""0"":1,""2"":1}"' in taste_text
@@ -272,6 +274,60 @@ def test_complete_export_preserves_raw_thresholds_and_taste_destinations(tmp_pat
     audit = json.loads((output / "final_export_audit.json").read_text(encoding="utf-8"))
     assert audit["zero_fill_used"] is False
     assert audit["paper_directory_written"] is False
+
+
+def test_valid_zero_cell_preserves_na_cost_instead_of_numeric_imputation(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project-zero"
+    (project / "paper").mkdir(parents=True)
+    matrix = _matrix(tmp_path)
+    payload = json.loads(matrix.read_text(encoding="utf-8"))
+    row = next(
+        item
+        for item in payload["cells"]
+        if item["dataset"] == "TasteMolNet" and item["method"] == "GlobalGCE"
+    )
+    root = Path(row["standardized_output_root"])
+    figure3_path = root / "figure3_coverage_vs_k.csv"
+    with figure3_path.open(encoding="utf-8", newline="") as handle:
+        figure3 = list(csv.DictReader(handle))
+    for item in figure3:
+        item["coverage"] = "0"
+        item["cost"] = "N/A"
+    _write_csv(figure3_path, figure3)
+    table_path = root / "table2_globalgce_k10.csv"
+    with table_path.open(encoding="utf-8", newline="") as handle:
+        table = list(csv.DictReader(handle))
+    table[0]["coverage"] = "0"
+    table[0]["cost"] = "N/A"
+    _write_csv(table_path, table)
+    audit_path = root / "final_artifact_audit.json"
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    audit["file_sha256"][figure3_path.name] = sha256_file(figure3_path)
+    audit["file_sha256"][table_path.name] = sha256_file(table_path)
+    _write_json(audit_path, audit)
+
+    output = tmp_path / "outputs" / "valid-zero"
+    result = export_main_results(
+        matrix_status=matrix,
+        output_root=output,
+        project_root=project,
+        renderer=_fake_renderer,
+    )
+    assert result.complete is True
+    table_csv = (output / "tastemolnet/combined/table2.csv").read_text(
+        encoding="utf-8"
+    )
+    assert "GlobalGCE,10,0,N/A" in table_csv
+    assert "& 0.00\\% & N/A" in (
+        output / "paper_table2_four_datasets.tex"
+    ).read_text(encoding="utf-8")
+    final_audit = json.loads(
+        (output / "final_export_audit.json").read_text(encoding="utf-8")
+    )
+    assert final_audit["zero_fill_used"] is False
+    assert final_audit["undefined_conditional_cost_preserved_as_na"] is True
 
 
 def test_three_dataset_staging_requires_exact_12_and_preserves_taste_block(

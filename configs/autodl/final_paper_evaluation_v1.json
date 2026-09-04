@@ -1,0 +1,62 @@
+{
+  "bootstrap": {
+    "resampling_unit": "test_parent",
+    "samples": 1000,
+    "seed": 0
+  },
+  "cf_mode": "strict_flip",
+  "datasets": [
+    "AIDS",
+    "Mutagenicity",
+    "BACE",
+    "TasteMolNet"
+  ],
+  "distance_line": "MolCLR-Node-Wasserstein",
+  "figure3": {
+    "k_values": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20
+    ],
+    "theta": 0.05
+  },
+  "figure4": {
+    "k": 10,
+    "threshold_count": 601,
+    "threshold_start": 0.0,
+    "threshold_stop": 0.0535
+  },
+  "forbid_method_specific_parent_cohort": true,
+  "forbid_method_specific_threshold": true,
+  "forbid_posthoc_metric_selection": true,
+  "forbid_test_tuning": true,
+  "methods": [
+    "Ours",
+    "GCFExplainer",
+    "GlobalGCE",
+    "ComRecGC"
+  ],
+  "schema_version": "final_paper_evaluation_contract_v1",
+  "table2": {
+    "k": 10,
+    "theta": 0.05,
+    "undefined_conditional_cost": "N/A"
+  }
+}

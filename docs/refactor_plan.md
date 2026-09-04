@@ -4102,9 +4102,18 @@ Mutagenicity roadmaps.
   receipts and publish a hash-closed production-chain pointer.
 - [ ] Classify the first Mut trace-mode semantic divergence within the bounded
   audit and select either finalizer-only repair or the fresh trace-off route.
-- [ ] Fork the Taste GCF accelerated implementation from the sealed step-250
-  reference checkpoint without restarting the healthy reference process.
+- [x] Add a fresh-root Taste GCF accelerated owner/spec that copies the sealed
+  step-250 history, first-seen and transition prefixes without restarting or
+  signaling the healthy reference process.
+- [x] Add exact step-500 and reload-through-510 parity gates, a Mut-release
+  guarded GPU0 launcher, and blocked full/postprocess/publisher prebindings.
+- [ ] Add and review the diagnostic-to-20k prefix-reframing promotion before
+  dispatching the prebound 500 -> 10k full owner.
 - [ ] Validate and promote the dataset-specific disk-backed Taste ComRecGC
   Route C canary, then continue from its committed step-500 state.
 - [ ] Import the completed HPC T8 bundle into a fresh AutoDL root, finish the
   four missing cells, and render the frozen-protocol paper artifacts.
+- [x] Freeze the final Figure 3/4/Table 2 contract, preserve valid-zero
+  conditional cost as `N/A`, and add paired-parent bootstrap/claim auditing.
+- [x] Add a GPU-free, matrix-read-only final-four observer with a durable
+  heartbeat and independently checkable process identity.

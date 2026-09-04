@@ -17585,3 +17585,41 @@ has exited, no writable descriptor remains, and the independent replay passes.
   without modifying the immutable canary evidence or resubmitting successful
   shards.  The old refinement pointer remains preserved as historical
   evidence.
+
+# 2026-09-04: Freeze final rendering and parent-unit comparison semantics
+
+- Motivation: the final exporter accepted any monotone Figure 4 grid and
+  attempted to coerce every conditional cost to a finite number.  That would
+  either reject a scientifically valid zero-coverage baseline or invite an
+  incorrect zero imputation, and it did not independently enforce the frozen
+  601-point paper grid.
+- Decision: require the exact 601-point linear grid from 0 through 0.0535,
+  Figure 3 prefixes 1 through 20, and Table 2 at K=10/theta=0.05.  Preserve an
+  undefined conditional cost as `N/A` only when coverage is exactly zero;
+  never convert it to zero.  Pairwise uncertainty resamples paired test
+  parents (1000 draws, seed 0), and the claim marker is derived from frozen
+  metrics rather than chosen after inspecting results.
+- Impact: the final exporter and comparison audit fail closed on parent,
+  classifier, WNode, threshold, selector-freeze, or test-selection mismatch.
+  A small observer reports the four remaining cells and immutable owner
+  evidence without launching science, acquiring a GPU, or writing the matrix.
+
+# 2026-09-04: Fork T12 acceleration from the sealed reference step 250
+
+- Motivation: the protected GPU3 reference is healthy but I/O-bound.  A second
+  A800 can test an operationally faster layout without discarding the already
+  completed 250 scientific transitions or waiting for the reference to finish
+  before implementation work starts.
+- Decision: bind the exact checkpoint-250 manifest/payload plus the compact
+  history and first-seen raw-byte prefixes, copy those committed prefixes into
+  a fresh single-writer root, and retain the reference scientific checkpoint
+  identity.  GPU UUID/index are treated only as a separately recorded
+  transport difference and earn no equivalence claim by themselves.  The arm
+  must match the complete checkpoint at 500 and again after independent reload
+  through steps 501--510.  Its launcher is blocked on an immutable Mut GPU0
+  release receipt and never signals the reference.
+- Impact: GPU0 can be used after Mut releases it without restarting GPU3 or
+  recomputing steps 1--250.  Full/postprocess/publisher paths are prebound, but
+  remain blocked until exact parity.  Diagnostic 510-step resource bounds are
+  not silently relabeled as 20k bounds; a reviewed prefix-reframing promotion
+  is still required before 500 -> 10k execution.

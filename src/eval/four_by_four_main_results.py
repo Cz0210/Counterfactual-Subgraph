@@ -88,6 +88,11 @@ METHOD_STYLES = {
     "ComRecGC": {"color": "#2E7D32", "marker": "*"},
 }
 FIGURE3_MARKER_INDICES = (0, 2, 4, 9, 14, 19)
+FIGURE4_THRESHOLD_START = 0.0
+FIGURE4_THRESHOLD_STOP = 0.0535
+FIGURE4_THRESHOLD_POINTS = 601
+TABLE2_THETA = 0.05
+NA_COST_VALUES = frozenset({"", "n/a", "na"})
 
 
 class MainResultsError(ValueError):
@@ -212,6 +217,20 @@ def _finite(raw: Any, *, field: str, path: Path, rate: bool = False) -> float:
     return value
 
 
+def _conditional_cost(
+    raw: Any, *, coverage: float, field: str, path: Path
+) -> float | None:
+    """Validate a conditional cost without converting an empty cohort to zero."""
+
+    if str(raw).strip().lower() in NA_COST_VALUES:
+        if coverage != 0.0:
+            raise MainResultsError(
+                f"{path}: {field} may be N/A only when strict-flip coverage is zero"
+            )
+        return None
+    return _finite(raw, field=field, path=path)
+
+
 def _method_rows(
     path: Path,
     *,
@@ -252,8 +271,13 @@ def _method_rows(
             _finite(row[coverage_field], field=coverage_field, path=path, rate=True)
             for row in ordered
         ]
-        for row in ordered:
-            _finite(row[cost_field], field=cost_field, path=path)
+        for row, row_coverage in zip(ordered, coverage):
+            _conditional_cost(
+                row[cost_field],
+                coverage=row_coverage,
+                field=cost_field,
+                path=path,
+            )
         if any(right + 1e-12 < left for left, right in zip(coverage, coverage[1:])):
             raise MainResultsError(f"{path}: Figure 3 coverage is not monotone")
         return ordered, {
@@ -271,6 +295,22 @@ def _method_rows(
             _finite(row[threshold_field], field=threshold_field, path=path)
             for row in rows
         ]
+        expected_thresholds = [
+            FIGURE4_THRESHOLD_START
+            + (FIGURE4_THRESHOLD_STOP - FIGURE4_THRESHOLD_START)
+            * index
+            / (FIGURE4_THRESHOLD_POINTS - 1)
+            for index in range(FIGURE4_THRESHOLD_POINTS)
+        ]
+        if len(thresholds) != FIGURE4_THRESHOLD_POINTS or any(
+            not math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-12)
+            for observed, expected in zip(thresholds, expected_thresholds)
+        ):
+            raise MainResultsError(
+                f"{path}: Figure 4 grid must be the frozen "
+                f"{FIGURE4_THRESHOLD_POINTS}-point "
+                f"{FIGURE4_THRESHOLD_START}..{FIGURE4_THRESHOLD_STOP} grid"
+            )
         if any(right <= left for left, right in zip(thresholds, thresholds[1:])):
             raise MainResultsError(
                 f"{path}: Figure 4 thresholds must be raw, strictly increasing points"
@@ -309,8 +349,15 @@ def _method_rows(
             ),
             path=path,
         )
-        _finite(rows[0][coverage_field], field=coverage_field, path=path, rate=True)
-        _finite(rows[0][cost_field], field=cost_field, path=path)
+        coverage = _finite(
+            rows[0][coverage_field], field=coverage_field, path=path, rate=True
+        )
+        _conditional_cost(
+            rows[0][cost_field],
+            coverage=coverage,
+            field=cost_field,
+            path=path,
+        )
         return rows, {
             "method": method_field,
             "k": k_field,
@@ -831,6 +878,8 @@ def _display_rate(value: Any) -> str:
 
 
 def _display_cost(value: Any) -> str:
+    if str(value).strip().lower() in NA_COST_VALUES:
+        return "N/A"
     return f"{float(value):.4f}"
 
 
@@ -852,7 +901,8 @@ def _write_dataset_table(root: Path, dataset: str, rows: Sequence[Mapping[str, s
     ]
     for row in rows:
         markdown.append(
-            f"| {row['method']} | {100.0 * float(row['coverage']):.2f}% | {float(row['cost']):.4f} |"
+            f"| {row['method']} | {100.0 * float(row['coverage']):.2f}% | "
+            f"{_display_cost(row['cost'])} |"
         )
         latex.append(
             f"{_latex_escape(row['method'])} & {_display_rate(row['coverage'])} & {_display_cost(row['cost'])} \\\\"
@@ -920,7 +970,12 @@ def _plot_lines(axis: Any, rows: Sequence[Mapping[str, str]], *, x: str, y: str,
         style = METHOD_STYLES[method]
         axis.plot(
             [float(row[x]) for row in selected],
-            [float(row[y]) for row in selected],
+            [
+                math.nan
+                if str(row[y]).strip().lower() in NA_COST_VALUES
+                else float(row[y])
+                for row in selected
+            ],
             color=style["color"],
             marker=style["marker"],
             markevery=marker_every,
@@ -1176,6 +1231,10 @@ def export_main_results(
                 "cf_mode": CF_MODE,
                 "k_prefixes": list(K_PREFIXES),
                 "table2_k": TABLE2_K,
+                "table2_theta": TABLE2_THETA,
+                "figure4_threshold_start": FIGURE4_THRESHOLD_START,
+                "figure4_threshold_stop": FIGURE4_THRESHOLD_STOP,
+                "figure4_threshold_points": FIGURE4_THRESHOLD_POINTS,
                 "figure4_rendering": "raw_empirical_points_no_spline_no_smoothing",
                 "selection_performed_in_export": False,
                 "metric_recomputation_performed": False,
@@ -1227,6 +1286,10 @@ def export_main_results(
             "distance_line": DISTANCE_LINE,
             "cf_mode": CF_MODE,
             "table2_k": TABLE2_K,
+            "table2_theta": TABLE2_THETA,
+            "figure4_threshold_start": FIGURE4_THRESHOLD_START,
+            "figure4_threshold_stop": FIGURE4_THRESHOLD_STOP,
+            "figure4_threshold_points": FIGURE4_THRESHOLD_POINTS,
             "scientific_metrics_recomputed": False,
             "thresholds_selected_in_export": False,
             "smoothing_used": False,
@@ -1245,6 +1308,7 @@ def export_main_results(
             "clear_rejected": True,
             "taste_destination_fields_preserved": True,
             "zero_fill_used": False,
+            "undefined_conditional_cost_preserved_as_na": True,
             "paper_directory_written": False,
             "final_export_manifest_sha256": sha256_file(temporary / "final_export_manifest.json"),
             "outputs": _output_inventory(temporary, exclude=("final_export_audit.json", "FINAL_EXPORT_PASS.json", "PASS")),

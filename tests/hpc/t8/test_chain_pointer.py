@@ -222,3 +222,27 @@ def test_reconcile_full_chain_pointer_uses_receipts_and_live_state(tmp_path: Pat
     assert result["running_shards"] == 1
     assert result["merge_dependency"] == "afterok:2536781"
     assert load_current_pointer(pointer) == result
+
+    advanced = reconcile_full_chain_pointer(
+        current_pointer=pointer,
+        submission_receipt=submission_path,
+        slurm_inventory=inventory_path,
+        admission_receipt=admission_path,
+        sacct_text="2536781_0|COMPLETED|0:0\n2536781_1|COMPLETED|0:0\n",
+        updated_at="2026-09-04T05:00:00+00:00",
+    )
+    assert advanced["state"] == "FULL_CHAIN_ARRAY_PASS"
+    assert advanced["completed_shards"] == 2
+    assert advanced["previous_current_sha256"] == result["current_sha256"]
+
+    with pytest.raises(T8ChainPointerError, match="completed.*regressed"):
+        reconcile_full_chain_pointer(
+            current_pointer=pointer,
+            submission_receipt=submission_path,
+            slurm_inventory=inventory_path,
+            admission_receipt=admission_path,
+            sacct_text=(
+                "2536781_0|COMPLETED|0:0\n2536781_1|RUNNING|0:0\n"
+            ),
+            updated_at="2026-09-04T05:01:00+00:00",
+        )

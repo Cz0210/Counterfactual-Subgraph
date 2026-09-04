@@ -157,6 +157,57 @@ def _stage_order(payload: Mapping[str, Any]) -> tuple[int, int]:
     return 0, int(payload.get("refinement_depth", 0) or 0)
 
 
+def _full_chain_partition(payload: Mapping[str, Any]) -> dict[str, set[int]]:
+    shard_count = payload.get("shard_count")
+    if type(shard_count) is not int or shard_count < 1:
+        raise T8ChainPointerError("full-chain shard count is invalid")
+    categories: dict[str, set[int]] = {}
+    for prefix in ("completed", "running", "pending", "failed"):
+        count = payload.get(f"{prefix}_shards")
+        values = payload.get(f"{prefix}_shard_ids")
+        if type(count) is not int or count < 0 or type(values) is not list:
+            raise T8ChainPointerError(f"full-chain {prefix} state is malformed")
+        if any(type(value) is not int for value in values):
+            raise T8ChainPointerError(f"full-chain {prefix} IDs are malformed")
+        unique = set(values)
+        if len(unique) != count or len(values) != count:
+            raise T8ChainPointerError(f"full-chain {prefix} count disagrees with IDs")
+        categories[prefix] = unique
+    combined: set[int] = set()
+    for values in categories.values():
+        if combined.intersection(values):
+            raise T8ChainPointerError("full-chain shard states overlap")
+        combined.update(values)
+    if combined != set(range(shard_count)):
+        raise T8ChainPointerError("full-chain shard states are incomplete")
+    return categories
+
+
+def _full_chain_progress_changed(
+    existing: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> bool:
+    old = _full_chain_partition(existing)
+    new = _full_chain_partition(candidate)
+    if existing.get("shard_count") != candidate.get("shard_count"):
+        raise T8ChainPointerError("full-chain shard count changed")
+    if not old["completed"].issubset(new["completed"]):
+        raise T8ChainPointerError("completed full-chain shards regressed")
+    if not old["failed"].issubset(new["failed"]):
+        raise T8ChainPointerError("failed full-chain shards regressed")
+    progress_fields = (
+        "state",
+        "completed_shards",
+        "running_shards",
+        "pending_shards",
+        "failed_shards",
+        "completed_shard_ids",
+        "running_shard_ids",
+        "pending_shard_ids",
+        "failed_shard_ids",
+    )
+    return any(existing.get(key) != candidate.get(key) for key in progress_fields)
+
+
 def write_current_pointer(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
     """Publish a monotonic current pointer while the caller holds ``chain_lock``.
 
@@ -190,9 +241,15 @@ def write_current_pointer(path: Path, payload: Mapping[str, Any]) -> dict[str, A
                 "package_job_id",
             )
             if all(candidate.get(key) == existing.get(key) for key in identity_keys):
-                return existing
-            raise T8ChainPointerError("current pointer stage identity conflicts")
-        candidate["previous_current_sha256"] = existing[CURRENT_HASH_FIELD]
+                if candidate.get("active_stage") != "FULL_CHAIN":
+                    return existing
+                if not _full_chain_progress_changed(existing, candidate):
+                    return existing
+                candidate["previous_current_sha256"] = existing[CURRENT_HASH_FIELD]
+            else:
+                raise T8ChainPointerError("current pointer stage identity conflicts")
+        else:
+            candidate["previous_current_sha256"] = existing[CURRENT_HASH_FIELD]
     candidate[CURRENT_HASH_FIELD] = canonical_sha256(candidate)
     _validate(candidate)
     encoded = canonical_bytes(candidate) + b"\n"
