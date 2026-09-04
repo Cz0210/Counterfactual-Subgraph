@@ -54,6 +54,7 @@ MIN_VALID_UNIQUE_RULES = 10
 CHECK_INTERVAL = 2_500
 GENERATION_PASS_MARKER = "[TASTE_T14_COMRECGC_FULL_GENERATION_PASS]"
 RUNTIME_STATE_SCHEMA = "tastemolnet_t14_bounded_runtime_v1"
+ROUTE_C_RUNTIME_STATE_SCHEMA = "tastemolnet_t14_route_c_runtime_v1"
 CHECKPOINT_PROVENANCE_SCHEMA = "tastemolnet_t14_checkpoint_provenance_v1"
 TRANSITION_EXPANDED_CAPACITY = 5
 PROGRESS_INTERVAL = 100
@@ -199,8 +200,8 @@ class TasteComRecGCFullParameters:
     def validate(self) -> "TasteComRecGCFullParameters":
         if (
             self.steps != M_FALLBACK_MAX
-            or self.checkpoint_step % CHECK_INTERVAL != 0
-            or not CHECK_INTERVAL <= self.checkpoint_step <= M_FALLBACK_MAX
+            or self.checkpoint_step
+            not in {250, 500, *range(CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL)}
             or self.source_pool <= 0
             or self.source_count != self.source_pool
             or self.heads != 5
@@ -961,6 +962,8 @@ def fallback_checkpoint_targets(completed_step: int) -> tuple[int, ...]:
 class _BoundedRuntimeHandles:
     live_graph_state: Any
     transition_map: Any
+    route_c_updater: Any | None = None
+    step_observation: dict[str, Any] | None = None
 
 
 def _process_peak_rss_bytes() -> int:
@@ -983,6 +986,7 @@ def _checkpoint_identity(
     authority: Mapping[str, Any],
     cohort_manifest: Mapping[str, Any],
     parameters: TasteComRecGCFullParameters,
+    route_c_storage: str | None = None,
 ) -> tuple[dict[str, str], tuple[str, ...], str]:
     """Build output/run-ID-independent science identity for exact resume."""
 
@@ -1010,6 +1014,11 @@ def _checkpoint_identity(
         f"gpu_uuid={gpu.get('uuid')}",
     )
     command_sha256 = scientific_command_sha256(scientific_argv)
+    runtime_schema = (
+        ROUTE_C_RUNTIME_STATE_SCHEMA
+        if route_c_storage == "lowmemory"
+        else RUNTIME_STATE_SCHEMA
+    )
     provenance = {
         "schema_version": CHECKPOINT_PROVENANCE_SCHEMA,
         "dataset": DATASET,
@@ -1023,9 +1032,13 @@ def _checkpoint_identity(
         "execution_commit": str(execution.get("commit")),
         "physical_gpu_index": str(gpu.get("physical_index")),
         "gpu_uuid": str(gpu.get("uuid")),
-        "runtime_state_schema": RUNTIME_STATE_SCHEMA,
+        "runtime_state_schema": runtime_schema,
         "transition_cache_policy": "compact_transition_action_replay_lru_v1",
-        "graph_state_policy": "authoritative_backing_live_graph_resolution_v2",
+        "graph_state_policy": (
+            "t14_route_c_append_only_graph_store_bounded_lru_v1"
+            if route_c_storage == "lowmemory"
+            else "authoritative_backing_live_graph_resolution_v2"
+        ),
         "scientific_command_sha256": command_sha256,
         "total_steps": str(M_FALLBACK_MAX),
     }
@@ -1042,6 +1055,8 @@ def _bounded_t14_runtime(
     graph_store_path: Path,
     seed: int,
     expanded_capacity: int,
+    route_c_root: Path | None = None,
+    route_c_resume: bool = False,
 ) -> Iterator[_BoundedRuntimeHandles]:
     """Install the already-reviewed exact full-walk bounded state substrate."""
 
@@ -1059,12 +1074,30 @@ def _bounded_t14_runtime(
     original_transitions = module.transitions
     original_move = module.move_to_next_graph
     original_neighbor = module.neighbor_graph_access
-    live = LiveGraphState(
-        module,
-        module.graph_map,
-        store_path=graph_store_path,
-        seed=seed,
-    )
+    route_c_updater = None
+    original_candidates = module.counterfactual_candidates
+    if route_c_root is None:
+        live = LiveGraphState(
+            module,
+            module.graph_map,
+            store_path=graph_store_path,
+            seed=seed,
+        )
+    else:
+        from src.baselines.tastemolnet_t14_route_c_fresh import (
+            RouteCLiveGraphState,
+            RouteCStateUpdater,
+        )
+
+        route_c_updater = RouteCStateUpdater(
+            route_c_root,
+            candidate_capacity=int(module.MAX_COUNTERFACTUAL_SIZE),
+            record_capacity=200_000,
+            lru_capacity=128,
+            resume=route_c_resume,
+        )
+        live = RouteCLiveGraphState(route_c_updater, module, module.graph_map)
+        module.counterfactual_candidates = route_c_updater.candidates
     module.graph_map = live.graph_map
     module.comrecgc_live_graph_state = live
     rebuild_with_gcf_lineage = graph_lineage_neighbor_wrapper(original_neighbor)
@@ -1077,7 +1110,121 @@ def _bounded_t14_runtime(
         rebuild_target=lambda graph, action: rebuild_with_both_lineages(graph, action),
     )
     module.transitions = transitions
-    module.move_to_next_graph = live.wrap_move(transitions.wrap_move(original_move))
+    step_observation: dict[str, Any] = {}
+    captured_move: dict[str, Any] = {}
+
+    def capture_move(*args: Any, **kwargs: Any) -> Any:
+        """Capture chosen actions before the move-scoped transition cache evicts."""
+
+        parents = list(kwargs.get("graphs_hash", args[0] if args else []))
+        candidate_before = {
+            str(row["graph_hash"]): int(row["frequency"])
+            for row in module.counterfactual_candidates
+        }
+        result = original_move(*args, **kwargs)
+        next_hashes = result[0] if isinstance(result, tuple) and result else None
+        resolved_next = (
+            list(next_hashes)
+            if isinstance(next_hashes, (list, tuple))
+            else [next_hashes] * len(parents)
+        )
+        candidate_after = {
+            str(row["graph_hash"]): int(row["frequency"])
+            for row in module.counterfactual_candidates
+        }
+        selected_transitions = []
+        for source_hash, target_hash in zip(parents, resolved_next, strict=True):
+            record = bridge.records.get(target_hash)
+            selected_transitions.append(
+                {
+                    "source_graph_hash": str(source_hash),
+                    "target_graph_hash": (
+                        None if target_hash is None else str(target_hash)
+                    ),
+                    "action_records": (
+                        transitions.action_records(source_hash, target_hash)
+                        if target_hash is not None
+                        else []
+                    ),
+                    "duplicate_before_move": (
+                        target_hash is not None
+                        and str(target_hash) in candidate_before
+                    ),
+                    "candidate_frequency_before": (
+                        None
+                        if target_hash is None
+                        else candidate_before.get(str(target_hash))
+                    ),
+                    "candidate_frequency_after": (
+                        None
+                        if target_hash is None
+                        else candidate_after.get(str(target_hash))
+                    ),
+                    "accepted_candidate": (
+                        target_hash is not None
+                        and str(target_hash) in candidate_after
+                    ),
+                    "prediction": None if record is None else int(record.prediction),
+                    "source_probability": (
+                        None
+                        if record is None
+                        else float(record.probabilities[SOURCE_LABEL])
+                    ),
+                    "strict_flip": (
+                        None
+                        if record is None
+                        else bool(record.prediction != SOURCE_LABEL)
+                    ),
+                    "valid_fullgraph": (
+                        None if record is None else bool(record.valid_fullgraph)
+                    ),
+                }
+            )
+        captured_move.clear()
+        captured_move.update(
+            {
+                "parent_graph_hashes": [str(value) for value in parents],
+                "next_graph_hashes": (
+                    [str(value) for value in next_hashes]
+                    if isinstance(next_hashes, (list, tuple))
+                    else str(next_hashes)
+                ),
+                "teleported": result[1] if isinstance(result, tuple) and len(result) > 1 else None,
+                "recourse": result[2] if isinstance(result, tuple) and len(result) > 2 else None,
+                "next_importance": result[3] if isinstance(result, tuple) and len(result) > 3 else None,
+                "move_difference": result[4] if isinstance(result, tuple) and len(result) > 4 else None,
+                "selected_transitions": selected_transitions,
+            }
+        )
+        return result
+
+    bounded_move = live.wrap_move(transitions.wrap_move(capture_move))
+
+    def observed_move(*args: Any, **kwargs: Any) -> Any:
+        parents = list(kwargs.get("graphs_hash", args[0] if args else []))
+        result = bounded_move(*args, **kwargs)
+        next_hashes = result[0] if isinstance(result, tuple) and result else None
+        resolved_next = (
+            list(next_hashes)
+            if isinstance(next_hashes, (list, tuple))
+            else [next_hashes] * len(parents)
+        )
+        if route_c_updater is not None:
+            for source_hash, target_hash in zip(parents, resolved_next, strict=True):
+                if target_hash is not None:
+                    route_c_updater.candidates.record_transition(
+                        source_hash=source_hash, target_hash=target_hash
+                    )
+        step_observation.clear()
+        step_observation.update(
+            {
+                **captured_move,
+                "transition_move_count": int(transitions.move_count),
+            }
+        )
+        return result
+
+    module.move_to_next_graph = observed_move
 
     def neighbor_wrapper(original: Any) -> Any:
         return lineage_neighbor_wrapper(
@@ -1091,21 +1238,35 @@ def _bounded_t14_runtime(
             yield _BoundedRuntimeHandles(
                 live_graph_state=live,
                 transition_map=transitions,
+                route_c_updater=route_c_updater,
+                step_observation=step_observation,
             )
             completed_normally = True
     finally:
         module.move_to_next_graph = original_move
-        module.graph_map = dict(live.graph_map)
+        module.graph_map = (
+            {} if route_c_updater is not None else dict(live.graph_map)
+        )
+        if route_c_updater is not None:
+            module.counterfactual_candidates = []
         module.transitions = {}
         if hasattr(module, "comrecgc_live_graph_state"):
             delattr(module, "comrecgc_live_graph_state")
         try:
-            live.close()
+            if route_c_updater is not None:
+                route_c_updater.close()
+            else:
+                live.close()
         finally:
             if not completed_normally:
                 # Keep teardown bounded after a science exception.  The latest
                 # atomically published checkpoint remains the resume authority.
-                module.graph_map = dict(live.graph_map)
+                module.graph_map = (
+                    {} if route_c_updater is not None else dict(live.graph_map)
+                )
+                module.counterfactual_candidates = (
+                    [] if route_c_updater is not None else original_candidates
+                )
             module.transitions = original_transitions
 
 
@@ -1140,14 +1301,77 @@ def _checkpoint_algorithm_state(
             "Taste T14 checkpoint graph closure is incomplete: "
             f"missing_count={len(missing)} first={missing[0]!r}"
         )
-    return {
-        "schema_version": RUNTIME_STATE_SCHEMA,
+    if handles.route_c_updater is None:
+        official_state = snapshot_official_state(module)
+        runtime_schema = RUNTIME_STATE_SCHEMA
+        route_c_state = None
+    else:
+        covered = module.input_graphs_covered
+        if hasattr(covered, "detach"):
+            covered = covered.detach().cpu().clone()
+        official_state = {
+            "schema_version": "tastemolnet_t14_route_c_official_state_v1",
+            "graph_index_map": dict(module.graph_index_map),
+            "input_graphs_covered": covered,
+            "covering_graphs": set(module.covering_graphs),
+            "start": dict(module.start),
+            "is_sample": bool(module.is_sample),
+            "starting_step": int(module.starting_step),
+            "traversed_hashes": list(module.traversed_hashes),
+            "sample_size": int(module.sample_size),
+            "MAX_COUNTERFACTUAL_SIZE": int(module.MAX_COUNTERFACTUAL_SIZE),
+            "graph_objects_saved": 0,
+            "full_python_candidate_list_saved": False,
+        }
+        runtime_schema = ROUTE_C_RUNTIME_STATE_SCHEMA
+        route_c_state = handles.route_c_updater.checkpoint_state()
+    state = {
+        "schema_version": runtime_schema,
         "loop_state": loop_state.to_checkpoint_state(),
-        "official_state": snapshot_official_state(module),
+        "official_state": official_state,
         "transition_state": transition_state,
         "live_graph_state": live_state,
         "bridge_state": bridge.checkpoint_state(),
     }
+    if route_c_state is not None:
+        state["route_c_state"] = route_c_state
+    return state
+
+
+def _restore_route_c_official_state(module: Any, value: Mapping[str, Any]) -> None:
+    """Restore only non-disk official globals for a Route C segment."""
+
+    if (
+        type(value) is not dict
+        or value.get("schema_version")
+        != "tastemolnet_t14_route_c_official_state_v1"
+        or value.get("graph_objects_saved") != 0
+        or value.get("full_python_candidate_list_saved") is not False
+    ):
+        raise TasteComRecGCFullError("Taste T14 Route C official state changed")
+    required = {
+        "graph_index_map",
+        "input_graphs_covered",
+        "covering_graphs",
+        "start",
+        "traversed_hashes",
+        "sample_size",
+        "MAX_COUNTERFACTUAL_SIZE",
+    }
+    if not required.issubset(value):
+        raise TasteComRecGCFullError("Taste T14 Route C official state is incomplete")
+    module.graph_map = {}
+    module.graph_index_map = dict(value["graph_index_map"])
+    module.counterfactual_candidates = []
+    module.input_graphs_covered = value["input_graphs_covered"]
+    module.covering_graphs = set(value["covering_graphs"])
+    module.transitions = {}
+    module.start = dict(value["start"])
+    module.is_sample = bool(value.get("is_sample", True))
+    module.starting_step = int(value.get("starting_step", 1))
+    module.traversed_hashes = list(value["traversed_hashes"])
+    module.sample_size = int(value["sample_size"])
+    module.MAX_COUNTERFACTUAL_SIZE = int(value["MAX_COUNTERFACTUAL_SIZE"])
 
 
 def _restore_checkpoint_state(
@@ -1161,8 +1385,16 @@ def _restore_checkpoint_state(
     from src.baselines.comrecgc.generation_loop import GenerationLoopState
 
     state = loaded.algorithm_state
-    if state.get("schema_version") != RUNTIME_STATE_SCHEMA:
+    expected_schema = (
+        ROUTE_C_RUNTIME_STATE_SCHEMA
+        if handles.route_c_updater is not None
+        else RUNTIME_STATE_SCHEMA
+    )
+    if state.get("schema_version") != expected_schema:
         raise TasteComRecGCFullError("Taste T14 runtime checkpoint schema changed")
+    if handles.route_c_updater is not None:
+        route_c_state = state.pop("route_c_state")
+        handles.route_c_updater.restore_checkpoint_state(route_c_state)
     transition_state = state.pop("transition_state")
     live_graph_state = state.pop("live_graph_state")
     bridge_state = state.pop("bridge_state")
@@ -1171,6 +1403,15 @@ def _restore_checkpoint_state(
     handles.live_graph_state.restore_checkpoint_state(live_graph_state)
     bridge.restore_checkpoint_state(bridge_state, consume=True)
     loop_state = GenerationLoopState.from_checkpoint_state(loop_payload)
+    if handles.route_c_updater is not None:
+        candidates = handles.route_c_updater.candidates
+        rebuilt = {
+            candidates.graph_hash_at(index): index for index in range(len(candidates))
+        }
+        if rebuilt != module.graph_index_map:
+            raise TasteComRecGCFullError(
+                "Taste T14 Route C candidate/index state changed on reload"
+            )
     if (
         handles.transition_map.move_count != loop_state.completed_step
         or handles.live_graph_state.move_count != loop_state.completed_step
@@ -1242,6 +1483,55 @@ def _write_checkpoint(
     return evidence
 
 
+def _write_route_c_boundary(
+    *,
+    root: Path,
+    checkpoint_identity_path: Path,
+    route_c_contract: Mapping[str, Any],
+    target: int,
+    valid_unique_rule_count: int,
+    checkpoint_evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Seal every Route C boundary, including crash-resumable production ones."""
+
+    replay = target == 510
+    if not replay and checkpoint_evidence is None:
+        raise TasteComRecGCFullError("Taste T14 Route C checkpoint evidence is missing")
+    boundary = {
+        "schema_version": "tastemolnet_t14_route_c_first_checkpoint_v1",
+        "status": "REPLAY_BOUNDARY_REACHED" if replay else "CHECKPOINT_BOUNDARY_REACHED",
+        "attempt_uuid": route_c_contract["attempt_uuid"],
+        "spec_sha256": route_c_contract["spec_sha256"],
+        "output_root": str(root),
+        "completed_step": target,
+        "next_step": target + 1,
+        "checkpoint_dir": None if replay else checkpoint_evidence["checkpoint_dir"],
+        "checkpoint_digest": None if replay else checkpoint_evidence["checkpoint_digest"],
+        "checkpoint_identity_sha256": _sha256_file(checkpoint_identity_path),
+        "payload_reload_state": (
+            "NOT_APPLICABLE_REPLAY_TERMINAL"
+            if replay
+            else "PENDING_INDEPENDENT_RELOAD"
+        ),
+        "latest_promoted": False,
+        "legacy_checkpoint_loaded": False,
+        "valid_unique_rule_count": int(valid_unique_rule_count),
+        "validation_loaded": False,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "written_at": _utc_now(),
+    }
+    path = root / f"route_c_boundary_{target:06d}.json"
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        stable = set(boundary) - {"written_at"}
+        if any(existing.get(key) != boundary.get(key) for key in stable):
+            raise TasteComRecGCFullError("Taste T14 Route C boundary already differs")
+        return existing
+    _atomic_json(path, boundary)
+    return boundary
+
+
 def _load_latest_checkpoint(
     checkpoint_root: Path,
     *,
@@ -1249,6 +1539,7 @@ def _load_latest_checkpoint(
     provenance: Mapping[str, str],
     scientific_argv: Sequence[str],
     command_sha256: str,
+    route_c_storage: str | None = None,
 ) -> Any | None:
     from src.baselines.comrecgc.generation_checkpoint import load_generation_checkpoint
 
@@ -1293,10 +1584,19 @@ def _load_latest_checkpoint(
         single_pass=True,
     )
     completed = loaded.completed_step
+    valid_steps = (
+        {250, 500, *range(CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL)}
+        if route_c_storage is not None
+        else set(range(CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL))
+    )
+    expected_schema = (
+        ROUTE_C_RUNTIME_STATE_SCHEMA
+        if route_c_storage == "lowmemory"
+        else RUNTIME_STATE_SCHEMA
+    )
     if (
-        completed % CHECK_INTERVAL != 0
-        or not CHECK_INTERVAL <= completed <= M_FALLBACK_MAX
-        or loaded.algorithm_state.get("schema_version") != RUNTIME_STATE_SCHEMA
+        completed not in valid_steps
+        or loaded.algorithm_state.get("schema_version") != expected_schema
         or loaded.validation.checkpoint_digest != digest_pointer
     ):
         raise TasteComRecGCFullError("Taste T14 checkpoint payload changed")
@@ -1433,6 +1733,10 @@ def run_t14_full(
     output_root: str | Path,
     resume: bool,
     resume_spec: str | Path | None = None,
+    route_c_spec: str | Path | None = None,
+    route_c_storage: str | None = None,
+    checkpoint_only_step: int | None = None,
+    convergence_receipt: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run or resume the train-only native full generation and postprocessing."""
 
@@ -1450,6 +1754,31 @@ def run_t14_full(
         raise TasteComRecGCFullError("Taste T14 output root must be normalized")
     if root.exists() and not resume:
         raise FileExistsError(f"Taste T14 output already exists: {root}")
+    if resume_spec is not None and route_c_spec is not None:
+        raise TasteComRecGCFullError(
+            "Taste T14 legacy resume and fresh Route C are mutually exclusive"
+        )
+    if convergence_receipt is not None and (
+        route_c_spec is None or not resume or checkpoint_only_step is not None
+    ):
+        raise TasteComRecGCFullError(
+            "Taste T14 convergence receipt requires Route C finalization resume"
+        )
+    route_c_enabled = route_c_spec is not None
+    if bool(route_c_storage) != route_c_enabled:
+        raise TasteComRecGCFullError(
+            "Taste T14 Route C spec and storage mode must be supplied together"
+        )
+    if route_c_storage not in {None, "reference", "lowmemory"}:
+        raise TasteComRecGCFullError("Taste T14 Route C storage mode is invalid")
+    if checkpoint_only_step is not None and (
+        route_c_spec is None
+        or type(checkpoint_only_step) is not int
+        or checkpoint_only_step not in {250, 500, 510, *range(2_500, 25_001, 2_500)}
+    ):
+        raise TasteComRecGCFullError(
+            "Taste T14 Route C stop is not a registered checkpoint/replay boundary"
+        )
     if not root.exists():
         root.mkdir(parents=True, mode=0o700)
         _fsync_dir(root.parent)
@@ -1566,6 +1895,7 @@ def run_t14_full(
         authority=authority,
         cohort_manifest=cohort_manifest,
         parameters=parameters,
+        route_c_storage=route_c_storage,
     )
     checkpoint_identity = {
         "schema_version": CHECKPOINT_PROVENANCE_SCHEMA,
@@ -1574,7 +1904,7 @@ def run_t14_full(
         "scientific_argv": list(scientific_argv),
         "command_sha256": command_sha256,
         "total_steps": M_FALLBACK_MAX,
-        "checkpoint_interval": CHECK_INTERVAL,
+        "checkpoint_interval": 250 if route_c_enabled else CHECK_INTERVAL,
         "transition_expanded_capacity": TRANSITION_EXPANDED_CAPACITY,
         "raw_neighbor_graphs_retained_unbounded": False,
     }
@@ -1604,6 +1934,55 @@ def run_t14_full(
         provenance = dict(checkpoint_identity["provenance"])
         scientific_argv = tuple(checkpoint_identity["scientific_argv"])
         command_sha256 = str(checkpoint_identity["command_sha256"])
+    route_c_contract: dict[str, Any] | None = None
+    route_c_promotion_receipt: dict[str, Any] | None = None
+    route_c_convergence_receipt: dict[str, Any] | None = None
+    if route_c_spec is not None:
+        from src.baselines.tastemolnet_t14_route_c_fresh import (
+            load_spec as load_route_c_spec,
+            promotion_receipt_path,
+            validate_promotion_receipt,
+        )
+
+        route_c_contract = load_route_c_spec(Path(route_c_spec))
+        if (
+            route_c_contract["output_root"] != str(root)
+            or route_c_contract["execution_commit"]
+            != str(authority["execution"]["commit"])
+            or route_c_contract["gpu_index"] != 2
+            or route_c_contract["storage_mode"] != route_c_storage
+        ):
+            raise TasteComRecGCFullError(
+                "Taste T14 Route C spec differs from the live science identity"
+            )
+        if resume:
+            latest_pointer_path = root / "checkpoints" / "LATEST"
+            if not latest_pointer_path.is_file():
+                raise TasteComRecGCFullError(
+                    "Taste T14 Route C resume lacks a promoted checkpoint"
+                )
+            latest_pointer = json.loads(
+                latest_pointer_path.read_text(encoding="utf-8")
+            )
+            latest_step = int(latest_pointer.get("completed_step", -1))
+            route_c_promotion_receipt = validate_promotion_receipt(
+                promotion_receipt_path(route_c_contract, latest_step),
+                spec=route_c_contract,
+                expected_step=latest_step,
+            )
+            if convergence_receipt is not None:
+                from src.baselines.tastemolnet_t14_route_c_fresh import (
+                    validate_route_c_convergence_receipt,
+                )
+
+                route_c_convergence_receipt = validate_route_c_convergence_receipt(
+                    Path(convergence_receipt),
+                    spec=route_c_contract,
+                    expected_step=latest_step,
+                    expected_checkpoint_digest=str(
+                        latest_pointer.get("checkpoint_digest") or ""
+                    ),
+                )
     if checkpoint_identity_path.exists():
         if json.loads(checkpoint_identity_path.read_text(encoding="utf-8")) != (
             checkpoint_identity
@@ -1684,6 +2063,7 @@ def run_t14_full(
         provenance=provenance,
         scientific_argv=scientific_argv,
         command_sha256=command_sha256,
+        route_c_storage=route_c_storage,
     )
     if resume and latest is None:
         raise TasteComRecGCFullError(
@@ -1695,13 +2075,36 @@ def run_t14_full(
         )
     if latest is not None:
         runtime_state = latest.algorithm_state
-        if runtime_state.get("schema_version") != RUNTIME_STATE_SCHEMA:
-            raise TasteComRecGCFullError("Taste T14 checkpoint runtime changed")
-        restore_official_state(
-            module,
-            runtime_state.pop("official_state"),
-            consume=True,
+        expected_runtime_schema = (
+            ROUTE_C_RUNTIME_STATE_SCHEMA
+            if route_c_storage == "lowmemory"
+            else RUNTIME_STATE_SCHEMA
         )
+        if runtime_state.get("schema_version") != expected_runtime_schema:
+            raise TasteComRecGCFullError("Taste T14 checkpoint runtime changed")
+        if route_c_storage == "lowmemory":
+            if route_c_promotion_receipt is None:
+                raise TasteComRecGCFullError(
+                    "Taste T14 Route C resume lacks its validated promotion receipt"
+                )
+            from src.baselines.tastemolnet_t14_route_c_fresh import (
+                recover_route_c_external_state,
+            )
+
+            recover_route_c_external_state(
+                output_root=root,
+                loaded=latest,
+                promotion_receipt=route_c_promotion_receipt,
+            )
+            _restore_route_c_official_state(
+                module, runtime_state.pop("official_state")
+            )
+        else:
+            restore_official_state(
+                module,
+                runtime_state.pop("official_state"),
+                consume=True,
+            )
     graph_store_path = _prepare_runtime_store(root, latest)
     with _bounded_t14_runtime(
         module=module,
@@ -1709,6 +2112,10 @@ def run_t14_full(
         graph_store_path=graph_store_path,
         seed=parameters.seed,
         expanded_capacity=TRANSITION_EXPANDED_CAPACITY,
+        route_c_root=(root / "route_c_state")
+        if route_c_storage == "lowmemory"
+        else None,
+        route_c_resume=bool(latest is not None),
     ) as runtime_handles:
         state = None
         if latest is not None:
@@ -1724,6 +2131,23 @@ def run_t14_full(
 
         def progress_callback(loop_state: Any) -> None:
             step = int(loop_state.completed_step)
+            if route_c_contract is not None and step <= 510:
+                from src.baselines.tastemolnet_t14_route_c_fresh import (
+                    append_step_state,
+                    scientific_state_digest,
+                )
+
+                append_step_state(
+                    root / "route_c_step_states.jsonl",
+                    scientific_state_digest(
+                        module=module,
+                        bridge=bridge,
+                        loop_state=loop_state,
+                        selected=runtime_handles.step_observation or {},
+                        transition_map=runtime_handles.transition_map,
+                        live_graph_state=runtime_handles.live_graph_state,
+                    ),
+                )
             if step % PROGRESS_INTERVAL == 0:
                 _progress(
                     root,
@@ -1733,11 +2157,34 @@ def run_t14_full(
                     runtime_handles=runtime_handles,
                 )
 
-        for target in range(
-            ((completed // CHECK_INTERVAL) + 1) * CHECK_INTERVAL,
-            M_MAX + 1,
-            CHECK_INTERVAL,
-        ):
+        primary_stop = (
+            int(route_c_convergence_receipt["m_effective"])
+            if route_c_convergence_receipt is not None
+            else checkpoint_only_step or M_MAX
+        )
+        if route_c_enabled:
+            from src.baselines.tastemolnet_t14_route_c_fresh import (
+                checkpoint_targets,
+            )
+
+            targets = list(
+                checkpoint_targets(
+                    completed_step=completed,
+                    stop_step=primary_stop,
+                    route_c=True,
+                )
+            )
+            if primary_stop == 510 and completed < 510 and 510 not in targets:
+                targets.append(510)
+        else:
+            targets = list(
+                range(
+                    ((completed // CHECK_INTERVAL) + 1) * CHECK_INTERVAL,
+                    primary_stop + 1,
+                    CHECK_INTERVAL,
+                )
+            )
+        for target in targets:
             state = run_generation_loop(
                 module,
                 input_graphs=dataset,
@@ -1748,17 +2195,19 @@ def run_t14_full(
                 initial_state=state,
                 on_step_complete=progress_callback,
             )
-            _write_checkpoint(
-                module=module,
-                bridge=bridge,
-                loop_state=state,
-                parameters=parameters,
-                checkpoint_root=checkpoint_root,
-                handles=runtime_handles,
-                provenance=provenance,
-                scientific_argv=scientific_argv,
-                command_sha256=command_sha256,
-            )
+            checkpoint_evidence = None
+            if target != 510:
+                checkpoint_evidence = _write_checkpoint(
+                    module=module,
+                    bridge=bridge,
+                    loop_state=state,
+                    parameters=parameters,
+                    checkpoint_root=checkpoint_root,
+                    handles=runtime_handles,
+                    provenance=provenance,
+                    scientific_argv=scientific_argv,
+                    command_sha256=command_sha256,
+                )
             valid = count_train_side_valid_unique(bridge)
             _progress(
                 root,
@@ -1768,11 +2217,61 @@ def run_t14_full(
                 valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
                 runtime_handles=runtime_handles,
             )
+            boundary = None
+            if route_c_contract is not None:
+                boundary = _write_route_c_boundary(
+                    root=root,
+                    checkpoint_identity_path=checkpoint_identity_path,
+                    route_c_contract=route_c_contract,
+                    target=target,
+                    valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
+                    checkpoint_evidence=checkpoint_evidence,
+                )
+            if checkpoint_only_step is not None and target == checkpoint_only_step:
+                if route_c_contract is None:
+                    raise TasteComRecGCFullError(
+                        "Taste T14 first-checkpoint stop lacks its Route C spec"
+                    )
+                if boundary is None:
+                    raise TasteComRecGCFullError(
+                        "Taste T14 Route C boundary was not durably sealed"
+                    )
+                _progress(
+                    root,
+                    phase=(
+                        "ROUTE_C_REPLAY_510_COMPLETE"
+                        if target == 510
+                        else "ROUTE_C_CHECKPOINT_PENDING_INDEPENDENT_RELOAD"
+                    ),
+                    completed_step=target,
+                    cohort_count=len(cohort),
+                    valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
+                    runtime_handles=runtime_handles,
+                )
+                return boundary
         if state is None:
             raise TasteComRecGCFullError("Taste T14 generation produced no state")
         completed_now = int(state.completed_step)
         valid = count_train_side_valid_unique(bridge)
-        if completed_now == M_MAX or completed_now == M_FALLBACK_MAX:
+        if route_c_convergence_receipt is not None:
+            if completed_now != int(route_c_convergence_receipt["m_effective"]):
+                raise TasteComRecGCFullError(
+                    "Taste T14 convergence checkpoint cursor changed"
+                )
+            decision = {
+                "state": "STOP_AND_POSTPROCESS",
+                "m_configured_max": M_MAX,
+                "m_fallback_max": M_FALLBACK_MAX,
+                "m_effective": completed_now,
+                "resource_cap_used": False,
+                "early_stop_used": True,
+                "stop_reason": route_c_convergence_receipt["stop_reason"],
+                "convergence_receipt": str(Path(convergence_receipt)),
+                "convergence_receipt_sha256": route_c_convergence_receipt[
+                    "receipt_sha256"
+                ],
+            }
+        elif completed_now == M_MAX or completed_now == M_FALLBACK_MAX:
             decision = resource_cap_decision(
                 completed_step=completed_now,
                 valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
@@ -1808,7 +2307,7 @@ def run_t14_full(
                     initial_state=state,
                     on_step_complete=progress_callback,
                 )
-                _write_checkpoint(
+                checkpoint_evidence = _write_checkpoint(
                     module=module,
                     bridge=bridge,
                     loop_state=state,
@@ -1819,6 +2318,18 @@ def run_t14_full(
                     scientific_argv=scientific_argv,
                     command_sha256=command_sha256,
                 )
+                if route_c_contract is not None:
+                    fallback_valid = count_train_side_valid_unique(bridge)
+                    _write_route_c_boundary(
+                        root=root,
+                        checkpoint_identity_path=checkpoint_identity_path,
+                        route_c_contract=route_c_contract,
+                        target=target,
+                        valid_unique_rule_count=int(
+                            fallback_valid["valid_unique_rule_count"]
+                        ),
+                        checkpoint_evidence=checkpoint_evidence,
+                    )
                 _progress(
                     root,
                     phase="FALLBACK_GENERATION",
@@ -1854,14 +2365,38 @@ def run_t14_full(
             valid_unique_rule_count=int(valid["valid_unique_rule_count"]),
             runtime_handles=runtime_handles,
         )
-        common = _common_recourse_summary(
-            modules=modules,
-            module=module,
-            bridge=bridge,
-            source_graphs=source_graphs,
-            adapter=adapter,
-            parameters=parameters,
-        )
+        if runtime_handles.route_c_updater is None:
+            common = _common_recourse_summary(
+                modules=modules,
+                module=module,
+                bridge=bridge,
+                source_graphs=source_graphs,
+                adapter=adapter,
+                parameters=parameters,
+            )
+        else:
+            # The pinned summary intentionally requires ``type(raw) is dict``.
+            # Route C keeps the official ordered sequence behind mmap-backed
+            # mapping proxies during generation, so expose an iterator that
+            # materializes exactly one immutable candidate row at a time at
+            # this post-generation boundary.  This preserves order/frequency
+            # and avoids rebuilding the full Python candidate list in memory.
+            route_c_candidates = module.counterfactual_candidates
+            module.counterfactual_candidates = (
+                dict(route_c_candidates[index])
+                for index in range(len(route_c_candidates))
+            )
+            try:
+                common = _common_recourse_summary(
+                    modules=modules,
+                    module=module,
+                    bridge=bridge,
+                    source_graphs=source_graphs,
+                    adapter=adapter,
+                    parameters=parameters,
+                )
+            finally:
+                module.counterfactual_candidates = route_c_candidates
         bridge_evidence = bridge.report()
         transition_evidence = runtime_handles.transition_map.audit()
         graph_state_evidence = runtime_handles.live_graph_state.runtime_diagnostics()
@@ -1926,7 +2461,11 @@ def run_t14_full(
         "bounded_runtime": {
             "transition_cache": transition_evidence,
             "live_graph_state": graph_state_evidence,
-            "checkpoint_schema": RUNTIME_STATE_SCHEMA,
+            "checkpoint_schema": (
+                ROUTE_C_RUNTIME_STATE_SCHEMA
+                if route_c_storage == "lowmemory"
+                else RUNTIME_STATE_SCHEMA
+            ),
             "checkpoint_identity_sha256": _sha256_file(
                 checkpoint_identity_path
             ),
@@ -2072,7 +2611,8 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         or manifest.get("resource_cap") != resource
         or manifest.get("valid_unique") != valid
         or type(bounded_runtime) is not dict
-        or bounded_runtime.get("checkpoint_schema") != RUNTIME_STATE_SCHEMA
+        or bounded_runtime.get("checkpoint_schema")
+        != checkpoint_identity.get("provenance", {}).get("runtime_state_schema")
         or bounded_runtime.get("raw_neighbor_graphs_retained_unbounded") is not False
         or bounded_runtime.get("checkpoint_identity_sha256")
         != _sha256_file(root / "checkpoint_identity.json")
@@ -2088,7 +2628,18 @@ def validate_t14_full_output(output_root: str | Path) -> dict[str, Any]:
         or cohort_manifest.get("policy") != COHORT_POLICY
         or cohort_manifest.get("cohort_jsonl_sha256") != _sha256_bytes(cohort_bytes)
         or resource.get("state") != "STOP_AND_POSTPROCESS"
-        or effective not in {M_MAX, M_FALLBACK_MAX}
+        or (
+            effective not in {M_MAX, M_FALLBACK_MAX}
+            and not (
+                effective in {12_500, 15_000, 17_500}
+                and resource.get("early_stop_used") is True
+                and resource.get("resource_cap_used") is False
+                and resource.get("stop_reason")
+                == "TRAIN_SIDE_CONVERGENCE_TWO_CONSECUTIVE_WINDOWS"
+                and type(resource.get("convergence_receipt")) is str
+                and type(resource.get("convergence_receipt_sha256")) is str
+            )
+        )
         or valid.get("valid_unique_rule_count", 0) < MIN_VALID_UNIQUE_RULES
         or progress.get("status") != "PASS"
         or progress.get("completed_step") != effective

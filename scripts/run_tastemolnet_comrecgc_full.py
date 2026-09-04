@@ -50,6 +50,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--official-root", type=_absolute, required=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--resume-spec", type=_absolute)
+    parser.add_argument("--route-c-spec", type=_absolute)
+    parser.add_argument(
+        "--route-c-storage", choices=("reference", "lowmemory")
+    )
+    parser.add_argument(
+        "--checkpoint-only-step",
+        type=int,
+        choices=(250, 500, 510, 2500, 5000, 7500, 10000, 12500, 15000, 17500, 20000, 25000),
+    )
+    parser.add_argument("--convergence-receipt", type=_absolute)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--set", action="append", default=[])
     return parser.parse_args(argv)
@@ -59,8 +69,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.set != ["inference.fallback_to_heuristic=false"]:
         raise ValueError("Taste T14 requires the fail-closed inference override")
-    if bool(args.resume_spec) != bool(args.resume):
-        raise ValueError("Taste T14 resume and --resume-spec must be supplied together")
+    if args.resume_spec and args.route_c_spec:
+        raise ValueError("Taste T14 accepts only one resume authority")
+    if bool(args.route_c_storage) != bool(args.route_c_spec):
+        raise ValueError(
+            "Taste T14 Route C spec and storage mode must be supplied together"
+        )
+    if args.resume and not (args.resume_spec or args.route_c_spec):
+        raise ValueError("Taste T14 resume requires a bound resume authority")
+    if args.resume_spec and not args.resume:
+        raise ValueError("Taste T14 --resume-spec requires --resume")
+    if args.checkpoint_only_step is not None and args.route_c_spec is None:
+        raise ValueError(
+            "Taste T14 checkpoint-only mode requires one fresh Route C spec"
+        )
+    if args.convergence_receipt and (
+        not args.resume or args.route_c_spec is None or args.checkpoint_only_step is not None
+    ):
+        raise ValueError(
+            "Taste T14 convergence receipt requires Route C finalization resume"
+        )
     with hold_t9_inputs(
         config_path=args.config,
         run_id=args.run_id,
@@ -88,12 +116,33 @@ def main(argv: list[str] | None = None) -> int:
                 output_root=args.output_dir,
                 resume=args.resume,
                 resume_spec=args.resume_spec,
+                route_c_spec=args.route_c_spec,
+                route_c_storage=args.route_c_storage,
+                checkpoint_only_step=args.checkpoint_only_step,
+                convergence_receipt=args.convergence_receipt,
             )
             inputs.revalidate()
-            result = {
-                "science": result,
-                "verification": validate_t14_full_output(args.output_dir),
-            }
+            if result.get("status") in {
+                "CHECKPOINT_BOUNDARY_REACHED",
+                "REPLAY_BOUNDARY_REACHED",
+            }:
+                result = {
+                    "science": result,
+                    "verification": {
+                        "status": (
+                            "REPLAY_BOUNDARY_COMPLETE"
+                            if result.get("status") == "REPLAY_BOUNDARY_REACHED"
+                            else "PENDING_INDEPENDENT_RELOAD"
+                        ),
+                        "completed_step": args.checkpoint_only_step,
+                        "generation_pass": False,
+                    },
+                }
+            else:
+                result = {
+                    "science": result,
+                    "verification": validate_t14_full_output(args.output_dir),
+                }
     print(json.dumps(result, sort_keys=True, ensure_ascii=True), flush=True)
     return 0
 

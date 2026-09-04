@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Independently reload and promote one clean Taste T14 Route C checkpoint."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.baselines.tastemolnet_t14_route_c_fresh import (  # noqa: E402
+    load_spec,
+    promote_checkpoint,
+)
+
+
+def _absolute(value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("path must be absolute")
+    return path
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=_absolute, required=True)
+    parser.add_argument("--route-c-spec", type=_absolute, required=True)
+    parser.add_argument("--step", type=int, required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if not args.config.is_file() or args.config.is_symlink():
+        raise ValueError("T14 Route C promoter requires one physical config")
+    receipt = promote_checkpoint(load_spec(args.route_c_spec), step=args.step)
+    print(json.dumps(receipt, sort_keys=True), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

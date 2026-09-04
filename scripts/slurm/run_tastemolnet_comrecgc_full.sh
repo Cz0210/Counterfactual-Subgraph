@@ -25,7 +25,12 @@ exit 64
 #   --output-dir "$TASTEMOLNET_T14_OUTPUT" --run-id "$TASTEMOLNET_T14_RUN_ID" \
 #   --gpu-uuid "$TASTEMOLNET_GPU_UUID" \
 #   --physical-gpu-index "$TASTEMOLNET_T14_GPU_INDEX" \
+#   --route-c-spec "$TASTEMOLNET_T14_ROUTE_C_SPEC" \
+#   --route-c-storage "$TASTEMOLNET_T14_ROUTE_C_STORAGE" \
+#   --checkpoint-only-step "$TASTEMOLNET_T14_CHECKPOINT_ONLY_STEP" \
 #   --set inference.fallback_to_heuristic=false
 # Add --resume only after the fresh route has atomically published
 # "$TASTEMOLNET_T14_OUTPUT/checkpoints/LATEST"; the AutoDL wrapper exposes this
 # as TASTEMOLNET_T14_RESUME=1.
+# For convergence finalization, omit --checkpoint-only-step and additionally pass
+# --resume --convergence-receipt "$TASTEMOLNET_T14_CONVERGENCE_RECEIPT".
