@@ -1585,7 +1585,7 @@ def _load_latest_checkpoint(
     )
     completed = loaded.completed_step
     valid_steps = (
-        {250, 500, *range(CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL)}
+        {50, 100, 250, 500, *range(CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL)}
         if route_c_storage is not None
         else set(range(CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL))
     )
@@ -1774,7 +1774,8 @@ def run_t14_full(
     if checkpoint_only_step is not None and (
         route_c_spec is None
         or type(checkpoint_only_step) is not int
-        or checkpoint_only_step not in {250, 500, 510, *range(2_500, 25_001, 2_500)}
+        or checkpoint_only_step
+        not in {50, 100, 250, 500, 510, *range(2_500, 25_001, 2_500)}
     ):
         raise TasteComRecGCFullError(
             "Taste T14 Route C stop is not a registered checkpoint/replay boundary"
@@ -1904,7 +1905,7 @@ def run_t14_full(
         "scientific_argv": list(scientific_argv),
         "command_sha256": command_sha256,
         "total_steps": M_FALLBACK_MAX,
-        "checkpoint_interval": 250 if route_c_enabled else CHECK_INTERVAL,
+        "checkpoint_interval": 50 if route_c_enabled else CHECK_INTERVAL,
         "transition_expanded_capacity": TRANSITION_EXPANDED_CAPACITY,
         "raw_neighbor_graphs_retained_unbounded": False,
     }

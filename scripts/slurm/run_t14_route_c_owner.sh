@@ -17,6 +17,7 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
+echo "route_c_formal_canary_promotes_step500_without_replaying_steps_1_500"
 
 : "${T14_ROUTE_C_TASK_SPEC:?required}"
 : "${T14_ROUTE_C_CONTINUATION_SPEC:?required}"

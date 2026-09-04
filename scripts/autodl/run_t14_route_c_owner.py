@@ -22,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.baselines.tastemolnet_t14_route_c_fresh import (  # noqa: E402
+    EARLY_CHECKPOINT_STEPS,
     M_MAX,
     T14RouteCFreshError,
     atomic_json,
@@ -30,7 +31,6 @@ from src.baselines.tastemolnet_t14_route_c_fresh import (  # noqa: E402
     build_spec,
     compare_step_ledgers,
     load_spec,
-    promote_checkpoint,
     validate_checkpoint_boundary,
     validate_promotion_receipt,
     validate_route_c_convergence_receipt,
@@ -211,6 +211,10 @@ def _child_spec(
         launch_headroom_bytes=int(memory["launch_headroom_bytes"]),
         runtime_headroom_bytes=int(memory["runtime_headroom_bytes"]),
         sample_seconds=float(memory["sample_seconds"]),
+        launch_samples_required=int(memory.get("launch_samples_required", 1)),
+        runtime_low_headroom_samples=int(
+            memory.get("runtime_low_headroom_samples", 1)
+        ),
     )
     write_spec(path, spec)
     return spec, path
@@ -247,19 +251,44 @@ def _run_science(
     stdout_path = owner_root / "logs" / f"{label}.out"
     stderr_path = owner_root / "logs" / f"{label}.err"
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    launch_streak = 0
+    launch_samples_required = int(
+        spec["memory"].get("launch_samples_required", 1)
+    )
+    runtime_low_samples_required = int(
+        spec["memory"].get("runtime_low_headroom_samples", 1)
+    )
     while True:
         limit = _counter(Path(spec["memory"]["cgroup_limit_path"]))
         current = _counter(Path(spec["memory"]["cgroup_current_path"]))
         headroom = max(0, limit - current)
         if headroom < int(spec["memory"]["launch_headroom_bytes"]):
+            launch_streak = 0
             _phase(
                 owner_root,
                 phase="WAITING_MEMORY_HEADROOM",
                 task=label,
                 headroom_bytes=headroom,
+                other_science_rss_bytes=max(0, current - _rss_bytes(os.getpid())),
+                launch_admission_samples=launch_streak,
+                launch_admission_samples_required=launch_samples_required,
                 science_pid=None,
             )
-            time.sleep(30)
+            time.sleep(float(spec["memory"]["sample_seconds"]))
+            continue
+        launch_streak += 1
+        if launch_streak < launch_samples_required:
+            _phase(
+                owner_root,
+                phase="SAMPLING_MEMORY_HEADROOM",
+                task=label,
+                headroom_bytes=headroom,
+                other_science_rss_bytes=max(0, current - _rss_bytes(os.getpid())),
+                launch_admission_samples=launch_streak,
+                launch_admission_samples_required=launch_samples_required,
+                science_pid=None,
+            )
+            time.sleep(float(spec["memory"]["sample_seconds"]))
             continue
         with stdout_path.open("ab", buffering=0) as stdout, stderr_path.open(
             "ab", buffering=0
@@ -286,12 +315,18 @@ def _run_science(
             signal.signal(signal.SIGINT, request_stop)
             failcnt_start = _counter(Path(spec["memory"]["cgroup_failcnt_path"]))
             peak_rss = 0
+            low_headroom_streak = 0
             while child.poll() is None:
                 rss, process_tree = _process_tree_rss_bytes(child.pid)
                 peak_rss = max(peak_rss, rss)
+                limit = _counter(Path(spec["memory"]["cgroup_limit_path"]))
                 current = _counter(Path(spec["memory"]["cgroup_current_path"]))
                 failcnt = _counter(Path(spec["memory"]["cgroup_failcnt_path"]))
                 headroom = max(0, limit - current)
+                if headroom < int(spec["memory"]["runtime_headroom_bytes"]):
+                    low_headroom_streak += 1
+                else:
+                    low_headroom_streak = 0
                 _phase(
                     owner_root,
                     phase="SCIENCE_RUNNING",
@@ -302,20 +337,46 @@ def _run_science(
                     process_peak_rss_bytes=peak_rss,
                     science_process_tree=process_tree,
                     cgroup_headroom_bytes=headroom,
+                    other_science_rss_bytes=max(
+                        0, current - rss - _rss_bytes(os.getpid())
+                    ),
+                    low_headroom_samples=low_headroom_streak,
+                    low_headroom_samples_required=runtime_low_samples_required,
                     stop_requested=stop_requested,
                 )
-                if (
-                    rss > int(spec["memory"]["max_process_rss_bytes"])
-                    or headroom < int(spec["memory"]["runtime_headroom_bytes"])
-                    or failcnt > failcnt_start
-                ):
+                resource_reason = None
+                if rss > int(spec["memory"]["max_process_rss_bytes"]):
+                    resource_reason = "PROCESS_RSS_LIMIT"
+                elif failcnt > failcnt_start:
+                    resource_reason = "CGROUP_FAILCNT_INCREASED"
+                elif low_headroom_streak >= runtime_low_samples_required:
+                    resource_reason = "RUNTIME_HEADROOM_BELOW_RESERVE_THREE_SAMPLES"
+                if resource_reason is not None:
+                    latest = _latest_step(spec) if Path(spec["output_root"]).exists() else None
+                    atomic_json(
+                        owner_root / "resource_watchdog_stop_request.json",
+                        {
+                            "schema_version": "tastemolnet_t14_resource_stop_request_v1",
+                            "reason": resource_reason,
+                            "science_pid": child.pid,
+                            "science_start_ticks": child_start_ticks,
+                            "cgroup_headroom_bytes": headroom,
+                            "low_headroom_samples": low_headroom_streak,
+                            "low_headroom_samples_required": runtime_low_samples_required,
+                            "latest_promoted_checkpoint": latest,
+                            "signal": "SIGTERM",
+                            "sigkill_allowed": False,
+                            "requested_at": _utc_now(),
+                        },
+                    )
                     _terminate_process_tree(
                         child.pid, expected_root_ticks=child_start_ticks
                     )
                     stop_requested = True
                     child.wait()
                     raise T14RouteCFreshError(
-                        f"Route C resource watchdog stopped {label} at a safe request"
+                        "Route C resource watchdog stopped "
+                        f"{label} at a safe request: {resource_reason}"
                     )
                 time.sleep(float(spec["memory"]["sample_seconds"]))
             return_code = int(child.wait())
@@ -444,7 +505,55 @@ def _latest_step(spec: Mapping[str, Any]) -> int | None:
     return step
 
 
-def _promote_pending(spec: Mapping[str, Any]) -> int | None:
+def _promote_checkpoint_fresh_process(
+    spec: Mapping[str, Any],
+    spec_path: Path,
+    *,
+    step: int,
+    owner_root: Path,
+    label: str,
+) -> None:
+    """Reload and promote one boundary in a process fresh from science state."""
+
+    stdout_path = owner_root / "logs" / f"{label}-reload.out"
+    stderr_path = owner_root / "logs" / f"{label}-reload.err"
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    with stdout_path.open("ab", buffering=0) as stdout, stderr_path.open(
+        "ab", buffering=0
+    ) as stderr:
+        completed = subprocess.run(
+            [
+                str(spec["python"]),
+                "-I",
+                "-B",
+                str(REPO_ROOT / "scripts/autodl/promote_t14_route_c_checkpoint.py"),
+                "--config",
+                str(REPO_ROOT / "configs/hpc.yaml"),
+                "--route-c-spec",
+                str(spec_path),
+                "--step",
+                str(step),
+            ],
+            stdout=stdout,
+            stderr=stderr,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise T14RouteCFreshError(
+            f"Route C fresh-process checkpoint reload failed: step={step}"
+        )
+    validate_promotion_receipt(
+        promotion_receipt_path(spec, step), spec=spec, expected_step=step
+    )
+
+
+def _promote_pending(
+    spec: Mapping[str, Any],
+    spec_path: Path,
+    *,
+    owner_root: Path,
+    label: str,
+) -> int | None:
     root = Path(spec["output_root"])
     pending_path = root / "checkpoints" / "PENDING_LATEST.json"
     if not pending_path.is_file():
@@ -454,7 +563,13 @@ def _promote_pending(spec: Mapping[str, Any]) -> int | None:
     pending = _json_object(pending_path)
     step = int(pending.get("completed_step", -1))
     validate_checkpoint_boundary(spec, step=step, validate_envelope=True)
-    promote_checkpoint(spec, step=step)
+    _promote_checkpoint_fresh_process(
+        spec,
+        spec_path,
+        step=step,
+        owner_root=owner_root,
+        label=label,
+    )
     return step
 
 
@@ -467,7 +582,16 @@ def _ensure_promoted_boundary(
     label: str,
 ) -> None:
     root = Path(spec["output_root"])
-    latest = _promote_pending(spec) if root.exists() else None
+    latest = (
+        _promote_pending(
+            spec,
+            spec_path,
+            owner_root=owner_root,
+            label=f"{label}-pending",
+        )
+        if root.exists()
+        else None
+    )
     if latest is not None and latest >= target:
         return
     if root.exists() and latest is None:
@@ -482,7 +606,13 @@ def _ensure_promoted_boundary(
         resume=latest is not None,
         stop_step=target,
     )
-    promote_checkpoint(spec, step=target)
+    _promote_checkpoint_fresh_process(
+        spec,
+        spec_path,
+        step=target,
+        owner_root=owner_root,
+        label=label,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -641,9 +771,20 @@ def main(argv: list[str] | None = None) -> int:
                 resume=False,
                 stop_step=250,
             )
-            promote_checkpoint(reload_spec, step=250)
+            _promote_checkpoint_fresh_process(
+                reload_spec,
+                reload_path,
+                step=250,
+                owner_root=owner_root,
+                label="lowmemory-reload-250",
+            )
         elif not _replay_boundary_valid(reload_spec):
-            latest = _promote_pending(reload_spec)
+            latest = _promote_pending(
+                reload_spec,
+                reload_path,
+                owner_root=owner_root,
+                label="lowmemory-reload-pending",
+            )
             if latest is None:
                 raise T14RouteCFreshError(
                     "Route C reload canary crashed before a sealed checkpoint"
@@ -674,13 +815,18 @@ def main(argv: list[str] | None = None) -> int:
         if any(value["status"] != "PASS" for value in receipts.values()):
             raise T14RouteCFreshError("T14 Route C semantic parity failed")
 
-        _ensure_promoted_boundary(
-            master,
-            args.task_spec,
-            owner_root=owner_root,
-            target=500,
-            label="promotable-lowmemory-500",
-        )
+        # The promotable root is the formal Route-C run.  Stop at every early
+        # boundary so this owner independently reloads and promotes each one.
+        # After parity, the same step-500 state continues to full; steps 1-500
+        # are not generated again.
+        for early_checkpoint in (*EARLY_CHECKPOINT_STEPS, 500):
+            _ensure_promoted_boundary(
+                master,
+                args.task_spec,
+                owner_root=owner_root,
+                target=early_checkpoint,
+                label=f"promotable-lowmemory-{early_checkpoint}",
+            )
         promotable_ledger = Path(master["output_root"]) / "route_c_step_states.jsonl"
         receipts["continuous_vs_promotable_1_500"] = compare_step_ledgers(
             continuous_ledger, promotable_ledger, start_step=1, end_step=500
@@ -694,6 +840,8 @@ def main(argv: list[str] | None = None) -> int:
             "checkpoint_250_reload_pass": True,
             "steps_501_510_exact": True,
             "promotable_checkpoint_step": 500,
+            "durable_early_checkpoints": [50, 100, 250, 500],
+            "formal_route_c_500_promoted_to_full_without_replay": True,
             "legacy_checkpoint_loaded": False,
             "written_at": _utc_now(),
         }

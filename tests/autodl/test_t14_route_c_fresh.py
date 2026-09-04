@@ -15,6 +15,7 @@ from scripts.autodl import run_t14_route_c_owner as route_c_owner
 from src.baselines import tastemolnet_t14_route_c_fresh as route_c
 
 from src.baselines.tastemolnet_t14_route_c_fresh import (
+    EARLY_CHECKPOINT_STEPS,
     FIRST_CHECKPOINT_STEP,
     PROMOTABLE_CHECKPOINT_STEP,
     RELOAD_REPLAY_END_STEP,
@@ -26,7 +27,9 @@ from src.baselines.tastemolnet_t14_route_c_fresh import (
     build_spec,
     checkpoint_targets,
     compare_step_ledgers,
+    file_sha256,
     recover_route_c_external_state,
+    retire_failed_route_c_current,
     scientific_state_digest,
     stable_sha256,
     validate_spec,
@@ -434,10 +437,13 @@ def test_single_state_updater_rejects_other_thread(tmp_path: Path) -> None:
 
 
 def test_compact_transition_and_checkpoint_schedule() -> None:
-    assert FIRST_CHECKPOINT_STEP == 250
+    assert FIRST_CHECKPOINT_STEP == 50
+    assert EARLY_CHECKPOINT_STEPS == (50, 100, 250)
     assert PROMOTABLE_CHECKPOINT_STEP == 500
     assert RELOAD_REPLAY_END_STEP == 510
     assert checkpoint_targets(completed_step=0, stop_step=510, route_c=True) == (
+        50,
+        100,
         250,
         500,
     )
@@ -597,3 +603,197 @@ def test_no_live_t14_owner_audit_uses_exact_entrypoints(tmp_path: Path) -> None:
             receipt_path=tmp_path / "blocked.json",
             proc_root=proc,
         )
+
+
+def test_failed_watchdog_attempt_is_preserved_and_pointer_retired(
+    tmp_path: Path,
+) -> None:
+    attempt = str(uuid4())
+    old_owner = tmp_path / "owners" / f"route-c-{attempt}"
+    old_output = tmp_path / "science" / f"route-c-{attempt}"
+    current = tmp_path / "control" / "t14_route_c" / "current"
+    retired = tmp_path / "control" / "t14_route_c" / "retired"
+    proc = tmp_path / "proc"
+    for path in (old_owner, old_output, current, proc):
+        path.mkdir(parents=True)
+    spec_path = old_owner / "T14_ROUTE_C_TASK_SPEC.json"
+    old_spec = {
+        "attempt_uuid": attempt,
+        "owner_root": str(old_owner),
+        "output_root": str(old_output),
+        "spec_sha256": "a" * 64,
+    }
+    spec_path.write_text(json.dumps(old_spec), encoding="utf-8")
+    (old_owner / "owner.json").write_text(
+        json.dumps(
+            {
+                "owner_pid": 321,
+                "owner_start_ticks": 654,
+                "task_spec": str(spec_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (old_owner / "terminal.json").write_text(
+        json.dumps(
+            {
+                "status": "FAILED",
+                "error": "Route C resource watchdog stopped full at a safe request",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (old_output / "cohort_manifest.json").write_text(
+        json.dumps({"cohort_jsonl_sha256": "b" * 64}), encoding="utf-8"
+    )
+    with (old_output / "route_c_step_states.jsonl").open("w", encoding="utf-8") as stream:
+        for step in (1, 50, 100, 161):
+            stream.write(json.dumps({"completed_step": step}) + "\n")
+    (current / "owner.pid").write_text("321\n", encoding="utf-8")
+    (current / "owner.start_ticks").write_text("654\n", encoding="utf-8")
+    (current / "task_spec.path").write_text(f"{spec_path}\n", encoding="utf-8")
+
+    receipt = retire_failed_route_c_current(
+        current_root=current, retired_root=retired, proc_root=proc
+    )
+    assert receipt["terminal_state"] == "TERMINAL_FAILED_RESOURCE_WATCHDOG"
+    assert receipt["retirement_state"] == "SUPERSEDED_BY_FRESH_RETRY"
+    assert receipt["observed_uncommitted_step"] == 161
+    assert receipt["reuse_partial_step161"] is False
+    assert receipt["old_root_deleted"] is False
+    assert old_output.is_dir()
+    assert not current.exists()
+    assert Path(receipt["retired_pointer_root"]).is_dir()
+
+
+def test_fresh_retry_contract_has_strict_memory_and_checkpoint_policy(
+    tmp_path: Path,
+) -> None:
+    old_attempt = str(uuid4())
+    old_owner = tmp_path / f"old-owner-{old_attempt}"
+    old_output = tmp_path / f"old-output-{old_attempt}"
+    retired_pointer = tmp_path / f"retired-{old_attempt}"
+    for path in (old_owner, old_output, retired_pointer):
+        path.mkdir()
+    terminal = old_owner / "terminal.json"
+    terminal.write_text(
+        json.dumps({"status": "FAILED", "error": "resource watchdog"}),
+        encoding="utf-8",
+    )
+    receipt = {
+        "schema_version": "tastemolnet_t14_route_c_failed_attempt_retirement_v1",
+        "terminal_state": "TERMINAL_FAILED_RESOURCE_WATCHDOG",
+        "retirement_state": "SUPERSEDED_BY_FRESH_RETRY",
+        "retry_index": 1,
+        "max_retries": 1,
+        "reuse_partial_step161": False,
+        "preserve_failed_attempt": True,
+        "old_attempt_uuid": old_attempt,
+        "old_owner_pid": 321,
+        "old_owner_start_ticks": 654,
+        "old_owner_root": str(old_owner),
+        "old_output_root": str(old_output),
+        "old_terminal_sha256": file_sha256(terminal),
+        "observed_uncommitted_step": 161,
+        "old_root_deleted": False,
+        "process_signal_sent": False,
+        "retired_pointer_root": str(retired_pointer),
+        "retired_at": "2026-09-05T00:00:00+00:00",
+    }
+    receipt["receipt_sha256"] = stable_sha256(receipt)
+    receipt_path = retired_pointer / "retirement_receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    attempt = str(uuid4())
+    counters = tmp_path / "new-cgroup"
+    counters.mkdir()
+    for name, value in (("limit", "1"), ("current", "0"), ("failcnt", "0")):
+        (counters / name).write_text(value, encoding="utf-8")
+    matrix_root = tmp_path / "matrix"
+    matrix_root.mkdir()
+    retry = {
+        "schema_version": "tastemolnet_t14_route_c_fresh_retry_task_v1",
+        "retry_index": 1,
+        "max_retries": 1,
+        "reuse_partial_step161": False,
+        "preserve_failed_attempt": True,
+        "fresh_uuid": attempt,
+        "fresh_output_root": str(tmp_path / f"science-{attempt}"),
+        "previous_attempt_uuid": old_attempt,
+        "previous_output_root": str(old_output),
+        "retirement_receipt": str(receipt_path),
+        "retirement_receipt_sha256": file_sha256(receipt_path),
+        "dataset_sha256": "1" * 64,
+        "train_split_sha256": "2" * 64,
+        "cohort_sha256": "3" * 64,
+        "t3_gine_sha256": "4" * 64,
+        "seed": 7,
+        "config_sha256": "5" * 64,
+        "candidate_capacity": 50_000,
+        "m_configured_max": 20_000,
+        "m_fallback_max": 25_000,
+        "min_valid_unique": 10,
+        "gpu_index": 2,
+        "memory_policy": {
+            "start_headroom_bytes": 384 * 1024**3,
+            "runtime_reserve_bytes": 96 * 1024**3,
+            "launch_samples_required": 3,
+            "runtime_low_headroom_samples": 3,
+            "sample_seconds": 30.0,
+        },
+        "checkpoint_policy": {
+            "early_steps": [50, 100, 250, 500],
+            "production_steps": [
+                2_500,
+                5_000,
+                7_500,
+                10_000,
+                12_500,
+                15_000,
+                17_500,
+                20_000,
+            ],
+            "fresh_process_reload_each_checkpoint": True,
+            "route_c_500_promoted_to_full_without_replay": True,
+        },
+        "matrix_authority_root": str(matrix_root),
+        "matrix_authority_state": str(matrix_root / "state.json"),
+        "matrix_authority_lock": str(matrix_root / "publish.lock"),
+    }
+    spec = build_spec(
+        attempt_uuid=attempt,
+        execution_commit="1" * 40,
+        python=Path(sys.executable).resolve(),
+        science_wrapper=REPO_ROOT / "scripts/autodl/run_tastemolnet_t14_comrecgc_full.sh",
+        owner_entrypoint=REPO_ROOT / "scripts/autodl/run_t14_route_c_owner.py",
+        output_root=tmp_path / f"science-{attempt}",
+        owner_root=tmp_path / f"owner-{attempt}",
+        cgroup_limit_path=counters / "limit",
+        cgroup_current_path=counters / "current",
+        cgroup_failcnt_path=counters / "failcnt",
+        forbidden_legacy_root=tmp_path / "legacy-12500",
+        science_environment={
+            "RUN_TASTEMOLNET": "1",
+            "TASTE_RESEARCH_COMPUTE_ALLOWED": "1",
+            "TASTE_PAPER_RESULTS_ALLOWED": "1",
+            "TASTE_DATA_REDISTRIBUTION_ALLOWED": "0",
+            "RUN_GNN_ABLATION": "0",
+            "RUN_LLM_ABLATION": "0",
+        },
+        max_process_rss_bytes=64 * 1024**3,
+        launch_headroom_bytes=384 * 1024**3,
+        runtime_headroom_bytes=96 * 1024**3,
+        sample_seconds=30,
+        launch_samples_required=3,
+        runtime_low_headroom_samples=3,
+        fresh_retry=retry,
+    )
+    assert spec["fresh_retry"]["reuse_partial_step161"] is False
+    assert spec["memory"]["launch_headroom_bytes"] == 384 * 1024**3
+    assert spec["memory"]["runtime_headroom_bytes"] == 96 * 1024**3
+    assert checkpoint_targets(completed_step=0, stop_step=500, route_c=True) == (
+        50,
+        100,
+        250,
+        500,
+    )

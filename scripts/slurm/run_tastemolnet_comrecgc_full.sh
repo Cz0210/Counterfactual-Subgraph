@@ -29,6 +29,7 @@ exit 64
 #   --route-c-storage "$TASTEMOLNET_T14_ROUTE_C_STORAGE" \
 #   --checkpoint-only-step "$TASTEMOLNET_T14_CHECKPOINT_ONLY_STEP" \
 #   --set inference.fallback_to_heuristic=false
+# Fresh Route C accepts durable early boundaries 50, 100, 250, and 500.
 # Add --resume only after the fresh route has atomically published
 # "$TASTEMOLNET_T14_OUTPUT/checkpoints/LATEST"; the AutoDL wrapper exposes this
 # as TASTEMOLNET_T14_RESUME=1.

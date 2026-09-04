@@ -34,7 +34,7 @@ case "$TASTEMOLNET_T14_RESUME" in
     [[ ! -e "$TASTEMOLNET_T14_OUTPUT" && ! -L "$TASTEMOLNET_T14_OUTPUT" ]] \
       || { echo "T14 fresh mode requires an absent output root" >&2; exit 64; }
     if [[ -n "$TASTEMOLNET_T14_CHECKPOINT_ONLY_STEP" ]]; then
-      [[ "$TASTEMOLNET_T14_CHECKPOINT_ONLY_STEP" =~ ^(250|500|510|2500|5000|7500|10000|12500|15000|17500|20000|25000)$ ]] \
+      [[ "$TASTEMOLNET_T14_CHECKPOINT_ONLY_STEP" =~ ^(50|100|250|500|510|2500|5000|7500|10000|12500|15000|17500|20000|25000)$ ]] \
         || { echo "T14 Route C checkpoint/replay boundary is invalid" >&2; exit 64; }
       [[ "$TASTEMOLNET_T14_GPU_INDEX" == "2" ]] \
         || { echo "T14 Route C fresh mode is bound to GPU2" >&2; exit 64; }

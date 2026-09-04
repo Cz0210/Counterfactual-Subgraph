@@ -17,4 +17,6 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
+echo "fresh_retry_memory_gate=384GiB_start_3_samples,96GiB_runtime_3_samples"
+echo "fresh_retry_checkpoints=50,100,250,500"
 python scripts/autodl/build_t14_route_c_task_spec.py --config configs/hpc.yaml "$@"

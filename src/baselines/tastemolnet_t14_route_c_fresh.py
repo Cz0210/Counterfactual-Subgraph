@@ -1,9 +1,10 @@
 """Dataset-specific ownership contract for a fresh low-memory Taste T14 run.
 
-Route C deliberately starts from step zero.  Its first checkpoint is step 250,
-the parity-qualified canary becomes promotable at step 500, and it never treats
-a legacy checkpoint as an input.  Promotion performs payload reload in a
-separate process after the science process has released its live state.
+Route C deliberately starts from step zero.  A fresh production attempt seals
+early recovery checkpoints at steps 50, 100, and 250; the parity-qualified
+canary becomes promotable at step 500, and it never treats a legacy checkpoint
+as an input.  Promotion performs payload reload after the science process has
+released its live state.
 """
 
 from __future__ import annotations
@@ -30,9 +31,11 @@ from src.baselines.comrecgc.live_graph_state import LiveGraphState
 SPEC_SCHEMA = "tastemolnet_t14_route_c_fresh_spec_v1"
 BOUNDARY_SCHEMA = "tastemolnet_t14_route_c_first_checkpoint_v1"
 PROMOTION_SCHEMA = "tastemolnet_t14_route_c_promotion_v1"
-FIRST_CHECKPOINT_STEP = 250
+FIRST_CHECKPOINT_STEP = 50
+PARITY_RELOAD_CHECKPOINT_STEP = 250
 PROMOTABLE_CHECKPOINT_STEP = 500
 RELOAD_REPLAY_END_STEP = 510
+EARLY_CHECKPOINT_STEPS = (50, 100, 250)
 PRODUCTION_CHECKPOINT_STEPS = (
     500,
     2_500,
@@ -54,6 +57,8 @@ STEP_LEDGER_SCHEMA = "tastemolnet_t14_route_c_step_state_v1"
 PARITY_SCHEMA = "tastemolnet_t14_route_c_parity_v1"
 RECOVERY_SCHEMA = "tastemolnet_t14_route_c_external_state_recovery_v1"
 CONVERGENCE_RECEIPT_SCHEMA = "tastemolnet_t14_route_c_convergence_receipt_v1"
+FRESH_RETRY_RECEIPT_SCHEMA = "tastemolnet_t14_route_c_failed_attempt_retirement_v1"
+FRESH_RETRY_CONTRACT_SCHEMA = "tastemolnet_t14_route_c_fresh_retry_task_v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -1000,7 +1005,7 @@ def checkpoint_targets(
         return tuple(
             range(((completed_step // 2_500) + 1) * 2_500, stop_step + 1, 2_500)
         )
-    allowed = (250, *PRODUCTION_CHECKPOINT_STEPS)
+    allowed = (*EARLY_CHECKPOINT_STEPS, *PRODUCTION_CHECKPOINT_STEPS)
     return tuple(step for step in allowed if completed_step < step <= stop_step)
 
 
@@ -2311,6 +2316,349 @@ def _is_within(candidate: Path, parent: Path) -> bool:
     return True
 
 
+def _validate_fresh_retry_contract(
+    raw: Mapping[str, Any], *, spec: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate the one authorized post-watchdog retry without opening old state."""
+
+    value = dict(raw)
+    required = {
+        "schema_version",
+        "retry_index",
+        "max_retries",
+        "reuse_partial_step161",
+        "preserve_failed_attempt",
+        "fresh_uuid",
+        "fresh_output_root",
+        "previous_attempt_uuid",
+        "previous_output_root",
+        "retirement_receipt",
+        "retirement_receipt_sha256",
+        "dataset_sha256",
+        "train_split_sha256",
+        "cohort_sha256",
+        "t3_gine_sha256",
+        "seed",
+        "config_sha256",
+        "candidate_capacity",
+        "m_configured_max",
+        "m_fallback_max",
+        "min_valid_unique",
+        "gpu_index",
+        "memory_policy",
+        "checkpoint_policy",
+        "matrix_authority_root",
+        "matrix_authority_state",
+        "matrix_authority_lock",
+    }
+    if set(value) != required:
+        raise T14RouteCFreshError("Route C fresh-retry contract fields changed")
+    if (
+        value.get("schema_version") != FRESH_RETRY_CONTRACT_SCHEMA
+        or value.get("retry_index") != 1
+        or value.get("max_retries") != 1
+        or value.get("reuse_partial_step161") is not False
+        or value.get("preserve_failed_attempt") is not True
+        or value.get("fresh_uuid") != spec.get("attempt_uuid")
+        or value.get("fresh_output_root") != spec.get("output_root")
+        or value.get("seed") != 7
+        or value.get("candidate_capacity") != 50_000
+        or value.get("m_configured_max") != M_MAX
+        or value.get("m_fallback_max") != M_FALLBACK_MAX
+        or value.get("min_valid_unique") != 10
+        or value.get("gpu_index") != GPU_INDEX
+    ):
+        raise T14RouteCFreshError("Route C fresh-retry fixed contract changed")
+    try:
+        previous = UUID(str(value.get("previous_attempt_uuid")))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise T14RouteCFreshError("Route C previous attempt UUID is invalid") from exc
+    if previous.version != 4 or str(previous) != value["previous_attempt_uuid"]:
+        raise T14RouteCFreshError("Route C previous attempt UUID is not canonical")
+    for field in (
+        "retirement_receipt_sha256",
+        "dataset_sha256",
+        "train_split_sha256",
+        "cohort_sha256",
+        "t3_gine_sha256",
+        "config_sha256",
+    ):
+        if _SHA256.fullmatch(str(value.get(field) or "")) is None:
+            raise T14RouteCFreshError(f"Route C fresh-retry {field} is invalid")
+    for field in (
+        "previous_output_root",
+        "retirement_receipt",
+        "matrix_authority_root",
+        "matrix_authority_state",
+        "matrix_authority_lock",
+    ):
+        _absolute(value.get(field), field=f"fresh_retry.{field}")
+    retirement_path = Path(value["retirement_receipt"])
+    retirement = validate_fresh_retry_retirement_receipt(retirement_path)
+    if (
+        file_sha256(retirement_path) != value["retirement_receipt_sha256"]
+        or retirement.get("old_attempt_uuid") != value["previous_attempt_uuid"]
+        or retirement.get("old_output_root") != value["previous_output_root"]
+    ):
+        raise T14RouteCFreshError("Route C retry retirement binding changed")
+    matrix_root = Path(value["matrix_authority_root"])
+    if (
+        Path(value["matrix_authority_state"]).parent != matrix_root
+        or Path(value["matrix_authority_lock"]).parent != matrix_root
+    ):
+        raise T14RouteCFreshError("Route C retry matrix authority binding changed")
+    previous_root = Path(value["previous_output_root"])
+    fresh_root = Path(str(spec["output_root"]))
+    if not previous_root.is_dir() or previous_root.is_symlink():
+        raise T14RouteCFreshError("Route C failed attempt was not preserved")
+    if previous_root == fresh_root or _is_within(previous_root, fresh_root) or _is_within(
+        fresh_root, previous_root
+    ):
+        raise T14RouteCFreshError("Route C retry overlaps the failed attempt")
+    if str(previous_root) in canonical_bytes(spec["science_environment"]).decode("utf-8"):
+        raise T14RouteCFreshError("Route C retry environment references failed state")
+    memory = value.get("memory_policy")
+    if memory != {
+        "start_headroom_bytes": 384 * 1024**3,
+        "runtime_reserve_bytes": 96 * 1024**3,
+        "launch_samples_required": 3,
+        "runtime_low_headroom_samples": 3,
+        "sample_seconds": 30.0,
+    }:
+        raise T14RouteCFreshError("Route C retry memory policy changed")
+    spec_memory = spec.get("memory")
+    if (
+        not isinstance(spec_memory, Mapping)
+        or spec_memory.get("launch_headroom_bytes") != memory["start_headroom_bytes"]
+        or spec_memory.get("runtime_headroom_bytes") != memory["runtime_reserve_bytes"]
+        or spec_memory.get("launch_samples_required", 1)
+        != memory["launch_samples_required"]
+        or spec_memory.get("runtime_low_headroom_samples", 1)
+        != memory["runtime_low_headroom_samples"]
+        or float(spec_memory.get("sample_seconds", -1)) != memory["sample_seconds"]
+    ):
+        raise T14RouteCFreshError("Route C retry memory/spec binding changed")
+    checkpoints = value.get("checkpoint_policy")
+    if checkpoints != {
+        "early_steps": [50, 100, 250, 500],
+        "production_steps": [
+            2_500,
+            5_000,
+            7_500,
+            10_000,
+            12_500,
+            15_000,
+            17_500,
+            20_000,
+        ],
+        "fresh_process_reload_each_checkpoint": True,
+        "route_c_500_promoted_to_full_without_replay": True,
+    }:
+        raise T14RouteCFreshError("Route C retry checkpoint policy changed")
+    return value
+
+
+def validate_fresh_retry_retirement_receipt(path: Path) -> dict[str, Any]:
+    """Read one immutable receipt proving the failed attempt was only superseded."""
+
+    receipt_path = Path(path)
+    if not receipt_path.is_absolute() or receipt_path.is_symlink() or not receipt_path.is_file():
+        raise T14RouteCFreshError("Route C retirement receipt is absent or indirect")
+    try:
+        value = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise T14RouteCFreshError("Route C retirement receipt is unreadable") from exc
+    if not isinstance(value, dict):
+        raise T14RouteCFreshError("Route C retirement receipt is not an object")
+    unsigned = {key: item for key, item in value.items() if key != "receipt_sha256"}
+    if (
+        value.get("schema_version") != FRESH_RETRY_RECEIPT_SCHEMA
+        or value.get("terminal_state") != "TERMINAL_FAILED_RESOURCE_WATCHDOG"
+        or value.get("retirement_state") != "SUPERSEDED_BY_FRESH_RETRY"
+        or value.get("retry_index") != 1
+        or value.get("max_retries") != 1
+        or value.get("reuse_partial_step161") is not False
+        or value.get("preserve_failed_attempt") is not True
+        or value.get("old_root_deleted") is not False
+        or value.get("process_signal_sent") is not False
+        or _SHA256.fullmatch(str(value.get("old_terminal_sha256") or "")) is None
+        or value.get("receipt_sha256") != stable_sha256(unsigned)
+    ):
+        raise T14RouteCFreshError("Route C retirement receipt changed")
+    for field in ("old_output_root", "old_owner_root", "retired_pointer_root"):
+        _absolute(value.get(field), field=f"retirement.{field}")
+    old_output = Path(value["old_output_root"])
+    old_owner = Path(value["old_owner_root"])
+    old_terminal = old_owner / "terminal.json"
+    if (
+        not old_output.is_dir()
+        or old_output.is_symlink()
+        or not old_owner.is_dir()
+        or old_owner.is_symlink()
+        or not old_terminal.is_file()
+        or old_terminal.is_symlink()
+        or file_sha256(old_terminal) != value["old_terminal_sha256"]
+    ):
+        raise T14RouteCFreshError("Route C failed attempt preservation changed")
+    return value
+
+
+def retire_failed_route_c_current(
+    *,
+    current_root: Path,
+    retired_root: Path,
+    proc_root: Path = Path("/proc"),
+) -> dict[str, Any]:
+    """Atomically retire only a dead resource-watchdog pointer for one fresh retry.
+
+    The failed science and owner roots are never modified or removed.  The
+    caller must hold the Route C launch lock, making the absence check and
+    pointer rename a one-shot operation.
+    """
+
+    current = Path(current_root)
+    retired = Path(retired_root)
+    if (
+        not current.is_absolute()
+        or not retired.is_absolute()
+        or current.is_symlink()
+        or retired.is_symlink()
+        or not current.is_dir()
+    ):
+        raise T14RouteCFreshError("Route C retry pointer roots are invalid")
+    required = {
+        "owner.pid": current / "owner.pid",
+        "owner.start_ticks": current / "owner.start_ticks",
+        "task_spec.path": current / "task_spec.path",
+    }
+    for label, path in required.items():
+        _regular_physical_file(path, field=f"current {label}")
+    try:
+        old_pid = int(required["owner.pid"].read_text(encoding="utf-8").strip())
+        old_ticks = int(
+            required["owner.start_ticks"].read_text(encoding="utf-8").strip()
+        )
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise T14RouteCFreshError("Route C failed owner identity is unreadable") from exc
+    spec_path = Path(required["task_spec.path"].read_text(encoding="utf-8").strip())
+    _regular_physical_file(spec_path, field="failed task spec")
+    try:
+        old_spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise T14RouteCFreshError("Route C failed task spec is unreadable") from exc
+    if not isinstance(old_spec, dict):
+        raise T14RouteCFreshError("Route C failed task spec is not an object")
+    if old_spec.get("fresh_retry") is not None:
+        raise T14RouteCFreshError("Route C one fresh retry was already consumed")
+    old_owner_root = _absolute(old_spec.get("owner_root"), field="failed owner_root")
+    old_output_root = _absolute(old_spec.get("output_root"), field="failed output_root")
+    if spec_path.parent != old_owner_root:
+        raise T14RouteCFreshError("Route C failed task spec escaped its owner root")
+    owner_path = _regular_physical_file(
+        old_owner_root / "owner.json", field="failed owner evidence"
+    )
+    terminal_path = _regular_physical_file(
+        old_owner_root / "terminal.json", field="failed terminal evidence"
+    )
+    owner = json.loads(owner_path.read_text(encoding="utf-8"))
+    terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(owner, dict)
+        or owner.get("owner_pid") != old_pid
+        or owner.get("owner_start_ticks") != old_ticks
+        or owner.get("task_spec") != str(spec_path)
+        or not isinstance(terminal, dict)
+        or terminal.get("status") != "FAILED"
+        or "resource watchdog" not in str(terminal.get("error", "")).lower()
+    ):
+        raise T14RouteCFreshError("Route C prior attempt was not a resource-watchdog failure")
+    live_stat = proc_root / str(old_pid) / "stat"
+    if live_stat.is_file():
+        try:
+            raw = live_stat.read_text(encoding="utf-8")
+            close = raw.rfind(")")
+            fields = raw[close + 2 :].split()
+            live_ticks = int(fields[19])
+        except (OSError, ValueError, IndexError) as exc:
+            raise T14RouteCFreshError("Route C prior PID identity is ambiguous") from exc
+        if live_ticks == old_ticks:
+            raise T14RouteCFreshError("Route C failed owner PID is still live")
+    exact_entrypoints = {
+        "run_tastemolnet_comrecgc_full.py",
+        "run_tastemolnet_t14_comrecgc_full.sh",
+        "run_t14_route_c_owner.py",
+    }
+    for directory in proc_root.iterdir():
+        if not directory.name.isdigit():
+            continue
+        try:
+            tokens = [
+                item.decode("utf-8", errors="replace")
+                for item in (directory / "cmdline").read_bytes().split(b"\0")
+                if item
+            ]
+        except OSError:
+            continue
+        if not any(Path(token).name in exact_entrypoints for token in tokens):
+            continue
+        command = "\0".join(tokens)
+        if str(old_output_root) in command or str(spec_path) in command:
+            raise T14RouteCFreshError("Route C failed root still has an exact writer")
+    attempt = str(old_spec.get("attempt_uuid") or "")
+    try:
+        attempt_uuid = UUID(attempt)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise T14RouteCFreshError("Route C failed attempt UUID is invalid") from exc
+    if attempt_uuid.version != 4 or str(attempt_uuid) != attempt:
+        raise T14RouteCFreshError("Route C failed attempt UUID is not canonical")
+    retired.mkdir(parents=True, exist_ok=True)
+    for prior_receipt in retired.glob(
+        "*-superseded-by-fresh-retry-1/retirement_receipt.json"
+    ):
+        if prior_receipt.is_file() and not prior_receipt.is_symlink():
+            validate_fresh_retry_retirement_receipt(prior_receipt)
+            raise T14RouteCFreshError("Route C one fresh retry was already consumed")
+    destination = retired / f"{attempt}-superseded-by-fresh-retry-1"
+    if destination.exists() or destination.is_symlink():
+        raise T14RouteCFreshError("Route C fresh retry was already consumed")
+    completed_step = 0
+    ledger = old_output_root / "route_c_step_states.jsonl"
+    if ledger.is_file() and not ledger.is_symlink():
+        with ledger.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                if line.strip():
+                    row = json.loads(line)
+                    completed_step = max(completed_step, int(row["completed_step"]))
+    receipt: dict[str, Any] = {
+        "schema_version": FRESH_RETRY_RECEIPT_SCHEMA,
+        "terminal_state": "TERMINAL_FAILED_RESOURCE_WATCHDOG",
+        "retirement_state": "SUPERSEDED_BY_FRESH_RETRY",
+        "retry_index": 1,
+        "max_retries": 1,
+        "reuse_partial_step161": False,
+        "preserve_failed_attempt": True,
+        "old_attempt_uuid": attempt,
+        "old_owner_pid": old_pid,
+        "old_owner_start_ticks": old_ticks,
+        "old_owner_root": str(old_owner_root),
+        "old_output_root": str(old_output_root),
+        "old_terminal_sha256": file_sha256(terminal_path),
+        "observed_uncommitted_step": completed_step,
+        "old_root_deleted": False,
+        "process_signal_sent": False,
+        "retired_pointer_root": str(destination),
+        "retired_at": _utc_now(),
+    }
+    receipt["receipt_sha256"] = stable_sha256(receipt)
+    atomic_json(current / "retirement_receipt.json", receipt)
+    os.replace(current, destination)
+    _fsync_dir(retired)
+    _fsync_dir(retired.parent)
+    return validate_fresh_retry_retirement_receipt(
+        destination / "retirement_receipt.json"
+    )
+
+
 def build_spec(
     *,
     attempt_uuid: str,
@@ -2330,7 +2678,10 @@ def build_spec(
     max_process_rss_bytes: int,
     launch_headroom_bytes: int,
     runtime_headroom_bytes: int,
-    sample_seconds: float = 10.0,
+    sample_seconds: float = 30.0,
+    launch_samples_required: int = 3,
+    runtime_low_headroom_samples: int = 3,
+    fresh_retry: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one immutable fresh-route spec without touching the legacy root."""
 
@@ -2385,9 +2736,13 @@ def build_spec(
             "launch_headroom_bytes": int(launch_headroom_bytes),
             "runtime_headroom_bytes": int(runtime_headroom_bytes),
             "sample_seconds": float(sample_seconds),
+            "launch_samples_required": int(launch_samples_required),
+            "runtime_low_headroom_samples": int(runtime_low_headroom_samples),
         },
         "created_at": _utc_now(),
     }
+    if fresh_retry is not None:
+        value["fresh_retry"] = dict(fresh_retry)
     value["spec_sha256"] = stable_sha256(value)
     return validate_spec(value, check_files=True)
 
@@ -2432,7 +2787,8 @@ def validate_spec(
         "created_at",
         "spec_sha256",
     }
-    if set(value) != required:
+    optional = {"fresh_retry"}
+    if not required.issubset(value) or set(value) - required - optional:
         raise T14RouteCFreshError("Route C spec fields changed")
     if value.get("schema_version") != SPEC_SCHEMA:
         raise T14RouteCFreshError("Route C spec schema changed")
@@ -2543,7 +2899,7 @@ def validate_spec(
     if str(forbidden) in canonical_bytes(environment).decode("utf-8"):
         raise T14RouteCFreshError("Route C science environment references the legacy root")
     memory = value.get("memory")
-    if not isinstance(memory, Mapping) or set(memory) != {
+    base_memory_fields = {
         "cgroup_limit_path",
         "cgroup_current_path",
         "cgroup_failcnt_path",
@@ -2551,6 +2907,15 @@ def validate_spec(
         "launch_headroom_bytes",
         "runtime_headroom_bytes",
         "sample_seconds",
+    }
+    extended_memory_fields = {
+        *base_memory_fields,
+        "launch_samples_required",
+        "runtime_low_headroom_samples",
+    }
+    if not isinstance(memory, Mapping) or frozenset(memory) not in {
+        frozenset(base_memory_fields),
+        frozenset(extended_memory_fields),
     }:
         raise T14RouteCFreshError("Route C memory contract changed")
     for field in ("cgroup_limit_path", "cgroup_current_path", "cgroup_failcnt_path"):
@@ -2570,6 +2935,13 @@ def validate_spec(
         or not 1 <= float(memory["sample_seconds"]) <= 60
     ):
         raise T14RouteCFreshError("Route C sample interval is invalid")
+    for field in ("launch_samples_required", "runtime_low_headroom_samples"):
+        observed = memory.get(field, 1)
+        if type(observed) is not int or not 1 <= int(observed) <= 10:
+            raise T14RouteCFreshError(f"Route C memory.{field} is invalid")
+    retry = value.get("fresh_retry")
+    if retry is not None:
+        _validate_fresh_retry_contract(retry, spec=value)
     if check_files:
         for field in ("science_wrapper", "owner_entrypoint"):
             path = paths[field]
@@ -2632,7 +3004,7 @@ def _checkpoint_identity(output_root: Path) -> dict[str, Any]:
 
 def _registered_checkpoint_step(step: int) -> int:
     value = int(step)
-    if value not in {250, *PRODUCTION_CHECKPOINT_STEPS}:
+    if value not in {*EARLY_CHECKPOINT_STEPS, *PRODUCTION_CHECKPOINT_STEPS}:
         raise T14RouteCFreshError(f"Route C checkpoint step is not registered: {value}")
     return value
 

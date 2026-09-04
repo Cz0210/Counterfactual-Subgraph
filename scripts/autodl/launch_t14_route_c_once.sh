@@ -5,8 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 
-[[ "${ALLOW_T14_ROUTE_C:-0}" == "1" ]] \
-  || { echo "ALLOW_T14_ROUTE_C=1 is required" >&2; exit 64; }
+RETRY_REQUESTED="${ALLOW_T14_ROUTE_C_FRESH_RETRY_AFTER_RESOURCE_WATCHDOG:-0}"
+[[ "${ALLOW_T14_ROUTE_C:-0}" == "1" || "$RETRY_REQUESTED" == "1" ]] \
+  || { echo "ALLOW_T14_ROUTE_C=1 or the exact fresh-retry authorization is required" >&2; exit 64; }
+if [[ "$RETRY_REQUESTED" == "1" ]]; then
+  [[ "${T14_ROUTE_C_FRESH_RETRY_MAX_ATTEMPTS:-}" == "1" \
+    && "${PRESERVE_FAILED_ROUTE_C_ATTEMPT:-}" == "1" \
+    && "${REUSE_PARTIAL_STEP161:-}" == "0" ]] \
+    || { echo "T14 Route C fresh-retry contract is incomplete" >&2; exit 64; }
+fi
 [[ "${RUN_GNN_ABLATION:-0}" == "0" && "${RUN_LLM_ABLATION:-0}" == "0" ]] \
   || { echo "Ablation science must remain disabled" >&2; exit 64; }
 export RUN_GNN_ABLATION=0
@@ -20,9 +27,15 @@ MATRIX_AUTHORITY_ROOT="$CONTROL/fast16_matrix_authority"
 MATRIX_STATE="$MATRIX_AUTHORITY_ROOT/state.json"
 MATRIX_LOCK="$MATRIX_AUTHORITY_ROOT/publish.lock"
 CURRENT="$CONTROL/t14_route_c/current"
-mkdir -p "$CONTROL/t14_route_c" "$CURRENT"
+mkdir -p "$CONTROL/t14_route_c"
 exec 9>"$CONTROL/t14_route_c/launch.lock"
 flock -n 9 || { echo "another T14 Route C launch is in progress" >&2; exit 73; }
+if [[ ! -e "$CURRENT" && ! -L "$CURRENT" ]]; then
+  mkdir -m 700 "$CURRENT"
+fi
+[[ -d "$CURRENT" && ! -L "$CURRENT" ]] \
+  || { echo "T14 Route C current pointer root is invalid" >&2; exit 74; }
+FRESH_RETRY_RECEIPT=""
 
 matrix_launch_gate() {
   local receipt="$1"
@@ -92,22 +105,47 @@ if owner.get("owner_pid") != old_pid or owner.get("owner_start_ticks") != old_ti
 print(owner_root)
 ' "$SEALED_SPEC" "$OLD_PID" "$OLD_TICKS")" \
     || { echo "sealed Route C task/owner evidence failed validation" >&2; exit 74; }
-  OWNER_PID="$(launch_owner "$SEALED_SPEC" "$SEALED_OWNER_ROOT" "$SEALED_CONTINUATION")"
-  echo "[T14_ROUTE_C_OWNER_SAME_ROOT_RESUMED]"
-  echo "t14_route_c_owner_pid=$OWNER_PID"
-  echo "t14_route_c_task_spec=$SEALED_SPEC"
-  exit 0
+  if [[ "$RETRY_REQUESTED" == "1" ]]; then
+    FRESH_RETRY_RECEIPT="$($PY -I -B -c '
+import pathlib,sys
+sys.path.insert(0,sys.argv[4])
+from src.baselines.tastemolnet_t14_route_c_fresh import retire_failed_route_c_current
+receipt=retire_failed_route_c_current(
+    current_root=pathlib.Path(sys.argv[1]),
+    retired_root=pathlib.Path(sys.argv[2]),
+)
+print(pathlib.Path(receipt["retired_pointer_root"])/"retirement_receipt.json")
+' "$CURRENT" "$CONTROL/t14_route_c/retired" "$CONTROL" "$PROJECT_ROOT")" \
+      || { echo "failed Route C pointer was not eligible for its one fresh retry" >&2; exit 74; }
+    mkdir -m 700 "$CURRENT"
+  else
+    OWNER_PID="$(launch_owner "$SEALED_SPEC" "$SEALED_OWNER_ROOT" "$SEALED_CONTINUATION")"
+    echo "[T14_ROUTE_C_OWNER_SAME_ROOT_RESUMED]"
+    echo "t14_route_c_owner_pid=$OWNER_PID"
+    echo "t14_route_c_task_spec=$SEALED_SPEC"
+    exit 0
+  fi
+fi
+
+if [[ "$RETRY_REQUESTED" == "1" && -z "$FRESH_RETRY_RECEIPT" ]]; then
+  echo "T14 fresh retry requires one eligible failed current pointer" >&2
+  exit 74
 fi
 
 ATTEMPT="$($PY -c 'import uuid; print(uuid.uuid4())')"
 EXECUTION_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
 OWNER_ROOT="$CONTROL/t14_route_c/owners/route-c-$ATTEMPT"
 OUTPUT_ROOT="$RUNTIME/outputs/autodl/tastemolnet/comrecgc_route_c/route-c-$ATTEMPT"
-SPEC="$OWNER_ROOT/T14_ROUTE_C_TASK_SPEC.json"
+if [[ -n "$FRESH_RETRY_RECEIPT" ]]; then
+  SPEC="$OWNER_ROOT/T14_ROUTE_C_FRESH_RETRY_TASK_SPEC.json"
+else
+  SPEC="$OWNER_ROOT/T14_ROUTE_C_TASK_SPEC.json"
+fi
 CONTINUATION_SPEC="$OWNER_ROOT/T14_ROUTE_C_CONTINUATION_SPEC.json"
 mkdir -p "$OWNER_ROOT" "$(dirname "$OUTPUT_ROOT")"
 
-"$PY" -I -B "$PROJECT_ROOT/scripts/autodl/build_t14_route_c_task_spec.py" \
+SPEC_ARGS=(
+  "$PY" -I -B "$PROJECT_ROOT/scripts/autodl/build_t14_route_c_task_spec.py"
   --config "$PROJECT_ROOT/configs/hpc.yaml" \
   --attempt-uuid "$ATTEMPT" \
   --execution-commit "$EXECUTION_COMMIT" \
@@ -124,7 +162,17 @@ mkdir -p "$OWNER_ROOT" "$(dirname "$OUTPUT_ROOT")"
   --matrix-authority-state "$MATRIX_STATE" \
   --matrix-authority-lock "$MATRIX_LOCK" \
   --matrix-cell-absent-receipt "$OWNER_ROOT/matrix_cell_absent_receipt.json" \
+  --launch-headroom-bytes "$((384 * 1024 * 1024 * 1024))" \
+  --runtime-headroom-bytes "$((96 * 1024 * 1024 * 1024))" \
+  --sample-seconds 30 \
+  --launch-samples-required 3 \
+  --runtime-low-headroom-samples 3 \
   --spec-out "$SPEC"
+)
+if [[ -n "$FRESH_RETRY_RECEIPT" ]]; then
+  SPEC_ARGS+=(--fresh-retry-receipt "$FRESH_RETRY_RECEIPT")
+fi
+"${SPEC_ARGS[@]}"
 
 POSTPROCESS_SCIENCE_ROOT="${T14_ROUTE_C_POSTPROCESS_SCIENCE_ROOT:-$RUNTIME/outputs/autodl/tastemolnet/comrecgc_route_c_postprocess/science-$ATTEMPT}"
 POSTPROCESS_FINAL_ROOT="${T14_ROUTE_C_POSTPROCESS_FINAL_ROOT:-$RUNTIME/outputs/autodl/tastemolnet/comrecgc_route_c_postprocess/final-$ATTEMPT}"
@@ -157,6 +205,13 @@ NODE_EMBEDDING_CACHE_DIR="${NODE_EMBEDDING_CACHE_DIR:-$RUNTIME/cache/tastemolnet
 OWNER_PID="$(launch_owner "$SPEC" "$OWNER_ROOT" "$CONTINUATION_SPEC")"
 
 echo "[T14_ROUTE_C_IMPLEMENTATION_PASS]"
+if [[ -n "$FRESH_RETRY_RECEIPT" ]]; then
+  echo "[T14_FAILED_ATTEMPT_PRESERVED]"
+  echo "[T14_STALE_POINTER_RETIRED]"
+  echo "[T14_FRESH_RETRY_OWNER_PASS]"
+  echo "[T14_ROUTE_C_FRESH_RETRY_LAUNCHED]"
+  echo "t14_route_c_retry_retirement_receipt=$FRESH_RETRY_RECEIPT"
+fi
 echo "t14_route_c_owner_pid=$OWNER_PID"
 echo "t14_route_c_task_spec=$SPEC"
 echo "t14_route_c_output_root=$OUTPUT_ROOT"
