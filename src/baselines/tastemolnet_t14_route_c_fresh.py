@@ -2407,7 +2407,7 @@ def _validate_fresh_retry_contract(
         or Path(value["matrix_authority_lock"]).parent != matrix_root
     ):
         raise T14RouteCFreshError("Route C retry matrix authority binding changed")
-    previous_root = Path(value["previous_output_root"])
+    previous_root = Path(retirement["preserved_science_root"])
     fresh_root = Path(str(spec["output_root"]))
     if not previous_root.is_dir() or previous_root.is_symlink():
         raise T14RouteCFreshError("Route C failed attempt was not preserved")
@@ -2415,7 +2415,11 @@ def _validate_fresh_retry_contract(
         fresh_root, previous_root
     ):
         raise T14RouteCFreshError("Route C retry overlaps the failed attempt")
-    if str(previous_root) in canonical_bytes(spec["science_environment"]).decode("utf-8"):
+    environment_bytes = canonical_bytes(spec["science_environment"]).decode("utf-8")
+    if (
+        str(previous_root) in environment_bytes
+        or str(value["previous_output_root"]) in environment_bytes
+    ):
         raise T14RouteCFreshError("Route C retry environment references failed state")
     memory = value.get("memory_policy")
     if memory != {
@@ -2491,16 +2495,66 @@ def validate_fresh_retry_retirement_receipt(path: Path) -> dict[str, Any]:
     old_owner = Path(value["old_owner_root"])
     old_terminal = old_owner / "terminal.json"
     if (
-        not old_output.is_dir()
-        or old_output.is_symlink()
-        or not old_owner.is_dir()
+        not old_owner.is_dir()
         or old_owner.is_symlink()
         or not old_terminal.is_file()
         or old_terminal.is_symlink()
         or file_sha256(old_terminal) != value["old_terminal_sha256"]
     ):
         raise T14RouteCFreshError("Route C failed attempt preservation changed")
-    return value
+    # The original owner wrote REFERENCE_500 below its sealed canary plan.  Its
+    # master output_root is only a prospective production destination and was
+    # never created when the watchdog fired during that child.  Bind the
+    # preserved attempt to the child spec/plan rather than claiming the unused
+    # master destination contained science.
+    preserved_science_root = old_output
+    preservation_source = "MASTER_OUTPUT_ROOT"
+    if not old_output.is_dir() or old_output.is_symlink():
+        plan_path = _regular_physical_file(
+            old_owner / "owner_plan.json", field="failed owner plan"
+        )
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise T14RouteCFreshError("Route C failed owner plan is unreadable") from exc
+        reference = (
+            plan.get("children", {}).get("REFERENCE_500")
+            if isinstance(plan, Mapping)
+            else None
+        )
+        if not isinstance(reference, Mapping):
+            raise T14RouteCFreshError("Route C failed reference child is absent")
+        child_spec_path = _regular_physical_file(
+            Path(str(reference.get("spec_path", ""))),
+            field="failed reference child spec",
+        )
+        expected_child_sha = str(reference.get("spec_sha256") or "")
+        if file_sha256(child_spec_path) != expected_child_sha:
+            raise T14RouteCFreshError("Route C failed reference child spec changed")
+        try:
+            child_spec = json.loads(child_spec_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise T14RouteCFreshError(
+                "Route C failed reference child spec is unreadable"
+            ) from exc
+        preserved_science_root = Path(str(reference.get("output_root", "")))
+        if (
+            child_spec.get("output_root") != str(preserved_science_root)
+            or not preserved_science_root.is_dir()
+            or preserved_science_root.is_symlink()
+            or not _is_within(preserved_science_root, old_owner)
+            or not (preserved_science_root / "cohort_manifest.json").is_file()
+            or not (preserved_science_root / "route_c_step_states.jsonl").is_file()
+        ):
+            raise T14RouteCFreshError(
+                "Route C failed reference science root was not preserved"
+            )
+        preservation_source = "OWNER_PLAN_REFERENCE_500"
+    result = dict(value)
+    result["preserved_science_root"] = str(preserved_science_root)
+    result["preservation_source"] = preservation_source
+    result["declared_master_output_materialized"] = old_output.is_dir()
+    return result
 
 
 def retire_failed_route_c_current(

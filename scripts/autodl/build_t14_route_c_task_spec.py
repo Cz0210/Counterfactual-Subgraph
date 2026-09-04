@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
             if not path.is_file() or path.is_symlink():
                 raise ValueError(f"T14 Route C retry {label} is absent or indirect")
         old_cohort_manifest = (
-            Path(retirement["old_output_root"]) / "cohort_manifest.json"
+            Path(retirement["preserved_science_root"]) / "cohort_manifest.json"
         )
         if not old_cohort_manifest.is_file() or old_cohort_manifest.is_symlink():
             raise ValueError("T14 Route C failed cohort manifest is absent")

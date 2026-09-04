@@ -666,6 +666,92 @@ def test_failed_watchdog_attempt_is_preserved_and_pointer_retired(
     assert Path(receipt["retired_pointer_root"]).is_dir()
 
 
+def test_failed_watchdog_preserves_real_child_when_master_output_was_unused(
+    tmp_path: Path,
+) -> None:
+    attempt = str(uuid4())
+    child_attempt = str(uuid4())
+    old_owner = tmp_path / "owners" / f"route-c-{attempt}"
+    old_master_output = tmp_path / "science" / f"route-c-{attempt}"
+    child_owner = old_owner / "canaries" / "reference_500" / child_attempt
+    child_output = child_owner / f"science-{child_attempt}"
+    current = tmp_path / "control" / "t14_route_c" / "current"
+    retired = tmp_path / "control" / "t14_route_c" / "retired"
+    proc = tmp_path / "proc"
+    for path in (old_owner, child_output, current, proc):
+        path.mkdir(parents=True)
+    master_spec_path = old_owner / "T14_ROUTE_C_TASK_SPEC.json"
+    master_spec_path.write_text(
+        json.dumps(
+            {
+                "attempt_uuid": attempt,
+                "owner_root": str(old_owner),
+                "output_root": str(old_master_output),
+                "spec_sha256": "a" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    child_spec_path = child_owner / "route_c_spec.json"
+    child_spec_path.write_text(
+        json.dumps({"output_root": str(child_output)}), encoding="utf-8"
+    )
+    (old_owner / "owner_plan.json").write_text(
+        json.dumps(
+            {
+                "children": {
+                    "REFERENCE_500": {
+                        "output_root": str(child_output),
+                        "spec_path": str(child_spec_path),
+                        "spec_sha256": file_sha256(child_spec_path),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (old_owner / "owner.json").write_text(
+        json.dumps(
+            {
+                "owner_pid": 321,
+                "owner_start_ticks": 654,
+                "task_spec": str(master_spec_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (old_owner / "terminal.json").write_text(
+        json.dumps(
+            {
+                "status": "FAILED",
+                "error": "Route C resource watchdog stopped reference at a safe request",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (child_output / "cohort_manifest.json").write_text(
+        json.dumps({"cohort_jsonl_sha256": "b" * 64}), encoding="utf-8"
+    )
+    with (child_output / "route_c_step_states.jsonl").open(
+        "w", encoding="utf-8"
+    ) as stream:
+        stream.write(json.dumps({"completed_step": 161}) + "\n")
+    (current / "owner.pid").write_text("321\n", encoding="utf-8")
+    (current / "owner.start_ticks").write_text("654\n", encoding="utf-8")
+    (current / "task_spec.path").write_text(
+        f"{master_spec_path}\n", encoding="utf-8"
+    )
+
+    receipt = retire_failed_route_c_current(
+        current_root=current, retired_root=retired, proc_root=proc
+    )
+    assert not old_master_output.exists()
+    assert child_output.is_dir()
+    assert receipt["preserved_science_root"] == str(child_output)
+    assert receipt["preservation_source"] == "OWNER_PLAN_REFERENCE_500"
+    assert receipt["declared_master_output_materialized"] is False
+
+
 def test_fresh_retry_contract_has_strict_memory_and_checkpoint_policy(
     tmp_path: Path,
 ) -> None:

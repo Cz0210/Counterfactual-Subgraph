@@ -30,12 +30,28 @@ CURRENT="$CONTROL/t14_route_c/current"
 mkdir -p "$CONTROL/t14_route_c"
 exec 9>"$CONTROL/t14_route_c/launch.lock"
 flock -n 9 || { echo "another T14 Route C launch is in progress" >&2; exit 73; }
+FRESH_RETRY_RECEIPT=""
+
+# A prior launcher may have completed the atomic pointer retirement and then
+# stopped before creating the fresh owner. Resume that exact one-shot
+# transaction from its single sealed receipt; never consume a second retry.
+if [[ ! -e "$CURRENT" && ! -L "$CURRENT" && "$RETRY_REQUESTED" == "1" ]]; then
+  mapfile -t RETIRED_RECEIPTS < <(find "$CONTROL/t14_route_c/retired" \
+    -mindepth 2 -maxdepth 2 -type f -name retirement_receipt.json -print 2>/dev/null | sort)
+  if [[ "${#RETIRED_RECEIPTS[@]}" == "1" ]]; then
+    "$PY" -I -B -c 'import pathlib,sys; sys.path.insert(0,sys.argv[2]); from src.baselines.tastemolnet_t14_route_c_fresh import validate_fresh_retry_retirement_receipt; validate_fresh_retry_retirement_receipt(pathlib.Path(sys.argv[1]))' \
+      "${RETIRED_RECEIPTS[0]}" "$PROJECT_ROOT"
+    FRESH_RETRY_RECEIPT="${RETIRED_RECEIPTS[0]}"
+  elif [[ "${#RETIRED_RECEIPTS[@]}" -gt 1 ]]; then
+    echo "multiple T14 fresh-retry retirement receipts require audit" >&2
+    exit 74
+  fi
+fi
 if [[ ! -e "$CURRENT" && ! -L "$CURRENT" ]]; then
   mkdir -m 700 "$CURRENT"
 fi
 [[ -d "$CURRENT" && ! -L "$CURRENT" ]] \
   || { echo "T14 Route C current pointer root is invalid" >&2; exit 74; }
-FRESH_RETRY_RECEIPT=""
 
 matrix_launch_gate() {
   local receipt="$1"
