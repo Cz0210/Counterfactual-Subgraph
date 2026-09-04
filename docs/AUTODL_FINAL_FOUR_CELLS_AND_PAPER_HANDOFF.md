@@ -85,8 +85,9 @@ HPC chain (do not resubmit completed shards):
   `/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/control/t8-production-chain/current.json`
 - science commit: `481475c31d809577b791f4dd9002f5d2894c65b4`
 
-At the 2026-09-04 08:10 UTC audit the array had 13 completed, 3 running,
-0 pending, and 0 failed shards (active shard IDs 3, 14, and 15).  AutoDL's
+At the 2026-09-04 08:29 UTC expanded array audit, 15 shards were `COMPLETED`
+with exit code `0:0`; shard 3 was still running.  The apparent parent row for
+task 15 must not be mistaken for the entire array terminal state.  AutoDL's
 old T8 remains an untouched fallback.
 Only after the package independently passes may AutoDL import it into a fresh
 root and run chemical validation, calibrated GINE inference, calibration,
@@ -140,6 +141,22 @@ copy remains recoverable and the receipts are under
 The post-delete audit observed `46652133376` bytes free on `/share`; final
 publication must nevertheless use the live dynamic reserve check because the
 shared filesystem changes independently of this project.
+
+The reviewed storage-safe implementation is commit
+`934d227cd2759851337369a83c8c364149121307` in detached worktree
+`/share/home/u20526/czx/worktrees/t8-storage-safe-934d227c`.  Both Mac and HPC
+focused runs passed 78 tests.  CPU-only replacement job `2538830` was first
+submitted in hold state, bound to the real Slurm IDs and exact file/self
+hashes, and then released with dependency `afterok:2536781`.  It correctly
+remains dependency-pending until shard 3 completes.  Its control root
+is
+`/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/continuations/stress-2535373-e8be657a-2223-476b-94a3-fd14997e48ad/control/storage-safe-934d227c-20260904T082641Z-61a9996d-00ee-4ffb-a76e-05d60c09b729/`,
+and its fresh result root has the same final directory name under
+`artifacts/full-depth-7-9208ffec328b/`.  Legacy jobs `2536786` and `2536787`
+remain held and must not be released.  The AutoDL streaming verifier is ready
+at
+`/root/autodl-tmp/worktrees/t8-storage-safe-934d227c/scripts/hpc/t8/stream_verify_storage_safe_bundle.py`;
+it must not import until job `2538830` has produced a PASS receipt.
 
 ## TasteMolNet / ComRecGC (T14)
 

@@ -79,6 +79,16 @@ After two external-disk-verified cache cleanups, `/share` had
 `46652133376` bytes free, but the job must still evaluate its live dynamic
 reserve immediately before the final two-file publication.
 
+Production replacement deployment (2026-09-04): commit
+`934d227cd2759851337369a83c8c364149121307`, detached HPC worktree
+`/share/home/u20526/czx/worktrees/t8-storage-safe-934d227c`, and Slurm job
+`2538830` with `afterok:2536781`.  At the expanded 08:29 UTC audit the full
+array had 15/16 shards complete with exit code `0:0`; shard 3 remained running,
+so `2538830` was correctly dependency-pending.  The job's sealed submission
+inventory and release receipt are under the
+`storage-safe-934d227c-20260904T082641Z-61a9996d-00ee-4ffb-a76e-05d60c09b729`
+control directory.  Legacy jobs `2536786/2536787` remain in `JobHeldUser`.
+
 ## 1. Purpose and authority boundary
 
 This route moves only the exhaustive CPU gSpan stage of the single authorized
