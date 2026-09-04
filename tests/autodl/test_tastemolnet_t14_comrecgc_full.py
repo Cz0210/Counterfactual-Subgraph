@@ -422,8 +422,11 @@ def test_resource_cap_uses_20k_then_one_25k_fallback() -> None:
         fallback_checkpoint_targets(17_500)
 
 
+@pytest.mark.parametrize("route_c_updater", [None, object()], ids=["reference", "lowmemory"])
 def test_route_c_step50_checkpoint_does_not_masquerade_as_parameter_drift(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route_c_updater: object | None,
 ) -> None:
     captured: dict[str, object] = {}
 
@@ -450,7 +453,7 @@ def test_route_c_step50_checkpoint_does_not_masquerade_as_parameter_drift(
     )
     connection = object()
     handles = SimpleNamespace(
-        route_c_updater=object(),
+        route_c_updater=route_c_updater,
         live_graph_state=SimpleNamespace(
             store=SimpleNamespace(checkpoint_connection=connection)
         ),
@@ -470,6 +473,7 @@ def test_route_c_step50_checkpoint_does_not_masquerade_as_parameter_drift(
         provenance={"identity": "frozen"},
         scientific_argv=("tastemolnet_t14_comrecgc_full_v1",),
         command_sha256="b" * 64,
+        route_c=True,
     )
 
     assert parameters.checkpoint_step == t14.CHECK_INTERVAL
@@ -504,6 +508,7 @@ def test_legacy_step50_checkpoint_remains_fail_closed(
             provenance={"identity": "frozen"},
             scientific_argv=("tastemolnet_t14_comrecgc_full_v1",),
             command_sha256="b" * 64,
+            route_c=False,
         )
 
 

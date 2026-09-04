@@ -5,12 +5,12 @@
 ### Decision
 
 Keep the frozen Taste ComRecGC scientific parameters unchanged and validate
-checkpoint transport cadence separately.  The Route C recovery contract admits
-its registered early boundaries at steps 50, 100, and 250 plus its production
-boundaries; the legacy full route continues to admit only 2,500-step
-boundaries.  Writing a Route C checkpoint must not replace the frozen
-`checkpoint_step` parameter with the current cursor before parameter
-validation.
+checkpoint transport cadence separately.  The explicit Route C contract—not
+the selected reference or low-memory storage backend—admits its registered
+early boundaries at steps 50, 100, and 250 plus its production boundaries; the
+legacy full route continues to admit only 2,500-step boundaries.  Writing a
+Route C checkpoint must not replace the frozen `checkpoint_step` parameter
+with the current cursor before parameter validation.
 
 ### Impact
 

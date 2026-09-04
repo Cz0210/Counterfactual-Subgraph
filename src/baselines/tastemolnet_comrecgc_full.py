@@ -1437,6 +1437,7 @@ def _write_checkpoint(
     provenance: Mapping[str, str],
     scientific_argv: Sequence[str],
     command_sha256: str,
+    route_c: bool,
 ) -> dict[str, Any]:
     from src.baselines.comrecgc.generation_checkpoint import (
         save_generation_checkpoint,
@@ -1450,7 +1451,7 @@ def _write_checkpoint(
     # replacing ``checkpoint_step`` with the live cursor incorrectly reported
     # a scientific-parameter drift at the first Route C checkpoint.
     parameters.validate()
-    if handles.route_c_updater is None:
+    if not route_c:
         checkpoint_steps = range(
             CHECK_INTERVAL, M_FALLBACK_MAX + 1, CHECK_INTERVAL
         )
@@ -2232,6 +2233,7 @@ def run_t14_full(
                     provenance=provenance,
                     scientific_argv=scientific_argv,
                     command_sha256=command_sha256,
+                    route_c=route_c_contract is not None,
                 )
             valid = count_train_side_valid_unique(bridge)
             _progress(
@@ -2342,6 +2344,7 @@ def run_t14_full(
                     provenance=provenance,
                     scientific_argv=scientific_argv,
                     command_sha256=command_sha256,
+                    route_c=route_c_contract is not None,
                 )
                 if route_c_contract is not None:
                     fallback_valid = count_train_side_valid_unique(bridge)

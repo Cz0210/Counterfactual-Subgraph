@@ -4165,7 +4165,8 @@ Mutagenicity roadmaps.
 - [ ] Validate and promote the Route C 500/510 remote parity canary, then
   continue from its committed step-500 state through the 20k/25k policy.
 - [x] Separate Route C's registered 50/100 early checkpoint cadence from the
-  frozen full-run scientific parameter validator so step 50 cannot be
+  frozen full-run scientific parameter validator, using the explicit Route-C
+  contract for both reference and low-memory storage, so step 50 cannot be
   misclassified as parameter drift.
 - [ ] Import the completed HPC T8 bundle into a fresh AutoDL root, finish the
   four missing cells, and render the frozen-protocol paper artifacts.
