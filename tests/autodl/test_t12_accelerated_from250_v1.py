@@ -20,6 +20,7 @@ from src.utils.tastemolnet_t12_accelerated_from250 import (
     build_promotion_blocker,
     compare_checkpoint_payloads,
     fork_step250_prefix,
+    validate_reference_run_identity_binding,
     validate_scientific_source_equivalence_binding,
     validate_mut_gpu0_release_receipt,
 )
@@ -421,6 +422,61 @@ def test_mut_gpu0_release_receipt_is_physical_and_fail_closed(tmp_path: Path) ->
     alias.symlink_to(target)
     with pytest.raises(T12AcceleratedError, match="physical file"):
         validate_mut_gpu0_release_receipt(alias)
+
+
+def test_reference_identity_reconciles_only_a_stale_manifest_locator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = (tmp_path / "reference").resolve()
+    root.mkdir()
+    identity_template = {
+        "execution_commit": "1" * 40,
+        "execution_tree": "2" * 40,
+        "sample_size": 10000,
+        "candidate_capacity": 100000,
+    }
+    (root / "run_identity.json").write_text(
+        json.dumps({"identity_template": identity_template}), encoding="utf-8"
+    )
+    manifest = {
+        "purpose": "production",
+        "total_steps": 510,
+        "checkpoint_cursor": 250,
+    }
+    checkpoint_identity = dict(identity_template)
+    checkpoint_identity.update(manifest)
+    manifest["identity_sha256"] = _canonical_sha(checkpoint_identity)
+    monkeypatch.setattr(
+        "src.utils.tastemolnet_t12_accelerated_from250._git",
+        lambda *_args, **_kwargs: "2" * 40,
+    )
+    report = validate_reference_run_identity_binding(
+        spec={
+            "output_root": str(root),
+            "manifest_path": str(tmp_path / "superseded/run_identity.json"),
+            "execution_commit": "1" * 40,
+            "repo_root": str(tmp_path),
+        },
+        contract={"reference_root": str(root)},
+        root=root,
+        checkpoint_manifest=manifest,
+    )
+    assert report["legacy_manifest_locator_reconciled"] is True
+    assert report["declared_manifest_path_matches_physical"] is False
+    changed = dict(manifest)
+    changed["identity_sha256"] = OTHER_SHA
+    with pytest.raises(T12AcceleratedError, match="not bound by checkpoint-250"):
+        validate_reference_run_identity_binding(
+            spec={
+                "output_root": str(root),
+                "manifest_path": str(root / "run_identity.json"),
+                "execution_commit": "1" * 40,
+                "repo_root": str(tmp_path),
+            },
+            contract={"reference_root": str(root)},
+            root=root,
+            checkpoint_manifest=changed,
+        )
 
 
 def test_checkpoint250_common_fork_and_firstseen_bytes(

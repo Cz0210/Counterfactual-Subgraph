@@ -17773,3 +17773,21 @@ history/embedding headers and transition headers also authenticate the active
 510-step bounds/contract.  Consequently, the implementation emits a
 machine-readable `BLOCKED_UNSUPPORTED_BY_CURRENT_STATE_SCHEMA` receipt rather
 than relabeling diagnostic evidence or creating a non-runnable full owner.
+
+# 2026-09-05: Reconcile the T12 first-seen reference manifest locator
+
+- Motivation: the sealed first-seen reference task correctly names its fresh
+  `output_root`, checkpoint-250, and science contract, but its generic
+  `manifest_path` field was inherited from a superseded attempt.  Treating that
+  dispatch locator as the promoted run identity blocked the authorized GPU1
+  fork even though the physical fresh-root identity and checkpoint were
+  internally consistent.
+- Decision: use `<reference_root>/run_identity.json` as the physical identity
+  only when the task `output_root` and science-contract `reference_root` are
+  identical, its execution commit/tree match the immutable checkout, and the
+  exact identity reconstructed for cursor 250 reproduces the checkpoint's
+  `identity_sha256`.  Record the legacy locator mismatch explicitly; do not
+  rewrite the sealed task spec or reference artifacts.
+- Impact: non-scientific stale routing metadata no longer blocks the diagnostic
+  GPU1 fork, while any root, commit, tree, cursor, total-step, purpose, or
+  checkpoint identity discrepancy still fails closed.

@@ -562,6 +562,76 @@ def _json(path: Path) -> dict[str, Any]:
     return value
 
 
+def validate_reference_run_identity_binding(
+    *,
+    spec: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    root: Path,
+    checkpoint_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the physical reference identity even when a legacy locator is stale.
+
+    The sealed first-seen task inherited ``manifest_path`` from the attempt it
+    superseded.  That field is dispatch metadata, not the identity used by the
+    promoted reference science.  The latter lives at
+    ``<reference_root>/run_identity.json`` and is independently bound by the
+    checkpoint's identity digest.  Accepting the stale locator is therefore
+    safe only when the task output root and science-contract root agree and the
+    physical run identity reproduces the checkpoint digest byte-for-byte.
+    """
+
+    if Path(str(spec.get("output_root"))) != root or Path(
+        str(contract.get("reference_root"))
+    ) != root:
+        raise T12AcceleratedError(
+            "T12 reference output/science roots do not identify one run"
+        )
+    reference_commit = _require_git_sha(
+        spec.get("execution_commit"), field="reference execution commit"
+    )
+    reference_tree = _git(
+        Path(str(spec["repo_root"])), "rev-parse", f"{reference_commit}^{{tree}}"
+    )
+    assert isinstance(reference_tree, str)
+    _require_git_sha(reference_tree, field="reference execution tree")
+    run_identity_path = root / "run_identity.json"
+    run_identity = _json(run_identity_path)
+    identity_template = run_identity.get("identity_template")
+    if (
+        type(identity_template) is not dict
+        or identity_template.get("execution_commit") != reference_commit
+        or identity_template.get("execution_tree") != reference_tree
+    ):
+        raise T12AcceleratedError(
+            "T12 reference run identity differs from its execution commit/tree"
+        )
+    checkpoint_identity = dict(identity_template)
+    checkpoint_identity.update(
+        {
+            "purpose": checkpoint_manifest.get("purpose"),
+            "total_steps": checkpoint_manifest.get("total_steps"),
+            "checkpoint_cursor": checkpoint_manifest.get("checkpoint_cursor"),
+        }
+    )
+    if _stable_sha256(checkpoint_identity) != checkpoint_manifest.get(
+        "identity_sha256"
+    ):
+        raise T12AcceleratedError(
+            "T12 physical run identity is not bound by checkpoint-250"
+        )
+    declared_path = Path(str(spec.get("manifest_path")))
+    return {
+        "reference_execution_commit": reference_commit,
+        "reference_execution_tree": reference_tree,
+        "physical_run_identity": str(run_identity_path),
+        "physical_run_identity_sha256": file_sha256(run_identity_path),
+        "declared_manifest_path": str(declared_path),
+        "declared_manifest_path_matches_physical": declared_path == run_identity_path,
+        "legacy_manifest_locator_reconciled": declared_path != run_identity_path,
+        "checkpoint_identity_sha256": checkpoint_manifest["identity_sha256"],
+    }
+
+
 def validate_mut_gpu0_release_receipt(path: Path) -> dict[str, Any]:
     """Require the exact physical Mut release receipt bound by the task spec.
 
@@ -690,26 +760,15 @@ def validate_reference_step250(
         or file_sha256(first_seen_path) != REFERENCE_FIRST_SEEN_PREFIX_SHA256
     ):
         raise T12AcceleratedError("T12 first-seen/history prefix bytes changed")
-    reference_commit = _require_git_sha(
-        spec.get("execution_commit"), field="reference execution commit"
+    run_identity_binding = validate_reference_run_identity_binding(
+        spec=spec,
+        contract=contract,
+        root=root,
+        checkpoint_manifest=manifest,
     )
-    reference_tree = _git(
-        Path(spec["repo_root"]), "rev-parse", f"{reference_commit}^{{tree}}"
-    )
-    assert isinstance(reference_tree, str)
-    _require_git_sha(reference_tree, field="reference execution tree")
-    run_identity_path = root / "run_identity.json"
-    run_identity = _json(run_identity_path)
-    identity_template = run_identity.get("identity_template")
-    if (
-        type(identity_template) is not dict
-        or identity_template.get("execution_commit") != reference_commit
-        or identity_template.get("execution_tree") != reference_tree
-        or Path(spec["manifest_path"]) != run_identity_path
-    ):
-        raise T12AcceleratedError(
-            "T12 reference run identity differs from its execution commit/tree"
-        )
+    reference_commit = run_identity_binding["reference_execution_commit"]
+    reference_tree = run_identity_binding["reference_execution_tree"]
+    run_identity_path = Path(run_identity_binding["physical_run_identity"])
     return {
         "schema_version": "tastemolnet_t12_reference_step250_evidence_v1",
         "status": "PASS",
@@ -721,6 +780,16 @@ def validate_reference_step250(
         "reference_official_root": str(contract.get("official_root")),
         "reference_run_identity": str(run_identity_path),
         "reference_run_identity_sha256": file_sha256(run_identity_path),
+        "declared_manifest_path": run_identity_binding["declared_manifest_path"],
+        "declared_manifest_path_matches_physical": run_identity_binding[
+            "declared_manifest_path_matches_physical"
+        ],
+        "legacy_manifest_locator_reconciled": run_identity_binding[
+            "legacy_manifest_locator_reconciled"
+        ],
+        "checkpoint_identity_sha256": run_identity_binding[
+            "checkpoint_identity_sha256"
+        ],
         "checkpoint_manifest": str(manifest_path),
         "checkpoint_manifest_sha256": expected_manifest_sha256,
         "checkpoint_payload": str(payload),
