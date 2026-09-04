@@ -245,6 +245,11 @@ def adopt_completed_array(
         ):
             raise HierarchicalT8Error("adopted shard still has an active partial writer")
         partition_hashes = []
+        partition_totals = {
+            "event_count": 0,
+            "pattern_count": 0,
+            "rejection_count": 0,
+        }
         for unit in sorted(
             (
                 row
@@ -259,7 +264,12 @@ def adopt_completed_array(
                 unit=unit,
             )
             partition_hashes.append(small["result_sha256"])
-        if shard.get("partition_result_sha256s") != partition_hashes:
+            for field in partition_totals:
+                partition_totals[field] += int(small[field])
+        if (
+            shard.get("partition_result_sha256s") != partition_hashes
+            or any(shard.get(field) != total for field, total in partition_totals.items())
+        ):
             raise HierarchicalT8Error("adopted shard/partition hash binding changed")
         shards.append(
             {
