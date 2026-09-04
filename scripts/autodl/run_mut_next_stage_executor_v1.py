@@ -64,6 +64,8 @@ def run_executor(
         "stage": None,
         "science_pid": None,
         "lane": None,
+        "route_b_started": False,
+        "fresh_50k_started": False,
     }
 
     def _stop(_signum: int, _frame: object) -> None:
@@ -95,7 +97,8 @@ def run_executor(
                 "task_spec": str(task_spec),
                 "task_spec_sha256": spec["spec_sha256"],
                 "sequence": sequence,
-                "fresh_50k_started": state["lane"] == "ROUTE_B",
+                "route_b_started": state["route_b_started"],
+                "fresh_50k_started": state["fresh_50k_started"],
                 "written_at": _now(),
             },
         )
@@ -156,13 +159,39 @@ def run_executor(
             if stopped:
                 raise MutNextStageError("executor received graceful stop between stages")
             heartbeat(str(stage["stage"]), None)
+            runtime_stage = dict(stage)
+            if lane == "ROUTE_B":
+                runtime_stage["environment"] = {
+                    **dict(stage["environment"]),
+                    "MUT_NEXT_ACTION_CONSUMED_PATH": str(consumed),
+                    "MUT_NEXT_ACTION_CONSUMPTION_RECEIPT": str(
+                        runtime / "next_action_consumption.json"
+                    ),
+                }
             receipt = run_stage(
-                stage,
+                runtime_stage,
                 log_path=runtime / "logs" / f"{index:02d}-{stage['stage']}.log",
                 progress=heartbeat,
             )
             receipts.append(receipt)
             atomic_json(runtime / "stages" / f"{index:02d}-{stage['stage']}.json", receipt)
+            state["route_b_started"] = (
+                state["route_b_started"] or receipt.get("route_b_started") is True
+            )
+            state["fresh_50k_started"] = (
+                state["fresh_50k_started"]
+                or receipt.get("fresh_50k_started") is True
+            )
+            if str(receipt["terminal_status"]).startswith("BLOCKED_"):
+                raise MutNextStageError(
+                    f"{stage['stage']} reported {receipt['terminal_status']}"
+                )
+        if lane == "ROUTE_B" and not (
+            state["route_b_started"] and state["fresh_50k_started"]
+        ):
+            raise MutNextStageError(
+                "Route-B pipeline returned without proving fresh generation started"
+            )
         if lane == "ADOPTION":
             locator = Path(str(spec["publisher_locator"]))
             if locator.is_symlink() or not locator.is_file():
@@ -181,8 +210,8 @@ def run_executor(
             "publisher_id": spec["publisher_id"],
             "publisher_locator": spec["publisher_locator"],
             "publisher_locator_sha256": locator_sha,
-            "fresh_50k_started": lane == "ROUTE_B",
-            "route_b_started": lane == "ROUTE_B",
+            "fresh_50k_started": state["fresh_50k_started"],
+            "route_b_started": state["route_b_started"],
             "pair_store_recomputed": False if lane == "ADOPTION" else None,
             "dbscan_recomputed": False if lane == "ADOPTION" else None,
             "completed_at": _now(),
@@ -198,8 +227,8 @@ def run_executor(
             "lane": state["lane"],
             "stage": state["stage"],
             "error": f"{type(exc).__name__}: {exc}",
-            "route_b_started": state["lane"] == "ROUTE_B",
-            "fresh_50k_started": state["lane"] == "ROUTE_B",
+            "route_b_started": state["route_b_started"],
+            "fresh_50k_started": state["fresh_50k_started"],
             "automatic_route_b_after_engineering_failure": False,
             "failed_at": _now(),
         }

@@ -183,6 +183,36 @@ def test_successor_spec_predeploys_full_adoption_and_route_b(tmp_path: Path) -> 
     assert validate_successor_spec(value, check_files=False) == value
 
 
+def test_successor_spec_rejects_spoofed_consumed_action_environment(
+    tmp_path: Path,
+) -> None:
+    predecessor = _write(tmp_path / "predecessor/spec.json", {"immutable": True})
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    stages = [_stage(tmp_path, name) for name in ADOPTION_STAGES]
+    route_b = _stage(tmp_path, "ROUTE_B")
+    route_b["environment"] = {"MUT_NEXT_ACTION_CONSUMED_PATH": "/tmp/forged"}
+    with pytest.raises(MutNextStageError, match="may not spoof"):
+        build_successor_spec(
+            {
+                "task_id": "mut-next",
+                "execution_commit": "a" * 40,
+                "predecessor_task_id": "mut-ab",
+                "predecessor_task_spec": str(predecessor),
+                "predecessor_terminal": str(tmp_path / "terminal/terminal.json"),
+                "next_action_path": str(tmp_path / "action/next_action.json"),
+                "runtime_root": str(tmp_path / "runtime"),
+                "lease_path": str(tmp_path / "lease"),
+                "publisher_id": "mut-publisher",
+                "publisher_locator": str(tmp_path / "publisher.locator.json"),
+                "matrix_authority_root": str(authority),
+                "adoption_pipeline": stages,
+                "route_b_pipeline": [route_b],
+            },
+            check_files=False,
+        )
+
+
 def test_next_action_consumed_once(tmp_path: Path) -> None:
     _gate, terminal, decision = _gate_tree(tmp_path)
     action = _write(tmp_path / "action/next_action.json", decision)

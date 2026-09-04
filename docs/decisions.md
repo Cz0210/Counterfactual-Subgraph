@@ -17831,3 +17831,30 @@ an exact comparison.
 - Impact: framework preparation stays CPU-only.  LLM and GNN science fail
   closed on stale/unowned main work and cannot take a GPU merely because a
   handwritten status snapshot says one is idle.
+
+# 2026-09-05: Add dataset-specific Mut successor terminal adapters
+
+- Motivation: the sealed generic post-A/B executor had runnable adoption and
+  standardization entrypoints, but no public stage entrypoint for reopening the
+  resulting Figure 3/Figure 4/Table 2 closure and no single operation binding
+  matrix append to the canonical publisher locator.  Its Route-B implementation
+  stopped after generation and therefore could not truthfully represent a
+  generation-to-pair-store-to-DBSCAN-to-publication cell closure.
+- Decision: add a strict Mut export reopener that delegates to the existing
+  fast-accurate terminal validator and hashes the already generated exports.
+  Add a canonical publisher adapter that requires the signed owner registry,
+  takes that publisher's exact lease, reopens the terminal again, appends via
+  the unique fast16 pointer, and only then writes the standard locator.  Both
+  stages prohibit scientific recomputation and test-side selection.
+- Route-B decision: do not compose a partial or placeholder science command.
+  Until reviewed pair-store and exact-DBSCAN rebuild adapters exist, the
+  Route-B stage writes `BLOCKED_ADAPTER_MISSING`, records every absent edge,
+  and proves that no fresh generation started.  The generic executor now
+  preserves these explicit booleans instead of inferring that selecting the
+  Route-B lane means generation ran.  It injects the dynamically renamed,
+  consumed decision path through a reserved environment variable; sealed
+  stage specifications cannot spoof this binding.
+- Impact: the current Mut owner can remain untouched while its successor waits
+  for the existing sealed `next_action`.  The adoption lane is executable end
+  to end once its concrete artifact paths are bound; the divergent lane fails
+  closed before expensive work rather than publishing a generation-only PASS.

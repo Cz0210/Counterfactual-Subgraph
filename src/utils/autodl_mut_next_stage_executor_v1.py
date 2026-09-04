@@ -160,6 +160,10 @@ def _normalize_stage(raw: Mapping[str, Any], *, check_files: bool) -> dict[str, 
         for key, value in environment.items()
     ):
         raise MutNextStageError(f"{stage}.environment is invalid")
+    if any(key.startswith("MUT_NEXT_ACTION_") for key in environment):
+        raise MutNextStageError(
+            f"{stage}.environment may not spoof executor next-action bindings"
+        )
     row["environment"] = dict(sorted(environment.items()))
     for flag in (
         "pair_store_recomputed",
@@ -494,6 +498,8 @@ def run_stage(
         "terminal": str(terminal_path),
         "terminal_sha256": file_sha256(terminal_path),
         "terminal_status": status,
+        "route_b_started": terminal.get("route_b_started"),
+        "fresh_50k_started": terminal.get("fresh_50k_started"),
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
 
