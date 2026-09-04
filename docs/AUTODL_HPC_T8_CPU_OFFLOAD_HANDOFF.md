@@ -1,5 +1,60 @@
 # AutoDL to HPC Taste GlobalGCE T8 CPU-offload handoff
 
+## 2026-09-04 storage-safe merge/package replacement
+
+The legacy merge/package chain materializes a full uncompressed merge under
+`/share` and then creates another uncompressed tar.  Keep those jobs held when
+the user-path free space cannot cover that peak.  Do not modify successful
+array shards and do not release the legacy chain merely to test this route.
+
+The replacement is
+`scripts/hpc/t8/slurm_storage_safe_merge_package.sh`.  It is one CPU-only
+`afterok:${T8_FULL_ARRAY_JOB_ID}` job.  Exact merge, duplicate checks, complete
+partition/order validation, and deterministic gzip creation occur in
+`$SLURM_TMPDIR` (or a task-private `/tmp` directory).  The fresh persistent
+`T8_STORAGE_SAFE_RESULT_ROOT` ends with exactly:
+
+```text
+t8_exact_result_bundle.tar.gz
+result_manifest.json
+```
+
+Required bindings are:
+
+```text
+T8_FULL_ARRAY_JOB_ID
+T8_EXECUTION_WORKTREE
+T8_EXPECTED_COMMIT
+T8_PYTHON
+T8_INPUT_MANIFEST
+T8_EXPECTED_INPUT_MANIFEST_SHA256
+T8_EXPECTED_CONFIG_SHA256
+T8_EXPECTED_HPC_CONFIG_SHA256
+T8_PARTITION_MANIFEST
+T8_EXPECTED_PARTITION_MANIFEST_SHA256
+T8_FULL_SHARDS_ROOT
+T8_CANARY_PARITY_RECEIPT
+T8_EXPECTED_CANARY_PARITY_SHA256
+T8_STORAGE_SAFE_RESULT_ROOT
+T8_ENVIRONMENT_MANIFEST
+T8_SLURM_INVENTORY
+T8_RESOURCE_METRICS
+```
+
+`T8_EXPECTED_COMMIT` is the immutable packaging-code commit.  The full
+partition manifest separately retains the original exact-science commit and
+input identities.  Optional admission settings default to
+`T8_MIN_PERSISTENT_RESERVE_BYTES=2147483648` and
+`T8_PERSISTENT_RESERVE_FRACTION=0.20`; do not weaken them for production.
+
+After transfer, AutoDL runs
+`scripts/hpc/t8/stream_verify_storage_safe_bundle.py` with externally recorded
+archive SHA, packaging commit, scientific-input SHA, and full-partition SHA.
+It streams every member, recomputes each raw JSONL hash/count, checks typed DFS
+identities and official preorder, and never extracts the archive.  PASS allows
+only a fresh-root import; it does not authorize GINE inference,
+calibration/test, or matrix publication on HPC.
+
 ## 1. Purpose and authority boundary
 
 This route moves only the exhaustive CPU gSpan stage of the single authorized

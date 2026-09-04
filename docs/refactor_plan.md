@@ -1,5 +1,22 @@
 # Refactor Plan
 
+## 2026-09-04: T8 exact HPC storage-safe terminal chain
+
+- [x] Preserve the existing exact shard and raw merge stream contracts.
+- [x] Run complete merge, uniqueness, preorder, and stable top-K validation on
+  Slurm node-local scratch.
+- [x] Add deterministic lossless gzip/PAX packaging with normalized metadata.
+- [x] Add exact persistent-space admission with a 2 GiB/20 percent reserve and
+  atomic bundle-plus-manifest publication.
+- [x] Add one-pass verification that never extracts the large streams.
+- [x] Add one CPU-only `afterok` replacement job with no GPU or matrix path.
+- [x] Cover tiny round-trip, byte determinism, ENOSPC, dependency, CPU-only,
+  and corruption failure behavior with focused tests.
+- [ ] Deploy the commit in a new immutable HPC worktree and submit only after
+  the current full array succeeds.
+- [ ] Import the independently verified bundle into a fresh AutoDL root; keep
+  GINE, chemistry, calibration/test, and matrix work on AutoDL.
+
 ## 2026-09-04: Mut fresh successor ownership
 
 - [x] Require a terminal operational failure and no live Mut writer.

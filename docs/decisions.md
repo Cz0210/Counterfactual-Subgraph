@@ -67,6 +67,41 @@ hash-closed provenance chain.
 
 ---
 
+## [2026-09-04] Publish the exact T8 HPC merge as one storage-safe compressed bundle
+
+### Decision
+
+Keep the completed shard format, official DFS preorder, typed identities,
+supports, rejections, and raw-stream SHA-256 meanings unchanged.  Run the
+existing exact merge and its full verifier entirely below Slurm node-local
+scratch.  Create one deterministic gzip/PAX archive there with normalized tar
+metadata and gzip mtime zero.  It contains the complete unmodified event,
+pattern, and rejection JSONL streams, their merge manifest, stable top-K,
+partition/parity evidence, and compact run evidence.
+
+Only after a streaming round-trip verification, calculate admission from the
+exact compressed byte count and path-specific free space, preserving the
+larger of 2 GiB or 20 percent as reserve.  Atomically publish a fresh directory
+containing only the compressed archive and a small self-hashed receipt.  An
+ENOSPC race or failed admission leaves no terminal result.  AutoDL verifies the
+archive in one decompression pass without extracting it and binds the archive
+SHA, packaging commit, scientific-input SHA, and partition-manifest SHA.
+
+Use one CPU-only `afterok:<array-job-id>` replacement for merge and package.
+It neither modifies completed array shards nor touches the held legacy jobs,
+and it receives no GPU, classifier, calibration/test data, or matrix authority.
+
+### Impact
+
+The old route's uncompressed merge plus second uncompressed tar would require
+roughly 42--50 GiB while the user path currently has about 6.45 GiB free.  The
+new persistent peak is one compressed archive plus one small manifest.  If the
+archive itself cannot fit with reserve, the exact shortfall is reported and no
+partial PASS is published.  Compression changes only transport bytes; HPC is
+still an intermediate producer and AutoDL retains all publication authority.
+
+---
+
 ## [2026-09-04] Replace the failed Mut owner with one throttled fresh successor
 
 ### Decision
