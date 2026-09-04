@@ -5,7 +5,7 @@ require_env() { [[ -n "${!1:-}" ]] || { echo "missing required environment varia
 sha256_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
 for name in T8_EXECUTION_WORKTREE T8_EXPECTED_COMMIT T8_PYTHON T8_PARTITION_MANIFEST \
   T8_FULL_SHARDS_ROOT T8_CANARY_PARITY_RECEIPT T8_ENVIRONMENT_MANIFEST \
-  T8_RESOURCE_METRICS T8_HIERARCHICAL_CHAIN_ROOT; do require_env "$name"; done
+  T8_HIERARCHICAL_CHAIN_ROOT; do require_env "$name"; done
 
 set +u
 source ~/.bashrc
