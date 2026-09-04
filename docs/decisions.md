@@ -17798,3 +17798,36 @@ two duplicated commit/tree pairs from comparison only after each runtime pair
 has first been proven equal to its own checkpoint pair.  Every remaining
 runtime field, including determinism and non-location GPU properties, remains
 an exact comparison.
+
+# 2026-09-05: Predeploy the exact HPC T8 import and T13 successor
+
+- Motivation: all sixteen CPU mining shards are sealed on HPC, while their
+  exact hierarchical merge/package is still in progress.  Waiting to write
+  the AutoDL continuation until after transport would leave the main-table GPU
+  path unnecessarily unowned.
+- Decision: seal a three-part successor contract now: a CPU-only import owner,
+  a distinct T13 GPU owner, and a non-writing publisher locator.  The import
+  owner remains `WAITING_HPC_PACKAGE` until a relayed package passes outer and
+  inner hashes, sixteen-shard and partition checks, pinned commits, train-only
+  provenance, and the prohibition on HPC GINE/calibration/test/matrix work.
+  Only the AutoDL T13 successor performs chemistry, frozen-GINE strict-flip,
+  calibration selection, held-out test, and standardized export in fresh
+  roots.  The existing fast16 publisher remains the sole matrix writer.
+- Impact: successor code can be deployed without consuming a GPU or claiming
+  scientific readiness.  Successful HPC shards are never rerun, an incomplete
+  package cannot become a valid zero result, and resume is accepted only from
+  a hash-bound T13 checkpoint.
+
+# 2026-09-05: Bind ablation launch gates to live final16 owners
+
+- Motivation: a matrix count and an apparently idle GPU are insufficient to
+  prove that an ablation will not delay an unfinished main-table cell.
+- Decision: derive the LLM early-launch snapshot from the canonical final16
+  owner registry and the unique publisher claims, then reopen and revalidate
+  both files at launch time.  Require Mutagenicity/ComRecGC to be registered
+  PASS, every other unfinished cell to have a healthy owner and publisher, no
+  main GPU waiter, and the existing 1200-second idle-GPU gate.  GNN launch also
+  requires a syntactically valid hash for the final combined audit.
+- Impact: framework preparation stays CPU-only.  LLM and GNN science fail
+  closed on stale/unowned main work and cannot take a GPU merely because a
+  handwritten status snapshot says one is idle.
