@@ -16,7 +16,8 @@ for name in T8_EXECUTION_WORKTREE T8_EXPECTED_COMMIT T8_PYTHON T8_PARTITION_MANI
   T8_FULL_SHARDS_ROOT T8_HIERARCHICAL_MERGE_ROOT T8_CANARY_PARITY_RECEIPT \
   T8_ENVIRONMENT_MANIFEST T8_HIERARCHICAL_SLURM_INVENTORY T8_RESOURCE_METRICS \
   T8_HIERARCHICAL_PACKAGE_ROOT T8_HIERARCHICAL_GROUP_PLAN \
-  T8_HIERARCHICAL_GROUPS_ROOT; do require_env "$name"; done
+  T8_HIERARCHICAL_GROUPS_ROOT T8_HIERARCHICAL_GROUP_JOB_ID \
+  T8_HIERARCHICAL_FINAL_JOB_ID; do require_env "$name"; done
 
 set +u
 source ~/.bashrc
@@ -43,6 +44,32 @@ terminate_child() {
 trap cleanup EXIT
 trap terminate_child TERM INT
 mkdir -p "$(dirname "$T8_HIERARCHICAL_PACKAGE_ROOT")"
+
+# Bind the package to terminal resource evidence from this fresh hierarchy.
+sacct -n -X -j "$T8_HIERARCHICAL_GROUP_JOB_ID,$T8_HIERARCHICAL_FINAL_JOB_ID" \
+  --format=JobIDRaw,JobName,State,ExitCode,ElapsedRaw,AllocCPUS,ReqMem,MaxRSS,NodeList \
+  --parsable2 > "$job_tmp/sacct.txt"
+"$T8_PYTHON" - "$job_tmp/sacct.txt" "$T8_RESOURCE_METRICS" "$T8_HIERARCHICAL_GROUP_JOB_ID" "$T8_HIERARCHICAL_FINAL_JOB_ID" <<'PY_METRICS'
+import hashlib,json,os,sys,tempfile
+from datetime import datetime,timezone
+from pathlib import Path
+source,destination,group_job,final_job=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],sys.argv[4]
+rows=[]
+for line in source.read_text().splitlines():
+    values=line.split('|')
+    if values and values[-1]=='': values.pop()
+    if len(values)==9:
+        rows.append(dict(zip(('job_id','job_name','state','exit_code','elapsed_seconds','allocated_cpus','requested_memory','max_rss','node_list'),values)))
+if not rows or not any(row['job_id']==final_job and row['state'].split('+')[0]=='COMPLETED' and row['exit_code']=='0:0' for row in rows):
+    raise SystemExit('hierarchical final Slurm terminal evidence is incomplete')
+payload={"schema_version":"t8_hpc_hierarchical_resource_metrics_v1","status":"PASS","created_at":datetime.now(timezone.utc).isoformat(),"group_array_job_id":group_job,"final_merge_job_id":final_job,"sacct_rows":rows,"matrix_write_enabled":False}
+payload['resource_metrics_sha256']=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
+data=(json.dumps(payload,sort_keys=True,separators=(',',':'),ensure_ascii=True)+'\n').encode()
+destination.parent.mkdir(parents=True,exist_ok=True)
+fd,tmp=tempfile.mkstemp(prefix='.resource-metrics.',dir=destination.parent)
+with os.fdopen(fd,'wb') as stream: stream.write(data); stream.flush(); os.fsync(stream.fileno())
+os.replace(tmp,destination)
+PY_METRICS
 
 echo "python=$T8_PYTHON"
 "$T8_PYTHON" --version

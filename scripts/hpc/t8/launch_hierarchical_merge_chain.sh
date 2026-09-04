@@ -56,6 +56,9 @@ group_job_id="$(sbatch --parsable --array="0-${last_group}%${concurrency}" --exp
 group_job_id="${group_job_id%%;*}"
 final_job_id="$(sbatch --parsable --dependency="afterok:${group_job_id}" --export=ALL scripts/hpc/t8/slurm_hierarchical_final_merge.sh)"
 final_job_id="${final_job_id%%;*}"
+export T8_HIERARCHICAL_GROUP_JOB_ID="$group_job_id"
+export T8_HIERARCHICAL_FINAL_JOB_ID="$final_job_id"
+export T8_RESOURCE_METRICS="$T8_HIERARCHICAL_CHAIN_ROOT/control/resource_metrics.json"
 package_job_id="$(sbatch --parsable --dependency="afterok:${final_job_id}" --export=ALL scripts/hpc/t8/slurm_hierarchical_package.sh)"
 package_job_id="${package_job_id%%;*}"
 
