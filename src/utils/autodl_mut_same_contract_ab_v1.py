@@ -24,6 +24,14 @@ CANDIDATE_CAPACITY = 100_000
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _GPU_UUID = re.compile(r"^GPU-[A-Za-z0-9-]+$")
+DEPLOYED_PRE_GPU_LOCK_SPEC_SHA256 = (
+    "45a52717e01d10171fbb53120d60f640ad2f43b82358080bcdd1aa0dc4558a97"
+)
+DEPLOYED_PRE_GPU_LOCK_TASK_ID = "mut-same-contract-ab-7c9a0159"
+DEPLOYED_PRE_GPU_LOCK_ATTEMPT_UUID = "7c9a0159-108d-4980-a002-fc4370be3da9"
+DEPLOYED_PRE_GPU_LOCK_CONTROLLER_COMMIT = (
+    "02c8e032593e19893f7562ae9b9a8aa7ea72c3f0"
+)
 
 
 class MutSameContractABSpecError(RuntimeError):
@@ -271,6 +279,30 @@ def validate_same_contract_ab_spec(
     environment = value.get("required_environment")
     if not isinstance(environment, Mapping) or environment.get("PYTHONHASHSEED") != "0":
         raise MutSameContractABSpecError("A/B deterministic environment changed")
+    has_gpu_lock_root = "gpu_lock_root" in value
+    has_gpu_uuid = "gpu_uuid" in value
+    if has_gpu_lock_root != has_gpu_uuid:
+        raise MutSameContractABSpecError(
+            "A/B GPU UUID and lock-root bindings must appear together"
+        )
+    deployed_pre_gpu_lock_spec = not has_gpu_lock_root
+    if deployed_pre_gpu_lock_spec:
+        pinned = {
+            "spec_sha256": DEPLOYED_PRE_GPU_LOCK_SPEC_SHA256,
+            "task_id": DEPLOYED_PRE_GPU_LOCK_TASK_ID,
+            "attempt_uuid": DEPLOYED_PRE_GPU_LOCK_ATTEMPT_UUID,
+            "controller_commit": DEPLOYED_PRE_GPU_LOCK_CONTROLLER_COMMIT,
+            "gpu_index": 0,
+        }
+        changed_deployed = [
+            key for key, expected_value in pinned.items()
+            if value.get(key) != expected_value
+        ]
+        if changed_deployed:
+            raise MutSameContractABSpecError(
+                "unrecognized pre-GPU-lock deployed A/B spec: "
+                f"{changed_deployed}"
+            )
     path_fields = (
         "controller_project_root",
         "python",
@@ -287,15 +319,19 @@ def validate_same_contract_ab_spec(
         "output_dir",
         "control_root",
         "lease_path",
-        "gpu_lock_root",
     )
+    if not deployed_pre_gpu_lock_spec:
+        path_fields = (*path_fields, "gpu_lock_root")
     paths = {field: _absolute(value.get(field), field=field) for field in path_fields}
     if value.get("gpu_index") != 0 or isinstance(value.get("gpu_index"), bool):
         raise MutSameContractABSpecError("Mut A/B is pinned to physical GPU0")
-    if _GPU_UUID.fullmatch(str(value.get("gpu_uuid") or "")) is None:
-        raise MutSameContractABSpecError("A/B physical GPU UUID changed")
-    if paths["lease_path"] == paths["gpu_lock_root"] / f"gpu-{value['gpu_uuid']}.lock":
-        raise MutSameContractABSpecError("owner lease and global GPU UUID lock must differ")
+    if not deployed_pre_gpu_lock_spec:
+        if _GPU_UUID.fullmatch(str(value.get("gpu_uuid") or "")) is None:
+            raise MutSameContractABSpecError("A/B physical GPU UUID changed")
+        if paths["lease_path"] == paths["gpu_lock_root"] / f"gpu-{value['gpu_uuid']}.lock":
+            raise MutSameContractABSpecError(
+                "owner lease and global GPU UUID lock must differ"
+            )
     if check_files:
         expected_runner = (
             paths["controller_project_root"]

@@ -226,8 +226,10 @@ def validate_exact_mut_successor_template(
     if trace_mode_gate.name != "trace_on_off_500_step_equivalence.json":
         raise MutSuccessorTemplateError("adoption does not consume the future A/B gate")
     authorization = Path(_option(adopt_argv, "--authorization-receipt"))
-    if authorization.name != (
-        "trace_on_adoption_authorization_20260901T183543Z.json"
+    if (
+        authorization.name != "trace_on_adoption_authorization_20260901T183543Z.json"
+        or authorization.parent.name != "mut_fast_accurate_v2_20260901T043250Z"
+        or authorization.parent.parent.name != "mut_fast_accurate_v2"
     ):
         raise MutSuccessorTemplateError(
             "adoption does not bind the latest existing 2026-09-01 authorization"

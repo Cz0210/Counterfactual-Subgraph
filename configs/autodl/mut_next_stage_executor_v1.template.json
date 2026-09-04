@@ -29,7 +29,7 @@
         "--same-contract-gate",
         "__TRACE_MODE_GATE__",
         "--authorization-receipt",
-        "/autodl-fs/data/counterfactual-subgraph-runtime/control/mut_fast_accurate_v2/trace_on_adoption_authorization_20260901T183543Z.json",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/control/mut_fast_accurate_v2/mut_fast_accurate_v2_20260901T043250Z/trace_on_adoption_authorization_20260901T183543Z.json",
         "--historical-source-root",
         "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/mutagenicity_comrecgc_lineage_v3_20260822T025620Z",
         "--completed-common-root",

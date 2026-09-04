@@ -17900,3 +17900,9 @@ an exact comparison.
   proceeds through adoption, standardization, export, and the canonical matrix
   publisher; causal divergence still reaches the explicit fail-closed Route-B
   adapter blocker.
+- Deployment compatibility: the already-running A/B spec predates the later
+  `gpu_uuid`/`gpu_lock_root` fields.  Only its exact deployed task id, UUID,
+  controller commit, and self-hash are accepted by the compatibility path;
+  newly built specs still require both GPU-lock fields.  The successor also
+  binds the authorization receipt at its actual controller-scoped path rather
+  than the nonexistent parent-directory shorthand.

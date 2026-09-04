@@ -157,7 +157,7 @@ def _validate_current_ab(
 ) -> dict[str, Any]:
     spec_path = _physical(task_spec_path, field="same-contract A/B task spec")
     spec = validate_same_contract_ab_spec(
-        _json(spec_path, field="same-contract A/B task spec"), check_files=False
+        _json(spec_path, field="same-contract A/B task spec"), check_files=True
     )
     expected_gate = Path(str(spec["output_dir"])) / (
         "trace_on_off_500_step_equivalence.json"
