@@ -47,6 +47,18 @@ from src.baselines.comrecgc.contracts import (  # noqa: E402
     stable_json_sha256,
     write_json,
 )
+from src.utils.autodl_mut_post_ab_continuation_v1 import (  # noqa: E402
+    GATE_SCHEMA as SAME_CONTRACT_GATE_SCHEMA,
+    classify_same_contract_gate,
+    validate_ab_owner_terminal,
+    validate_same_contract_gate,
+)
+from src.utils.autodl_mut_same_contract_ab_v1 import (  # noqa: E402
+    validate_same_contract_ab_spec,
+)
+from src.utils.autodl_mut_trace_on_adoption_v1 import (  # noqa: E402
+    validate_authorization_receipt,
+)
 from src.utils.autodl_mut_traceoff_parity_v1 import (  # noqa: E402
     INSTRUMENTATION_PROJECT_COMMIT,
     INSTRUMENTATION_SOURCE_INVENTORY_SHA256,
@@ -352,13 +364,96 @@ def _validate_historical_adoption(
             "500_step_semantic_equivalence_receipt_sha256"
         ):
             failures.append("500_step_semantic_equivalence_receipt_sha256")
-        equivalence = validate_instrumentation_equivalence_gate(
-            gate_path=equivalence_path,
-            expected_legacy_inventory_sha256=LEGACY_SOURCE_INVENTORY_SHA256,
-            expected_instrumentation_inventory_sha256=(
-                INSTRUMENTATION_SOURCE_INVENTORY_SHA256
-            ),
+        equivalence_raw = _object(
+            equivalence_path, label="500-step semantic equivalence receipt"
         )
+        if equivalence_raw.get("schema_version") == SAME_CONTRACT_GATE_SCHEMA:
+            equivalence = validate_same_contract_gate(
+                equivalence_raw, gate_path=equivalence_path
+            )
+            if classify_same_contract_gate(equivalence) != (
+                "PASS_TRACE_MODE_EQUIVALENCE"
+            ):
+                failures.append("same_contract_equivalence_classification")
+            spec_path = _physical_bound_file(
+                value.get("same_contract_ab_spec_path"),
+                label="same-contract A/B task spec",
+            )
+            if sha256_file(spec_path) != value.get("same_contract_ab_spec_sha256"):
+                failures.append("same_contract_ab_spec_sha256")
+            ab_spec = validate_same_contract_ab_spec(
+                _object(spec_path, label="same-contract A/B task spec"),
+                check_files=False,
+            )
+            expected_gate = Path(str(ab_spec["output_dir"])) / (
+                "trace_on_off_500_step_equivalence.json"
+            )
+            if expected_gate.resolve(strict=True) != equivalence_path:
+                failures.append("same_contract_gate_not_spec_derived")
+            if Path(str(ab_spec["historical_artifact_root"])).resolve(
+                strict=True
+            ) != source:
+                failures.append("same_contract_historical_source")
+            owner_terminal_path = _physical_bound_file(
+                value.get("same_contract_ab_owner_terminal_path"),
+                label="same-contract A/B owner terminal",
+            )
+            expected_owner_terminal = Path(str(ab_spec["control_root"])) / (
+                "terminal.json"
+            )
+            if expected_owner_terminal.resolve(strict=True) != owner_terminal_path:
+                failures.append("same_contract_owner_terminal_not_spec_derived")
+            if sha256_file(owner_terminal_path) != value.get(
+                "same_contract_ab_owner_terminal_sha256"
+            ):
+                failures.append("same_contract_ab_owner_terminal_sha256")
+            owner_terminal = validate_ab_owner_terminal(
+                _object(owner_terminal_path, label="same-contract A/B owner terminal"),
+                task_id=str(ab_spec["task_id"]),
+                gate_path=equivalence_path,
+            )
+            if owner_terminal.get("status") != "PASS_TRACE_MODE_EQUIVALENCE":
+                failures.append("same_contract_owner_terminal_status")
+            if (
+                value.get("same_contract_gate_path") != str(equivalence_path)
+                or value.get("same_contract_gate_sha256")
+                != sha256_file(equivalence_path)
+                or value.get("same_contract_gate_summary_sha256")
+                != equivalence.get("summary_sha256")
+            ):
+                failures.append("same_contract_gate_receipt_binding")
+            authorization_path = _physical_bound_file(
+                value.get("trace_on_adoption_authorization_path"),
+                label="trace-on adoption authorization",
+            )
+            if sha256_file(authorization_path) != value.get(
+                "trace_on_adoption_authorization_file_sha256"
+            ):
+                failures.append("trace_on_adoption_authorization_file_sha256")
+            authorization_raw = _object(
+                authorization_path, label="trace-on adoption authorization"
+            )
+            authorization, _authorization_file_sha = validate_authorization_receipt(
+                authorization_path,
+                expected_controller_id=str(authorization_raw.get("controller_id") or ""),
+                expected_source_root=source,
+            )
+            if authorization.get("authorization_sha256") != value.get(
+                "trace_on_adoption_authorization_sha256"
+            ):
+                failures.append("trace_on_adoption_authorization_sha256")
+            equivalence = {
+                **equivalence,
+                "sha256": sha256_file(equivalence_path),
+            }
+        else:
+            equivalence = validate_instrumentation_equivalence_gate(
+                gate_path=equivalence_path,
+                expected_legacy_inventory_sha256=LEGACY_SOURCE_INVENTORY_SHA256,
+                expected_instrumentation_inventory_sha256=(
+                    INSTRUMENTATION_SOURCE_INVENTORY_SHA256
+                ),
+            )
         if equivalence.get("sha256") != value.get(
             "500_step_semantic_equivalence_receipt_sha256"
         ):

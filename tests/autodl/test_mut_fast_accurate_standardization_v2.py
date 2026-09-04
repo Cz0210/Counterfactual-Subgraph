@@ -406,3 +406,166 @@ def test_run_emits_truthful_fast_accurate_v2_terminal(
     assert result["dbscan_native_candidate_universe_field_present"] is False
     assert result["dbscan_universe_binding_via_pair_vectors"] is True
     assert (inputs.output_root / "PASS").read_bytes() == b"PASS\n"
+
+
+def test_historical_adoption_reopens_current_same_contract_ab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.utils.autodl_mut_first_divergence_v1 import stable_sha256
+    from src.utils.autodl_mut_post_ab_continuation_v1 import (
+        EXECUTION_COMMIT,
+        SOURCE_COMMIT,
+        UPSTREAM_COMMIT,
+    )
+    from src.utils.autodl_mut_same_contract_ab_v1 import (
+        build_same_contract_ab_spec,
+    )
+
+    receipt, source = _historical_adoption(tmp_path)
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    legacy_gate = Path(payload["500_step_semantic_equivalence_receipt_path"])
+    old_gate = legacy_gate.parent / "trace_on_off_500_step_equivalence.json"
+    payload["500_step_semantic_equivalence_receipt_path"] = str(old_gate)
+    input_manifest: dict[str, object] = {
+        "schema_version": "mut_trace_equivalence_input_manifest_v1",
+        "dataset": "mutagenicity",
+        "source_algorithm_commit": SOURCE_COMMIT,
+        "execution_commit": EXECUTION_COMMIT,
+        "upstream_commit": UPSTREAM_COMMIT,
+        "formal_M_MAX": 50_000,
+        "comparison_steps": 500,
+        "post_reload_steps": 10,
+        "candidate_capacity": 100_000,
+        "seed": 0,
+        "parent_limit": 1448,
+        "batch_size": 128,
+        "device": "cuda:0",
+        "arms_sequential": True,
+        "max_concurrent_arms": 1,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "pythonhashseed": "0",
+    }
+    input_manifest["manifest_sha256"] = stable_sha256(input_manifest)
+    input_path = old_gate.parent / "equivalence_input_manifest.json"
+    _json(input_path, input_manifest)
+    exact_fields = {
+        key: True
+        for key in (
+            "trace_on_off_stepwise_exact",
+            "step_action_trace_exact",
+            "rng_state_exact",
+            "classifier_probability_trace_exact",
+            "step_semantic_fields_present",
+            "trace_on_checkpoint_reload_pass",
+            "trace_off_checkpoint_reload_pass",
+            "post_reload_trace_mode_equivalence_pass",
+            "step500_checkpoint_serialized_candidate_records_exact",
+            "step500_checkpoint_candidate_universe_exact",
+            "checkpoint_algorithm_scientific_state_exact",
+            "checkpoint_rng_state_exact",
+            "checkpoint_sqlite_logical_state_exact",
+            "checkpoint_graph_registry_exact",
+            "resolved_config_scientific_binding_exact",
+        )
+    }
+    gate: dict[str, object] = {
+        "schema_version": "mut_trace_on_off_500_step_equivalence_v1",
+        "status": "PASS",
+        "dataset": "mutagenicity",
+        "method": "COMRECGC",
+        "source_algorithm_commit": SOURCE_COMMIT,
+        "execution_commit": EXECUTION_COMMIT,
+        "formal_M_MAX": 50_000,
+        "steps_compared": 500,
+        "post_reload_steps_compared": 10,
+        "trace_on_trace_enabled": True,
+        "trace_off_trace_enabled": False,
+        "trace_only_files_excluded_from_scientific_digest": True,
+        "post_walk_prefix_finalization_performed": False,
+        "full_50k_trace_on_off_parity_claimed": False,
+        "arms_overlapped": False,
+        "max_concurrent_arms": 1,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "first_semantic_divergence_step": None,
+        "failures": [],
+        "trace_on_observer_log_audit": {"status": "PASS"},
+        "trace_off_observer_log_audit": {"status": "PASS"},
+        "input_manifest": str(input_path),
+        "input_manifest_sha256": sha256_file(input_path),
+        **exact_fields,
+    }
+    gate["summary_sha256"] = stable_sha256(gate)
+    _json(old_gate, gate)
+
+    control = tmp_path / "ab-control"
+    run_root = tmp_path / "ab-run"
+    ab_spec = build_same_contract_ab_spec(
+        {
+            "task_id": "mut-ab",
+            "attempt_uuid": "12345678-1234-4234-9234-123456789abc",
+            "controller_project_root": str(tmp_path / "controller"),
+            "controller_commit": "a" * 40,
+            "python": str(tmp_path / "python"),
+            "runner_path": str(tmp_path / "controller/scripts/autodl/run_mut_trace_mode_equivalence.py"),
+            "legacy_project_root": str(tmp_path / "legacy"),
+            "execution_project_root": str(tmp_path / "execution"),
+            "historical_artifact_root": str(source),
+            "upstream_root": str(tmp_path / "upstream"),
+            "dataset_dir": str(tmp_path / "dataset"),
+            "gnn_checkpoint": str(tmp_path / "gnn.pt"),
+            "distance_checkpoint": str(tmp_path / "distance.pt"),
+            "rf_oracle": str(tmp_path / "rf.pkl"),
+            "run_root": str(run_root),
+            "output_dir": str(old_gate.parent),
+            "control_root": str(control),
+            "lease_path": str(control / "owner.lease"),
+            "gpu_lock_root": str(tmp_path / "locks"),
+            "gpu_uuid": "GPU-test-uuid",
+            "gpu_index": 0,
+        },
+        check_files=False,
+    )
+    ab_spec_path = tmp_path / "ab-task-spec.json"
+    _json(ab_spec_path, ab_spec)
+    owner_terminal = control / "terminal.json"
+    _json(
+        owner_terminal,
+        {
+            "schema_version": "mut_same_contract_ab_owner_terminal_v1",
+            "task_id": "mut-ab",
+            "status": "PASS_TRACE_MODE_EQUIVALENCE",
+            "fresh_50k_started": False,
+            "equivalence_gate": str(old_gate),
+            "equivalence_gate_sha256": sha256_file(old_gate),
+        },
+    )
+    authorization = tmp_path / "authorization.json"
+    _json(authorization, {"controller_id": "authorized-controller"})
+    monkeypatch.setattr(
+        standardizer,
+        "validate_authorization_receipt",
+        lambda *_args, **_kwargs: ({"authorization_sha256": "d" * 64}, sha256_file(authorization)),
+    )
+    payload.update(
+        {
+            "same_contract_ab_spec_path": str(ab_spec_path),
+            "same_contract_ab_spec_sha256": sha256_file(ab_spec_path),
+            "same_contract_ab_owner_terminal_path": str(owner_terminal),
+            "same_contract_ab_owner_terminal_sha256": sha256_file(owner_terminal),
+            "same_contract_gate_path": str(old_gate),
+            "same_contract_gate_sha256": sha256_file(old_gate),
+            "same_contract_gate_summary_sha256": gate["summary_sha256"],
+            "500_step_semantic_equivalence_receipt_sha256": sha256_file(old_gate),
+            "trace_on_adoption_authorization_path": str(authorization),
+            "trace_on_adoption_authorization_file_sha256": sha256_file(authorization),
+            "trace_on_adoption_authorization_sha256": "d" * 64,
+        }
+    )
+    payload["binding_sha256"] = stable_json_sha256(
+        {key: item for key, item in payload.items() if key != "binding_sha256"}
+    )
+    _json(receipt, payload)
+    reopened = standardizer._validate_historical_adoption(receipt, source_root=source)
+    assert reopened["same_contract_gate_sha256"] == sha256_file(old_gate)

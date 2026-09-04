@@ -17879,3 +17879,24 @@ an exact comparison.
   for the existing sealed `next_action`.  The adoption lane is executable end
   to end once its concrete artifact paths are bound; the divergent lane fails
   closed before expensive work rather than publishing a generation-only PASS.
+
+# 2026-09-05: Replace superseded Mut adoption inputs with the current A/B gate
+
+- Motivation: the old semantic-finalizer root does not contain the historical
+  checkpoint-instrumentation equivalence or canary-memory files expected by
+  the legacy `verify-adoption` action.  Keeping those paths in a successor spec
+  would create a deterministic engineering failure after a successful current
+  same-contract A/B.
+- Decision: use a dataset-specific adoption verifier whose only dynamic trace
+  evidence is the self-hashed current A/B task spec, its spec-derived
+  `trace_on_off_500_step_equivalence.json`, and its owner terminal.  Reuse the
+  existing strict validators for step/action/RNG/probability equality and both
+  checkpoint/reload arms, then independently reopen historical lineage, the
+  train-only source, and the exact generation-to-pair-store-to-DBSCAN binding.
+  Bind the extant 2026-09-01 authorization receipt; do not claim a full 50k
+  trace-off rerun or consume absent legacy instrumentation/memory evidence.
+- Impact: the successor can be predeployed while A/B is still running and wait
+  on its existing `next_action` without restarting the A/B owner.  Exact PASS
+  proceeds through adoption, standardization, export, and the canonical matrix
+  publisher; causal divergence still reaches the explicit fail-closed Route-B
+  adapter blocker.

@@ -18,6 +18,10 @@ from src.utils.autodl_mut_next_stage_executor_v1 import (  # noqa: E402
     atomic_json,
     build_successor_spec,
 )
+from src.utils.autodl_mut_successor_template_v1 import (  # noqa: E402
+    render_successor_template,
+    validate_exact_mut_successor_template,
+)
 
 
 def _absolute(value: str) -> Path:
@@ -41,14 +45,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--template", type=_absolute, required=True)
+    parser.add_argument(
+        "--bindings",
+        type=_absolute,
+        help="JSON object mapping every __PLACEHOLDER__ token to one string",
+    )
     parser.add_argument("--output", type=_absolute, required=True)
     parser.add_argument("--no-file-check", action="store_true")
     args = parser.parse_args(argv)
     if args.output.exists() or args.output.is_symlink():
         raise FileExistsError(f"successor spec output must be fresh: {args.output}")
-    value = build_successor_spec(
-        _json(args.template), check_files=not args.no_file_check
-    )
+    template = _json(args.template)
+    if args.bindings is not None:
+        template = render_successor_template(template, _json(args.bindings))
+    template = validate_exact_mut_successor_template(template)
+    value = build_successor_spec(template, check_files=not args.no_file_check)
     atomic_json(args.output, value)
     print(json.dumps(value, sort_keys=True), flush=True)
     print("[MUT_SUCCESSOR_CHAIN_PREDEPLOYED]", flush=True)

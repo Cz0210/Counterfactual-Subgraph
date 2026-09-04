@@ -4170,6 +4170,9 @@ Mutagenicity roadmaps.
   misclassified as parameter drift.
 - [ ] Import the completed HPC T8 bundle into a fresh AutoDL root, finish the
   four missing cells, and render the frozen-protocol paper artifacts.
+- [x] Replace the obsolete Mut instrumentation/memory adoption inputs with a
+  strict current same-contract A/B adoption verifier and an exact predeployable
+  adoption-to-publication stage template.
 - [x] Freeze the final Figure 3/4/Table 2 contract, preserve valid-zero
   conditional cost as `N/A`, and add paired-parent bootstrap/claim auditing.
 - [x] Add a GPU-free, matrix-read-only final-four observer with a durable
