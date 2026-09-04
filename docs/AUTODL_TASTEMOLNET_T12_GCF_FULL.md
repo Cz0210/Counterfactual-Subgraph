@@ -388,3 +388,53 @@ process authorized to write the paper PASS.
 The NeuroSED distance threshold and shared WNode threshold contract remain
 required external pins.  No value is inferred from a test fixture or generic
 default, and test data is not opened before the fsynced calibration freeze.
+
+## Accelerated fork from the sealed step-250 reference
+
+`build_t12_accelerated_from250_v1.py` binds the current immutable reference
+task spec, checkpoint manifest/payload, generation receipt, compact-history
+prefix, and first-seen embedding prefix into one fresh accelerated task spec.
+The current sealed evidence is deliberately pinned by SHA-256; a replacement
+reference cannot silently enter this route.  The builder also emits a
+non-executable downstream descriptor.  It is explicitly
+`BLOCKED_PENDING_PRODUCTION_IDENTITY_REFRAME`; it is not a sealed full,
+postprocess, or publisher task spec.
+
+The sealed task spec binds an immutable Mut GPU0 release-receipt path.  The
+science owner itself requires the physical receipt to contain `status=PASS`,
+`gpu_index=0`, and `gpu_released=true` before taking the lease or creating the
+science root; this gate cannot be bypassed by invoking the Python entrypoint
+without its convenience launcher.  It never signals or restarts the GPU3
+reference.  The accelerated owner copies the exact committed binary prefixes
+to a fresh root, changes only their absolute storage-root fields, retains the
+reference checkpoint identity, and records GPU0 as a separate transport
+identity.  Its disposable SQLite history index is placed under the explicitly
+bound local-scratch root; all append-only journals remain authoritative in the
+fresh output root.
+
+After both arms have checkpoints 500 and 510, the owner's `parity` action can
+write `endpoint_250_500_510_comparison.json`.  It compares complete endpoint
+checkpoint state, but the current checkpoint schema does not retain every
+per-step selected action, pre-softmax logit, and NeuroSED distance.  Therefore
+the receipt is `ENDPOINT_ONLY_PASS_PROMOTION_BLOCKED`, never a required
+251--500 per-step parity PASS.  Promotion from diagnostic bounds to the
+10k/20k resource contract requires both a separately implemented per-step
+proof and a reviewed prefix-identity/bounds reframing step.  Until then, no
+full/postprocess/publisher task is dispatchable.
+
+The builder writes `promotion_blocker.json` for this exact limitation.  The
+existing compact journal authenticates graph identity, probabilities,
+prediction, coverage digests and endpoint frequency/lineage state, but not an
+ordered per-step selected-action ledger, pre-softmax logits, or normalized
+NeuroSED distances.  Because the live reference did not record those fields,
+a correct comparison needs a shadow reference replay from the same sealed
+step-250 checkpoint, endpoint-bound back to the live reference at 500/510,
+plus an independently recorded accelerated ledger.
+
+The diagnostic history, first-seen and transition segment headers also bind
+the 510-step contract and bounds.  They cannot be relabeled as a 20k
+checkpoint.  A future promotion must re-emit the authenticated prefix into a
+fresh root under the 20k contract, prove the scientific projection and RNG
+unchanged, and explicitly support cursor 500 as a promotion seed followed by
+the 2500-through-20000 checkpoint schedule.  Until all of those code points
+exist and pass, the blocker remains fail closed and no GPU full owner exists.

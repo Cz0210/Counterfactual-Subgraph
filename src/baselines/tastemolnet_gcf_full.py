@@ -86,6 +86,84 @@ PRODUCTION_RUN_SCHEMA = "tastemolnet_t12_gcf_generation_run_v1"
 PRODUCTION_RECEIPT_SCHEMA = "tastemolnet_t12_gcf_generation_receipt_v1"
 
 
+def validate_cross_gpu_resume_identity(
+    *, current: Mapping[str, Any], authority: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Prove that a checkpoint identity differs only by A800 transport.
+
+    The checkpoint retains the identity of the reference arm.  A second A800
+    may consume it only for the explicitly compared accelerated arm, and its
+    physical UUID/index are recorded outside the scientific checkpoint.  This
+    helper deliberately does *not* weaken any model, split, RNG, planner, or
+    algorithm field.
+    """
+
+    if type(current) is not dict or type(authority) is not dict:
+        raise TasteGCFFullResumeError("T12 cross-GPU run identity is malformed")
+    current_copy = json.loads(json.dumps(current, allow_nan=False))
+    authority_copy = json.loads(json.dumps(authority, allow_nan=False))
+    try:
+        current_gpu = current_copy["runtime"].pop("gpu")
+        authority_gpu = authority_copy["runtime"].pop("gpu")
+        current_identity = current_copy["identity_template"]
+        authority_identity = authority_copy["identity_template"]
+        current_runtime_sha = current_identity.pop("runtime_identity_sha256")
+        authority_runtime_sha = authority_identity.pop("runtime_identity_sha256")
+        current_uuid = current_identity.pop("gpu_uuid")
+        authority_uuid = authority_identity.pop("gpu_uuid")
+        current_contract = current_copy.pop("transition_contract_sha256")
+        authority_contract = authority_copy.pop("transition_contract_sha256")
+    except (KeyError, AttributeError, TypeError) as exc:
+        raise TasteGCFFullResumeError(
+            "T12 cross-GPU identity lacks one required transport field"
+        ) from exc
+    if current_copy != authority_copy:
+        raise TasteGCFFullResumeError(
+            "T12 cross-GPU identity changed a non-transport field"
+        )
+    ignored_gpu_fields = {"visible_selector", "physical_index", "gpu_uuid"}
+    if (
+        not isinstance(current_gpu, Mapping)
+        or not isinstance(authority_gpu, Mapping)
+        or {
+            key: value
+            for key, value in current_gpu.items()
+            if key not in ignored_gpu_fields
+        }
+        != {
+            key: value
+            for key, value in authority_gpu.items()
+            if key not in ignored_gpu_fields
+        }
+        or current_gpu.get("gpu_uuid") != current_uuid
+        or authority_gpu.get("gpu_uuid") != authority_uuid
+        or current_uuid == authority_uuid
+    ):
+        raise TasteGCFFullResumeError(
+            "T12 accelerated transport requires two otherwise identical A800s"
+        )
+    for value, field in (
+        (current_runtime_sha, "current runtime identity"),
+        (authority_runtime_sha, "authority runtime identity"),
+        (current_contract, "current transition contract"),
+        (authority_contract, "authority transition contract"),
+    ):
+        if type(value) is not str or len(value) != 64:
+            raise TasteGCFFullResumeError(f"T12 {field} is invalid")
+    return {
+        "schema_version": "tastemolnet_t12_cross_gpu_transport_v1",
+        "status": "TRANSPORT_ONLY_DIFFERENCE_VERIFIED",
+        "authority_gpu_uuid": authority_uuid,
+        "transport_gpu_uuid": current_uuid,
+        "authority_runtime_identity_sha256": authority_runtime_sha,
+        "transport_runtime_identity_sha256": current_runtime_sha,
+        "authority_transition_contract_sha256": authority_contract,
+        "transport_transition_contract_sha256": current_contract,
+        "checkpoint_identity_retained_from_authority": True,
+        "scientific_equivalence_claimed_before_parity": False,
+    }
+
+
 def _load_and_validate_native_result(
     *, runtime_root: Path, vrrw: Any, torch: Any
 ) -> tuple[Path, str, str]:
@@ -346,6 +424,8 @@ def run_t12_generation_segment(
     official_root: str | Path,
     threshold_authority_path: str | Path,
     replay_gate_path: str | Path,
+    resume_run_identity_authority: str | Path | None = None,
+    disposable_index_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run exactly fresh 1..10k or resumed 10001..20k generation."""
 
@@ -456,6 +536,35 @@ def run_t12_generation_segment(
             threshold_sha256=threshold_sha,
             runtime=runtime,
         )
+        transport_receipt = None
+        if resume_run_identity_authority is not None:
+            if mode != "resume":
+                raise TasteGCFFullResumeError(
+                    "T12 cross-GPU identity authority is resume-only"
+                )
+            authority_path = _absolute(
+                resume_run_identity_authority,
+                field="T12 resume run-identity authority",
+            )
+            try:
+                authority_run_identity = json.loads(
+                    authority_path.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise TasteGCFFullResumeError(
+                    "T12 resume run-identity authority is unreadable"
+                ) from exc
+            transport_receipt = validate_cross_gpu_resume_identity(
+                current=run_identity,
+                authority=authority_run_identity,
+            )
+            # Keep the checkpoint's original scientific identity.  The actual
+            # transport A800 is recorded separately and must earn parity before
+            # this arm can be promoted.
+            run_identity = authority_run_identity
+            identity = validate_checkpoint_identity(
+                authority_run_identity["identity_template"]
+            )
         root = _absolute(
             output_root, field="T12 production output root", must_exist=False
         )
@@ -579,6 +688,11 @@ def run_t12_generation_segment(
             f"segment-{plan['segment_start']:05d}-{plan['segment_end']:05d}"
         )
         runtime_root.mkdir(mode=0o700, exist_ok=False)
+        if transport_receipt is not None:
+            _write_new(
+                runtime_root / "cross_gpu_transport_receipt.json",
+                transport_receipt,
+            )
         loaded_checkpoint = None
         if mode == "resume":
             if checkpoint_manifest is None:
@@ -598,9 +712,22 @@ def run_t12_generation_segment(
                 )
             history_snapshot = None
         contract_sha = production_transition_contract_sha256(identity)
+        if disposable_index_root is None:
+            history_index_root = (runtime_root / "history_index").resolve()
+        else:
+            scratch = _absolute(
+                disposable_index_root,
+                field="T12 disposable history-index root",
+                must_exist=False,
+            )
+            history_index_root = (
+                scratch
+                / attempt_id
+                / f"segment-{plan['segment_start']:05d}-{plan['segment_end']:05d}"
+            ).resolve()
         history = T12CompactHistoryJournal(
             root=(root / "bridge_history").resolve(),
-            index_root=(runtime_root / "history_index").resolve(),
+            index_root=history_index_root,
             bounds=bounds,
             contract_sha256=contract_sha,
             attempt_id=attempt_id,
@@ -737,6 +864,8 @@ def run_t12_generation_segment(
                     "test_loaded": False,
                     "rf_oracle_used": False,
                     "paper_cell_pass": False,
+                    "cross_gpu_transport": transport_receipt,
+                    "disposable_history_index_root": str(history_index_root),
                 }
                 receipt_path = root / (
                     f"generation_receipt_{plan['checkpoint_cursor']:08d}.json"
