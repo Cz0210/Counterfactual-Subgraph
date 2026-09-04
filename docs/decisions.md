@@ -17791,3 +17791,10 @@ than relabeling diagnostic evidence or creating a non-runnable full owner.
 - Impact: non-scientific stale routing metadata no longer blocks the diagnostic
   GPU1 fork, while any root, commit, tree, cursor, total-step, purpose, or
   checkpoint identity discrepancy still fails closed.
+
+The cross-commit identity is duplicated in both the checkpoint template and
+the runtime evidence.  The same source-equivalence receipt may remove those
+two duplicated commit/tree pairs from comparison only after each runtime pair
+has first been proven equal to its own checkpoint pair.  Every remaining
+runtime field, including determinism and non-location GPU properties, remains
+an exact comparison.

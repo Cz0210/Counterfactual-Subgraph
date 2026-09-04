@@ -75,7 +75,12 @@ def _run_identity(
             "execution_commit": commit,
             "execution_tree": tree,
         },
-        "runtime": {"gpu": gpu, "determinism": {"exact": True}},
+        "runtime": {
+            "execution_commit": commit,
+            "execution_tree": tree,
+            "gpu": gpu,
+            "determinism": {"exact": True},
+        },
         "transition_contract_sha256": runtime_sha,
         "cohort_manifest": {"sha256": SHA},
         "production_parameters": {"M": 510},
@@ -578,6 +583,15 @@ def test_cross_commit_requires_exact_scientific_source_receipt() -> None:
         "receipt_sha256"
     ]
     assert report["scientific_equivalence_claimed_before_parity"] is False
+
+    inconsistent_runtime = copy.deepcopy(accelerated)
+    inconsistent_runtime["runtime"]["execution_tree"] = "5" * 40
+    with pytest.raises(Exception, match="runtime and checkpoint"):
+        validate_cross_gpu_resume_identity(
+            current=inconsistent_runtime,
+            authority=reference,
+            scientific_source_equivalence=receipt,
+        )
 
 
 def test_source_receipt_rejects_an_extra_scientific_change() -> None:

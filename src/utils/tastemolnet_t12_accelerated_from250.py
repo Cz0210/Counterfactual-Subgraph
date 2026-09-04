@@ -70,7 +70,7 @@ AUDITED_REFERENCE_SOURCE_SHA256 = (
 # deliberately a content pin rather than a commit pin: wrapper-only commits may
 # advance, but a scientific byte cannot enter the accelerated route implicitly.
 AUDITED_CURRENT_SOURCE_SHA256 = (
-    "f1fc49342556a6e3e7c3ec699afb246e5e0ef294fdc21475b73624f7c8e79dc9"
+    "a630d945f8e22e1e3330aa74670bbff0c9f110402b289c65ac91b3590a98a2d3"
 )
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")

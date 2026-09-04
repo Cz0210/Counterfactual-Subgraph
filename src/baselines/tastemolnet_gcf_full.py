@@ -106,8 +106,10 @@ def validate_cross_gpu_resume_identity(
     current_copy = json.loads(json.dumps(current, allow_nan=False))
     authority_copy = json.loads(json.dumps(authority, allow_nan=False))
     try:
-        current_gpu = current_copy["runtime"].pop("gpu")
-        authority_gpu = authority_copy["runtime"].pop("gpu")
+        current_runtime = current_copy["runtime"]
+        authority_runtime = authority_copy["runtime"]
+        current_gpu = current_runtime.pop("gpu")
+        authority_gpu = authority_runtime.pop("gpu")
         current_identity = current_copy["identity_template"]
         authority_identity = authority_copy["identity_template"]
         current_runtime_sha = current_identity.pop("runtime_identity_sha256")
@@ -120,10 +122,23 @@ def validate_cross_gpu_resume_identity(
         current_tree = current_identity["execution_tree"]
         authority_commit = authority_identity["execution_commit"]
         authority_tree = authority_identity["execution_tree"]
+        current_runtime_commit = current_runtime["execution_commit"]
+        current_runtime_tree = current_runtime["execution_tree"]
+        authority_runtime_commit = authority_runtime["execution_commit"]
+        authority_runtime_tree = authority_runtime["execution_tree"]
     except (KeyError, AttributeError, TypeError) as exc:
         raise TasteGCFFullResumeError(
             "T12 cross-GPU identity lacks one required transport field"
         ) from exc
+    if (
+        (current_runtime_commit, current_runtime_tree)
+        != (current_commit, current_tree)
+        or (authority_runtime_commit, authority_runtime_tree)
+        != (authority_commit, authority_tree)
+    ):
+        raise TasteGCFFullResumeError(
+            "T12 runtime and checkpoint execution identities disagree"
+        )
     cross_commit_receipt = None
     if (current_commit, current_tree) != (authority_commit, authority_tree):
         from src.utils.tastemolnet_t12_accelerated_from250 import (
@@ -148,6 +163,10 @@ def validate_cross_gpu_resume_identity(
         current_identity.pop("execution_tree")
         authority_identity.pop("execution_commit")
         authority_identity.pop("execution_tree")
+        current_runtime.pop("execution_commit")
+        current_runtime.pop("execution_tree")
+        authority_runtime.pop("execution_commit")
+        authority_runtime.pop("execution_tree")
     if current_copy != authority_copy:
         raise TasteGCFFullResumeError(
             "T12 cross-GPU identity changed a non-transport field"
