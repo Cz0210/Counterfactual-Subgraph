@@ -17566,3 +17566,22 @@ has exited, no writable descriptor remains, and the independent replay passes.
   fits the current first-embedding disk cap; full production still requires
   measured storage admission and must fail closed rather than truncate the
   scientific history.
+
+# 2026-09-04: Reconcile the active T8 HPC full chain from immutable receipts
+
+- Motivation: the legacy refinement pointer stopped at the completed depth-5
+  canary even though the admitted production array and its dependent merge and
+  package jobs had already been submitted.  Reading that stale pointer caused
+  status reports to name superseded jobs 2536033/2536034 instead of the active
+  2536781/2536786/2536787 chain.
+- Decision: rebuild a separate `t8-production-chain/current.json` only after
+  independently checking the self-hashes, detached file hashes, partition
+  manifest binding, exact Slurm IDs, dependency edges, pinned science commit,
+  and live per-shard `sacct` state.  Collapsed pending-array rows are expanded
+  deterministically; `.batch` and `.extern` rows are excluded.  Publication is
+  an atomic status write and cannot submit, cancel, requeue, run a GPU, or
+  access the AutoDL matrix authority.
+- Impact: status and import preparation follow the real full-array lineage
+  without modifying the immutable canary evidence or resubmitting successful
+  shards.  The old refinement pointer remains preserved as historical
+  evidence.

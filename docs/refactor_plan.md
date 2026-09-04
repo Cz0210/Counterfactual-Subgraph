@@ -4095,3 +4095,16 @@ Mutagenicity roadmaps.
   interactive Codex turn, wait for each hour-scale refinement.
 - [ ] Publish each of the four remaining cells through the sole matrix
   authority, then build the final four-dataset Figure 3, Figure 4, and Table 2.
+
+## 2026-09-04: Final four-cell closeout
+
+- [x] Parse the active T8 full array from immutable admission/submission/Slurm
+  receipts and publish a hash-closed production-chain pointer.
+- [ ] Classify the first Mut trace-mode semantic divergence within the bounded
+  audit and select either finalizer-only repair or the fresh trace-off route.
+- [ ] Fork the Taste GCF accelerated implementation from the sealed step-250
+  reference checkpoint without restarting the healthy reference process.
+- [ ] Validate and promote the dataset-specific disk-backed Taste ComRecGC
+  Route C canary, then continue from its committed step-500 state.
+- [ ] Import the completed HPC T8 bundle into a fresh AutoDL root, finish the
+  four missing cells, and render the frozen-protocol paper artifacts.

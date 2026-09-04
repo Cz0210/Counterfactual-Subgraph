@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 from pathlib import Path
 
 import pytest
@@ -8,8 +9,12 @@ import pytest
 from scripts.hpc.t8 import run_stress_followup as followup
 from src.utils.hpc_t8_chain_pointer import (
     T8ChainPointerError,
+    canonical_sha256,
     chain_lock,
     load_current_pointer,
+    parse_array_sacct,
+    reconcile_full_chain_pointer,
+    sha256_file,
     write_current_pointer,
 )
 
@@ -109,3 +114,111 @@ def test_refinement_limit_is_exact_depth_eight() -> None:
     assert followup.INITIAL_STRESS_DEPTH == 3
     assert followup.MAX_REFINEMENT_DEPTH == 8
     assert followup.MAX_REFINEMENT_LEVELS == 5
+
+
+def _write_receipt(path: Path, payload: dict[str, object], hash_field: str) -> None:
+    body = dict(payload)
+    body[hash_field] = canonical_sha256(body)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    path.with_suffix(path.suffix + ".sha256").write_text(sha256_file(path) + "\n")
+
+
+def test_parse_array_sacct_expands_pending_range() -> None:
+    status = parse_array_sacct(
+        "\n".join(
+            [
+                "2536781_0|COMPLETED|0:0",
+                "2536781_1|RUNNING|0:0",
+                "2536781_[2-3%2]|PENDING|0:0",
+                "2536781_0.batch|COMPLETED|0:0",
+            ]
+        ),
+        array_job_id="2536781",
+        array_range="0-3",
+    )
+    assert status["completed_shard_ids"] == [0]
+    assert status["running_shard_ids"] == [1]
+    assert status["pending_shard_ids"] == [2, 3]
+    assert status["failed_shard_ids"] == []
+
+
+def test_reconcile_full_chain_pointer_uses_receipts_and_live_state(tmp_path: Path) -> None:
+    decision = tmp_path / "continuation" / "control" / "upstream-2536771"
+    full_root = tmp_path / "continuation" / "artifacts" / "full"
+    manifest = full_root / "partition_manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}\n")
+    admission_path = decision / "admission_receipt.json"
+    inventory_path = decision / "slurm_inventory.json"
+    submission_path = decision / "submission_receipt.json"
+    _write_receipt(
+        admission_path,
+        {
+            "schema_version": "t8_hpc_full_admission_v1",
+            "state": "PASS",
+            "admission_pass": True,
+            "full_manifest_path": str(manifest),
+            "full_manifest_sha256": "a" * 64,
+            "full_manifest_file_sha256": sha256_file(manifest),
+        },
+        "admission_receipt_sha256",
+    )
+    _write_receipt(
+        inventory_path,
+        {
+            "schema_version": "t8_hpc_slurm_inventory_v1",
+            "state": "PASS",
+            "array_job_id": "2536781",
+            "merge_job_id": "2536786",
+            "package_job_id": "2536787",
+            "array_range": "0-1",
+            "dependency_chain": [
+                {"dependency": "afterok:2536781", "job_id": "2536786"},
+                {"dependency": "afterok:2536786", "job_id": "2536787"},
+            ],
+        },
+        "slurm_inventory_sha256",
+    )
+    _write_receipt(
+        submission_path,
+        {
+            "schema_version": "t8_hpc_stress_followup_v1",
+            "state": "FULL_CHAIN_SUBMITTED",
+            "action": "SUBMIT_ARRAY_AFTEROK_MERGE_AFTEROK_PACKAGE",
+            "array_job_id": "2536781",
+            "merge_job_id": "2536786",
+            "package_job_id": "2536787",
+            "controller_commit": "a" * 40,
+            "science_commit": "b" * 40,
+            "full_root": str(full_root),
+            "full_manifest": str(manifest),
+            "upstream_terminal": {"job_id": "2536771"},
+            "array_sbatch_argv": [
+                "sbatch",
+                "--export",
+                "ALL,T8_EXPECTED_COMMIT="
+                + "b" * 40
+                + ",T8_EXPECTED_INPUT_MANIFEST_SHA256="
+                + "c" * 64
+                + ",T8_CANARY_PARITY_RECEIPT=/parity.json",
+            ],
+        },
+        "submission_receipt_sha256",
+    )
+    pointer = tmp_path / "runtime" / "control" / "t8-production-chain" / "current.json"
+    result = reconcile_full_chain_pointer(
+        current_pointer=pointer,
+        submission_receipt=submission_path,
+        slurm_inventory=inventory_path,
+        admission_receipt=admission_path,
+        sacct_text="2536781_0|COMPLETED|0:0\n2536781_1|RUNNING|0:0\n",
+        updated_at="2026-09-04T04:00:00+00:00",
+    )
+    assert result["state"] == "FULL_CHAIN_RUNNING"
+    assert result["completed_shards"] == 1
+    assert result["running_shards"] == 1
+    assert result["merge_dependency"] == "afterok:2536781"
+    assert load_current_pointer(pointer) == result
