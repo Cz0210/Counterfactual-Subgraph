@@ -87,7 +87,10 @@ PRODUCTION_RECEIPT_SCHEMA = "tastemolnet_t12_gcf_generation_receipt_v1"
 
 
 def validate_cross_gpu_resume_identity(
-    *, current: Mapping[str, Any], authority: Mapping[str, Any]
+    *,
+    current: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    scientific_source_equivalence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Prove that a checkpoint identity differs only by A800 transport.
 
@@ -113,10 +116,38 @@ def validate_cross_gpu_resume_identity(
         authority_uuid = authority_identity.pop("gpu_uuid")
         current_contract = current_copy.pop("transition_contract_sha256")
         authority_contract = authority_copy.pop("transition_contract_sha256")
+        current_commit = current_identity["execution_commit"]
+        current_tree = current_identity["execution_tree"]
+        authority_commit = authority_identity["execution_commit"]
+        authority_tree = authority_identity["execution_tree"]
     except (KeyError, AttributeError, TypeError) as exc:
         raise TasteGCFFullResumeError(
             "T12 cross-GPU identity lacks one required transport field"
         ) from exc
+    cross_commit_receipt = None
+    if (current_commit, current_tree) != (authority_commit, authority_tree):
+        from src.utils.tastemolnet_t12_accelerated_from250 import (
+            T12AcceleratedError,
+            validate_scientific_source_equivalence_binding,
+        )
+
+        try:
+            cross_commit_receipt = validate_scientific_source_equivalence_binding(
+                scientific_source_equivalence,
+                reference_commit=authority_commit,
+                reference_tree=authority_tree,
+                current_commit=current_commit,
+                current_tree=current_tree,
+            )
+        except T12AcceleratedError as exc:
+            raise TasteGCFFullResumeError(
+                "T12 execution commit/tree differs without an exact scientific "
+                "source equivalence receipt"
+            ) from exc
+        current_identity.pop("execution_commit")
+        current_identity.pop("execution_tree")
+        authority_identity.pop("execution_commit")
+        authority_identity.pop("execution_tree")
     if current_copy != authority_copy:
         raise TasteGCFFullResumeError(
             "T12 cross-GPU identity changed a non-transport field"
@@ -159,6 +190,18 @@ def validate_cross_gpu_resume_identity(
         "transport_runtime_identity_sha256": current_runtime_sha,
         "authority_transition_contract_sha256": authority_contract,
         "transport_transition_contract_sha256": current_contract,
+        "authority_execution_commit": authority_commit,
+        "authority_execution_tree": authority_tree,
+        "transport_execution_commit": current_commit,
+        "transport_execution_tree": current_tree,
+        "scientific_source_equivalence_receipt_sha256": (
+            None
+            if cross_commit_receipt is None
+            else cross_commit_receipt["receipt_sha256"]
+        ),
+        "cross_commit_source_equivalence_verified": (
+            cross_commit_receipt is not None
+        ),
         "checkpoint_identity_retained_from_authority": True,
         "scientific_equivalence_claimed_before_parity": False,
     }
@@ -426,6 +469,7 @@ def run_t12_generation_segment(
     replay_gate_path: str | Path,
     resume_run_identity_authority: str | Path | None = None,
     disposable_index_root: str | Path | None = None,
+    scientific_source_equivalence_receipt_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run exactly fresh 1..10k or resumed 10001..20k generation."""
 
@@ -554,9 +598,53 @@ def run_t12_generation_segment(
                 raise TasteGCFFullResumeError(
                     "T12 resume run-identity authority is unreadable"
                 ) from exc
+            source_equivalence = None
+            current_identity = run_identity["identity_template"]
+            authority_identity = authority_run_identity["identity_template"]
+            if (
+                current_identity.get("execution_commit"),
+                current_identity.get("execution_tree"),
+            ) != (
+                authority_identity.get("execution_commit"),
+                authority_identity.get("execution_tree"),
+            ):
+                if scientific_source_equivalence_receipt_path is None:
+                    raise TasteGCFFullResumeError(
+                        "T12 cross-commit resume lacks its source equivalence receipt"
+                    )
+                from src.utils.tastemolnet_t12_accelerated_from250 import (
+                    T12AcceleratedError,
+                    validate_scientific_source_equivalence_receipt,
+                )
+
+                try:
+                    source_equivalence = (
+                        validate_scientific_source_equivalence_receipt(
+                            _absolute(
+                                scientific_source_equivalence_receipt_path,
+                                field="T12 scientific source equivalence receipt",
+                            ),
+                            repo_root=Path(__file__).resolve().parents[2],
+                            expected_reference_commit=authority_identity[
+                                "execution_commit"
+                            ],
+                            expected_reference_tree=authority_identity[
+                                "execution_tree"
+                            ],
+                            expected_current_commit=current_identity[
+                                "execution_commit"
+                            ],
+                            expected_current_tree=current_identity["execution_tree"],
+                        )
+                    )
+                except T12AcceleratedError as exc:
+                    raise TasteGCFFullResumeError(
+                        "T12 scientific source equivalence receipt failed closed"
+                    ) from exc
             transport_receipt = validate_cross_gpu_resume_identity(
                 current=run_identity,
                 authority=authority_run_identity,
+                scientific_source_equivalence=source_equivalence,
             )
             # Keep the checkpoint's original scientific identity.  The actual
             # transport A800 is recorded separately and must earn parity before

@@ -400,17 +400,31 @@ non-executable downstream descriptor.  It is explicitly
 `BLOCKED_PENDING_PRODUCTION_IDENTITY_REFRAME`; it is not a sealed full,
 postprocess, or publisher task spec.
 
-The sealed task spec binds an immutable Mut GPU0 release-receipt path.  The
-science owner itself requires the physical receipt to contain `status=PASS`,
-`gpu_index=0`, and `gpu_released=true` before taking the lease or creating the
-science root; this gate cannot be bypassed by invoking the Python entrypoint
-without its convenience launcher.  It never signals or restarts the GPU3
-reference.  The accelerated owner copies the exact committed binary prefixes
-to a fresh root, changes only their absolute storage-root fields, retains the
-reference checkpoint identity, and records GPU0 as a separate transport
-identity.  Its disposable SQLite history index is placed under the explicitly
-bound local-scratch root; all append-only journals remain authoritative in the
-fresh output root.
+The builder must use `baselines/gcfexplainer_official` below its current
+`--repo-root`; it must not reuse the reference task's old checkout path.  Before
+sealing, it compares the complete tracked `tastemolnet_gcf*.py` inventory and
+the full vendored GCF tree at reference commit
+`1ad12b560d3ad8533f47e3bc3fd1e6ee315a895a` and the current execution commit.
+An equal inventory is accepted directly.  Otherwise the only accepted delta
+is the content-pinned `tastemolnet_gcf_full.py` cross-GPU/disposable-transport
+glue; both endpoint file hashes, the exact changed-path set, both Git trees,
+and the full per-file inventories are bound in the canonical self-hashed
+`scientific_source_equivalence.json`.  Any additional source/vendor byte,
+missing path, dirty execution checkout, receipt mutation, or commit/tree
+rebinding fails before the GPU lease or science-root creation.  This narrow
+source receipt does not relax the task spec's current-HEAD check and does not
+claim runtime parity.
+
+The sealed task spec and launcher require the explicit GPU1 authorization
+`ALLOW_T12_ACCELERATED_FROM_CHECKPOINT250_NOW=1`.  The owner never signals or
+restarts the GPU3 reference.  It copies the exact committed binary prefixes to
+a fresh root, changes only their absolute storage-root fields, retains the
+reference checkpoint identity, and records GPU1 as a separate transport
+identity.  The cross-commit identity fields may be projected out only after
+the independently reopened scientific-source receipt binds both old and
+current commit/tree identities.  Its disposable SQLite history index is
+placed under the explicitly bound local-scratch root; all append-only journals
+remain authoritative in the fresh output root.
 
 After both arms have checkpoints 500 and 510, the owner's `parity` action can
 write `endpoint_250_500_510_comparison.json`.  It compares complete endpoint

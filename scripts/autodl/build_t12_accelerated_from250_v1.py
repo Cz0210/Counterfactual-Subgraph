@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -18,11 +19,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.utils.main_ready_task_specs import (  # noqa: E402
     TASK_SPEC_PATH_TOKEN,
     atomic_json,
+    canonical_bytes,
     file_sha256,
     materialize_task_spec_path,
     seal_spec,
 )
 from src.utils.tastemolnet_t12_accelerated_from250 import (  # noqa: E402
+    build_scientific_source_equivalence,
     build_prebound_continuation,
     build_promotion_blocker,
     validate_reference_step250,
@@ -69,12 +72,33 @@ def main(argv: list[str] | None = None) -> int:
     evidence = validate_reference_step250(task_spec_path=args.reference_task_spec)
     reference = json.loads(args.reference_task_spec.read_text(encoding="utf-8"))
     reference_contract = reference["science_contract"]
+    current_official_root = args.repo_root / "baselines/gcfexplainer_official"
+    source_equivalence = build_scientific_source_equivalence(
+        repo_root=args.repo_root,
+        reference_commit=evidence["reference_execution_commit"],
+        current_commit=args.execution_commit,
+    )
+    source_equivalence_path = args.output_root / "scientific_source_equivalence.json"
+    source_equivalence_file_sha256 = hashlib.sha256(
+        canonical_bytes(source_equivalence) + b"\n"
+    ).hexdigest()
     dispatch_uuid = str(uuid4())
     task_id = f"t12-accelerated-from250-{dispatch_uuid[:8]}"
     owner_runtime = args.owner_control_root / task_id / "runtime"
     spec_path = args.output_root / f"{task_id}.json"
     input_roots = dict(reference["input_roots"])
     input_hashes = dict(reference["input_hashes"])
+    reference_official_root = Path(reference_contract["official_root"])
+    replaced_official_role = False
+    for role, value in list(input_roots.items()):
+        if Path(value) == reference_official_root:
+            input_roots[role] = str(current_official_root)
+            replaced_official_role = True
+    if not replaced_official_role:
+        input_roots["current_official_gcf_root"] = str(current_official_root)
+        input_hashes["current_official_gcf_root"] = source_equivalence[
+            "current_inventory"
+        ]["inventory_sha256"]
     additions = {
         "reference_task_spec": args.reference_task_spec,
         "reference_checkpoint_250": Path(evidence["checkpoint_manifest"]),
@@ -83,10 +107,15 @@ def main(argv: list[str] | None = None) -> int:
         "reference_run_identity": Path(evidence["reference_root"]) / "run_identity.json",
         "reference_history_prefix": Path(evidence["history_segment"]),
         "reference_first_seen_prefix": Path(evidence["first_seen_segment"]),
+        "scientific_source_equivalence": source_equivalence_path,
     }
     for name, path in additions.items():
         input_roots[name] = str(path)
-        input_hashes[name] = file_sha256(path)
+        input_hashes[name] = (
+            source_equivalence_file_sha256
+            if name == "scientific_source_equivalence"
+            else file_sha256(path)
+        )
     raw = {
         "schema_version": "ignored-until-sealed",
         "task_id": task_id,
@@ -175,7 +204,23 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "managed_neurosed_root": reference_contract["managed_neurosed_root"],
             "t3_root": reference_contract["t3_root"],
-            "official_root": reference_contract["official_root"],
+            "official_root": str(current_official_root),
+            "reference_official_root": reference_contract["official_root"],
+            "scientific_source_equivalence_receipt": str(
+                source_equivalence_path
+            ),
+            "scientific_source_equivalence_file_sha256": (
+                source_equivalence_file_sha256
+            ),
+            "scientific_source_equivalence_receipt_sha256": (
+                source_equivalence["receipt_sha256"]
+            ),
+            "reference_execution_commit": source_equivalence[
+                "reference_commit"
+            ],
+            "reference_execution_tree": source_equivalence["reference_tree"],
+            "current_execution_commit": source_equivalence["current_commit"],
+            "current_execution_tree": source_equivalence["current_tree"],
             "threshold_authority": reference_contract["threshold_authority"],
             "replay_gate": reference_contract["replay_gate"],
             "disposable_index_root": str(args.disposable_index_root),
@@ -214,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     promotion_blocker = build_promotion_blocker()
     args.output_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    atomic_json(source_equivalence_path, source_equivalence)
     atomic_json(spec_path, spec)
     atomic_json(args.output_root / "reference_step250_evidence.json", evidence)
     atomic_json(args.output_root / "continuation_prebinding.json", continuation)
@@ -232,6 +278,14 @@ def main(argv: list[str] | None = None) -> int:
             "reference_owner_must_not_be_signaled": True,
             "gpu1_parallel_authorized": True,
             "gpu3_reference_must_continue": True,
+            "scientific_source_equivalence": str(source_equivalence_path),
+            "scientific_source_equivalence_file_sha256": (
+                source_equivalence_file_sha256
+            ),
+            "scientific_source_equivalence_receipt_sha256": (
+                source_equivalence["receipt_sha256"]
+            ),
+            "official_root": str(current_official_root),
             "promotion_state": promotion_blocker["status"],
             "promotion_blocker": str(args.output_root / "promotion_blocker.json"),
             "promotion_allowed": False,

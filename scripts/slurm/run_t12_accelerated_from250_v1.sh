@@ -12,5 +12,6 @@ mkdir -p logs
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print(f"cuda_available={torch.cuda.is_available()}")'
+echo "t12_scientific_source_equivalence=strict_inventory_or_audited_delta_v1"
 python scripts/autodl/run_t12_accelerated_from250_v1.py \
   --config configs/hpc.yaml "$@"

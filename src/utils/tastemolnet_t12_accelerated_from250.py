@@ -13,8 +13,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
+import subprocess
 from typing import Any, Mapping
 
 
@@ -42,9 +44,479 @@ REFERENCE_HISTORY_PREFIX_SHA256 = (
 )
 REFERENCE_HISTORY_COMMITTED_BYTES = 242_191_887
 
+REFERENCE_IMPLEMENTATION_COMMIT = "1ad12b560d3ad8533f47e3bc3fd1e6ee315a895a"
+SCIENTIFIC_SOURCE_EQUIVALENCE_SCHEMA = (
+    "tastemolnet_t12_scientific_source_equivalence_v1"
+)
+SCIENTIFIC_SOURCE_PREFIX = "src/baselines/tastemolnet_gcf"
+SCIENTIFIC_SOURCE_FILES = (
+    "src/baselines/tastemolnet_gcf_candidate_store.py",
+    "src/baselines/tastemolnet_gcf_full.py",
+    "src/baselines/tastemolnet_gcf_full_postprocess.py",
+    "src/baselines/tastemolnet_gcf_full_resume.py",
+    "src/baselines/tastemolnet_gcf_full_verify.py",
+    "src/baselines/tastemolnet_gcf_ordered_io_canary.py",
+    "src/baselines/tastemolnet_gcf_production_state.py",
+    "src/baselines/tastemolnet_gcf_replay_canary.py",
+    "src/baselines/tastemolnet_gcf_smoke.py",
+    "src/baselines/tastemolnet_gcf_transition_store.py",
+)
+OFFICIAL_VENDOR_PREFIX = "baselines/gcfexplainer_official/"
+AUDITED_TRANSPORT_GLUE_PATH = "src/baselines/tastemolnet_gcf_full.py"
+AUDITED_REFERENCE_SOURCE_SHA256 = (
+    "80bac42c3ca202074f192d9bcdc76c195fcd52fe4cd7847e024e9b0cd5393f6f"
+)
+# Updated only when the complete audited transport-glue file changes.  This is
+# deliberately a content pin rather than a commit pin: wrapper-only commits may
+# advance, but a scientific byte cannot enter the accelerated route implicitly.
+AUDITED_CURRENT_SOURCE_SHA256 = (
+    "f1fc49342556a6e3e7c3ec699afb246e5e0ef294fdc21475b73624f7c8e79dc9"
+)
+
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_EQUIVALENCE_KEYS = {
+    "schema_version",
+    "status",
+    "equivalence_basis",
+    "reference_commit",
+    "reference_tree",
+    "current_commit",
+    "current_tree",
+    "reference_inventory",
+    "current_inventory",
+    "changed_paths",
+    "audited_differences",
+    "audited_differences_sha256",
+    "official_vendor_inventory_exact",
+    "wrapper_commit_tree_difference_allowed",
+    "scientific_source_equivalence_verified",
+    "runtime_parity_claimed",
+    "receipt_sha256",
+}
+
 
 class T12AcceleratedError(RuntimeError):
     """The T12 prefix, parity, or continuation binding is unsafe."""
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _stable_sha256(value: Any) -> str:
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _require_git_sha(value: Any, *, field: str) -> str:
+    if type(value) is not str or _GIT_SHA.fullmatch(value) is None:
+        raise T12AcceleratedError(f"{field} must be one full lowercase Git SHA")
+    return value
+
+
+def _git(
+    repo_root: Path,
+    *arguments: str,
+    binary: bool = False,
+) -> str | bytes:
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                "-C",
+                str(repo_root),
+                *arguments,
+            ],
+            check=True,
+            capture_output=True,
+            text=not binary,
+            timeout=60,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LC_ALL": "C",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_NO_REPLACE_OBJECTS": "1",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise T12AcceleratedError(
+            f"T12 scientific source Git evidence is unavailable: {arguments!r}"
+        ) from exc
+    return completed.stdout if binary else completed.stdout.strip()
+
+
+def _physical_repo(path: Path) -> Path:
+    if not path.is_absolute() or path.is_symlink():
+        raise T12AcceleratedError("T12 execution repository is not one physical root")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise T12AcceleratedError("T12 execution repository is unavailable") from exc
+    if resolved != path or not path.is_dir():
+        raise T12AcceleratedError("T12 execution repository is not one physical root")
+    return path
+
+
+def _commit_source_paths(repo_root: Path, commit: str) -> tuple[str, ...]:
+    output = _git(repo_root, "ls-tree", "-r", "--name-only", commit, "--")
+    assert isinstance(output, str)
+    paths = tuple(
+        sorted(
+            line
+            for line in output.splitlines()
+            if (
+                line.startswith(SCIENTIFIC_SOURCE_PREFIX)
+                and line.endswith(".py")
+            )
+            or line.startswith(OFFICIAL_VENDOR_PREFIX)
+        )
+    )
+    scientific = tuple(
+        path for path in paths if path.startswith(SCIENTIFIC_SOURCE_PREFIX)
+    )
+    vendor = tuple(path for path in paths if path.startswith(OFFICIAL_VENDOR_PREFIX))
+    if scientific != SCIENTIFIC_SOURCE_FILES or not vendor:
+        raise T12AcceleratedError(
+            "T12 scientific source path inventory changed"
+        )
+    return paths
+
+
+def _commit_source_inventory(
+    repo_root: Path,
+    *,
+    commit: str,
+    require_physical_match: bool,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for relative in _commit_source_paths(repo_root, commit):
+        raw = _git(repo_root, "show", f"{commit}:{relative}", binary=True)
+        assert isinstance(raw, bytes)
+        digest = hashlib.sha256(raw).hexdigest()
+        row = {"path": relative, "bytes": len(raw), "sha256": digest}
+        if require_physical_match:
+            physical = repo_root / relative
+            _physical_file(physical, expected_bytes=len(raw))
+            if file_sha256(physical) != digest:
+                raise T12AcceleratedError(
+                    f"T12 committed scientific source differs on disk: {relative}"
+                )
+        rows.append(row)
+    payload = {
+        "schema_version": "tastemolnet_t12_scientific_source_inventory_v1",
+        "paths": rows,
+    }
+    return {**payload, "inventory_sha256": _stable_sha256(payload)}
+
+
+def build_scientific_source_equivalence(
+    *,
+    repo_root: Path,
+    reference_commit: str,
+    current_commit: str,
+) -> dict[str, Any]:
+    """Build the only cross-commit scientific-source waiver accepted by T12.
+
+    The full Git commit/tree check remains in force for each task spec.  This
+    receipt permits the checkpoint's older identity to cross into that already
+    verified current execution tree only when the complete T12 GCF source and
+    vendored upstream inventory is either byte-identical or has exactly the
+    one content-pinned transport-glue delta below.
+    """
+
+    root = _physical_repo(repo_root)
+    reference = _require_git_sha(reference_commit, field="reference commit")
+    current = _require_git_sha(current_commit, field="current commit")
+    if reference != REFERENCE_IMPLEMENTATION_COMMIT:
+        raise T12AcceleratedError("T12 reference implementation commit changed")
+    head = _git(root, "rev-parse", "HEAD^{commit}")
+    if head != current:
+        raise T12AcceleratedError("T12 current execution commit differs from HEAD")
+    status = _git(root, "status", "--porcelain", "--untracked-files=all")
+    if status:
+        raise T12AcceleratedError("T12 current execution checkout is not clean")
+    reference_tree = _git(root, "rev-parse", f"{reference}^{{tree}}")
+    current_tree = _git(root, "rev-parse", f"{current}^{{tree}}")
+    assert isinstance(reference_tree, str) and isinstance(current_tree, str)
+    _require_git_sha(reference_tree, field="reference tree")
+    _require_git_sha(current_tree, field="current tree")
+    reference_inventory = _commit_source_inventory(
+        root, commit=reference, require_physical_match=False
+    )
+    current_inventory = _commit_source_inventory(
+        root, commit=current, require_physical_match=True
+    )
+    reference_rows = {
+        row["path"]: row for row in reference_inventory["paths"]
+    }
+    current_rows = {row["path"]: row for row in current_inventory["paths"]}
+    if set(reference_rows) != set(current_rows):
+        raise T12AcceleratedError("T12 scientific source inventory membership changed")
+    changed_paths = sorted(
+        path for path in reference_rows if reference_rows[path] != current_rows[path]
+    )
+    audited_differences: list[dict[str, Any]] = []
+    if changed_paths:
+        if changed_paths != [AUDITED_TRANSPORT_GLUE_PATH]:
+            raise T12AcceleratedError(
+                "T12 scientific source changed outside the audited transport glue"
+            )
+        reference_row = reference_rows[AUDITED_TRANSPORT_GLUE_PATH]
+        current_row = current_rows[AUDITED_TRANSPORT_GLUE_PATH]
+        if (
+            reference_row["sha256"] != AUDITED_REFERENCE_SOURCE_SHA256
+            or current_row["sha256"] != AUDITED_CURRENT_SOURCE_SHA256
+        ):
+            raise T12AcceleratedError(
+                "T12 audited transport-glue source content changed"
+            )
+        audited_differences.append(
+            {
+                "path": AUDITED_TRANSPORT_GLUE_PATH,
+                "reference_sha256": reference_row["sha256"],
+                "reference_bytes": reference_row["bytes"],
+                "current_sha256": current_row["sha256"],
+                "current_bytes": current_row["bytes"],
+                "audit_scope": (
+                    "cross_gpu_identity_and_disposable_transport_glue_only"
+                ),
+                "scientific_parameters_changed": False,
+                "official_vrrw_changed": False,
+            }
+        )
+        basis = "EXACT_AUDITED_TRANSPORT_GLUE_BINDING"
+    else:
+        basis = "BYTE_IDENTICAL_SCIENTIFIC_SOURCE_INVENTORY"
+    vendor_paths = [
+        path for path in reference_rows if path.startswith(OFFICIAL_VENDOR_PREFIX)
+    ]
+    if any(reference_rows[path] != current_rows[path] for path in vendor_paths):
+        raise T12AcceleratedError("T12 official vendored source inventory changed")
+    audit_payload = {
+        "schema_version": "tastemolnet_t12_scientific_source_delta_audit_v1",
+        "differences": audited_differences,
+    }
+    receipt = {
+        "schema_version": SCIENTIFIC_SOURCE_EQUIVALENCE_SCHEMA,
+        "status": "PASS",
+        "equivalence_basis": basis,
+        "reference_commit": reference,
+        "reference_tree": reference_tree,
+        "current_commit": current,
+        "current_tree": current_tree,
+        "reference_inventory": reference_inventory,
+        "current_inventory": current_inventory,
+        "changed_paths": changed_paths,
+        "audited_differences": audited_differences,
+        "audited_differences_sha256": _stable_sha256(audit_payload),
+        "official_vendor_inventory_exact": True,
+        "wrapper_commit_tree_difference_allowed": True,
+        "scientific_source_equivalence_verified": True,
+        "runtime_parity_claimed": False,
+        "receipt_sha256": "0" * 64,
+    }
+    receipt["receipt_sha256"] = _stable_sha256(
+        {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    )
+    validate_scientific_source_equivalence_binding(
+        receipt,
+        reference_commit=reference,
+        reference_tree=reference_tree,
+        current_commit=current,
+        current_tree=current_tree,
+    )
+    return receipt
+
+
+def validate_scientific_source_equivalence_receipt(
+    path: Path,
+    *,
+    repo_root: Path,
+    expected_reference_commit: str,
+    expected_reference_tree: str,
+    expected_current_commit: str,
+    expected_current_tree: str,
+) -> dict[str, Any]:
+    """Rebuild and compare the source receipt; paths and declarations are untrusted."""
+
+    _physical_file(path)
+    raw = path.read_bytes()
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise T12AcceleratedError(
+            "T12 scientific source equivalence receipt is unreadable"
+        ) from exc
+    if type(value) is not dict or raw != _canonical_bytes(value) + b"\n":
+        raise T12AcceleratedError(
+            "T12 scientific source equivalence receipt is not canonical"
+        )
+    rebuilt = build_scientific_source_equivalence(
+        repo_root=repo_root,
+        reference_commit=expected_reference_commit,
+        current_commit=expected_current_commit,
+    )
+    if value != rebuilt:
+        raise T12AcceleratedError(
+            "T12 scientific source equivalence receipt changed"
+        )
+    if (
+        value.get("reference_tree") != expected_reference_tree
+        or value.get("current_tree") != expected_current_tree
+        or value.get("status") != "PASS"
+        or value.get("scientific_source_equivalence_verified") is not True
+        or value.get("runtime_parity_claimed") is not False
+    ):
+        raise T12AcceleratedError(
+            "T12 scientific source equivalence identity binding changed"
+        )
+    return value
+
+
+def validate_scientific_source_equivalence_binding(
+    receipt: Mapping[str, Any] | None,
+    *,
+    reference_commit: Any,
+    reference_tree: Any,
+    current_commit: Any,
+    current_tree: Any,
+) -> dict[str, Any]:
+    """Validate an already re-opened receipt at the identity comparison boundary."""
+
+    if type(receipt) is not dict:
+        raise T12AcceleratedError("T12 cross-commit source receipt is absent")
+    if set(receipt) != _SOURCE_EQUIVALENCE_KEYS:
+        raise T12AcceleratedError("T12 cross-commit source receipt keys changed")
+    expected_hash = _stable_sha256(
+        {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    )
+    if (
+        receipt.get("schema_version") != SCIENTIFIC_SOURCE_EQUIVALENCE_SCHEMA
+        or receipt.get("status") != "PASS"
+        or receipt.get("reference_commit") != reference_commit
+        or receipt.get("reference_tree") != reference_tree
+        or receipt.get("current_commit") != current_commit
+        or receipt.get("current_tree") != current_tree
+        or receipt.get("receipt_sha256") != expected_hash
+        or receipt.get("scientific_source_equivalence_verified") is not True
+        or receipt.get("official_vendor_inventory_exact") is not True
+        or receipt.get("wrapper_commit_tree_difference_allowed") is not True
+        or receipt.get("runtime_parity_claimed") is not False
+        or receipt.get("equivalence_basis")
+        not in {
+            "BYTE_IDENTICAL_SCIENTIFIC_SOURCE_INVENTORY",
+            "EXACT_AUDITED_TRANSPORT_GLUE_BINDING",
+        }
+    ):
+        raise T12AcceleratedError(
+            "T12 cross-commit source receipt does not bind both identities"
+        )
+    inventories: list[dict[str, Any]] = []
+    for name in ("reference_inventory", "current_inventory"):
+        inventory = receipt.get(name)
+        if (
+            type(inventory) is not dict
+            or set(inventory) != {"schema_version", "paths", "inventory_sha256"}
+            or inventory.get("schema_version")
+            != "tastemolnet_t12_scientific_source_inventory_v1"
+            or type(inventory.get("paths")) is not list
+            or inventory.get("inventory_sha256")
+            != _stable_sha256(
+                {
+                    "schema_version": inventory.get("schema_version"),
+                    "paths": inventory.get("paths"),
+                }
+            )
+        ):
+            raise T12AcceleratedError(f"T12 {name} is malformed")
+        inventories.append(inventory)
+    row_maps: list[dict[str, dict[str, Any]]] = []
+    for inventory in inventories:
+        rows: dict[str, dict[str, Any]] = {}
+        for row in inventory["paths"]:
+            if (
+                type(row) is not dict
+                or set(row) != {"path", "bytes", "sha256"}
+                or type(row.get("path")) is not str
+                or not row["path"]
+                or row["path"] in rows
+                or type(row.get("bytes")) is not int
+                or row["bytes"] <= 0
+                or type(row.get("sha256")) is not str
+                or _SHA256.fullmatch(row["sha256"]) is None
+            ):
+                raise T12AcceleratedError("T12 source inventory row is malformed")
+            rows[row["path"]] = row
+        scientific = tuple(
+            sorted(path for path in rows if path.startswith(SCIENTIFIC_SOURCE_PREFIX))
+        )
+        vendor = [path for path in rows if path.startswith(OFFICIAL_VENDOR_PREFIX)]
+        if scientific != SCIENTIFIC_SOURCE_FILES or not vendor:
+            raise T12AcceleratedError("T12 source inventory membership changed")
+        row_maps.append(rows)
+    reference_rows, current_rows = row_maps
+    if set(reference_rows) != set(current_rows):
+        raise T12AcceleratedError("T12 source inventory memberships differ")
+    observed_changed = sorted(
+        path for path in reference_rows if reference_rows[path] != current_rows[path]
+    )
+    if receipt.get("changed_paths") != observed_changed:
+        raise T12AcceleratedError("T12 source receipt changed-path projection differs")
+    audit = receipt.get("audited_differences")
+    audit_payload = {
+        "schema_version": "tastemolnet_t12_scientific_source_delta_audit_v1",
+        "differences": audit,
+    }
+    if (
+        type(audit) is not list
+        or receipt.get("audited_differences_sha256") != _stable_sha256(audit_payload)
+        or any(
+            reference_rows[path] != current_rows[path]
+            for path in reference_rows
+            if path.startswith(OFFICIAL_VENDOR_PREFIX)
+        )
+    ):
+        raise T12AcceleratedError("T12 source delta audit changed")
+    if receipt["equivalence_basis"] == "BYTE_IDENTICAL_SCIENTIFIC_SOURCE_INVENTORY":
+        if observed_changed or audit:
+            raise T12AcceleratedError("T12 byte-identical source receipt has a delta")
+    else:
+        if observed_changed != [AUDITED_TRANSPORT_GLUE_PATH] or len(audit) != 1:
+            raise T12AcceleratedError("T12 source delta is not the one audited file")
+        expected_audit = {
+            "path": AUDITED_TRANSPORT_GLUE_PATH,
+            "reference_sha256": AUDITED_REFERENCE_SOURCE_SHA256,
+            "reference_bytes": reference_rows[AUDITED_TRANSPORT_GLUE_PATH]["bytes"],
+            "current_sha256": AUDITED_CURRENT_SOURCE_SHA256,
+            "current_bytes": current_rows[AUDITED_TRANSPORT_GLUE_PATH]["bytes"],
+            "audit_scope": "cross_gpu_identity_and_disposable_transport_glue_only",
+            "scientific_parameters_changed": False,
+            "official_vrrw_changed": False,
+        }
+        if (
+            audit[0] != expected_audit
+            or reference_rows[AUDITED_TRANSPORT_GLUE_PATH]["sha256"]
+            != AUDITED_REFERENCE_SOURCE_SHA256
+            or current_rows[AUDITED_TRANSPORT_GLUE_PATH]["sha256"]
+            != AUDITED_CURRENT_SOURCE_SHA256
+        ):
+            raise T12AcceleratedError("T12 audited source delta content changed")
+    return dict(receipt)
 
 
 def file_sha256(path: Path, *, limit: int | None = None) -> str:
@@ -218,12 +690,37 @@ def validate_reference_step250(
         or file_sha256(first_seen_path) != REFERENCE_FIRST_SEEN_PREFIX_SHA256
     ):
         raise T12AcceleratedError("T12 first-seen/history prefix bytes changed")
+    reference_commit = _require_git_sha(
+        spec.get("execution_commit"), field="reference execution commit"
+    )
+    reference_tree = _git(
+        Path(spec["repo_root"]), "rev-parse", f"{reference_commit}^{{tree}}"
+    )
+    assert isinstance(reference_tree, str)
+    _require_git_sha(reference_tree, field="reference execution tree")
+    run_identity_path = root / "run_identity.json"
+    run_identity = _json(run_identity_path)
+    identity_template = run_identity.get("identity_template")
+    if (
+        type(identity_template) is not dict
+        or identity_template.get("execution_commit") != reference_commit
+        or identity_template.get("execution_tree") != reference_tree
+        or Path(spec["manifest_path"]) != run_identity_path
+    ):
+        raise T12AcceleratedError(
+            "T12 reference run identity differs from its execution commit/tree"
+        )
     return {
         "schema_version": "tastemolnet_t12_reference_step250_evidence_v1",
         "status": "PASS",
         "task_spec": str(task_spec_path),
         "task_spec_sha256": file_sha256(task_spec_path),
         "reference_root": str(root),
+        "reference_execution_commit": reference_commit,
+        "reference_execution_tree": reference_tree,
+        "reference_official_root": str(contract.get("official_root")),
+        "reference_run_identity": str(run_identity_path),
+        "reference_run_identity_sha256": file_sha256(run_identity_path),
         "checkpoint_manifest": str(manifest_path),
         "checkpoint_manifest_sha256": expected_manifest_sha256,
         "checkpoint_payload": str(payload),
@@ -680,12 +1177,15 @@ __all__ = [
     "REFERENCE_STEP",
     "RELOAD_STEP",
     "T12AcceleratedError",
+    "build_scientific_source_equivalence",
     "build_prebound_continuation",
     "build_promotion_blocker",
     "checkpoint_science_projection",
     "compare_checkpoint_payloads",
     "file_sha256",
     "fork_step250_prefix",
+    "validate_scientific_source_equivalence_binding",
+    "validate_scientific_source_equivalence_receipt",
     "validate_mut_gpu0_release_receipt",
     "validate_reference_step250",
 ]

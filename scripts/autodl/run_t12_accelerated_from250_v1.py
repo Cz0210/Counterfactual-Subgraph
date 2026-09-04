@@ -25,6 +25,7 @@ from src.utils.tastemolnet_t12_accelerated_from250 import (  # noqa: E402
     compare_checkpoint_payloads,
     file_sha256,
     fork_step250_prefix,
+    validate_scientific_source_equivalence_receipt,
     validate_reference_step250,
 )
 
@@ -35,6 +36,32 @@ ACCELERATED_TOTAL_STEPS = 510
 # journal re-emission, so the authorized parallel arm retains the exact source
 # schedule and writes lightweight progress separately.
 ACCELERATED_CHECKPOINT_CURSORS = (250, 500, 510)
+
+
+def _validate_source_equivalence(spec: dict[str, Any]) -> dict[str, Any]:
+    contract = spec["science_contract"]
+    path = Path(contract["scientific_source_equivalence_receipt"])
+    if (
+        file_sha256(path)
+        != contract["scientific_source_equivalence_file_sha256"]
+        or spec["input_roots"].get("scientific_source_equivalence") != str(path)
+        or spec["input_hashes"].get("scientific_source_equivalence")
+        != contract["scientific_source_equivalence_file_sha256"]
+    ):
+        raise ValueError("T12 scientific source equivalence file binding changed")
+    receipt = validate_scientific_source_equivalence_receipt(
+        path,
+        repo_root=Path(spec["repo_root"]),
+        expected_reference_commit=contract["reference_execution_commit"],
+        expected_reference_tree=contract["reference_execution_tree"],
+        expected_current_commit=spec["execution_commit"],
+        expected_current_tree=contract["current_execution_tree"],
+    )
+    if receipt["receipt_sha256"] != contract[
+        "scientific_source_equivalence_receipt_sha256"
+    ]:
+        raise ValueError("T12 scientific source equivalence receipt hash changed")
+    return receipt
 
 
 def _absolute(value: str) -> Path:
@@ -76,6 +103,7 @@ def _expected_identity(run_identity_path: Path, cursor: int) -> dict[str, Any]:
 def _segment(args: argparse.Namespace) -> int:
     spec = load_spec(args.task_spec)
     contract = spec["science_contract"]
+    _validate_source_equivalence(spec)
     _configure_profile()
     from src.baselines.tastemolnet_gcf_full import run_t12_generation_segment
 
@@ -93,6 +121,9 @@ def _segment(args: argparse.Namespace) -> int:
         replay_gate_path=contract["replay_gate"],
         resume_run_identity_authority=(Path(spec["output_root"]) / "run_identity.json"),
         disposable_index_root=contract["disposable_index_root"],
+        scientific_source_equivalence_receipt_path=contract[
+            "scientific_source_equivalence_receipt"
+        ],
     )
     print(json.dumps(result, sort_keys=True), flush=True)
     return 0
@@ -104,6 +135,7 @@ def _parity(args: argparse.Namespace) -> int:
 
     spec = load_spec(args.task_spec)
     contract = spec["science_contract"]
+    _validate_source_equivalence(spec)
     _configure_profile()
     authority = Path(contract["source_reference_root"]) / "run_identity.json"
     reports: dict[str, Any] = {}
@@ -182,6 +214,7 @@ def _owner(args: argparse.Namespace) -> int:
     ):
         raise ValueError("T12 accelerated GPU1 dispatch is not authorized")
     validate_reference_step250(task_spec_path=Path(contract["source_reference_task_spec"]))
+    _validate_source_equivalence(spec)
     root = Path(spec["output_root"])
     if root.exists() or root.is_symlink():
         raise FileExistsError("T12 accelerated root must be fresh")

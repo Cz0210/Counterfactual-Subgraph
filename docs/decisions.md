@@ -1,5 +1,35 @@
 # Decisions Log
 
+## [2026-09-05] Bind the T12 checkpoint-250 fork by scientific source content
+
+### Decision
+
+Keep the ordinary main-ready task-spec check exact: the accelerated task must
+run from the full current `execution_commit` and tree.  Do not reuse the
+reference task's old integrated GCF checkout path; derive the official root
+from the current task's physical `repo_root`.
+
+Permit the checkpoint identity's older commit/tree to cross that execution
+boundary only through one canonical self-hashed scientific-source receipt.
+The receipt inventories every tracked `tastemolnet_gcf*.py` file and every
+vendored `baselines/gcfexplainer_official` byte at reference commit
+`1ad12b560d3ad8533f47e3bc3fd1e6ee315a895a` and the current commit, checks the
+current physical bytes against its commit, and binds both Git trees.  A
+byte-identical inventory is valid.  The only non-identical inventory admitted
+by the current route is the exact content-pinned
+`src/baselines/tastemolnet_gcf_full.py` transport-glue delta; an extra path or
+byte fails closed.  The builder, owner, segment runner, and cross-GPU identity
+boundary each reopen the relevant binding before science can proceed.
+
+### Impact
+
+The accelerated GPU1 fork can consume the sealed step-250 reference even when
+wrapper/orchestration commits advanced after the reference commit, without
+weakening the execution-HEAD gate or silently declaring arbitrary commits
+equivalent.  The current vendored GCF root is used, reference data remain
+read-only, and source equivalence remains distinct from the still-required
+500/510 runtime parity and blocked production-identity reframe.
+
 ## [2026-09-04] Use a dataset-specific disk-backed Route C for Taste ComRecGC
 
 ### Decision
