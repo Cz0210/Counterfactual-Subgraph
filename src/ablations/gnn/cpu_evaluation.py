@@ -233,7 +233,8 @@ def _predict(parents: Sequence[BACEParent], oracle: Any, featurizer: Any, split:
 
 def _pairs(parents: Sequence[BACEParent], candidates: Sequence[dict[str, Any]], *, oracle: Any,
            featurizer: Any, distance: Any, split: str, output: Path, binding: str,
-           batch_size: int, predictions: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+           batch_size: int, predictions: Mapping[str, Mapping[str, Any]],
+           require_cached: bool = False) -> list[dict[str, Any]]:
     from src.eval.bace_frozen_gnn_verification import _evaluate_rows
     pairs = []
     output.mkdir(parents=True, exist_ok=True)
@@ -248,6 +249,8 @@ def _pairs(parents: Sequence[BACEParent], candidates: Sequence[dict[str, Any]], 
                 raise ValueError("Evaluation parent checkpoint hash mismatch")
             current = science["pair_rows"]
         else:
+            if require_cached:
+                raise ValueError(f"MISSING_SEALED_PARENT_UNIT:{split}:{parent.parent_id}")
             before = predictions[parent.parent_id]
             cache = {parent.parent_id: {"parent_smiles": parent.smiles,
                 "pred_before": before["predicted_label"], "p_before": before["probabilities"]}}
@@ -397,11 +400,12 @@ def evaluate_with_cpu_admission(*, bundle_root: str | Path, model_roots: Mapping
 
 
 def run_evaluation(*, bundle_root: str | Path, model_roots: Mapping[str, str], output_root: str | Path,
-                   resume: bool = False, batch_size: int = 256, cpu_threads: int = 8) -> dict[str, Any]:
+                   resume: bool = False, batch_size: int = 256, cpu_threads: int = 8,
+                   phase: str = "full", require_cached_pairs: bool = False) -> dict[str, Any]:
     """Freeze all native/common calibration orders before first test CSV load."""
     import torch
     from src.oracles.gnn_oracle import GNNOracle, classification_metrics
-    if set(model_roots) != set(BACKBONES) or cpu_threads < 1:
+    if set(model_roots) != set(BACKBONES) or cpu_threads < 1 or phase not in {"full", "calibration", "finish"}:
         raise ValueError("Evaluation requires all five classifier roots")
     torch.set_num_threads(cpu_threads)
     root, manifest = load_bundle(bundle_root)
@@ -440,24 +444,33 @@ def run_evaluation(*, bundle_root: str | Path, model_roots: Mapping[str, str], o
             raise ValueError("Resume scientific input/config mismatch")
         if (output / "GNN_CORE_SEED7_PASS").is_file():
             return verify_evaluation(output)
+        previous_execution = read_json(run_path) if run_path.exists() else {}
         atomic_json(run_path, {**binding_payload, "binding_sha256": binding, "model_roots": {n: str(p) for n,p in models.items()},
+            **{k: previous_execution[k] for k in ("evaluation_driver_commit", "original_scientific_commit") if k in previous_execution},
             "main_matrix_write": False, "ChemLLM_loaded": False, "PPO_rerun": False,
             "proposal_fixed": True, "seed": 7, "cpu_only": True})
         featurizer = _featurizer(root, manifest)
-        distance = _distance(root, manifest, output)
+        distance = None if require_cached_pairs else _distance(root, manifest, output)
         try:
             return _run_phases(root, manifest, output, candidates, selector, oracles, models,
-                               featurizer, distance, binding, batch_size, classification_metrics)
+                               featurizer, distance, binding, batch_size, classification_metrics,
+                               phase=phase, require_cached_pairs=require_cached_pairs)
         finally:
-            distance.close()
+            if distance is not None:
+                distance.close()
 
 
 def _run_phases(root: Path, manifest: Mapping[str, Any], output: Path, candidates: list[dict[str, Any]],
                 selector: Mapping[str, Any], oracles: Mapping[str, Any], models: Mapping[str, Path],
-                featurizer: Any, distance: Any, binding: str, batch_size: int, metrics_fn: Any) -> dict[str, Any]:
+                featurizer: Any, distance: Any, binding: str, batch_size: int, metrics_fn: Any,
+                phase: str = "full", require_cached_pairs: bool = False) -> dict[str, Any]:
     cal = _all_parents(bundle_file(root, manifest, manifest["splits"]["calibration"]))
     predictions = {name: _predict(cal, oracle, featurizer, "calibration", batch_size) for name, oracle in oracles.items()}
     cohorts = cohort_ids(cal, predictions)
+    for name in BACKBONES:
+        atomic_csv(output / name / "calibration_classifier_predictions.csv", [
+            {"parent_id": p.parent_id, "label": p.label, **record}
+            for p, record in zip(cal, predictions[name], strict=True)])
     atomic_json(output / "calibration_cohorts.json", cohorts)
     selections: dict[str, dict[str, list[str]]] = {}
     for name in BACKBONES:
@@ -465,14 +478,30 @@ def _run_phases(root: Path, manifest: Mapping[str, Any], output: Path, candidate
         parents = [p for p in cal if p.parent_id in ids]
         pairs = _pairs(parents, candidates, oracle=oracles[name], featurizer=featurizer, distance=distance,
             split="calibration", output=output / name / "calibration" / "parents", binding=binding,
-            batch_size=batch_size, predictions={p.parent_id: r for p,r in zip(cal,predictions[name],strict=True)})
+            batch_size=batch_size, predictions={p.parent_id: r for p,r in zip(cal,predictions[name],strict=True)},
+            require_cached=require_cached_pairs)
         atomic_jsonl(output / name / "calibration" / "pair_matrix.jsonl", pairs)
         selections[name] = {}
         for mode in ("native", "common"):
             cohort = cohorts["native"][name] if mode == "native" else cohorts["common"]
             subset = [row for row in pairs if row["parent_id"] in set(cohort)]
             matrix = matrix_from_pairs(cohort, candidates, subset, root=output, split="calibration")
-            sequence, trace = select_calibration(matrix, selector)
+            target = output / name / mode / "selected_rules.json"
+            if (output / "CALIBRATION_FREEZE.json").is_file():
+                prior_freeze = read_json(output / "CALIBRATION_FREEZE.json")
+                previous = read_json(target)
+                if (prior_freeze.get("binding_sha256") != binding
+                        or previous.get("binding_sha256") != binding
+                        or previous.get("candidate_ids") != prior_freeze["selections"][name][mode]
+                        or sha256_file(target) != prior_freeze["source_files"][f"{name}/{mode}"]
+                        or previous.get("test_loaded") is not False):
+                    raise ValueError("Existing calibration freeze cannot be adopted")
+                sequence = [matrix.candidate_index[c] for c in previous["candidate_ids"]]
+                trace = previous["trace"]
+            else:
+                if phase == "finish":
+                    raise ValueError("Test finalization requires a previously sealed global calibration freeze")
+                sequence, trace = select_calibration(matrix, selector)
             selected = [candidates[i] for i in sequence]
             ids = [row["candidate_id"] for row in selected]
             selections[name][mode] = ids
@@ -483,14 +512,22 @@ def _run_phases(root: Path, manifest: Mapping[str, Any], output: Path, candidate
                                     "fragment": row["canonical_fragment"]} for row in selected],
                 "selector": asdict(selector["variant"]),
                 "thresholds": selector["thresholds"].to_dict(), "trace": trace}
-            target = output / name / mode / "selected_rules.json"
             if target.exists() and read_json(target) != frozen:
                 raise ValueError("Deterministic calibration replay changed frozen selection")
-            atomic_json(target, frozen)
+            if not target.exists():
+                atomic_json(target, frozen)
     freeze = {"binding_sha256": binding, "all_five_calibration_orders_frozen": True, "test_loaded": False,
               "selections": selections, "source_files": {f"{n}/{m}": sha256_file(output / n / m / "selected_rules.json")
                                                           for n in BACKBONES for m in ("native", "common")}}
-    atomic_json(output / "CALIBRATION_FREEZE.json", freeze)
+    freeze_path = output / "CALIBRATION_FREEZE.json"
+    if freeze_path.exists():
+        if read_json(freeze_path) != freeze:
+            raise ValueError("Global calibration freeze drift")
+    else:
+        atomic_json(freeze_path, freeze)
+    if phase == "calibration":
+        return {"state": "CALIBRATION_FROZEN", "core_pass": False, "test_loaded": False,
+                "freeze_sha256": sha256_file(freeze_path)}
     # This is deliberately the first scientific load of held-out test rows.
     test = _all_parents(bundle_file(root, manifest, manifest["splits"]["test"]))
     if {p.parent_id for p in cal} & {p.parent_id for p in test}:
@@ -524,7 +561,8 @@ def _run_phases(root: Path, manifest: Mapping[str, Any], output: Path, candidate
         native_parents = [p for p in test if p.parent_id in native_ids]
         pairs = _pairs(native_parents, selected_candidates, oracle=oracles[name], featurizer=featurizer,
             distance=distance, split="test", output=output / name / "test" / "parents", binding=binding,
-            batch_size=batch_size, predictions={p.parent_id:r for p,r in zip(test,test_predictions[name],strict=True)})
+            batch_size=batch_size, predictions={p.parent_id:r for p,r in zip(test,test_predictions[name],strict=True)},
+            require_cached=require_cached_pairs)
         atomic_jsonl(output / name / "test" / "pair_matrix.jsonl", pairs)
         atomic_json(output / name / "verification_manifest.json", {
             "state": "PASS", "binding_sha256": binding, "backbone": name,

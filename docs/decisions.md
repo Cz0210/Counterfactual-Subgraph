@@ -1,5 +1,51 @@
 # Decisions Log
 
+## [2026-09-05] Close seed-7 evaluation with exact CPU parent shards and independent publication
+
+Job 2558288 exited successfully after admission only: its measured conservative
+CPU projection is 104822 seconds, not an explanation-result PASS. The authorized
+fresh continuation first replays the two real train parents for each backbone,
+then partitions every native calibration/test parent deterministically. All 66
+rules and original match/strict-flip/WNode contracts remain unchanged. Arrays
+have at most two active 8-CPU jobs; node-local caches never share backbone flip
+masks. Sealed parent records are reused, not recomputed. The complete calibration
+merge selects each native/common order once; all ten orders freeze before test.
+The original trained scientific commit and new evaluation driver are separately
+recorded. No training, temperature fitting, candidate generation or main writes.
+
+An independent offline verifier replays cohort membership, per-match flip and
+minimum-distance selection, global selectors, metrics and CSVs against the
+sealed parent records. Producer exit codes and self-reported file inventories
+are insufficient. A portable verified bundle preserves original provenance and
+uses an import location overlay rather than rewriting historical HPC paths.
+The reference's missing explicit cohort text is disclosed in an overlay bound
+to the original framework's true-and-predicted-source definition. This does not
+change eligibility or the validation-fitted temperature convention. GatedGCN+
+recomputes RWPE on each counterfactual graph, as the original evaluator does.
+
+LLM core still requires this independent seed-7 core, real model execution and
+resource gates; the owner removed main-matrix count and secondary-seed gates.
+T13 reservations cannot be cleared. CPU-only intel Slurm wrappers are explicit
+task-specific exceptions to the generic GPU template, with no environment
+modifications and all persistent HPC writes scoped under the project directory.
+
+## [2026-09-05] Export AIDS/BACE as explicitly PARTIAL published-source staging
+
+An independent presentation-only exporter follows the unique authority pointer
+and binds its matrix SHA, source audit SHA, run manifest SHA and exact plotted
+CSV SHA. It does not rerun evaluation or write the registry or `paper/`.
+Existing legacy/valid-zero publication decisions are `ADOPTED_FROM_AUTHORITY`,
+not new waivers. Older schema differences are disclosed; AIDS conditional-cost
+blanks remain unavailable and BACE retains its actual seven-point frozen grid.
+Any missing or hash-unbound cell stays `PENDING_WITH_PROVENANCE_REASON`, with no
+numeric placeholder. Figures and tables are explicitly titled PARTIAL.
+
+CLI: `python scripts/autodl/export_partial_main_results.py
+--matrix-authority-state /absolute/control/fast16_matrix_authority/state.json
+--output-root /absolute/fresh/staging-root`. The paired Slurm script is a
+task-specific CPU-only intel exception to the generic A800 template; it never
+reserves a main-table GPU and is not automatically submitted.
+
 ## [2026-09-05] Run the authorized BACE seed-7 GNN study on HPC CPU before main16
 
 The project owner now permits BACE/Ours proposal-fixed GNN science at main
