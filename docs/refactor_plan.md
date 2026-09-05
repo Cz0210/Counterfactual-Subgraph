@@ -10,6 +10,17 @@
 - [ ] Deploy the isolated canary under the existing AutoDL GPU1 T13 reservation.
 - [ ] After parity and measured memory gates pass, consume one fresh full launch.
 - [ ] Continue ordinary calibration/test/export and canonical matrix publication.
+## 2026-09-06: Mut observational selected-action causal lineage
+
+- [x] Add a Mut-only opt-in recorder using the retained official action index.
+- [x] Preserve default trace-off argv/schema; keep debug trace independently off.
+- [x] Test 500-step fixture parity and real checkpoint serialization + 501--510.
+- [x] Draft real new-universe downstream commands, with old pair/cache rejection.
+- [x] Include causal chunks in resource estimates without lowering inode guard.
+- [ ] Prove new producer on the real fixed 1,448-parent 500/510-step experiment.
+- [ ] Accept its typed proof in chemistry preregistration without historical-parity impersonation.
+- [ ] Bind a fresh immutable owner/spec and Route-B terminal in the existing publisher.
+- [ ] Dispatch only after genuine A/B scientific failure and live full admission.
 
 ## 2026-09-05: Early BACE GNN seed7 on isolated HPC CPU
 

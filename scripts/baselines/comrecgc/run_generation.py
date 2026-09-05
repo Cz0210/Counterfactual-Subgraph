@@ -65,6 +65,9 @@ def canonical_scientific_argv(args: argparse.Namespace) -> tuple[str, ...]:
     for key, value in sorted(vars(args).items()):
         if key == "resume":
             continue
+        if key == "mut_causal_lineage_output_dir" and value is None:
+            # Preserve existing inactive CLI/checkpoint identities byte-for-byte.
+            continue
         redacted = _redact_cli_value(key, value)
         encoded = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
         canonical.append(f"--{key.replace('_', '-')}={encoded}")
@@ -159,6 +162,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional project-owned action trace directory; does not modify upstream output.",
     )
     parser.add_argument(
+        "--mut-causal-lineage-output-dir",
+        help="Opt-in Mut full trace-off causal receipts; must be OUTPUT/causal_lineage. Not a production-parity PASS.",
+    )
+    parser.add_argument(
         "--parity-reference",
         help="Trace-disabled counterfactuals.pt used for normalized trace parity.",
     )
@@ -181,6 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.mut_causal_lineage_output_dir is not None and args.route != "project":
+        raise ValueError("Mut causal lineage is only supported by the project full route.")
     scientific_argv = canonical_scientific_argv(args)
     command_sha256 = scientific_command_sha256(scientific_argv)
     parameters = GenerationParameters.for_mode(args.mode)
@@ -251,6 +260,7 @@ def main() -> int:
             bace_acceleration_gate_sha256=args.bace_acceleration_gate_sha256,
             resume=args.resume,
             trace_output_dir=args.trace_output_dir,
+            mut_causal_lineage_output_dir=args.mut_causal_lineage_output_dir,
             parity_reference_path=args.parity_reference,
             graph_state_dir=args.graph_state_dir,
             storage_guard_root=args.storage_guard_root,

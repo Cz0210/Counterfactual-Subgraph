@@ -1,5 +1,11 @@
 # Mut Route B: conditional closeout preflight
 
+Update 2026-09-06: the opt-in observational selected-action producer now exists;
+the current first blocker is `BLOCKED_CAUSAL_PRODUCTION_PARITY_REQUIRED`.
+The historical diagnosis below explains why it was needed. Read
+`MUT_OBSERVATIONAL_CAUSAL_LINEAGE_REPAIR.md` for the implemented scope and
+remaining typed chemistry / owner / publisher integration. No Route B is READY.
+
 This is a diagnostic, **not a runnable end-to-end successor or launch receipt**.
 The existing A/B experiment must first produce a reopened, byte-bound genuine
 scientific divergence. Engineering failure, missing logs and an incomplete
@@ -49,8 +55,9 @@ For capacity 100,000, candidate batch 128 and 1,448 train parents, the upper
 bound is 782 pair chunks / 1,564 npy files, rather than one file per candidate
 or candidate-parent pair. Two keep-last-2 checkpoint stores plus one in-flight
 publication per store are budgeted, with retention receipts and a conservative
-fixed-file allowance. Known peak new inodes: 2,068. This excludes unmeasured
-evaluation cache peaks and any future lineage-producer files.
+fixed-file allowance. The original estimate was 2,068; the new selected-event
+producer adds 489 chunks and twelve directory/fixed/temporary slots, making 2,569. This still
+excludes unmeasured chemistry/evaluation cache peaks.
 
 The existing 100,000-free-inode guard is unchanged. At the read-only snapshot
 of 2026-09-05 14:45:36 UTC, free inodes were 98,232: 1,768 below that guard,

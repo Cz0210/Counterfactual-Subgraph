@@ -1,5 +1,43 @@
 # Decisions Log
 
+## [2026-09-06] Add opt-in observational Mut causal records without promoting Route B
+
+The user authorized a selected-action causal-lineage producer for a possible
+fresh trace-off Route B. `MutCausalLineageRecorder` reads the action already
+retained at the official deduplicated target index, after the official move
+updates its state. It does not select a replacement action, draw RNG, reorder
+the transition cache, or retain a second per-neighbor enumeration map. Missing,
+ambiguous or non-replaying actions fail explicitly. Event/checkpoint snapshots
+are deep copies; events are chunked, and the compact final lineage is stored at
+`output_root/causal_lineage`, separate from optional debug trace output.
+
+The option is Mut/project/full-only. Omitted options preserve existing CLI
+identity and checkpoint behavior; healthy A/B, T12, T13 and T14 are not changed.
+Tiny tests compare 500-step RNG/actions/graphs/candidates/frequencies against
+both recorder-disabled and existing debug observation, and serialize/reload
+the real checkpoint envelope before comparing steps 501--510. These are
+**fixtures**, not production parity or a 50k parity claim.
+
+The read-only closeout preflight now reports
+`BLOCKED_CAUSAL_PRODUCTION_PARITY_REQUIRED`, not a missing-source-file blocker.
+It can draft the existing five real pair/DBSCAN, chemistry, unified-evaluation,
+gate and freeze commands for a fresh universe. It rejects old pair/DBSCAN/cache
+arguments and does not dispatch or publish. The first missing scientific proof
+is the new producer's actual same-input 500/510-step/reload comparison. The
+existing chemistry preregistration must explicitly validate that new typed
+evidence; `trace_parity_passed=true` cannot be invented. The existing owner/spec
+execution pin and canonical publisher still require narrow integration after
+that proof. No new scheduler, publisher or authority is introduced.
+
+Compact lineage adds at most 489 selected-event chunks plus twelve fixed inode
+slots including directories and atomic-write temporaries at 50k / five heads /
+512 events per chunk. Known compact new inode peak is now 2,569, with byte and
+evaluation-cache peaks still unknown. The 100,000
+free-inode guard is unchanged, no files are deleted and no Route B is launched.
+See `docs/MUT_OBSERVATIONAL_CAUSAL_LINEAGE_REPAIR.md` for the exact remaining
+sequence and tests. The paired generation Slurm wrapper is an opt-in CLI only,
+not launch authorization.
+
 ## [2026-09-05] Keep Mut Route B blocked on its missing causal lineage producer
 
 The authorized closeout review found a scientific input mismatch, not merely

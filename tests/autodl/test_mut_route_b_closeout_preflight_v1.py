@@ -18,9 +18,11 @@ def test_compact_files_do_not_scale_per_candidate() -> None:
     result = preflight.compact_resource_estimate(free_inodes=98_232, free_bytes=10**12)
     assert result["pair_chunk_count_upper_bound"] == 782
     assert result["pair_chunk_inodes"] == 1564
-    assert result["known_compact_peak_new_inodes_estimate"] == 2068
+    assert result["causal_event_upper_bound"] == 250_000
+    assert result["causal_chunk_count_upper_bound"] == 489
+    assert result["known_compact_peak_new_inodes_estimate"] == 2569
     assert result["existing_guard_shortfall_inodes"] == 1768
-    assert result["shortfall_preserving_existing_guard_and_known_peak"] == 3836
+    assert result["shortfall_preserving_existing_guard_and_known_peak"] == 4337
     assert result["guard_modified"] is False
     assert result["full_storage_admission"] == "BLOCKED_UNMEASURED_PEAKS"
 
@@ -55,7 +57,10 @@ def test_invalid_resource_claim_fails(kwargs: dict) -> None:
 
 def test_no_decision_never_authorizes_generation(tmp_path: Path) -> None:
     result = preflight.inspect_closeout(repo_root=ROOT, resource_path=tmp_path)
-    assert result["status"] == "BLOCKED_SCIENCE_CRITICAL_LINEAGE_PRODUCER_MISSING"
+    assert result["status"] == "BLOCKED_CAUSAL_PRODUCTION_PARITY_REQUIRED"
+    assert result["causal_producer_available"] is True
+    assert result["causal_production_parity_claimed"] is False
+    assert result["existing_owner_uses_new_causal_producer"] is False
     assert result["scientific_trigger_state"] == "WAITING_FOR_ACTUAL_SCIENTIFIC_AB_FAILURE"
     for field in ("route_b_started", "fresh_50k_started", "pair_store_recomputed",
                   "dbscan_recomputed", "matrix_written", "gpu_lock_acquired", "launch_admission"):
@@ -112,6 +117,58 @@ def test_real_pair_store_rejects_changed_generation_universe(tmp_path: Path) -> 
     with pytest.raises(ExternalMemoryDBSCANError, match="identity mismatch"):
         ExternalPairStore(root=tmp_path / "pair", scientific_identity={**identity, "counterfactuals_sha256": "b" * 64},
                           max_rss_bytes=2**50, resume=True)
+
+
+def test_actual_compact_causal_allowance_does_not_relax_inode_guard() -> None:
+    result = preflight.compact_resource_estimate(free_inodes=95_191, free_bytes=1_684_089_421_824)
+    assert result["existing_guard_shortfall_inodes"] == 4809
+    assert result["shortfall_preserving_existing_guard_and_known_peak"] == 7378
+    assert result["existing_min_free_inodes"] == 100_000
+    assert result["full_storage_admission"] == "BLOCKED_UNMEASURED_PEAKS"
+
+
+def test_draft_shared_five_stages_bind_new_generation_and_causal_root(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from scripts.autodl.run_comrecgc_standardized_continuation import ContinuationInputs
+
+    generation = tmp_path / "fresh-generation"
+    generation.mkdir()
+    (generation / "run_manifest.json").write_text(json.dumps({"counterfactuals_sha256": "a" * 64}))
+    inputs = ContinuationInputs(
+        dataset="mutagenicity", source_generation_root=generation, upstream_root=Path("/upstream"),
+        dataset_dir=Path("/dataset"), source_csv=None, distance_checkpoint=Path("/distance.pt"),
+        dataset_csv=Path("/data.csv"), teacher_path=Path("/rf.pkl"), molclr_root=Path("/molclr"),
+        molclr_checkpoint=Path("/molclr.pt"), thresholds_path=Path("/thresholds.json"),
+        output_root=tmp_path / "fresh-closeout", device="cuda:0", theta_star=None, cost_cap=None,
+        common_recourse_engine="external_memory_exact_v1",
+        external_dbscan_shortcut_mode="sklearn_float64_exact_multi_component_v1",
+    )
+    kwargs = dict(execution_repo=ROOT, python=Path("/env/python"), project_commit="b" * 40,
+                  candidate_count=5, teacher_sha256="c" * 64)
+    plan = preflight.draft_fresh_closeout_commands(inputs, **kwargs)
+    assert plan["dispatchable"] is False and plan["science_started"] is False
+    assert [row["stage"] for row in plan["stages"]] == [
+        "common_recourse", "chemistry", "unified_eval", "full_gate", "freeze"]
+    assert not inputs.output_root.exists()
+    assert plan["publication"]["status"] == "BLOCKED_ROUTE_B_TYPED_TERMINAL_VALIDATOR_REQUIRED"
+    for row in plan["stages"]:
+        argv = row["argv"]
+        assert argv[0] == "/env/python"
+        assert Path(argv[1]).is_file()
+        assert "--resume" not in argv
+        assert not any("source-manifest" in arg or "source-checkpoint" in arg for arg in argv)
+    common, chemistry, evaluation = [row["argv"] for row in plan["stages"][:3]]
+    assert common[common.index("--generation-dir") + 1] == str(generation)
+    assert common[common.index("--device") + 1] == "cpu"
+    assert chemistry[chemistry.index("--trace-lineage-path") + 1] == str(generation / "causal_lineage/candidate_action_lineage.json")
+    assert chemistry[chemistry.index("--trace-evidence-path") + 1] == str(generation / "causal_lineage/trace_summary.json")
+    assert evaluation[evaluation.index("--expected-parent-count") + 1] == "217"
+    for changed in ({"external_pair_store_source_manifest": Path("/old-pair.json")},
+                    {"external_dbscan_source_manifest": Path("/old-dbscan.json")},
+                    {"external_vector_cache_root": Path("/old-cache")},
+                    {"common_recourse_resume": True}):
+        with pytest.raises(ValueError, match="old-universe"):
+            preflight.draft_fresh_closeout_commands(replace(inputs, **changed), **kwargs)
 
 
 def test_cli_is_read_only_and_paired_slurm_cpu_only(tmp_path: Path) -> None:

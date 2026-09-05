@@ -1296,6 +1296,7 @@ def run_project_generation(
     bace_acceleration_gate_sha256: str | None = None,
     resume: bool = False,
     trace_output_dir: str | Path | None = None,
+    mut_causal_lineage_output_dir: str | Path | None = None,
     parity_reference_path: str | Path | None = None,
     graph_state_dir: str | Path | None = None,
     storage_guard_root: str | Path | None = None,
@@ -1313,6 +1314,13 @@ def run_project_generation(
     diagnostic_equivalence_steps: int | None = None,
     equivalence_gate_role: str | None = None,
 ) -> dict[str, Any]:
+    from .mut_causal_lineage import MutCausalLineageRecorder, validate_causal_scope
+
+    causal_root = validate_causal_scope(
+        dataset=dataset, mode=mode, output_root=output_dir,
+        debug_trace_root=trace_output_dir, causal_root=mut_causal_lineage_output_dir,
+    )
+    selected_event_root = causal_root if causal_root is not None else trace_output_dir
     resolved_gnn_device = str(gnn_device or device)
     resolved_distance_device = str(distance_device or device)
     diagnostic_steps = (
@@ -1494,11 +1502,12 @@ def run_project_generation(
     process_start_step = 0
     progress_gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES") or str(device)
     trace_recorder = (
-        ActionTraceRecorder(
+        MutCausalLineageRecorder(causal_root)
+        if causal_root is not None else ActionTraceRecorder(
             output_dir=trace_output_dir,
             compact_enumeration=mode == "full",
         )
-        if trace_output_dir is not None
+        if selected_event_root is not None
         else None
     )
     compatibility_audit: dict[str, Any] = {}
@@ -1676,6 +1685,9 @@ def run_project_generation(
                     ),
                 ],
                 "official_source_modified": False,
+                **({"mut_causal_lineage_schema": "mut_observational_selected_action_causal_lineage_v1",
+                    "mut_causal_lineage_output_dir": str(causal_root)}
+                   if causal_root is not None else {}),
                 "generation_resume_supported": mode == "full",
                 "generation_checkpoint_root": (
                     str(resolved_checkpoint_root)
@@ -2023,7 +2035,7 @@ def run_project_generation(
                     else None
                 )
                 trace_summary = trace_recorder.write(
-                    trace_output_dir,
+                    selected_event_root,
                     payload,
                     source_graphs_by_parent_id=dict(
                         zip(bundle.parent_ids, bundle.graphs, strict=True)
@@ -2049,7 +2061,7 @@ def run_project_generation(
                 verified_payload = _torch_load(result_path)
                 selected_events = (
                     iter_selected_trace(
-                        Path(trace_output_dir) / "selected_action_trace_manifest.json"
+                        Path(selected_event_root) / "selected_action_trace_manifest.json"
                     )
                     if trace_recorder is not None
                     else ()
@@ -2094,8 +2106,13 @@ def run_project_generation(
                 "counterfactual_candidate_count": len(candidates),
                 "visited_graph_count": len(graph_map),
                 "traversed_step_count": len(payload.get("traversed_hashes") or []),
-                "trace_enabled": trace_recorder is not None,
-                "trace_summary": trace_summary,
+                "trace_enabled": trace_output_dir is not None,
+                "trace_summary": trace_summary if causal_root is None else None,
+                **({"causal_lineage_enabled": True,
+                    "causal_lineage_root": str(causal_root),
+                    "causal_lineage_summary": trace_summary,
+                    "causal_lineage_manifest_sha256": sha256_file(causal_root / "causal_lineage_manifest.json")}
+                   if causal_root is not None else {}),
                 "trace_parity": parity_summary,
                 "official_compatibility_audit": compatibility_audit,
                 "graph_state_audit_path": (
