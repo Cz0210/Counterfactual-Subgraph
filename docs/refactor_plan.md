@@ -5,8 +5,9 @@
 - [x] Record new main > GNN seed7 > LLM core > secondary-seed priority.
 - [x] Add a small hash-verified BACE-only input bundle and safe fresh import.
 - [x] Test exact epoch checkpoint continuation and five-backbone interfaces.
-- [ ] Measure the real HPC CPU benchmark and five-backbone forward preflight.
+- [x] Measure real HPC CPU benchmarks (all four5epochs) and five-backbone forward preflight.
 - [x] Submit no-GPU intel jobs in two dependency lanes (fresh chain2557523–2557529).
+- [x] Preserve sealed epoch5 and submit parser-consistent continuation2557856–2557859.
 - [ ] Freeze calibration selectors before test and publish native/common ablation tables.
 - [x] Gate LLM GPU eligibility on the hash-verified complete GNN seed7 audit.
 

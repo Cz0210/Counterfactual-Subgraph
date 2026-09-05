@@ -3,6 +3,8 @@
 ## Execution and scope
 
 - Scientific execution commit: `532e83733971701b0709086469d2ed8955a96e25`.
+- Corrected continuation driver commit: `8b7817906d352a3763424bb1f8ee26b347f7cc48`.
+- Continuation driver worktree: `/share/home/u20526/czx/worktrees/bace-gnn-resume-8b781790`.
 - Private branch: `feat/early-gnn-first-ablation-20260905`.
 - Mac development worktree: `/private/tmp/early-gnn-first-ablation-20260905`.
 - HPC immutable worktree: `/share/home/u20526/czx/worktrees/bace-gnn-ablation-532e8373`.
@@ -14,6 +16,8 @@
 ## Main authority and remaining cells
 
 Read-only observation: 2026-09-05 10:39:38 UTC / 18:39 CST.
+Matrix count and all protected PID identities were rechecked at11:08:52 UTC
+/19:08 CST and remain unchanged; the detailed step counts below are18:39.
 The unique authority remains **12/16** at
 `/autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json`.
 All BACE cells and Taste Ours are registered. Four missing cells remain:
@@ -64,7 +68,41 @@ training. The GINE training config, not stale generic YAML, fixes AdamW,
 200-epoch maximum, validation ROC-AUC checkpoint selection and validation-fitted
 temperature. No calibration-trained temperature is silently substituted.
 
-## Submitted CPU dependency chain
+## CPU dependency chains: current versus historical
+
+**Current continuation jobs** are2557856/2557857/2557858/2557859,
+with evaluation2557861 and package2557862. The first two resume GatedGCN+/GIN;
+the second pair resumes GCN/GATv2 after the respective lane becomes free.
+They start from the original committed epoch5, not from a new seed or root.
+`resume_submission.json` is the effective continuation receipt; the updated
+status tool reports these IDs and preserves `historical_jobs` separately.
+
+The five-model HPC environment preflight2557523 completed with exit0:0.
+All four original training jobs completed five real benchmark epochs, then
+failed at the auto-resume configuration comparison (not at model training).
+The wrapper had used a second YAML parser that converts string label keys
+to integers. The corrected driver loads the unchanged original scientific
+trainer from532e8373, with unchanged source identity/PYTHONPATH/config bytes,
+and records the new driver's identity separately. No source identity is
+spoofed and no sealed checkpoint/config/contract is rewritten. Only the two
+unstarted unsatisfiable evaluation/package jobs2557528/2557529 were removed.
+
+Actual CPU benchmark measurements:
+
+| Backbone | Seconds/epoch | Projected200-epoch training hours (1.5×) | Peak RSS bytes |
+|---|---:|---:|---:|
+|GatedGCN+|3.69718|0.30810|1,180,995,584|
+|GIN|1.82515|0.15210|951,050,240|
+|GCN|1.24185|0.10349|798,470,144|
+|GATv2|2.45479|0.20457|1,154,707,456|
+
+All four are CPU_TRAIN_ONLY_ELIGIBLE. These projections exclude queueing and
+full explanation evaluation. The latter remains unmeasured until the
+train-only timing stage; no full-route or final-core PASS is claimed yet.
+The 12-hour allocation is a ceiling, not the measured training ETA.
+
+The following table records the **historical** initial chain, not the current
+continuation jobs:
 
 Recovery history: the initial preflight2557215 failed before Python because
 site `/etc/bashrc` read optional `BASHRCSOURCED` under nounset. Its six exact
@@ -72,7 +110,7 @@ PENDING children2557216/17/18/19/20/22 were removed without starting science.
 The failed campaign and all logs remain under the earlier
 `bace-seed7-20260905T104500Z` root. Commit532e8373 corrects only shell bootstrap,
 covered by five executable regression tests. The table below is the **new**
-active chain; do not confuse it with those failed/cancelled historical IDs.
+initial chain; use the continuation IDs above for current training status.
 
 Transport review initially declined the second package for allegedly missing
 payload/destination authorization. The user's actual attachment sections2/5
@@ -161,7 +199,7 @@ claim that a GPU worker or cross-host result-transfer watcher is running.
 
 ## Validation and commands
 
-86 focused tests PASS; compileall, git diff --check and relevant shell syntax
+89 focused tests PASS; compileall, git diff --check and relevant shell syntax
 checks PASS. Tests include epoch-resume equivalence, own-source GINE SHA,
 common architecture preservation, five backbones, pre-test selector freeze,
 empty cohorts, CPU admission, native/common evaluation and no-GPU dependencies.
@@ -170,7 +208,7 @@ No real7B/20B model was loaded by a unit test.
 One-shot GNN status (do not poll continuously):
 
 ```bash
-ssh tongji-hpc '/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python /share/home/u20526/czx/worktrees/bace-gnn-ablation-532e8373/scripts/hpc/gnn/status_bace_gnn_seed7.py --campaign-root /share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/gnn/runs/bace-seed7-20260905T105800Z'
+ssh tongji-hpc '/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python /share/home/u20526/czx/worktrees/bace-gnn-resume-8b781790/scripts/hpc/gnn/status_bace_gnn_seed7.py --campaign-root /share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/gnn/runs/bace-seed7-20260905T105800Z'
 ```
 
 Read-only main count:
