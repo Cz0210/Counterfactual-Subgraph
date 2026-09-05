@@ -47,6 +47,18 @@ then restore it before task validation. Five executable shell fixtures cover
 this behavior. No scientific state existed in that failed preflight; six
 exactly verified unstarted dependency jobs were removed, with logs retained.
 
+All four real HPC benchmarks then committed epoch5, but the wrapper compared
+its frozen YAML through a different parser at resume. Numeric-looking string
+label keys became integers in PyYAML, although the actual training parser
+preserved them. Resume now validates with that same training parser; frozen
+config bytes, checkpoints, and scientific contracts are never rewritten.
+A separate versioned resume driver may load the corrected wrapper while
+binding the real unchanged trainer to its original immutable532e8373 tree.
+Both versions and all input/checkpoint hashes are explicitly recorded. This
+avoids relabelling a new scientific engine as the old one and avoids rerunning
+the five completed epochs. A continuation receipt supersedes stale job IDs in
+the status tool while preserving the original submission evidence.
+
 ## [2026-09-05] Hash the real T12 GINE checkpoint as a sealed content tree
 
 ### Decision

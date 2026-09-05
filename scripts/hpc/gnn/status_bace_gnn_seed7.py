@@ -11,6 +11,15 @@ def main():
     args=p.parse_args()
     root=Path(args.campaign_root)
     receipt=json.loads((root/'submission.json').read_text())
+    continuation_path=root/'resume_submission.json'
+    if continuation_path.is_file():
+        continuation=json.loads(continuation_path.read_text())
+        if continuation['source_bundle_manifest_sha256'] != receipt['bundle_manifest_sha256']:
+            raise ValueError('resume receipt input binding differs from original campaign')
+        receipt['historical_jobs']=dict(receipt['jobs'])
+        receipt['jobs'].update(continuation['jobs'])
+        receipt['resume_driver_commit']=continuation['resume_driver_commit']
+        receipt['resume_receipt']=str(continuation_path)
     states={}
     for name,path in receipt['attempt_roots'].items():
         states[name]={}

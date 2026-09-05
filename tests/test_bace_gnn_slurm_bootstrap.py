@@ -11,6 +11,7 @@ WRAPPERS = (
     "preflight_bace_gnn_cpu.sh", "run_bace_gnn_cpu.sh",
     "evaluate_bace_gnn_seed7.sh", "package_bace_gnn_seed7.sh",
     "build_bace_gnn_bundle.sh",
+    "resume_bace_gnn_cpu.sh",
 )
 
 

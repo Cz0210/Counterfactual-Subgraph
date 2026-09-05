@@ -17,6 +17,7 @@ def _bundle(tmp_path: Path) -> Path:
     root = tmp_path / "bundle"
     root.mkdir()
     config = {
+        "dataset": {"label_map": {"0": "negative", "1": "positive"}},
         "gnn": {"backbone": "gine", "hidden_dim": 8, "num_layers": 1,
                 "dropout": 0.2, "normalization": "none", "readout_layers": 1},
         "training": {"optimizer": "adamw", "learning_rate": 0.001,
@@ -172,3 +173,29 @@ def test_cpu_benchmark_resume_matches_uninterrupted_training(tmp_path: Path, mon
     for key, state in left["optimizer_state"]["state"].items():
         for name, value in state.items():
             assert torch.equal(value, right["optimizer_state"]["state"][key][name])
+
+
+def test_real_auto_continues_numeric_label_keys_without_rewriting_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("rdkit")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    root = _bundle(tmp_path)
+    output = tmp_path / "auto"
+    result = run_cpu_auto(bundle_root=root, backbone="gin", config_path=root / "configs/gin.yaml",
+                          output_root=output, cpu_threads=1, benchmark_epochs=1)
+    assert result["status"] == "TRAINING_PASS"
+    assert result["completed_epoch"] == 3
+    assert json.loads((output / "benchmark.json").read_text())["completed_epoch"] == 1
+    config_sha = file_sha256(output / "effective_config.yaml")
+    assert config_sha == json.loads((output / "cpu_contract.json").read_text())["effective_config_sha256"]
+    assert result["effective_config_sha256"] == config_sha
+
+
+def test_resume_driver_allows_orchestration_only_changes() -> None:
+    from scripts.hpc.gnn.resume_bace_gnn_cpu import allowed_driver_change
+    assert allowed_driver_change("src/ablations/gnn/cpu_training.py")
+    assert allowed_driver_change("docs/resume.md")
+    assert allowed_driver_change("scripts/hpc/gnn/status_bace_gnn_seed7.py")
+    assert not allowed_driver_change("scripts/train_molecular_gnn.py")
+    assert not allowed_driver_change("src/models/gatedgcn_plus_backbone.py")
+    assert not allowed_driver_change("configs/gnn/gin.yaml")

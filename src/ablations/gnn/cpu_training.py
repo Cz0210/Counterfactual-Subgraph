@@ -248,12 +248,14 @@ def run_cpu_training(
     output.mkdir(parents=True, exist_ok=resume)
     config = effective_training_config(root, manifest, backbone)
     config_file = output / "effective_config.yaml"
+    from src.utils.env import load_yaml_config
     if resume:
-        if yaml.safe_load(config_file.read_text()) != config:
+        # The trainer's mapping-only parser preserves numeric-looking label
+        # keys as strings; PyYAML would turn bare 0/1 keys into integers.
+        if load_yaml_config(config_file) != config:
             raise ValueError("Frozen effective training config changed across resume")
     else:
         atomic_text(config_file, _mapping_yaml(config))
-    from src.utils.env import load_yaml_config
     if load_yaml_config(config_file) != config:
         raise ValueError("Frozen config is not representable by the existing trainer YAML parser")
     schema_path = bundle_file(root, manifest, manifest["feature_schema_path"])
