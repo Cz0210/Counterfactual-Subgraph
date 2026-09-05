@@ -20,16 +20,18 @@ def gpu_allowed(evidence, *, family):
     if family not in ("gnn", "llm"):
         raise ValueError("unknown ablation family")
     blockers = []
+    if evidence.get("main_cells", 0) < 12:
+        blockers.append("MAIN_MATRIX_BELOW_12")
     for field in ("owners_healthy", "registry_healthy", "memory_safe", "storage_safe", "checkpoint_resume_pass"):
         if evidence.get(field) is not True:
             blockers.append(field.upper())
-    if evidence.get("main_ready_waiting_gpu"):
+    if evidence.get("main_ready_waiting_gpu") is not False:
         blockers.append("MAIN_READY_WAITING_GPU")
-    if evidence.get("gpu_main_reservation"):
+    if evidence.get("gpu_main_reservation") is not False:
         blockers.append("MAIN_GPU_RESERVATION")
     if evidence.get("gpu_idle_seconds", 0) < 1200:
         blockers.append("GPU_IDLE_BELOW_1200_SECONDS")
-    if evidence.get("active_early_ablation_gpus", 0) >= 1:
+    if evidence.get("active_early_ablation_gpus") != 0:
         blockers.append("MAX_ONE_EARLY_ABLATION_GPU")
     if family == "llm" and evidence.get("gnn_core_seed7_audit") != "PASS":
         blockers.append("WAITING_GNN_CORE_SEED7")

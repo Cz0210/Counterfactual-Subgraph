@@ -8,7 +8,7 @@ def test_gnn_allowed_at12_on_hpc_cpu():
 
 
 def evidence():
-    return dict(owners_healthy=True,registry_healthy=True,memory_safe=True,storage_safe=True,
+    return dict(main_cells=12,owners_healthy=True,registry_healthy=True,memory_safe=True,storage_safe=True,
                 checkpoint_resume_pass=True,main_ready_waiting_gpu=False,gpu_main_reservation=False,
                 gpu_idle_seconds=1200,active_early_ablation_gpus=0)
 
@@ -25,3 +25,10 @@ def test_llm_gpu_requires_seed7_core_not_secondary_seeds():
     assert not gpu_allowed(e,family="llm")["allowed"]
     assert gpu_allowed({**e,"gnn_core_seed7_audit":"PASS"},family="llm")["allowed"]
     assert not core_complete({"status":"PASS","seed":7,"backbones":{"gin":"PASS"}})
+
+
+def test_gpu_gate_requires_explicit_negative_queue_and_reservations():
+    for key in ("main_cells","main_ready_waiting_gpu","gpu_main_reservation","active_early_ablation_gpus"):
+        e=evidence()
+        e.pop(key)
+        assert not gpu_allowed(e,family="gnn")["allowed"]

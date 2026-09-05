@@ -4,10 +4,11 @@
 
 - [x] Record new main > GNN seed7 > LLM core > secondary-seed priority.
 - [x] Add a small hash-verified BACE-only input bundle and safe fresh import.
-- [ ] Verify the real CPU benchmark, exact checkpoint continuation, and five backbones.
+- [x] Test exact epoch checkpoint continuation and five-backbone interfaces.
+- [ ] Measure the real HPC CPU benchmark and five-backbone forward preflight.
 - [ ] Submit no-GPU intel jobs in two dependency lanes.
 - [ ] Freeze calibration selectors before test and publish native/common ablation tables.
-- [ ] Enable LLM GPU eligibility only after the complete GNN seed7 audit.
+- [x] Gate LLM GPU eligibility on the hash-verified complete GNN seed7 audit.
 
 ## 2026-09-05: Bind T12 fresh-zero plans to sealed T3 checkpoint directories
 

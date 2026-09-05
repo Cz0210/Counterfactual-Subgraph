@@ -660,6 +660,16 @@ and NeuroSED/GPU2 leases. This is an authority/monitor layer, not the complete
 
 ## 14. Post-main ablation framework
 
+The project-owner decision of 2026-09-05 supersedes the historical scheduling
+gate below for the BACE proposal-fixed seed-7 core: it may run at main12/16 on
+HPC intel CPU, at most two jobs and no main-table GPU. Use
+`scripts/hpc/gnn/launch_bace_gnn_seed7.sh` with the hash-verified BACE bundle and
+immutable execution commit. GINE is adopted; GIN/GCN/GATv2/GatedGCN+ use the
+frozen GINE training/validation contract and fixed candidate universe.
+LLM GPU science now additionally waits for the complete GNN seed7 core audit;
+secondary GNN seeds17/27 do not block it. Historical status tools below retain
+their old post-main meaning and do not govern this separately authorized CPU route.
+
 The BACE/Ours LLM-proposer and GNN-backbone ablations are staged under
 `src/ablations/`, `configs/ablations/`, and `scripts/ablations/`.  They are
 config/provenance frameworks, not permission to run science.  The gate-only

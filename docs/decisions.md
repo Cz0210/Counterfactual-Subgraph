@@ -28,6 +28,18 @@ Formal LLM GPU science now waits for all five seed-7 classifier, native/common
 cohort, explanation and audit outputs. Secondary seeds17/27 do not block LLM.
 The AutoDL main owners and unique matrix authority retain all their authority.
 
+The CPU implementation reuses the existing epoch-resume trainer and exact
+hard-deletion/MolCLR-WNode evaluator. Each classifier uses the same main-selected
+selector variant and threshold values; there is no across-backbone retuning.
+All five calibration-native and five-way-common selectors freeze before any
+test rows are parsed. Empty calibration cohorts block selection; empty test
+cohorts report N/A, while nonempty cohorts with no flips report valid zeros.
+CPU evaluation admission measures train-only candidate verification, selector
+work, and a real non-self WNode timing probe. Missing timing or a projection
+above twelve hours preserves the trained bundles for the GPU fallback gate.
+Training resource reports describe measured terminal-run time, not an invented
+cumulative total across historical attempts.
+
 ## [2026-09-05] Hash the real T12 GINE checkpoint as a sealed content tree
 
 ### Decision

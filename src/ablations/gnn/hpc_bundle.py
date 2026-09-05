@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import csv
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -64,6 +65,7 @@ def build_bundle(*, reference_path, matrix_path, merged_pool_root, molclr_source
     if output_root.exists():
         raise ValueError("bundle requires a fresh output root")
     sources = {}
+    split_row_counts = {}
 
     def add(relative, source, digest=None):
         identity = checked_file(source, digest)
@@ -71,7 +73,14 @@ def build_bundle(*, reference_path, matrix_path, merged_pool_root, molclr_source
 
     for split, path in ref["dataset_split_paths"].items():
         add(f"data/{split}.csv", path, ref["dataset_split_hashes"][split])
+        with Path(path).open() as stream:
+            split_row_counts[split] = sum(1 for _ in csv.DictReader(stream))
     gine = Path(ref["gine_checkpoint_root"])
+    for line in (gine / "sha256sums.txt").read_text().splitlines():
+        digest, separator, name = line.partition("  ")
+        if not separator or Path(name).name != name:
+            raise ValueError("malformed frozen GINE SHA inventory")
+        checked_file(gine / name, digest)
     for name in ("model.pt", "config.yaml", "feature_schema.json", "split_manifest.json",
                  "temperature_scaling.json", "model_card.json", "label_map.json", "environment.json",
                  "sha256sums.txt", "training_metrics.json", "validation_predictions.csv", "git_state.json",
@@ -149,6 +158,7 @@ def build_bundle(*, reference_path, matrix_path, merged_pool_root, molclr_source
     manifest = {"schema_version": "bace_gnn_cpu_bundle_v1", "dataset": "bace", "seed": 7, "num_classes": 2,
                 "execution_commit": execution_commit, "files": files,
                 "splits": {s: f"data/{s}.csv" for s in ref["dataset_split_paths"]},
+                "split_row_counts": split_row_counts,
                 "feature_schema_path": "reference/gine/feature_schema.json", "training_config_path": "reference/gine/config.yaml",
                 "backbone_configs": {b: f"configs/{b}.yaml" for b in BACKBONES},
                 "gine_reference_root": "reference/gine", "reference_contract_path": "reference_contract.json",
@@ -159,6 +169,8 @@ def build_bundle(*, reference_path, matrix_path, merged_pool_root, molclr_source
                 "frozen_selection_manifest_path": "reference/selector/frozen_selection_manifest.json",
                 "selector_variant_configs_path": "reference/selector/variant_configs.json",
                 "thresholds_path": "reference/selector/thresholds.json", "wnode_config": ref["wnode_config"],
+                "molclr_encoder_type": "gin",
+                "molclr_encoder_type_source": "src/eval/bace_frozen_gnn_verification.py: MolCLRNodeWassersteinConfig default gin",
                 "main_matrix_write_allowed": False, "no_chemllm_weights": True}
     manifest["manifest_sha256"] = canonical_json_sha256(manifest)
     atomic_json(payload_root / "bundle_manifest.json", manifest)
