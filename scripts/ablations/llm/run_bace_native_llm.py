@@ -78,6 +78,8 @@ def parser():
     prep.add_argument("--brics-root", required=True)
     prep.add_argument("--output-root", required=True)
     prep.add_argument("--execution-commit", required=True)
+    prep.add_argument("--two-b-isolated-receipt")
+    prep.add_argument("--two-b-isolated-receipt-sha256")
     gen = commands.add_parser("generate")
     for name in ("task-spec", "task-spec-sha256", "output-root", "gnn-verified-archive",
                  "gnn-verified-archive-sha256", "resource-evidence", "resource-evidence-sha256"):
@@ -98,9 +100,14 @@ def main(argv=None):
     if args.command == "prepare":
         if commit != args.execution_commit:
             raise ValueError("Preparation execution commit differs from actual checkout")
+        proof = None
+        if args.two_b_isolated_receipt or args.two_b_isolated_receipt_sha256:
+            if not args.two_b_isolated_receipt or not args.two_b_isolated_receipt_sha256:
+                raise ValueError("Both isolated receipt path and SHA are required")
+            proof = {"path": args.two_b_isolated_receipt, "sha256": args.two_b_isolated_receipt_sha256}
         result = prepare_bace_llm(reference_path=args.reference, reference_sha256=args.reference_sha256,
             two_b_root=args.two_b_root, brics_root=args.brics_root, output_root=args.output_root,
-            execution_commit=commit)
+            execution_commit=commit, two_b_isolated_receipt=proof)
     else:
         spec_path = verified_file({"path": args.task_spec, "sha256": args.task_spec_sha256})
         spec = json.loads(spec_path.read_text())
@@ -115,8 +122,20 @@ def main(argv=None):
         if args.two_b_isolated_receipt or args.two_b_isolated_receipt_sha256:
             if not args.two_b_isolated_receipt or not args.two_b_isolated_receipt_sha256:
                 raise ValueError("Both isolated receipt path and SHA are required")
-            spec = {**spec, "isolated_cpu_load_receipt": {"path": args.two_b_isolated_receipt,
-                    "sha256": args.two_b_isolated_receipt_sha256}}
+            proof = {"path": args.two_b_isolated_receipt, "sha256": args.two_b_isolated_receipt_sha256}
+            if proof != spec.get("isolated_cpu_load_receipt"):
+                raise ValueError("Isolated proof must be frozen by prepare, never injected into a sealed task")
+        destination = Path(args.output_root).absolute()
+        scope = Path(spec["output_scope_root"])
+        if (not scope.is_absolute() or scope not in destination.parents
+                or any(parent.is_symlink() for parent in (destination, *destination.parents))):
+            raise ValueError("Native generation must stay within the dedicated physical LLM output scope")
+        if args.resume:
+            # Check before opening/creating the writer lock: an incorrect main
+            # or unrelated ablation root must not be touched even on failure.
+            latest = json.loads((destination / "latest_checkpoint.json").read_text())
+            if latest["spec_sha256"] != canonical_json_sha256(spec):
+                raise ValueError("Requested resume root belongs to another task")
         # Dynamic resource values are not scientific task fields or RNG inputs.
         # Stale/missing main evidence asks for a checkpoint pause, never a broad kill.
         def current_permission():

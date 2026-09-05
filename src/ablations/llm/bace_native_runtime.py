@@ -71,6 +71,19 @@ def render_native_inputs(model: Any, tokenizer: Any, prompt: str, size: str) -> 
     raise ValueError("Only the two pinned ChemLLM scales are supported")
 
 
+def verified_2b_runtime_proof(model_spec: Mapping[str, Any], proof: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not proof:
+        raise ValueError("L3 requires actual isolated CPU weight/forward/generation PASS")
+    receipt = validate_isolated_load_receipt(verified_file(proof), require_weights=True)
+    tiny = receipt.get("tiny_forward") or {}
+    if (tiny.get("status") != "PASS" or tiny.get("tiny_generation_only") is not True
+            or tiny.get("tiny_generation_max_new_tokens") != 4
+            or not 0 < tiny.get("tiny_generation_token_count", 0) <= 4
+            or receipt.get("code_inventory_sha256") != model_spec["remote_code_audit"]["code_inventory_sha256"]):
+        raise ValueError("L3 isolated native tiny generation/source proof differs")
+    return receipt
+
+
 class BACEHFNativeRuntime:
     def __init__(self, spec: Mapping[str, Any]):
         import torch
@@ -79,16 +92,7 @@ class BACEHFNativeRuntime:
         model_spec = spec["model"]
         self.size = model_spec["size"]
         if self.size == "2b":
-            proof = spec.get("isolated_cpu_load_receipt")
-            if not proof:
-                raise ValueError("L3 requires actual isolated CPU weight/forward/generation PASS")
-            receipt = validate_isolated_load_receipt(verified_file(proof), require_weights=True)
-            if (receipt.get("tiny_forward", {}).get("status") != "PASS"
-                    or receipt["tiny_forward"].get("tiny_generation_only") is not True
-                    or receipt["tiny_forward"].get("tiny_generation_max_new_tokens") != 4
-                    or not 0 < receipt["tiny_forward"].get("tiny_generation_token_count", 0) <= 4
-                    or receipt.get("code_inventory_sha256") != model_spec["remote_code_audit"]["code_inventory_sha256"]):
-                raise ValueError("L3 isolated native tiny generation/source proof differs")
+            verified_2b_runtime_proof(model_spec, spec.get("isolated_cpu_load_receipt"))
         if torch.cuda.device_count() != 1:
             raise ValueError("Formal generation requires exactly one already-leased visible GPU")
         root = Path(model_spec["root"])

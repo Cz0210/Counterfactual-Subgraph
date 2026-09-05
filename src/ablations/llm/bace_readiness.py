@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.ablations.llm.bace_native_runtime import SOURCE_PINS, VARIANTS, audit_native_source, verified_file
+from src.ablations.llm.bace_native_runtime import (
+    SOURCE_PINS, VARIANTS, audit_native_source, verified_file, verified_2b_runtime_proof,
+)
 from src.ablations.llm.contracts import canonical_json_sha256
 from src.ablations.llm.runtime_evidence import load_bace_reference_v2
 from src.eval.bace_frozen_gnn_contracts import (
@@ -69,7 +71,8 @@ def _small_source_inventory(root: Path, expected_weights: Mapping[str, str]) -> 
 
 def prepare_bace_llm(*, reference_path: str | Path, reference_sha256: str,
                      two_b_root: str | Path, brics_root: str | Path,
-                     output_root: str | Path, execution_commit: str) -> dict[str, Any]:
+                     output_root: str | Path, execution_commit: str,
+                     two_b_isolated_receipt: Mapping[str, Any] | None = None) -> dict[str, Any]:
     reference = load_bace_reference_v2(reference_path, reference_sha256)
     values = reference.payload
     calls = generation_calls(values)
@@ -104,6 +107,8 @@ def prepare_bace_llm(*, reference_path: str | Path, reference_sha256: str,
     ppo = {"root": values["ppo"]["checkpoint_root"], "files": ppo_files,
            "optimizer_updates": 300, "training_rerun_allowed": False}
     common = {"schema_version": "bace_native_llm_task_v1", "execution_commit": execution_commit,
+        "dataset": "bace", "method": "ours", "seed": 7, "source_label": 1,
+        "output_scope_root": str(Path(reference.path).parent.parent / "llm"),
         "reference_contract": {"path": reference.path, "sha256": reference.file_sha256},
         "calls": calls, "parent_count": 386, "attempts_per_parent": 8,
         "main_adaptation": "BASE_PLUS_FRESH_LORA_PLUS_PPO", "project_sft_exists": False,
@@ -118,6 +123,9 @@ def prepare_bace_llm(*, reference_path: str | Path, reference_sha256: str,
         "main_matrix_13_required": False, "test_loaded_during_generation": False,
         "formal_safe_gpu_release_seconds_measured": None}
     tasks = {}
+    project = Path(__file__).resolve().parents[3]
+    downstream_entrypoint = project / "scripts/ablations/llm/run_bace_common_downstream.py"
+    downstream_module = project / "src/ablations/llm/bace_common_downstream.py"
     for variant in VARIANTS:
         spec = {**common, "variant": variant, "ppo_adapter": ppo if variant == VARIANTS[2] else None}
         if variant == VARIANTS[0]:
@@ -144,11 +152,24 @@ def prepare_bace_llm(*, reference_path: str | Path, reference_sha256: str,
             spec["blocker"] = blockers.get(size)
             if size == "2b":
                 spec["isolated_cpu_load_receipt_required_before_generation"] = True
+                if spec["model"] is not None:
+                    try:
+                        verified_2b_runtime_proof(spec["model"], two_b_isolated_receipt)
+                        spec["isolated_cpu_load_receipt"] = dict(two_b_isolated_receipt)
+                    except Exception as exc:
+                        spec["generator_state"] = "BLOCKED_MISSING_ISOLATED_CPU_PROOF"
+                        spec["blocker"] = str(exc)
             if variant == VARIANTS[2]:
                 spec["main_adoption_decision"] = ppo_adoption_decision(values, rendering=common["prompt_rendering"])
-        # Deliberately not READY for final science until the real single-model
-        # verification/selector entrypoint is connected and independently tested.
-        spec["downstream_state"] = "BLOCKED_MISSING_EXECUTABLE_COMMON_DOWNSTREAM"
+        # This is code-entrypoint readiness, never a result/metric PASS. The
+        # real single-GINE adapter has focused tests; it still requires the
+        # independently verified GNN package and real candidate pool at runtime.
+        spec["downstream_state"] = "EXECUTABLE_ENTRYPOINT_READY_WAITING_GNN_CORE"
+        spec["downstream_implementation"] = {"execution_commit": execution_commit,
+            "entrypoint": file_identity(downstream_entrypoint),
+            "module": file_identity(downstream_module),
+            "cohort": "FROZEN_MAIN_GINE_TRUE_SOURCE_CORRECT_PREDICTION",
+            "calibration_only_selector": True, "test_only_after_freeze": True}
         spec["task_spec_sha256"] = canonical_json_sha256(spec)
         path = output / f"{variant}.task.json"
         atomic_json(path, spec)

@@ -1,5 +1,47 @@
 # Decisions Log
 
+## [2026-09-05] Execute matched LLM pools with the frozen BACE downstream
+
+The four core treatments are BRICS, 7B off-the-shelf, the existing 7B PPO LoRA,
+and 2B off-the-shelf. No independent project SFT checkpoint exists. The actual
+2B isolated CPU load, finite forward and four-token native generation passed;
+its 1,889,110,016 parameters were counted from loaded tensors. Native generation
+has per-parent-call RNG-bound resume. This is not yet a real GPU resume proof
+or a measured 120-second release guarantee. GPU1/T13 borrowing is unsupported.
+
+BRICS adoption verifies the existing proposal-to-vocabulary/shortfall hash
+links and their shared reference; missing direct reference text is not silently
+filled in. A single executable common evaluator reuses the main BACE parser,
+hard deletion, GINE, exact WNode and frozen selector. Its source cohort remains
+the main evaluator's true-source definition, not the GNN native intersection.
+Each variant freezes calibration selection before reading test, and publishes
+only to an independent LLM registry. The existing 7B main plain-prompt pool is
+not a matched native-chat pool; only the already-trained PPO weights may be
+reused for matched regeneration, without training again. Source and generation
+driver commits are separately recorded.
+
+## [2026-09-05] Relay only the verified fd98c5f2 seed-7 package through the Mac
+
+The scoped Mac relay waits for this campaign's `verified/result_package.json`,
+not a producer exit code. It hashes the HPC archive, transfers to a fresh UUID
+on DireRaven, verifies bytes/SHA before atomic finalization, then repeats that
+check in a fresh AutoDL incoming directory and invokes the existing independent
+importer in a separate fresh root. Historical paths and source files remain
+untouched. No inference, GPU lease, matrix append, LLM launch or cleanup occurs.
+
+The system Mac rsync2.6.9 is supported with `--partial`; newer append/info and
+delete options are forbidden. A 60-second heartbeat remains live while waiting,
+hashing and transferring. SSH is BatchMode-only; any network/transfer/import
+failure preserves evidence and exits without automatic retries. Missing package
+after a failed fixed Slurm chain fails explicitly; normal pending/running work
+is checked once per minute, with a seven-day relay wait ceiling.
+
+This is Mac control code, paired with `scripts/local/run_gnn_seed7_verified_relay.sh`,
+not a Slurm workload. It intentionally has no submit-ready HPC/GPU wrapper.
+Use `scripts/local/run_gnn_seed7_verified_relay.sh plan --attempt-id <UUIDv4>`
+to inspect the fixed paths, then `run --attempt-id <same-unused-UUIDv4>` when
+the controller operator deploys it. An existing attempt is never overwritten.
+
 ## [2026-09-05] Close seed-7 evaluation with exact CPU parent shards and independent publication
 
 Job 2558288 exited successfully after admission only: its measured conservative

@@ -368,6 +368,22 @@ def validate_variant_artifact_bindings(
         ):
             raise LLMAblationContractError("BRICS proposal manifest does not bind adopted pool")
         reference_identity = proposal.get("reference_contract")
+        if reference_identity is None:
+            # The sealed v2 BRICS producer records reference provenance in both
+            # vocabulary and shortfall manifests, and SHA-binds those two files
+            # from its proposal manifest. Adopt that exact transitive chain;
+            # never add a synthetic field to the original scientific artifact.
+            for field, leaf, payload in (
+                ("vocabulary_manifest", "brics_vocab_manifest.json", vocabulary),
+                ("shortfall_receipt", "brics_proposal_shortfall_receipt.json", shortfall),
+            ):
+                bound = proposal.get(field, {})
+                identity = identities[leaf]
+                if (bound.get("path") != identity.path or bound.get("sha256") != identity.sha256
+                        or sha256_file(Path(identity.path)) != identity.sha256
+                        or payload.get("reference_contract", {}).get("sha256") != reference.file_sha256):
+                    raise LLMAblationContractError("BRICS transitive manifest/reference binding differs")
+            reference_identity = vocabulary["reference_contract"]
         if not isinstance(reference_identity, Mapping) or (
             reference_identity.get("sha256") != reference.file_sha256
         ):
