@@ -18294,3 +18294,13 @@ an exact comparison.
   PASS cannot. L1/L2/L3 use the existing resource gate, no main cell-count or
   secondary-seed prerequisite, no GPU borrowing and no reservation clearing.
 - See `docs/BACE_GNN_TEMPERATURE_CORRECTION_20260905.md` for real entrypoints.
+# 2026-09-05 — Corrective package verifier-only recovery
+
+The first temperature-correction chain fitted the four frozen classifiers and completed
+all 902 parent-model units without new OT. Its final portable verification incorrectly
+counted ten `parents/progress.json` status records as scientific checkpoints. These
+status files remain hash-bound in the full package inventory but are not parent units.
+Fix only that classification and reopen the existing corrective archive in a fresh
+verification attempt. Preserve failed Slurm job 2560779, the archive, all fits and
+evaluation results. No refit, model inference, OT or repack is authorized by this
+engineering retry. Record the temperature driver and the verifier driver separately.

@@ -13,12 +13,13 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config',required=True)
     p.add_argument('--action',required=True,choices=('plan','fit','reconcile-calibration','freeze',
-        'reconcile-test','finish','verify-package','status'))
+        'reconcile-test','finish','verify-package','verify-existing-package','status'))
     p.add_argument('--output-root',required=True)
     p.add_argument('--source-spec')
     p.add_argument('--original-package')
     p.add_argument('--authorization')
     p.add_argument('--driver-commit')
+    p.add_argument('--verification-root')
     a=p.parse_args()
     if os.environ.get('CUDA_VISIBLE_DEVICES','') not in ('','-1'):
         raise ValueError('CPU_CORRECTION_MUST_NOT_SEE_GPU')
@@ -31,6 +32,9 @@ def main():
     elif a.action=='reconcile-test': result=repair.reconcile(a.output_root,split='test')
     elif a.action=='finish': result=repair.replay_phase(a.output_root,phase='finish')
     elif a.action=='verify-package': result=repair.verify_package(a.output_root)
+    elif a.action=='verify-existing-package':
+        if not a.verification_root: p.error('--verification-root is required for a fresh verifier-only attempt')
+        result=repair.verify_existing_package(a.output_root,a.verification_root)
     else: result=repair.status(a.output_root)
     print(json.dumps(result,sort_keys=True),flush=True)
 

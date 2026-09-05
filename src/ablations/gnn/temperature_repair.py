@@ -706,6 +706,34 @@ def verify_package(output_root):
     return read_json(verified/'result_package.json')
 
 
+def verify_existing_package(output_root, verification_root):
+    """Fresh verifier-only receipt; never repeat fit, inference, OT or packaging."""
+    output, contract, *_ = context(output_root)
+    require(os.environ.get('SLURM_JOB_ID'), 'INDEPENDENT_CORRECTIVE_AUDIT_REQUIRES_COMPUTE_JOB')
+    attempt = Path(verification_root).absolute()
+    require(attempt.parent == output and not attempt.exists(), 'FRESH_SCOPED_VERIFICATION_ATTEMPT_REQUIRED')
+    destination = output / 'verified/result_package.json'
+    require(not destination.exists(), 'EXISTING_PACKAGE_RECEIPT_DO_NOT_OVERWRITE')
+    archive = output / 'verified/bace_gnn_seed7_corrected.tar.gz'
+    before = sha256_file(archive)
+    require(sha256_file(contract['original_package']) == ORIGINAL_SHA, 'ORIGINAL_PACKAGE_NOT_PRESERVED')
+    checked = verify_corrective_package(archive)
+    require(sha256_file(archive) == before, 'CORRECTIVE_PACKAGE_MUTATED_DURING_VERIFICATION')
+    import subprocess
+    driver = subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).resolve().parents[3],text=True).strip()
+    attempt.mkdir()
+    receipt = dict(checked, archive=str(archive), path=str(archive),
+        bytes=archive.stat().st_size, sha256=before, package_sha256=before,
+        temperature_driver_commit=contract['driver_commit'], repair_driver_commit=driver,
+        verification_driver_commit=driver, verification_only_repair=True,
+        fit_repeated=False, inference_repeated=False, ot_repeated=False, package_repacked=False,
+        preserved_failed_job='2560779', verification_job=os.environ['SLURM_JOB_ID'],
+        verification_root=str(attempt), main_matrix_write=False)
+    atomic_json(attempt / 'verification.json', receipt)
+    atomic_json(destination, receipt)
+    return receipt
+
+
 def _verify_corrective_science_bindings(manifest, data, rows, proof):
     """Reopen the independent replay's exact portable inputs; no inference/OT."""
     files = manifest['files']
@@ -746,8 +774,11 @@ def _verify_corrective_science_bindings(manifest, data, rows, proof):
         require(files[f'evaluation/{name}/calibration_classifier_predictions.csv']['sha256'] ==
             science['calibration_prediction_sha256s'][name], 'PORTABLE_CALIBRATION_PREDICTION_DRIFT')
     evidence = science['parent_scientific_checkpoint_sha256s']
+    # Each parent writer also seals one progress log, not a scientific checkpoint.
+    # These ten exact paths remain bound by the package/producer file inventories.
     actual_parents = {rel.removeprefix('evaluation/') for rel in files if any(
-        rel.startswith(f'evaluation/{name}/{split}/parents/') for name in core.BACKBONES
+        rel.startswith(f'evaluation/{name}/{split}/parents/')
+        and rel != f'evaluation/{name}/{split}/parents/progress.json' for name in core.BACKBONES
         for split in ('calibration', 'test'))}
     require(set(evidence) == actual_parents, 'PORTABLE_PARENT_AUDIT_INVENTORY_DRIFT')
     for rel, digest in evidence.items():

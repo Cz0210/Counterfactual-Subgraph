@@ -79,6 +79,40 @@ def test_portable_replays_five_model_prediction_cohorts_and_complete_parent_set(
     assert ('gin', 'calibration', 'calibration-p1') in units
 
 
+def _add_real_layout_progress_logs(portable):
+    manifest, documents, _, _ = portable
+    producer = documents['evaluation/gnn_seed7_final_audit.json']['files']
+    for name in repair.core.BACKBONES:
+        for split in ('calibration', 'test'):
+            rel = f'{name}/{split}/parents/progress.json'
+            manifest['files']['evaluation/' + rel] = {'sha256': 'progress:' + rel, 'size': 1}
+            producer[rel] = 'progress:' + rel
+            documents['evaluation/' + rel] = {'completed': 1}
+
+
+def test_portable_real_five_backbone_two_split_layout_excludes_only_ten_progress_logs(portable):
+    _add_real_layout_progress_logs(portable)
+    units, paths = verify(portable)
+    assert len(units) == len(paths) == 10
+    assert not any(path.endswith('/progress.json') for path in paths)
+    assert sum(path.endswith('/parents/progress.json') for path in portable[0]['files']) == 10
+
+
+def test_portable_progress_logs_remain_integrity_bound(portable):
+    _add_real_layout_progress_logs(portable)
+    portable[0]['files']['evaluation/gin/test/parents/progress.json']['sha256'] = 'changed'
+    with pytest.raises(ValueError, match='PORTABLE_PRODUCER_FILE_DRIFT'):
+        verify(portable)
+
+
+@pytest.mark.parametrize('leaf', ['checkpoint-progress.json', 'nested/progress.json'])
+def test_portable_unknown_parent_file_is_not_silently_excluded(portable, leaf):
+    _add_real_layout_progress_logs(portable)
+    portable[0]['files']['evaluation/gin/test/parents/' + leaf] = {'sha256': 'unexpected', 'size': 1}
+    with pytest.raises(ValueError, match='PORTABLE_PARENT_AUDIT_INVENTORY_DRIFT'):
+        verify(portable)
+
+
 @pytest.mark.parametrize('flag', ['state', 'all_five_validation_temperatures_fitted_and_input_bound',
     'global_calibration_selector_replayed', 'native_common_metrics_replayed', 'ot_recomputed'])
 def test_portable_rejects_stale_or_non_scientific_replay_receipt(portable, flag):
