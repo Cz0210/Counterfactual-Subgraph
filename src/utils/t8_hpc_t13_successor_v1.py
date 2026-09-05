@@ -207,6 +207,26 @@ def _file_sha(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _verified_import_adoption(root: Path, expected: dict[str, str]) -> dict[str, Any]:
+    """Read-only adoption of a complete imported result, never a second import."""
+    from src.baselines.globalgce_hpc_autodl_import import validate_imported_hpc_result
+
+    manifest = validate_imported_hpc_result(root)
+    for field, value in expected.items():
+        if manifest.get(field) != value:
+            raise T8HPCT13SpecError(f"adopted HPC import {field} mismatch")
+    return {
+        "status": "DEEP_IMPORT_PASS_ADOPTED",
+        "import_root": str(root),
+        "import_manifest_sha256": manifest["import_manifest_sha256"],
+        "source_archive_sha256": manifest["source_archive_sha256"],
+        "mining_adoption": manifest["mining_adoption"],
+        "identity": expected,
+        "science_rerun": False,
+        "import_rerun": False,
+    }
+
+
 def build_spec_set(
     *,
     repo_root: str | Path,
@@ -237,6 +257,7 @@ def build_spec_set(
     import_attempt_id: str | None = None,
     t13_attempt_id: str | None = None,
     publisher_id: str = "taste-globalgce-final16-canonical",
+    verified_import_adoption: bool = False,
 ) -> dict[str, Any]:
     """Build three immutable specs; no science or publisher is started."""
 
@@ -267,8 +288,19 @@ def build_spec_set(
     gpu_lease = _absolute(gpu_lease_path, label="gpu_lease_path")
     if len({str(import_root), str(science_root), str(root)}) != 3:
         raise T8HPCT13SpecError("spec, import, and T13 roots must be distinct")
+    adoption = None
+    if verified_import_adoption:
+        if not import_root.is_dir():
+            raise T8HPCT13SpecError("verified import adoption requires an existing root")
+        adoption = _verified_import_adoption(import_root, {
+            "execution_commit": expected_hpc_execution_commit,
+            "scientific_input_sha256": expected_scientific_input_sha256,
+            "partition_manifest_sha256": expected_partition_manifest_sha256,
+            "official_globalgce_commit": OFFICIAL_GLOBALGCE_COMMIT,
+        })
+    elif import_root.exists() or import_root.is_symlink():
+        raise T8HPCT13SpecError("import output must be fresh")
     for path, label in (
-        (import_root, "import output"),
         (science_root, "T13 output"),
         (locator, "T13 locator"),
     ):
@@ -318,7 +350,8 @@ def build_spec_set(
             "owner_entrypoint": str(
                 repository / "scripts/autodl/run_t8_hpc_import_owner_v1.py"
             ),
-            "fresh_output_required": True,
+            "fresh_output_required": not verified_import_adoption,
+            "verified_import_adoption": adoption,
             "hpc_permissions": {
                 "matrix_write": False,
                 "gine_inference": False,
@@ -332,6 +365,8 @@ def build_spec_set(
     import_manifest = import_root / "import_manifest.json"
     t13_command = [
         str(interpreter),
+        "-I",
+        "-B",
         str(repository / "scripts/autodl/run_t13_from_hpc_import_v1.py"),
         "--config",
         str(repository / "configs/hpc.yaml"),
@@ -383,7 +418,10 @@ def build_spec_set(
             "python": str(interpreter),
             "required_import_root": str(import_root),
             "required_import_manifest": str(import_manifest),
-            "required_import_manifest_sha256": "RESOLVE_AFTER_IMPORT_PASS",
+            "required_import_manifest_sha256": (
+                adoption["import_manifest_sha256"] if adoption
+                else "RESOLVE_AFTER_IMPORT_PASS"
+            ),
             "output_root": str(science_root),
             "gpu_index": gpu_index,
             "gpu_uuid": gpu_uuid,
@@ -532,6 +570,14 @@ def validate_spec_set(
         "--seed": "7",
     }
     command_pairs: dict[str, Any] = {}
+    entrypoint = str(repository / "scripts/autodl/run_t13_from_hpc_import_v1.py")
+    # Legacy sealed specs remain readable for history/recovery.  The owner
+    # separately refuses to execute their non-isolated command.
+    command_prefix_valid = type(command) is list and (
+        command[:4] == [t13_spec.get("python"), "-I", "-B", entrypoint]
+        or command[:3] == [t13_spec.get("python"), "-I", entrypoint]
+        or command[:2] == [t13_spec.get("python"), entrypoint]
+    )
     if type(command) is list:
         for index, token in enumerate(command[:-1]):
             if token in required_command_pairs:
@@ -547,8 +593,7 @@ def validate_spec_set(
         or t13_spec.get("owner_acquires_gpu_only_after_import_pass") is not True
         or type(command) is not list
         or len(command) < 10
-        or command[1]
-        != str(repository / "scripts/autodl/run_t13_from_hpc_import_v1.py")
+        or not command_prefix_valid
         or command_pairs != required_command_pairs
         or "--t8-pass-root" in command
         or "matrix-authority" in " ".join(str(value).lower() for value in command)
@@ -577,6 +622,28 @@ def validate_spec_set(
         or publisher.get("expected_terminal_root") != t13_spec.get("output_root")
     ):
         raise T8HPCT13SpecError("successor task chain contract changed")
+    adoption = import_spec.get("verified_import_adoption")
+    if adoption is not None:
+        expected_identity = {
+            "execution_commit": import_spec["expected_hpc_execution_commit"],
+            "scientific_input_sha256": import_spec["expected_scientific_input_sha256"],
+            "partition_manifest_sha256": import_spec["expected_partition_manifest_sha256"],
+            "official_globalgce_commit": OFFICIAL_GLOBALGCE_COMMIT,
+        }
+        if (
+            not isinstance(adoption, dict)
+            or adoption.get("identity") != expected_identity
+            or adoption.get("import_root") != import_spec["output_root"]
+            or import_spec["output_root"] != t13_spec["required_import_root"]
+            or import_spec.get("fresh_output_required") is not False
+            or adoption.get("import_manifest_sha256")
+            != t13_spec.get("required_import_manifest_sha256")
+        ):
+            raise T8HPCT13SpecError("verified import adoption binding changed")
+        if check_files and adoption != _verified_import_adoption(
+            Path(import_spec["output_root"]), expected_identity
+        ):
+            raise T8HPCT13SpecError("adopted HPC import changed after spec sealing")
     if check_files:
         repository = _absolute(import_spec["repo_root"], label="repo root", exists=True)
         if _clean_commit(repository) != manifest.get("execution_commit"):

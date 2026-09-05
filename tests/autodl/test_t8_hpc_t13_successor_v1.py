@@ -276,7 +276,7 @@ def _relay_package(
     }
 
 
-def _specs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dict]:
+def _specs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides) -> tuple[Path, dict]:
     monkeypatch.setattr(successor, "_clean_commit", lambda _root: "a" * 40)
     output = tmp_path / "specs"
     values = {
@@ -308,6 +308,7 @@ def _specs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dict]
         "import_attempt_id": "da80219a-0da6-4b7a-b522-68e1f4469caa",
         "t13_attempt_id": "f8f7ec0b-ab12-42de-965e-cf46f80deba6",
     }
+    values.update(overrides)
     result = successor.build_spec_set(**values)
     return output, result
 
@@ -406,6 +407,87 @@ def test_exact_relay_verifier_imports_only_complete_16_shard_train_bundle(
     assert manifest["calibration_test_export_pending_autodl"] is True
     assert not (output / "PASS").exists()
     assert not (output / "cell_root_locator.json").exists()
+    before = {str(path.relative_to(output)): _sha(path) for path in output.rglob("*") if path.is_file()}
+    spec_root, specs = _specs(
+        tmp_path, monkeypatch, import_output_root=output,
+        verified_import_adoption=True,
+        expected_hpc_execution_commit=identity["execution_commit"],
+        expected_scientific_input_sha256=identity["scientific_sha"],
+        expected_partition_manifest_sha256=identity["partition_sha"],
+    )
+    assert specs["t13"]["command"][1:3] == ["-I", "-B"]
+    assert specs["import"]["verified_import_adoption"]["import_rerun"] is False
+    assert specs["t13"]["required_import_manifest_sha256"] == manifest["import_manifest_sha256"]
+    release = successor.write_t13_release(
+        spec_root=spec_root, import_root=output, output=tmp_path / "fresh.release.json"
+    )
+    assert release["status"] == "READY_WAITING_T13_GPU"
+    successor.validate_t13_release(spec_root=spec_root, release_path=tmp_path / "fresh.release.json")
+    assert before == {str(path.relative_to(output)): _sha(path) for path in output.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("field", ["execution_commit", "scientific_input_sha256", "partition_manifest_sha256", "official_globalgce_commit"])
+def test_verified_import_adoption_rejects_wrong_identity(tmp_path, monkeypatch, field):
+    imported = tmp_path / "import"
+    imported.mkdir()
+    expected = {
+        "execution_commit": "4" * 40,
+        "scientific_input_sha256": "5" * 64,
+        "partition_manifest_sha256": "6" * 64,
+        "official_globalgce_commit": exact.OFFICIAL_GLOBALGCE_COMMIT,
+    }
+    wrong = dict(expected, **{field: "wrong"})
+    monkeypatch.setattr(importer, "validate_imported_hpc_result", lambda _root: wrong)
+    with pytest.raises(successor.T8HPCT13SpecError, match=f"{field} mismatch"):
+        _specs(tmp_path, monkeypatch, verified_import_adoption=True)
+    assert not (tmp_path / "specs").exists()
+
+
+def test_verified_import_adoption_cannot_skip_deep_gate(tmp_path, monkeypatch):
+    (tmp_path / "import").mkdir()
+    def reject(_root):
+        raise importer.T8HPCAutoDLImportError("corrupt selected patterns")
+    monkeypatch.setattr(importer, "validate_imported_hpc_result", reject)
+    with pytest.raises(importer.T8HPCAutoDLImportError, match="corrupt"):
+        _specs(tmp_path, monkeypatch, verified_import_adoption=True)
+    assert not (tmp_path / "specs").exists()
+
+
+def test_legacy_spec_is_readable_but_not_executable(tmp_path, monkeypatch):
+    root, specs = _specs(tmp_path, monkeypatch)
+    t13 = dict(specs["t13"])
+    t13["command"] = [token for token in t13["command"] if token not in ("-I", "-B")]
+    t13.pop("task_spec_sha256")
+    t13 = _hashed(t13, "task_spec_sha256")
+    _json(root / "t13_from_hpc_task_spec.json", t13)
+    manifest = dict(specs["manifest"])
+    manifest["task_spec_sha256s"]["t13"] = t13["task_spec_sha256"]
+    manifest.pop("spec_set_sha256")
+    _json(root / "spec_set_manifest.json", _hashed(manifest, "spec_set_sha256"))
+    assert successor.validate_spec_set(root)["t13"]["command"][1].endswith(".py")
+    release = tmp_path / "release.json"
+    _json(release, {})
+    monkeypatch.setattr(t13_owner, "validate_t13_release", lambda **_kw: {})
+    monkeypatch.setattr(t13_owner, "_nonblocking_lease", lambda _p: pytest.fail("must not request GPU"))
+    with pytest.raises(t13_owner.T13FromHPCOwnerError, match="requires python -I"):
+        t13_owner.run_once(spec_root=root, release_path=release, heartbeat=tmp_path / "owner/heartbeat.json", owner_root=tmp_path / "owner", poll_seconds=5)
+
+
+def test_owner_subprocess_failure_seals_failed_terminal(tmp_path, monkeypatch):
+    owner_root = tmp_path / "fresh-owner"
+    owner_root.mkdir()
+    heartbeat = owner_root / "heartbeat.json"
+    t13_owner._heartbeat(heartbeat, state="T13_AUTODL_SCIENCE_RUNNING", science_started=True, science_pid=12345)
+    def fail(**_kwargs):
+        raise t13_owner.T13FromHPCOwnerError("science exited with code 1")
+    monkeypatch.setattr(t13_owner, "run_once", fail)
+    with pytest.raises(t13_owner.T13FromHPCOwnerError, match="code 1"):
+        t13_owner.run(spec_root=tmp_path / "specs", release_path=tmp_path / "release", heartbeat=heartbeat, owner_root=owner_root, poll_seconds=5, once=True)
+    terminal = json.loads((owner_root / "terminal.json").read_text())
+    assert terminal["state"] == "FAILED"
+    assert terminal["last_observed_heartbeat"]["science_pid"] == 12345
+    assert terminal["science_root_modified_by_failure_handler"] is False
+    assert json.loads(heartbeat.read_text())["state"] == "FAILED"
 
 
 def test_exact_relay_verifier_accepts_strict_scoped_v2_marker(

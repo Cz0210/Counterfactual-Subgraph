@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.utils.t8_hpc_t13_successor_v1 import (  # noqa: E402
     atomic_json,
+    atomic_json_no_replace,
     publish_verified_t13_locator,
     validate_spec_set,
     validate_t13_release,
@@ -147,6 +148,10 @@ def _run_process(
             stderr=stderr,
             close_fds=True,
         )
+        _heartbeat(
+            heartbeat, state=state, science_started=True, science_pid=process.pid,
+            detail={"command": command, "cwd": str(cwd)},
+        )
         while process.poll() is None:
             _heartbeat(
                 heartbeat,
@@ -192,6 +197,12 @@ def run_once(
             science_started=True,
             detail={"locator": str(locator), "terminal_root": published["terminal_root"]},
         )
+    command = [str(value) for value in t13["command"]]
+    if command[:3] != [str(t13["python"]), "-I", "-B"]:
+        raise T13FromHPCOwnerError(
+            "T13 execution requires python -I -B; preserve the legacy sealed spec "
+            "and create a fresh verified-import-adoption spec"
+        )
     lease_path = Path(t13["gpu_lease_path"])
     with _nonblocking_lease(lease_path) as lease:
         if lease is None:
@@ -209,7 +220,6 @@ def run_once(
                 science_started=False,
                 detail=gpu,
             )
-        command = [str(value) for value in t13["command"]]
         checkpoint = output / "checkpoint.json"
         if output.exists():
             if output.is_symlink() or not output.is_dir() or not checkpoint.is_file():
@@ -239,6 +249,8 @@ def run_once(
         )
         verifier = [
             str(t13["python"]),
+            "-I",
+            "-B",
             str(Path(t13["repo_root"]) / "scripts/autodl/run_t13_from_hpc_import_v1.py"),
             "--config",
             str(Path(t13["repo_root"]) / "configs/hpc.yaml"),
@@ -284,13 +296,42 @@ def run(
     once: bool,
 ) -> dict[str, Any]:
     while True:
-        result = run_once(
-            spec_root=spec_root,
-            release_path=release_path,
-            heartbeat=heartbeat,
-            owner_root=owner_root,
-            poll_seconds=poll_seconds,
-        )
+        try:
+            result = run_once(
+                spec_root=spec_root,
+                release_path=release_path,
+                heartbeat=heartbeat,
+                owner_root=owner_root,
+                poll_seconds=poll_seconds,
+            )
+        except Exception as error:
+            # This is the fresh launcher's owner directory, never a science
+            # root or an older attempt. Preserve the last child/phase evidence.
+            if owner_root.is_dir() and not owner_root.is_symlink():
+                previous: dict[str, Any] = {}
+                if heartbeat.is_file() and not heartbeat.is_symlink():
+                    try:
+                        previous = json.loads(heartbeat.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        pass
+                failure = {
+                    "schema_version": "t13_from_hpc_owner_terminal_v1",
+                    "state": "FAILED", "owner_pid": os.getpid(),
+                    "spec_root": str(spec_root),
+                    "error_type": type(error).__name__, "reason": str(error),
+                    "last_observed_heartbeat": previous,
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "science_root_modified_by_failure_handler": False,
+                    "matrix_write_enabled": False,
+                }
+                atomic_json_no_replace(owner_root / "terminal.json", failure)
+                _heartbeat(
+                    heartbeat, state="FAILED",
+                    science_started=bool(previous.get("science_started", False)),
+                    science_pid=int(previous.get("science_pid", 0)),
+                    detail=failure,
+                )
+            raise
         if once or result["state"] == "PASS_LOCATOR_READY":
             return result
         time.sleep(poll_seconds)

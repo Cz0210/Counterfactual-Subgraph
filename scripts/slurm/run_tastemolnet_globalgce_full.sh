@@ -10,8 +10,10 @@
 
 set -euo pipefail
 
+set +u
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
 
@@ -40,7 +42,7 @@ if [[ -f "$T13_OUTPUT_DIR/checkpoint.json" ]]; then
   resume_args+=(--resume)
 fi
 
-python scripts/run_tastemolnet_globalgce_full.py \
+python -I -B scripts/run_tastemolnet_globalgce_full.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
   --t8-pass-root "$T8_PASS_ROOT" \
@@ -60,7 +62,7 @@ python scripts/run_tastemolnet_globalgce_full.py \
 
 # A distinct process reopens the sealed bytes and is the only invocation that
 # can publish the terminal PASS marker.
-python scripts/run_tastemolnet_globalgce_full.py \
+python -I -B scripts/run_tastemolnet_globalgce_full.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
   --output-dir "$T13_OUTPUT_DIR" \

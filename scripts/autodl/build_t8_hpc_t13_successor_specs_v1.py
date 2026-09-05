@@ -58,6 +58,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--import-attempt-id")
     result.add_argument("--t13-attempt-id")
     result.add_argument(
+        "--verified-import-adoption", action="store_true",
+        help="Reuse a deep-PASS matching HPC import in a fresh T13 spec; do not re-import.",
+    )
+    result.add_argument(
         "--publisher-id", default="taste-globalgce-final16-canonical"
     )
     return result

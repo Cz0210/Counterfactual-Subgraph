@@ -4241,3 +4241,7 @@ Mutagenicity roadmaps.
   conditional cost as `N/A`, and add paired-parent bootstrap/claim auditing.
 - [x] Add a GPU-free, matrix-read-only final-four observer with a durable
   heartbeat and independently checkable process identity.
+- [x] Repair imported T13 owner wiring with isolated/no-bytecode child launch,
+  explicit pinned official runtime source authority, and fresh-spec adoption of
+  the deep-verified existing HPC import; preserve old artifacts and the sole
+  canonical publisher rather than repeating mining/import.

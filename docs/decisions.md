@@ -18218,3 +18218,26 @@ an exact comparison.
   publisher result or weakening the independent per-step parity gate.  Any
   unexpected path, non-regular object, duplicate publisher, or registry change
   still fails closed.
+
+## 2026-09-05: Isolated T13 launch adopts an already verified HPC import
+
+- Motivation: the first imported T13 attempt failed before training because
+  its child lacked Python isolated mode; the caller also discarded the pinned
+  official source audit instead of passing its runtime source authority.
+- Decision: new T13 science/verifier commands use `python -I -B`. The existing
+  official-root validator supplies `runtime_source_authority` to both target
+  generators, with isolated-import checks unchanged. Legacy sealed specs stay
+  readable but cannot execute through the repaired owner.
+- Recovery: `build_t8_hpc_t13_successor_specs_v1.py
+  --verified-import-adoption` permits an existing import only after its full
+  import verification and exact HPC execution/input/partition/official commit
+  checks pass. The new spec binds the import manifest and mining adoption,
+  preserves the canonical publisher/locator, and requires a fresh T13 root and
+  UUID. Create a new release using `write_t13_release`; start only the fresh
+  T13 owner, not another import worker. Prior owner death is checked by the
+  operator before dispatch. Neither mining nor import is rerun.
+- Failure accounting: an exception records FAILED in the fresh owner root,
+  retaining last-observed child PID and phase without changing science roots.
+- Impact: no decoder, chemical, oracle, split, budget, source-provenance, or
+  test-selection semantics change. Old failed roots/specs remain preserved;
+  this wiring repair does not itself claim a main-table cell PASS.

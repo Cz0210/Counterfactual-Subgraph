@@ -601,9 +601,42 @@ def test_slurm_wrapper_runs_science_then_independent_verifier() -> None:
     assert "#SBATCH --partition=A800" in text
     assert "#SBATCH --gres=gpu:a800:1" in text
     assert "export PYTHONPATH=$PWD" in text
-    assert text.count("python scripts/run_tastemolnet_globalgce_full.py") == 2
+    assert text.count("python -I -B scripts/run_tastemolnet_globalgce_full.py") == 2
     assert "--verify-only" in text
     assert "--set inference.fallback_to_heuristic=false" in text
+
+
+def test_native_generator_receives_audited_source_authority(tmp_path, monkeypatch):
+    config = full.TasteGlobalGCEFullConfig(epochs=100)
+    authority = SimpleNamespace(
+        official_root=tmp_path / "official", checkpoint_path=tmp_path / "gine",
+        checkpoint_id="a" * 64, train_path=tmp_path / "train.csv",
+        resume_identity=lambda _config: {"source": "tiny-fixture"},
+    )
+    runtime_authority = {"src/gSpan/gspan.py": {"device": 1, "inode": 2, "bytes": 3, "sha256": "b" * 64}}
+    audited = []
+    def audit(root):
+        audited.append(root)
+        return {"runtime_source_authority": runtime_authority}
+    monkeypatch.setattr(full, "validate_official_globalgce_root", audit)
+    monkeypatch.setattr(full, "_checkpoint_payloads", lambda _p: {})
+    monkeypatch.setattr(full, "FrozenTasteGINEScorer", lambda *_a, **_k: SimpleNamespace(checkpoint_id=authority.checkpoint_id))
+    monkeypatch.setattr(full, "load_full_train_split", lambda _a: [])
+    monkeypatch.setattr(full, "select_full_sweet_train_cohort", lambda *_a, **_k: ([], {"selected_cohort_sha256": full.stable_sha256([])}))
+    class StopBeforeScience(Exception):
+        pass
+    def generator(root, **kwargs):
+        assert audited == [authority.official_root]
+        assert root == authority.official_root
+        assert kwargs["official_source_authority"] is runtime_authority
+        assert kwargs["require_isolated_imports"] is True
+        assert kwargs["source_label"] == 1
+        assert kwargs["target_label"] == 0
+        assert kwargs["num_classes"] == 3
+        raise StopBeforeScience
+    monkeypatch.setattr(full, "OfficialGlobalGCEMutagenicityGenerator", generator)
+    with pytest.raises(StopBeforeScience):
+        full.run_t13_full(authority=authority, output_dir=tmp_path / "fresh", config=config, resume=False, device="cuda:0", wnode_cache_db=tmp_path / "unused.sqlite", node_embedding_cache_dir=tmp_path / "unused-cache")
 
 
 def test_t8_adoption_accepts_real_managed_v2_nested_verification(

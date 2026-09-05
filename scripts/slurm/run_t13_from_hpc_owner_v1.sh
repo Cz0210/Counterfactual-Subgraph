@@ -10,15 +10,18 @@
 #SBATCH --error=logs/%j.err
 
 set -euo pipefail
+set +u
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
 mkdir -p logs
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
-python scripts/autodl/run_t13_from_hpc_owner_v1.py \
+# Actual AutoDL science and verifier children both require python -I.
+python -I -B scripts/autodl/run_t13_from_hpc_owner_v1.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
   --help >/dev/null

@@ -2122,6 +2122,10 @@ def run_t13_full(
     if (output / "PASS").exists():
         raise TasteGlobalGCEFullError("T13 science cannot overwrite terminal PASS")
 
+    # Retain the pinned, descriptor-verified runtime source authority.  The
+    # isolated official generator requires this exact inventory, not only a
+    # successful earlier root audit whose result has been discarded.
+    official_audit = validate_official_globalgce_root(authority.official_root)
     payloads = _checkpoint_payloads(authority.checkpoint_path)
     scorer = FrozenTasteGINEScorer(
         payloads, device=device, batch_size=config.oracle_batch_size
@@ -2162,6 +2166,7 @@ def run_t13_full(
             source_label=SOURCE_LABEL,
             target_label=target,
             num_classes=NUM_CLASSES,
+            official_source_authority=official_audit["runtime_source_authority"],
             require_isolated_imports=True,
             rules_only_min_valid_native_rules=0,
         )

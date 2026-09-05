@@ -10,15 +10,18 @@
 #SBATCH --error=logs/%j.err
 
 set -euo pipefail
+set +u
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
 mkdir -p logs
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
-python scripts/autodl/build_t8_hpc_t13_successor_specs_v1.py \
+# --verified-import-adoption is AutoDL-only and never bypasses the deep import gate.
+python -I -B scripts/autodl/build_t8_hpc_t13_successor_specs_v1.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
   --help >/dev/null
