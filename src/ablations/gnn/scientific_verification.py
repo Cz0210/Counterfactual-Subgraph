@@ -38,6 +38,36 @@ def _require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def require_validation_fitted_temperature(temperature: Mapping[str, Any], *,
+        model_card: Mapping[str, Any], backbone: str, validation_sha256: str,
+        validation_predictions_sha256: str, validation_count: int) -> None:
+    """Reject the checkpoint writer's identity-temperature placeholder.
+
+    T=1 may be a legitimate fitted result, but status=not_fit is never fit
+    evidence. A fitted receipt must bind the actual validation inputs and the
+    persisted predictions, not merely say which split would have been used.
+    This function does not fit or alter any temperature.
+    """
+    prefix = f"GNN_TEMPERATURE_NOT_VALIDATION_FITTED:{backbone}:"
+    _require(temperature.get("status") == "fit", prefix + "status_is_not_fit")
+    _require(model_card.get("temperature_calibration_fit_on_validation") is not False,
+             prefix + "model_card_explicitly_says_not_fit")
+    _require(temperature.get("selection_split") == "validation"
+             and temperature.get("test_used_for_fit") is False
+             and temperature.get("argmax_invariant") is True, prefix + "fit_split_or_argmax_proof_missing")
+    value = temperature.get("temperature")
+    _require(isinstance(value, (int, float)) and math.isfinite(value) and value > 0,
+             prefix + "invalid_temperature")
+    _require(temperature.get("num_classes") == 2 and temperature.get("num_examples") == validation_count
+             and validation_count > 0, prefix + "fit_count_or_classes_mismatch")
+    _require(temperature.get("validation_csv_sha256") == validation_sha256
+             and temperature.get("validation_predictions_sha256") == validation_predictions_sha256,
+             prefix + "fit_input_sha_mismatch")
+    _require(all(isinstance(temperature.get(key), (int, float))
+                 and math.isfinite(temperature[key]) for key in ("nll_before", "nll_after")),
+             prefix + "finite_fit_metrics_missing")
+
+
 def equal(actual: Any, expected: Any, where: str = "value") -> None:
     """Compare deterministic replays, tolerating only floating-point roundoff."""
     if isinstance(expected, Mapping):
@@ -262,6 +292,10 @@ def verify_science(*, bundle_root: str | Path, evaluation_root: str | Path,
                  and card["dataset"] == "bace" and sha256_file(model_root / "model.pt") == run["checkpoints"][name],
                  "Model bundle/checkpoint differs from evaluated model")
         temperature = read_json(model_root / "temperature_scaling.json")
+        require_validation_fitted_temperature(temperature, model_card=card, backbone=name,
+            validation_sha256=manifest["files"][manifest["splits"]["validation"]]["sha256"],
+            validation_predictions_sha256=sha256_file(model_root / "validation_predictions.csv"),
+            validation_count=manifest["split_row_counts"]["validation"])
         _require(card.get("selection_split") == "validation"
                  and all(card.get(field) is False for field in ("calibration_used_for_model_fit_or_selection",
                     "test_used_for_model_fit_or_selection", "test_loaded_during_training", "test_evaluated_during_training"))
@@ -380,6 +414,7 @@ def verify_science(*, bundle_root: str | Path, evaluation_root: str | Path,
         "parent_scientific_checkpoint_sha256s": evidence,
         "calibration_prediction_sha256s": {n: sha256_file(prediction_source / n / "calibration_classifier_predictions.csv") for n in core.BACKBONES},
         "global_calibration_selector_replayed": True, "test_used_for_selection": False,
+        "all_five_validation_temperatures_fitted_and_input_bound": True,
         "classifier_metrics_replayed": True, "native_common_metrics_replayed": True,
         "per_match_flip_and_best_match_replayed": True, "ot_recomputed": False,
         "classifier_inference_rerun": False, "seed": 7, "cross_seed_standard_deviation_claimed": False,
@@ -452,7 +487,7 @@ def verify_package_archive(path: str | Path) -> dict[str, Any]:
             "publication/gnn_seed7_explanation_common.csv", "publication/gnn_seed7_table.tex"}
         for name in core.BACKBONES:
             required.update(f"classifiers/{name}/{leaf}" for leaf in ("model.pt", "model_card.json",
-                "feature_schema.json", "temperature_scaling.json", "sha256sums.txt"))
+                "feature_schema.json", "temperature_scaling.json", "validation_predictions.csv", "sha256sums.txt"))
             required.add(f"evaluation/{name}/calibration_classifier_predictions.csv")
         _require(required <= set(names), "Portable scientific package lacks required provenance")
         for member in members:
@@ -484,6 +519,7 @@ def verify_package_archive(path: str | Path) -> dict[str, Any]:
         for rel, digest in evidence["parent_scientific_checkpoint_sha256s"].items():
             _require(manifest["files"].get(f"evaluation/{rel}", {}).get("sha256") == digest,
                      "Portable parent scientific checkpoint differs")
+        input_bundle = json.load(archive.extractfile("publication/input_bundle_manifest.json"))
         for name in core.BACKBONES:
             _require(manifest["files"][f"classifiers/{name}/model.pt"]["sha256"]
                      == evidence["models"][name]["model_sha256"] == run["checkpoints"][name]
@@ -491,6 +527,12 @@ def verify_package_archive(path: str | Path) -> dict[str, Any]:
                      == evidence["models"][name]["temperature_sha256"]
                      and manifest["files"][f"evaluation/{name}/calibration_classifier_predictions.csv"]["sha256"]
                      == evidence["calibration_prediction_sha256s"][name], "Portable classifier/prediction binding differs")
+            require_validation_fitted_temperature(
+                json.load(archive.extractfile(f"classifiers/{name}/temperature_scaling.json")),
+                model_card=json.load(archive.extractfile(f"classifiers/{name}/model_card.json")), backbone=name,
+                validation_sha256=input_bundle["files"][input_bundle["splits"]["validation"]]["sha256"],
+                validation_predictions_sha256=manifest["files"][f"classifiers/{name}/validation_predictions.csv"]["sha256"],
+                validation_count=input_bundle["split_row_counts"]["validation"])
         _require(manifest["files"]["publication/input_bundle_manifest.json"]["sha256"] == run["bundle_sha256"]
                  and manifest["files"]["publication/reference_contract.json"]["sha256"]
                  == evidence["cohort_contract"]["reference_contract_sha256"]
@@ -499,6 +541,50 @@ def verify_package_archive(path: str | Path) -> dict[str, Any]:
         return {"state": "PASS", "sha256": sha256_file(path), "file_count": len(names),
             "scientific_engine_commit": manifest["scientific_engine_commit"],
             "publication_driver_commit": manifest["publication_driver_commit"], "main_matrix_write": False}
+
+
+def temperature_promotion_audit(path: str | Path, expected_sha256: str) -> dict[str, Any]:
+    """Read-only corrective receipt; never rewrites a previously sealed PASS.
+
+    A prior producer/replay PASS remains historical evidence. This stricter
+    promotion result governs whether that package may open later science gates.
+    """
+    _require(sha256_file(path) == expected_sha256, "Correction audit transport SHA differs")
+    failure = None
+    try:
+        verify_package_archive(path)
+    except ValueError as exc:
+        if not str(exc).startswith("GNN_TEMPERATURE_NOT_VALIDATION_FITTED:"):
+            raise
+        failure = str(exc)
+    with tarfile.open(path, "r:gz") as archive:
+        manifest = json.load(archive.extractfile("package_manifest.json"))
+        bundle = json.load(archive.extractfile("publication/input_bundle_manifest.json"))
+        models, blockers = {}, []
+        for name in core.BACKBONES:
+            temperature = json.load(archive.extractfile(f"classifiers/{name}/temperature_scaling.json"))
+            card = json.load(archive.extractfile(f"classifiers/{name}/model_card.json"))
+            models[name] = {"status": temperature.get("status"), "temperature": temperature.get("temperature"),
+                "model_card_fit_on_validation": card.get("temperature_calibration_fit_on_validation"),
+                "temperature_sha256": manifest["files"][f"classifiers/{name}/temperature_scaling.json"]["sha256"]}
+            try:
+                require_validation_fitted_temperature(temperature, model_card=card, backbone=name,
+                    validation_sha256=bundle["files"][bundle["splits"]["validation"]]["sha256"],
+                    validation_predictions_sha256=manifest["files"][f"classifiers/{name}/validation_predictions.csv"]["sha256"],
+                    validation_count=bundle["split_row_counts"]["validation"])
+            except ValueError as exc:
+                blockers.append(str(exc))
+        _require(bool(failure) == bool(blockers), "Promotion and temperature audit disagree")
+        return {"schema_version": "bace_gnn_temperature_promotion_correction_v1",
+            "state": "BLOCKED_TEMP_CALIBRATION_CONTRACT" if blockers else "PASS",
+            "archive_sha256": expected_sha256, "archive_bytes": Path(path).stat().st_size,
+            "artifact_transport_integrity": "PASS", "models": models, "blockers": blockers,
+            "historical_sealed_audit_modified": False, "temperature_refit_performed": False,
+            "historical_file_hash_audit_pass_implies_temperature_contract_pass": False,
+            "new_scientific_results_generated": False, "llm_promotion_allowed": not blockers,
+            "scientific_engine_commit": manifest["scientific_engine_commit"],
+            "original_publication_driver_commit": manifest["publication_driver_commit"],
+            "correction_verifier_sha256": sha256_file(Path(__file__))}
 
 
 def package_verified_overlay(*, source: Path, overlay: Path, audit: Mapping[str, Any],

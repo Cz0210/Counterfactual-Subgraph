@@ -14,6 +14,24 @@ from src.eval.mutagenicity_wnode_selector import derive_thresholds, VariantConfi
 from src.chem.hard_deletion import CONNECTED_ACTION_SEMANTICS, CONNECTED_MATCH_SELECTION_POLICY
 
 
+def test_temperature_identity_placeholder_is_not_fitted_evidence():
+    kwargs = dict(model_card={}, backbone="gin", validation_sha256="a" * 64,
+                  validation_predictions_sha256="b" * 64, validation_count=187)
+    fitted = {"temperature": 1.0, "status": "fit", "selection_split": "validation",
+              "test_used_for_fit": False, "argmax_invariant": True, "num_classes": 2,
+              "num_examples": 187, "validation_csv_sha256": "a" * 64,
+              "validation_predictions_sha256": "b" * 64, "nll_before": .4, "nll_after": .4}
+    # T=1 alone is not a failure if actually fitted and input-bound.
+    audit.require_validation_fitted_temperature(fitted, **kwargs)
+    for change in ({"status": "not_fit"}, {"validation_csv_sha256": "c" * 64},
+                   {"num_examples": 0}, {"test_used_for_fit": True}, {"argmax_invariant": False}):
+        with pytest.raises(ValueError, match="GNN_TEMPERATURE_NOT_VALIDATION_FITTED:gin"):
+            audit.require_validation_fitted_temperature({**fitted, **change}, **kwargs)
+    with pytest.raises(ValueError, match="model_card_explicitly"):
+        audit.require_validation_fitted_temperature(fitted, **{**kwargs,
+            "model_card": {"temperature_calibration_fit_on_validation": False}})
+
+
 def match_fixture():
     before = {"predicted_label": 1, "probabilities": [0.2, 0.8]}
     matches = [{"match_index": i, "match_atom_indices": [i], "oracle_checkpoint_hash": "a" * 64,
@@ -83,7 +101,7 @@ def full_fixture(tmp_path, monkeypatch, *, empty_test=False):
     root.mkdir()
     source.mkdir()
     (source / "writer.lock").touch()
-    for split in ("calibration", "test"):
+    for split in ("validation", "calibration", "test"):
         (root / f"{split}.csv").write_text("fixture\n")
     reference = {"source_label": 1, "mode": "proposal_fixed"}
     reference["contract_sha256"] = canonical_json_sha256(reference)
@@ -91,7 +109,8 @@ def full_fixture(tmp_path, monkeypatch, *, empty_test=False):
     (root / "molclr.pth").write_bytes(b"fixture-not-a-loaded-model")
     manifest = {"reference_contract_path": "reference.json", "execution_commit": "a" * 40,
         "gine_reference_root": "gine", "molclr_checkpoint_path": "molclr.pth", "wnode_config": {"solver": "exact_emd2"},
-        "splits": {x: f"{x}.csv" for x in ("calibration", "test")},
+        "splits": {x: f"{x}.csv" for x in ("validation", "calibration", "test")},
+        "split_row_counts": {"validation": 2},
         "files": {p.name: {"size": p.stat().st_size, "sha256": sha256_file(p)} for p in root.iterdir() if p.is_file()}}
     atomic_json(root / "bundle_manifest.json", manifest)
     def parents(path):
@@ -116,7 +135,13 @@ def full_fixture(tmp_path, monkeypatch, *, empty_test=False):
         atomic_json(model / "model_card.json", {"backbone": name, "source_label": 1, "num_classes": 2, "dataset": "bace",
             "selection_split": "validation", "calibration_used_for_model_fit_or_selection": False,
             "test_used_for_model_fit_or_selection": False, "test_loaded_during_training": False, "test_evaluated_during_training": False})
-        atomic_json(model / "temperature_scaling.json", {"temperature": 1.0, "selection_split": "validation", "test_used_for_fit": False})
+        atomic_csv(model / "validation_predictions.csv", [{"parent_id": "fixture0", "label": 0, "logits": [1, 0]},
+                                                           {"parent_id": "fixture1", "label": 1, "logits": [0, 1]}])
+        atomic_json(model / "temperature_scaling.json", {"temperature": 1.0, "selection_split": "validation", "test_used_for_fit": False,
+            "status": "fit", "argmax_invariant": True, "num_classes": 2, "num_examples": 2,
+            "validation_csv_sha256": manifest["files"]["validation.csv"]["sha256"],
+            "validation_predictions_sha256": sha256_file(model / "validation_predictions.csv"),
+            "nll_before": .2, "nll_after": .2})
         atomic_json(model / "feature_schema.json", {"fixture": True})
         (model / "sha256sums.txt").write_text("".join(f"{sha256_file(p)}  {p.name}\n" for p in model.iterdir() if p.is_file()))
     import src.oracles.gnn_oracle as oracle_module
@@ -162,6 +187,7 @@ def test_full_offline_replay_and_fresh_overlay(tmp_path, monkeypatch):
     checked = audit.verify_science(bundle_root=root, evaluation_root=source)
     assert checked["state"] == "PASS"
     assert checked["ot_recomputed"] is False
+    assert checked["all_five_validation_temperatures_fitted_and_input_bound"] is True
     assert checked["cohort_contract"]["original_reference_missing_explicit_cohort_definition"] is True
     original = {str(p): sha256_file(p) for p in source.rglob("*") if p.is_file()}
     environment = tmp_path / "environment.json"

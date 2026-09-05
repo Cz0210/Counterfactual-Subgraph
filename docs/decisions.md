@@ -1,5 +1,29 @@
 # Decisions Log
 
+## [2026-09-05] Correct GNN temperature-contract promotion before starting LLM
+
+The completed exact seed-7 evaluation contains 902 parent-model units and a
+hash-closed 27,013,606-byte package. Its first row replay/file audit passed, but
+that verifier did not establish actual validation temperature fitting. The
+four new classifier configurations omit `calibration.fit_on_validation=true`;
+the trainer defaults this flag to false and the bundle writer emits
+`status=not_fit, temperature=1`. Only the adopted GINE has an input-bound fitted
+temperature. A positive scalar or a declared validation split is not fit proof.
+
+The independent verifier now requires fitted status, validation CSV/prediction
+hashes and count, finite fit metrics, and argmax invariance. An actually fitted
+T=1 remains valid. A fresh corrective receipt blocks scientific promotion and
+LLM launch without rewriting historical packages, audits, weights or
+temperatures. All provisional metrics and exact OT work remain preserved.
+
+The user explicitly prohibited temperature changes this turn. First-time
+validation-only fitting of the four frozen alternatives in fresh overlays,
+followed by probability-dependent evaluation reconciliation, therefore requires
+a narrow new authorization. No fitting or LLM science was performed. GINE,
+main-table tasks, the candidate pool and the main matrix remain untouched.
+The paired audit Slurm script is intentionally CPU-only under the current
+explicit no-main-GPU-use instruction; it verifies an archive, not inference.
+
 ## [2026-09-05] Execute matched LLM pools with the frozen BACE downstream
 
 The four core treatments are BRICS, 7B off-the-shelf, the existing 7B PPO LoRA,
