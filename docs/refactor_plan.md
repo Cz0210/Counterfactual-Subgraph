@@ -6,7 +6,7 @@
 - [x] Add a small hash-verified BACE-only input bundle and safe fresh import.
 - [x] Test exact epoch checkpoint continuation and five-backbone interfaces.
 - [ ] Measure the real HPC CPU benchmark and five-backbone forward preflight.
-- [ ] Submit no-GPU intel jobs in two dependency lanes.
+- [x] Submit no-GPU intel jobs in two dependency lanes (fresh chain2557523–2557529).
 - [ ] Freeze calibration selectors before test and publish native/common ablation tables.
 - [x] Gate LLM GPU eligibility on the hash-verified complete GNN seed7 audit.
 
