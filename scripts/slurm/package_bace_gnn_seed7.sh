@@ -7,8 +7,11 @@
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
 set -euo pipefail
+# Site bashrc/Conda scripts read optional unset variables during initialization.
+set +u
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 : "${GNN_EXECUTION_WORKTREE:?exact immutable execution worktree required}"
 : "${GNN_EXECUTION_COMMIT:?exact Git commit required}"
 : "${GNN_EVALUATION_ROOT:?sealed evaluation root required}"

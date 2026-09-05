@@ -40,6 +40,13 @@ above twelve hours preserves the trained bundles for the GPU fallback gate.
 Training resource reports describe measured terminal-run time, not an invented
 cumulative total across historical attempts.
 
+The first HPC preflight (2557215) failed before Python in site `/etc/bashrc`
+because `BASHRCSOURCED` is optional but the wrapper had already enabled nounset.
+Only the five new wrappers now disable nounset during bashrc/Conda bootstrap,
+then restore it before task validation. Five executable shell fixtures cover
+this behavior. No scientific state existed in that failed preflight; six
+exactly verified unstarted dependency jobs were removed, with logs retained.
+
 ## [2026-09-05] Hash the real T12 GINE checkpoint as a sealed content tree
 
 ### Decision

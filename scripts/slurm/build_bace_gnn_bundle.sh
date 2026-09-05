@@ -7,8 +7,11 @@
 #SBATCH --error=logs/%j.err
 # CPU-only exception explicitly authorized 2026-09-05; no GPU request.
 set -euo pipefail
+# Site bashrc/Conda scripts read optional unset variables during initialization.
+set +u
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 cd "${GNN_EXECUTION_WORKTREE:?set immutable execution worktree}"
 export PYTHONPATH=$PWD
 export CUDA_VISIBLE_DEVICES=""
