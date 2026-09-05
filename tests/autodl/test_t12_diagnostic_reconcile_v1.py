@@ -10,6 +10,8 @@ import uuid
 import pytest
 
 from src.baselines.tastemolnet_gcf_full import run_t12_generation_segment
+from src.eval.tastemolnet_t3_calibration_v2 import CANDIDATE_CHECKPOINT_FILES
+from src.train.tastemolnet_clean_policy_init import _inventory_directory
 from src.utils.final16_owner_registry_v1 import build_owner_registry
 from src.utils.main_ready_task_specs import stable_sha256
 from src.utils.tastemolnet_t12_diagnostic_reconcile_v1 import (
@@ -23,7 +25,10 @@ from src.utils.tastemolnet_t12_diagnostic_reconcile_v1 import (
 from src.utils.tastemolnet_t12_formal_profile_v1 import (
     FORMAL_PRODUCTION_CHECKPOINT_CURSORS,
 )
-from src.utils.tastemolnet_t12_fresh_zero_plan_v1 import build_fresh_zero_plan
+from src.utils.tastemolnet_t12_fresh_zero_plan_v1 import (
+    T12FreshZeroPlanError,
+    build_fresh_zero_plan,
+)
 
 
 SHA = "a" * 64
@@ -317,8 +322,12 @@ def test_registry_file_reconcile_rejects_stale_file_sha(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("locator_exists", [False, True])
+@pytest.mark.parametrize(
+    "gnn_checkpoint_mode",
+    ["regular_file", "sealed_directory", "tampered_sealed_directory"],
+)
 def test_fresh_zero_plan_is_strictly_blocked_and_preserves_unique_publisher(
-    tmp_path: Path, locator_exists: bool,
+    tmp_path: Path, locator_exists: bool, gnn_checkpoint_mode: str,
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -340,6 +349,20 @@ def test_fresh_zero_plan_is_strictly_blocked_and_preserves_unique_publisher(
         else:
             path.mkdir()
         existing[name] = path
+    if gnn_checkpoint_mode != "regular_file":
+        existing["gnn"].unlink()
+        existing["gnn"].mkdir()
+        for name in sorted(CANDIDATE_CHECKPOINT_FILES - {"sha256sums.txt"}):
+            (existing["gnn"] / name).write_bytes(f"sealed:{name}\n".encode())
+        (existing["gnn"] / "sha256sums.txt").write_text(
+            "".join(
+                f"{file_sha256(existing['gnn'] / name)}  {name}\n"
+                for name in sorted(CANDIDATE_CHECKPOINT_FILES - {"sha256sums.txt"})
+            ),
+            encoding="utf-8",
+        )
+        if gnn_checkpoint_mode == "tampered_sealed_directory":
+            (existing["gnn"] / "model.pt").write_bytes(b"tampered-after-seal\n")
     registry = build_owner_registry(
         registry_id="fresh-plan", matrix_authority_root=existing["matrix"], tasks=[],
         publishers=[{
@@ -358,7 +381,7 @@ def test_fresh_zero_plan_is_strictly_blocked_and_preserves_unique_publisher(
     bridge_history = tmp_path / "diagnostic-bridge-history"
     bridge_history.mkdir()
     (bridge_history / "history.bin").write_bytes(b"sealed-history")
-    plan = build_fresh_zero_plan(
+    kwargs = dict(
         repo_root=repo, python=Path(sys.executable).resolve(), config=config,
         execution_commit=COMMIT, attempt_id=str(uuid.uuid4()), generation_token=SHA,
         gpu_index=1, gpu_uuid="GPU-fixture", diagnostic_terminal=diagnostic,
@@ -378,6 +401,11 @@ def test_fresh_zero_plan_is_strictly_blocked_and_preserves_unique_publisher(
         diagnostic_bridge_history_root=bridge_history,
         nvme_disposable_index_root=Path("/root/autodl-tmp/t12-fixture-index"),
     )
+    if gnn_checkpoint_mode == "tampered_sealed_directory":
+        with pytest.raises(T12FreshZeroPlanError, match="differs from sha256sums.txt"):
+            build_fresh_zero_plan(**kwargs)
+        return
+    plan = build_fresh_zero_plan(**kwargs)
     assert plan["dispatchable"] is False
     assert plan["fresh_from_zero"] is True and plan["source_checkpoint"] is None
     assert plan["production_steps"] == list(FORMAL_PRODUCTION_CHECKPOINT_CURSORS)
@@ -406,3 +434,10 @@ def test_fresh_zero_plan_is_strictly_blocked_and_preserves_unique_publisher(
     assert plan["input_hash_bindings"]["owner_registry_file"] == file_sha256(
         registry_path
     )
+    if gnn_checkpoint_mode == "sealed_directory":
+        _inventory, expected_gnn_sha256 = _inventory_directory(
+            existing["gnn"], label="test sealed T3 checkpoint"
+        )
+    else:
+        expected_gnn_sha256 = file_sha256(existing["gnn"])
+    assert plan["input_hash_bindings"]["gnn_checkpoint"] == expected_gnn_sha256

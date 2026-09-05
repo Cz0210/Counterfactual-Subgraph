@@ -1,5 +1,20 @@
 # Refactor Plan
 
+## 2026-09-05: Bind T12 fresh-zero plans to sealed T3 checkpoint directories
+
+- [x] Accept the legacy single checkpoint file and the real sealed T3
+  checkpoint directory without treating a directory as one byte stream.
+- [x] Reuse the existing T3 exact-file manifest parser and project content-tree
+  hash instead of introducing another directory identity.
+- [x] Reject symlinks, special files, inventory drift, manifest mismatches, and
+  any checkpoint mutation observed during the two-pass binding.
+- [x] Keep every generated fresh-zero stage non-dispatchable while full
+  251--500 and 501--510 per-step parity remains absent.
+- [ ] Deploy the correction, rebuild under a fresh plan tag, and verify the
+  sealed plan without starting science or taking a GPU lease.
+
+---
+
 ## 2026-09-05: Accept the scoped T8 relay marker at the AutoDL import gate
 
 - [x] Keep the legacy `t8_hpc_package_ready_v1` relay contract readable.

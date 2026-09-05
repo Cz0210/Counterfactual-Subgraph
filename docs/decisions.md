@@ -1,5 +1,30 @@
 # Decisions Log
 
+## [2026-09-05] Hash the real T12 GINE checkpoint as a sealed content tree
+
+### Decision
+
+The T12 fresh-zero predeployment builder accepts either one legacy regular
+checkpoint file or the actual T3 calibrated-checkpoint directory.  For the
+directory form it reuses the T3 `sha256sums.txt` exact inventory contract and
+the project's existing `taste_content_tree_sha256_v1` content-tree identity,
+then inventories the tree again to reject mutation during binding.  Links,
+special files, missing or extra leaves, and a declared/actual SHA mismatch all
+fail closed.
+
+The same existing content-tree identity replaces the builder's local bridge
+history tree hash.  This is a provenance correction only: the resulting plan
+and every stage remain non-dispatchable until complete per-step diagnostic
+parity exists.
+
+### Impact
+
+Predeployment can bind the real sealed calibrated GINE root instead of failing
+with `IsADirectoryError`.  No diagnostic checkpoint is promoted, no science is
+started, and no GPU lease is acquired by this repair.
+
+---
+
 ## [2026-09-05] Bind both scoped-relay marker versions at T8 AutoDL import
 
 ### Decision

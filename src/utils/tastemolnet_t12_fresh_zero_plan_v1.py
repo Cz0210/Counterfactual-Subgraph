@@ -12,8 +12,21 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import stat
 from typing import Any, Mapping, Sequence
 import uuid
+
+from src.eval.tastemolnet_t3_calibration_v2 import (
+    CANDIDATE_CHECKPOINT_FILES as T3_CHECKPOINT_FILES,
+    TasteT3CalibrationError,
+    _parse_hash_manifest as _parse_t3_hash_manifest,
+)
+from src.train.tastemolnet_clean_policy_init import (
+    TasteCleanPolicyError,
+    _hash_regular as _hash_content_file,
+    _inventory_directory as _inventory_content_tree,
+    _read_regular as _read_content_file,
+)
 
 from .final16_owner_registry_v1 import (
     Final16OwnerRegistryError,
@@ -43,23 +56,63 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _tree_sha256(root: Path) -> str:
-    """Hash a sealed diagnostic directory without following aliases."""
+def _content_tree_sha256(root: Path, *, field: str) -> str:
+    """Use the project's existing deterministic physical-tree hash contract."""
 
-    digest = hashlib.sha256()
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
-        if path.is_symlink():
-            raise T12FreshZeroPlanError("diagnostic bridge history contains a symlink")
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        if path.is_dir():
-            digest.update(b"D\0" + relative + b"\0")
-        elif path.is_file():
-            digest.update(b"F\0" + relative + b"\0")
-            digest.update(str(path.stat().st_size).encode("ascii") + b"\0")
-            digest.update(bytes.fromhex(file_sha256(path)))
-        else:
-            raise T12FreshZeroPlanError("diagnostic bridge history has a special file")
-    return digest.hexdigest()
+    try:
+        _inventory, digest = _inventory_content_tree(root, label=field)
+    except (OSError, TasteCleanPolicyError) as exc:
+        raise T12FreshZeroPlanError(f"{field} content tree is invalid") from exc
+    return digest
+
+
+def _gnn_checkpoint_sha256(path: Path) -> str:
+    """Bind either one legacy checkpoint file or the sealed T3 checkpoint tree."""
+
+    try:
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            _size, digest = _hash_content_file(path, label="gnn_checkpoint")
+            return digest
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise T12FreshZeroPlanError(
+                "gnn_checkpoint must be a regular file or sealed T3 directory"
+            )
+
+        inventory, digest = _inventory_content_tree(
+            path, label="sealed T3 gnn_checkpoint"
+        )
+        if set(inventory) != set(T3_CHECKPOINT_FILES):
+            raise T12FreshZeroPlanError(
+                "sealed T3 gnn_checkpoint inventory differs from the T3 contract"
+            )
+        declared = _parse_t3_hash_manifest(
+            _read_content_file(
+                path / "sha256sums.txt",
+                label="sealed T3 gnn_checkpoint sha256sums.txt",
+            ),
+            expected=T3_CHECKPOINT_FILES - {"sha256sums.txt"},
+            label="sealed T3 gnn_checkpoint sha256sums.txt",
+        )
+        if any(
+            inventory[name]["sha256"] != expected
+            for name, expected in declared.items()
+        ):
+            raise T12FreshZeroPlanError(
+                "sealed T3 gnn_checkpoint file differs from sha256sums.txt"
+            )
+        inventory_after, digest_after = _inventory_content_tree(
+            path, label="sealed T3 gnn_checkpoint revalidation"
+        )
+        if inventory_after != inventory or digest_after != digest:
+            raise T12FreshZeroPlanError(
+                "sealed T3 gnn_checkpoint changed while it was bound"
+            )
+        return digest
+    except T12FreshZeroPlanError:
+        raise
+    except (OSError, TasteCleanPolicyError, TasteT3CalibrationError) as exc:
+        raise T12FreshZeroPlanError("gnn_checkpoint binding failed closed") from exc
 
 
 def _absolute(path: Path, *, field: str, must_exist: bool = False) -> Path:
@@ -237,6 +290,7 @@ def build_fresh_zero_plan(
     )
     if not bridge_history.is_dir():
         raise T12FreshZeroPlanError("diagnostic bridge history is not a directory")
+    gnn_checkpoint_sha256 = _gnn_checkpoint_sha256(gnn_checkpoint)
     disposable_index = _absolute(
         nvme_disposable_index_root,
         field="nvme_disposable_index_root",
@@ -368,7 +422,10 @@ def build_fresh_zero_plan(
             "disposable_index_root": str(disposable_index),
             "disposable_index_authoritative": False,
             "diagnostic_bridge_history_source": str(bridge_history),
-            "diagnostic_bridge_history_source_sha256": _tree_sha256(bridge_history),
+            "diagnostic_bridge_history_source_sha256": _content_tree_sha256(
+                bridge_history,
+                field="diagnostic bridge history",
+            ),
             "diagnostic_bridge_history_staging_root": str(
                 disposable_index / "diagnostic_bridge_history"
             ),
@@ -395,7 +452,7 @@ def build_fresh_zero_plan(
             "train_csv": file_sha256(train_csv),
             "calibration_csv": file_sha256(calibration_csv),
             "test_csv": file_sha256(test_csv),
-            "gnn_checkpoint": file_sha256(gnn_checkpoint),
+            "gnn_checkpoint": gnn_checkpoint_sha256,
             "molclr_checkpoint": file_sha256(molclr_checkpoint),
             "threshold_contract": file_sha256(threshold_contract),
         },
