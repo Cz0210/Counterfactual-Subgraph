@@ -62,3 +62,15 @@ def test_child_uses_original_train_and_import_no_test(tmp_path):
     assert '/sealed-import/adoption_proof.json' in command
     assert command[-4:]==['--device','cuda:0','--targets','0,2']
     assert '--test-csv' not in command
+
+
+@pytest.mark.parametrize('sample',[
+    {'VmHWM_bytes':97*GIB},
+    {'memory.limit_in_bytes':480*GIB,'memory.usage_in_bytes':300*GIB},
+    {'memory.failcnt':10},
+])
+def test_transient_boundary_pressure_blocks_full(tmp_path,sample):
+    obj=guard(tmp_path); receipt(obj)
+    (obj.canary/'memory_samples.json').write_text(json.dumps({'samples':[sample]}))
+    with pytest.raises(ValueError,match='TRANSIENT'): obj.accept_canary_and_claim_full()
+    assert not (obj.path.parent/'full_start.json').exists()

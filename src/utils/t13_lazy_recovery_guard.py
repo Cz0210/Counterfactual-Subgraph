@@ -126,8 +126,19 @@ class T13LazyRecoveryGuard:
                 raise ValueError('T13_CANARY_GATE_MISSING:'+gate)
         boundary=self.canary/'memory_samples.json'
         memory=json.loads(boundary.read_text())
-        for row in memory.get('samples',[]):
+        def merge_boundary(row):
             self.peak=max(self.peak,int(row.get('VmHWM_bytes',row.get('VmRSS_bytes',0))))
+            if self.peak>CANARY_RSS_CAP:
+                raise ValueError('T13_CANARY_TRANSIENT_RSS_CAP_EXCEEDED')
+            if 'memory.limit_in_bytes' in row and 'memory.usage_in_bytes' in row:
+                headroom=int(row['memory.limit_in_bytes'])-int(row['memory.usage_in_bytes'])
+                self.min_headroom=min(headroom,self.min_headroom or headroom)
+                if headroom<OTHER_MAIN_RESERVE:
+                    raise ValueError('T13_CANARY_TRANSIENT_HEADROOM_RESERVE_VIOLATED')
+            if int(row.get('memory.failcnt',self.baseline['failcnt']))>self.baseline['failcnt']:
+                raise ValueError('T13_CANARY_TRANSIENT_CGROUP_FAILURE')
+        for row in memory.get('samples',[]):
+            merge_boundary(row)
         # Per-step boundary probes capture peaks between the owner polls. Keep
         # this independent of the periodic process-tree samples above.
         for target in (0, 2):
@@ -136,7 +147,7 @@ class T13LazyRecoveryGuard:
                 evidence=json.loads(boundary_path.read_text())
                 rows=evidence if isinstance(evidence,list) else evidence.get('samples',[])
                 for row in rows:
-                    self.peak=max(self.peak,int(row.get('VmHWM_bytes',row.get('VmRSS_bytes',0))))
+                    merge_boundary(row)
         if self.peak<=0 or self.samples<1:
             raise ValueError('T13_MEASURED_PROCESS_TREE_PEAK_REQUIRED')
         now=resources(self.runtime)
