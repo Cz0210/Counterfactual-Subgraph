@@ -4167,6 +4167,9 @@ Mutagenicity roadmaps.
 - [ ] Add a per-step 251--500 evidence path for action/logit/NeuroSED parity
   and review the diagnostic-to-20k prefix-reframing promotion before creating
   or dispatching a 500 -> 10k full owner.
+- [x] Permit the strictly non-dispatchable fresh-zero plan to bind the
+  canonical T12 publisher's exact not-yet-created locator path, without
+  creating it or treating its absence as terminal evidence.
 - [x] Emit a machine-readable fail-closed promotion blocker enumerating the
   missing shadow-reference ledger, authenticated journal re-emission,
   scientific/RNG projection check, promotion-seed planner support, and the

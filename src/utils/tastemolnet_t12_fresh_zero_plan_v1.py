@@ -225,7 +225,11 @@ def build_fresh_zero_plan(
         or cell_claims[0]["locator"] != str(publisher_locator)
     ):
         raise T12FreshZeroPlanError("T12 canonical publisher is not unique or changed")
-    locator = _absolute(publisher_locator, field="publisher_locator", must_exist=True)
+    locator = _absolute(publisher_locator, field="publisher_locator")
+    if locator.exists() and not locator.is_file():
+        raise T12FreshZeroPlanError("publisher locator must be a regular file when present")
+    locator_present = locator.exists()
+    locator_sha256 = file_sha256(locator) if locator_present else None
     bridge_history = _absolute(
         diagnostic_bridge_history_root,
         field="diagnostic_bridge_history_root",
@@ -378,7 +382,14 @@ def build_fresh_zero_plan(
             "diagnostic_terminal": file_sha256(diagnostic),
             "owner_registry_file": expected_owner_registry_file_sha256,
             "owner_registry_self": expected_owner_registry_sha256,
-            "publisher_locator": file_sha256(locator),
+            "publisher_locator": locator_sha256,
+            "publisher_locator_path": str(publisher_locator),
+            "publisher_locator_present": locator_present,
+            "publisher_locator_binding_state": (
+                "PRESENT_SHA256_BOUND"
+                if locator_present
+                else "ABSENT_EXACT_PATH_BOUND"
+            ),
             "replay_gate": file_sha256(replay_gate),
             "threshold_authority": file_sha256(threshold_authority),
             "train_csv": file_sha256(train_csv),
@@ -400,6 +411,9 @@ def build_fresh_zero_plan(
             "status": "BLOCKED_WAITING_PARITY_AND_EXCLUSIVE_OWNER_TRANSFER",
             "publisher_id": publisher_id,
             "canonical_locator": str(publisher_locator),
+            "canonical_locator_present": locator_present,
+            "canonical_locator_sha256": locator_sha256,
+            "canonical_locator_creation_allowed": False,
             "matrix_authority_root": str(matrix_authority_root),
             "owner_registry": str(registry_path),
             "owner_registry_sha256": expected_owner_registry_sha256,

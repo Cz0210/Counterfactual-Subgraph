@@ -17966,3 +17966,20 @@ an exact comparison.
   unpinned correction commit, or a third retry fails closed.  The scientific
   candidate-generation semantics and the 20k/25k resource-cap policy remain
   unchanged.
+
+# 2026-09-05: Bind an absent T12 publisher locator during predeployment
+
+- Motivation: the canonical T12 publisher owns one exact future locator path,
+  but that locator correctly remains absent until a scientifically verified
+  cell is ready to publish.  Requiring a file hash at planning time made the
+  otherwise non-dispatchable fresh-zero plan impossible to seal.
+- Decision: accept either a regular, SHA-bound locator file or the exact absent
+  path already named by the canonical registry.  The absent case records
+  `ABSENT_EXACT_PATH_BOUND`, a null file hash, and
+  `canonical_locator_creation_allowed=false`; planning never creates the
+  locator.  Registry file/self hashes and the unique publisher claim remain
+  mandatory, and every planned stage remains non-dispatchable.
+- Impact: formal T12 production can be predeployed without fabricating a
+  publisher result or weakening the independent per-step parity gate.  Any
+  unexpected path, non-regular object, duplicate publisher, or registry change
+  still fails closed.

@@ -316,7 +316,10 @@ def test_registry_file_reconcile_rejects_stale_file_sha(tmp_path: Path) -> None:
         )
 
 
-def test_fresh_zero_plan_is_strictly_blocked_and_preserves_unique_publisher(tmp_path: Path) -> None:
+@pytest.mark.parametrize("locator_exists", [False, True])
+def test_fresh_zero_plan_is_strictly_blocked_and_preserves_unique_publisher(
+    tmp_path: Path, locator_exists: bool,
+) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     config = repo / "configs/hpc.yaml"
@@ -350,7 +353,8 @@ def test_fresh_zero_plan_is_strictly_blocked_and_preserves_unique_publisher(tmp_
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(json.dumps(registry), encoding="utf-8")
     locator = tmp_path / "locator.json"
-    locator.write_text('{"publisher":"fixture"}\n', encoding="utf-8")
+    if locator_exists:
+        locator.write_text('{"publisher":"fixture"}\n', encoding="utf-8")
     bridge_history = tmp_path / "diagnostic-bridge-history"
     bridge_history.mkdir()
     (bridge_history / "history.bin").write_bytes(b"sealed-history")
@@ -380,6 +384,18 @@ def test_fresh_zero_plan_is_strictly_blocked_and_preserves_unique_publisher(tmp_
     assert len(plan["stages"]) == len(FORMAL_PRODUCTION_CHECKPOINT_CURSORS) + 3
     assert all(stage["dispatchable"] is False for stage in plan["stages"])
     assert plan["publisher_handoff"]["new_publisher_created"] is False
+    assert plan["publisher_handoff"]["canonical_locator"] == str(locator)
+    assert plan["publisher_handoff"]["canonical_locator_present"] is locator_exists
+    assert plan["publisher_handoff"]["canonical_locator_creation_allowed"] is False
+    assert locator.exists() is locator_exists
+    assert plan["input_hash_bindings"]["publisher_locator_present"] is locator_exists
+    assert plan["input_hash_bindings"]["publisher_locator_path"] == str(locator)
+    if locator_exists:
+        assert plan["input_hash_bindings"]["publisher_locator"] == file_sha256(locator)
+        assert plan["input_hash_bindings"]["publisher_locator_binding_state"] == "PRESENT_SHA256_BOUND"
+    else:
+        assert plan["input_hash_bindings"]["publisher_locator"] is None
+        assert plan["input_hash_bindings"]["publisher_locator_binding_state"] == "ABSENT_EXACT_PATH_BOUND"
     assert "fresh" in plan["stages"][0]["command"]
     assert "resume" in plan["stages"][1]["command"]
     assert all(
