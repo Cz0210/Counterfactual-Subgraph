@@ -69,6 +69,16 @@ def test_relay_has_heartbeat_independent_sha_and_terminal_exit() -> None:
     assert '"hpc_source_delete_enabled": False' in source
 
 
+def test_relay_re_adopts_verified_mac_final_after_network_interruption() -> None:
+    source = RUN.read_text(encoding="utf-8")
+    assert "VERIFYING_EXISTING_MAC_FINAL" in source
+    assert '[[ -f "$local_final/MAC_RELAY_READY.json" ]]' in source
+    assert 'digest(archive) != expected_sha' in source
+    assert 'digest(evidence_archive) != evidence_sha' in source
+    assert 'if [[ "$adopt_existing_mac_final" != true ]]; then' in source
+    assert "re-adopted verified content-addressed Mac final" in source
+
+
 def test_status_is_read_only_and_reports_scoped_paths(tmp_path: Path) -> None:
     control = tmp_path / "control"
     control.mkdir()

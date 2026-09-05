@@ -272,8 +272,58 @@ autodl_final="$AUTODL_IMPORT_PARENT/t8-result-$archive_sha"
 for value in "$local_partial" "$local_final" "$autodl_partial" "$autodl_final"; do
   safe_path "$value" || { echo "invalid derived relay path" >&2; exit 65; }
 done
-[[ ! -e "$local_final" ]] || { echo "Mac final target already exists and was not created by this attempt" >&2; exit 67; }
-mkdir -p "$local_partial"
+adopt_existing_mac_final=false
+if [[ -e "$local_final" ]]; then
+  # A network interruption may happen after the content-addressed Mac relay was
+  # independently verified and atomically sealed but before the AutoDL leg
+  # finishes.  Re-adopt that immutable result instead of downloading 6.1 GB
+  # from the HPC again.  The marker is necessary but not sufficient: re-hash
+  # both archives and re-check the pinned package receipts below.
+  [[ -d "$local_final" && ! -L "$local_final" ]] || { echo "existing Mac final is not a regular directory" >&2; exit 67; }
+  [[ -f "$local_final/MAC_RELAY_READY.json" ]] || { echo "existing Mac final lacks MAC_RELAY_READY" >&2; exit 67; }
+  state=VERIFYING_EXISTING_MAC_FINAL
+  detail="$local_final"
+  current_partial_path="$local_final/$EXPECTED_ARCHIVE_NAME"
+  write_state "$state" "$detail"
+  python3 - "$local_final" "$EXPECTED_ARCHIVE_BYTES" "$EXPECTED_ARCHIVE_SHA256" "$evidence_sha" <<'PY_EXISTING_MAC'
+import hashlib, json, sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve(strict=True)
+expected_bytes, expected_sha, evidence_sha = int(sys.argv[2]), sys.argv[3], sys.argv[4]
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+archive = root / "t8_exact_result_bundle.tar.gz"
+evidence_archive = root / "t8_hierarchical_evidence.tar.gz"
+manifest = json.loads((root / "result_manifest.json").read_text(encoding="utf-8"))
+ready = json.loads((root / "HIERARCHICAL_PACKAGE_READY.json").read_text(encoding="utf-8"))
+mac_ready = json.loads((root / "MAC_RELAY_READY.json").read_text(encoding="utf-8"))
+if not archive.is_file() or archive.is_symlink() or archive.stat().st_size != expected_bytes:
+    raise SystemExit("existing Mac result archive shape/size mismatch")
+if digest(archive) != expected_sha:
+    raise SystemExit("existing Mac result archive SHA mismatch")
+if not evidence_archive.is_file() or evidence_archive.is_symlink() or digest(evidence_archive) != evidence_sha:
+    raise SystemExit("existing Mac evidence archive SHA mismatch")
+if manifest.get("status") != "PASS" or manifest.get("archive_bytes") != expected_bytes or manifest.get("archive_sha256") != expected_sha:
+    raise SystemExit("existing Mac result manifest mismatch")
+if ready.get("status") != "PASS" or ready.get("result_archive_sha256") != expected_sha or ready.get("evidence_archive_sha256") != evidence_sha:
+    raise SystemExit("existing Mac package-ready receipt mismatch")
+if mac_ready.get("state") != "MAC_RELAY_READY" or mac_ready.get("archive_bytes") != expected_bytes or mac_ready.get("archive_sha256") != expected_sha:
+    raise SystemExit("existing Mac relay-ready receipt mismatch")
+PY_EXISTING_MAC
+  adopt_existing_mac_final=true
+  local_partial=
+  current_partial_path=
+  write_state MAC_RELAY_READY "re-adopted verified content-addressed Mac final"
+else
+  mkdir -p "$local_partial"
+fi
 
 run_transfer() {
   transfer_state=$1
@@ -310,32 +360,33 @@ run_transfer() {
 
 ssh_transport="ssh -o BatchMode=yes -o ConnectTimeout=$SSH_CONNECT_TIMEOUT"
 rsync_common_args=(-a --partial --append-verify --protect-args --info=progress2 -e "$ssh_transport")
-run_transfer COPYING_HPC_TO_MAC "result archive $archive_bytes bytes" "$local_partial/$EXPECTED_ARCHIVE_NAME" \
-  "$RSYNC_BIN" "${rsync_common_args[@]}" \
-  "$HPC_ALIAS:$hpc_archive_path" "$local_partial/$EXPECTED_ARCHIVE_NAME"
-run_transfer COPYING_HPC_TO_MAC "result manifest" "$local_partial/result_manifest.json" \
-  "$RSYNC_BIN" "${rsync_common_args[@]}" \
-  "$HPC_ALIAS:$result_manifest_path" "$local_partial/result_manifest.json"
-run_transfer COPYING_HPC_TO_MAC "hierarchical evidence" "$local_partial/t8_hierarchical_evidence.tar.gz" \
-  "$RSYNC_BIN" "${rsync_common_args[@]}" \
-  "$HPC_ALIAS:$evidence_archive_path" "$local_partial/t8_hierarchical_evidence.tar.gz"
-run_transfer COPYING_HPC_TO_MAC "evidence manifest" "$local_partial/hierarchical_evidence_manifest.json" \
-  "$RSYNC_BIN" "${rsync_common_args[@]}" \
-  "$HPC_ALIAS:$evidence_manifest_path" "$local_partial/hierarchical_evidence_manifest.json"
-run_transfer COPYING_HPC_TO_MAC "package ready receipt" "$local_partial/HIERARCHICAL_PACKAGE_READY.json" \
-  "$RSYNC_BIN" "${rsync_common_args[@]}" \
-  "$HPC_ALIAS:$package_ready_path" "$local_partial/HIERARCHICAL_PACKAGE_READY.json"
+if [[ "$adopt_existing_mac_final" != true ]]; then
+  run_transfer COPYING_HPC_TO_MAC "result archive $archive_bytes bytes" "$local_partial/$EXPECTED_ARCHIVE_NAME" \
+    "$RSYNC_BIN" "${rsync_common_args[@]}" \
+    "$HPC_ALIAS:$hpc_archive_path" "$local_partial/$EXPECTED_ARCHIVE_NAME"
+  run_transfer COPYING_HPC_TO_MAC "result manifest" "$local_partial/result_manifest.json" \
+    "$RSYNC_BIN" "${rsync_common_args[@]}" \
+    "$HPC_ALIAS:$result_manifest_path" "$local_partial/result_manifest.json"
+  run_transfer COPYING_HPC_TO_MAC "hierarchical evidence" "$local_partial/t8_hierarchical_evidence.tar.gz" \
+    "$RSYNC_BIN" "${rsync_common_args[@]}" \
+    "$HPC_ALIAS:$evidence_archive_path" "$local_partial/t8_hierarchical_evidence.tar.gz"
+  run_transfer COPYING_HPC_TO_MAC "evidence manifest" "$local_partial/hierarchical_evidence_manifest.json" \
+    "$RSYNC_BIN" "${rsync_common_args[@]}" \
+    "$HPC_ALIAS:$evidence_manifest_path" "$local_partial/hierarchical_evidence_manifest.json"
+  run_transfer COPYING_HPC_TO_MAC "package ready receipt" "$local_partial/HIERARCHICAL_PACKAGE_READY.json" \
+    "$RSYNC_BIN" "${rsync_common_args[@]}" \
+    "$HPC_ALIAS:$package_ready_path" "$local_partial/HIERARCHICAL_PACKAGE_READY.json"
 
-state=VERIFYING_MAC_SHA256
-detail="$local_partial/$EXPECTED_ARCHIVE_NAME"
-current_partial_path="$local_partial/$EXPECTED_ARCHIVE_NAME"
-write_state "$state" "$detail"
-local_sha="$(shasum -a 256 "$local_partial/$EXPECTED_ARCHIVE_NAME" | awk '{print $1}')"
-local_size="$(wc -c < "$local_partial/$EXPECTED_ARCHIVE_NAME" | tr -d ' ')"
-local_evidence_sha="$(shasum -a 256 "$local_partial/t8_hierarchical_evidence.tar.gz" | awk '{print $1}')"
-[[ "$local_sha" == "$EXPECTED_ARCHIVE_SHA256" && "$local_size" == "$EXPECTED_ARCHIVE_BYTES" ]] || { echo "Mac result archive size/SHA mismatch" >&2; exit 66; }
-[[ "$local_evidence_sha" == "$evidence_sha" ]] || { echo "Mac evidence archive SHA mismatch" >&2; exit 66; }
-python3 - "$local_partial" "$EXPECTED_ARCHIVE_BYTES" "$EXPECTED_ARCHIVE_SHA256" "$evidence_sha" <<'PY'
+  state=VERIFYING_MAC_SHA256
+  detail="$local_partial/$EXPECTED_ARCHIVE_NAME"
+  current_partial_path="$local_partial/$EXPECTED_ARCHIVE_NAME"
+  write_state "$state" "$detail"
+  local_sha="$(shasum -a 256 "$local_partial/$EXPECTED_ARCHIVE_NAME" | awk '{print $1}')"
+  local_size="$(wc -c < "$local_partial/$EXPECTED_ARCHIVE_NAME" | tr -d ' ')"
+  local_evidence_sha="$(shasum -a 256 "$local_partial/t8_hierarchical_evidence.tar.gz" | awk '{print $1}')"
+  [[ "$local_sha" == "$EXPECTED_ARCHIVE_SHA256" && "$local_size" == "$EXPECTED_ARCHIVE_BYTES" ]] || { echo "Mac result archive size/SHA mismatch" >&2; exit 66; }
+  [[ "$local_evidence_sha" == "$evidence_sha" ]] || { echo "Mac evidence archive SHA mismatch" >&2; exit 66; }
+  python3 - "$local_partial" "$EXPECTED_ARCHIVE_BYTES" "$EXPECTED_ARCHIVE_SHA256" "$evidence_sha" <<'PY'
 import json, os, sys, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -377,10 +428,11 @@ try:
 finally:
     os.close(dir_fd)
 PY
-mv "$local_partial" "$local_final"
-local_partial=
-current_partial_path=
-write_state MAC_RELAY_READY "$local_final"
+  mv "$local_partial" "$local_final"
+  local_partial=
+  current_partial_path=
+  write_state MAC_RELAY_READY "$local_final"
+fi
 
 # Create or resume only this attempt's fresh AutoDL staging directory.
 $SSH_BIN -q -o BatchMode=yes -o "ConnectTimeout=$SSH_CONNECT_TIMEOUT" "$AUTODL_ALIAS" \
