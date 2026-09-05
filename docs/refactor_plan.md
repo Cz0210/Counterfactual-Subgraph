@@ -1,5 +1,22 @@
 # Refactor Plan
 
+## 2026-09-05: T12 diagnostic terminal and fresh-zero handoff
+
+- [x] Prevent the diagnostic 510 endpoint from invoking the 20k-only native
+  candidate materializer while keeping production behavior as the default.
+- [x] Independently reopen sealed diagnostic checkpoints 500 and 510 and write
+  a fresh, publication-excluded terminal overlay without rerunning step 510.
+- [x] Add exact dead-owner, cwd, writable-FD, and physical lease checks before
+  retiring the stale accelerated owner and releasing its registry lease.
+- [x] Add strict non-dispatchable fresh-zero 10k/20k, verification,
+  postprocess, and existing-publisher handoff stage specs.
+- [ ] Deploy from a clean immutable commit, create the overlay, then atomically
+  reconcile the live registry using its just-read self hash.
+- [ ] Obtain the required fresh diagnostic-parity receipt before activating
+  the fresh-zero owner; do not promote any diagnostic checkpoint.
+
+---
+
 ## 2026-09-04: T8 exact HPC storage-safe terminal chain
 
 - [x] Preserve the existing exact shard and raw merge stream contracts.
@@ -4168,6 +4185,10 @@ Mutagenicity roadmaps.
   frozen full-run scientific parameter validator, using the explicit Route-C
   contract for both reference and low-memory storage, so step 50 cannot be
   misclassified as parameter drift.
+- [x] Seal the user-authorized second and final T14 engineering retry with a
+  fresh UUID/root, a hash-bound cadence contract, preservation of the failed
+  step-50 ledger, and explicit rejection of both the failed checkpoint and the
+  legacy step-161 state.
 - [ ] Import the completed HPC T8 bundle into a fresh AutoDL root, finish the
   four missing cells, and render the frozen-protocol paper artifacts.
 - [x] Replace the obsolete Mut instrumentation/memory adoption inputs with a

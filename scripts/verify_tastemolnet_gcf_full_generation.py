@@ -35,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--production-root", type=_absolute, required=True)
     parser.add_argument("--output-root", type=_absolute, required=True)
+    parser.add_argument("--formal-checkpoint-cadence", action="store_true")
     args = parser.parse_args(argv)
     if args.config.resolve(strict=True) != (REPO_ROOT / "configs/hpc.yaml").resolve(
         strict=True
@@ -44,8 +45,19 @@ def main(argv: list[str] | None = None) -> int:
         raise TasteGCFFullResumeError(
             "T12 verifier requires fail-closed inference override"
         )
+    checkpoint_cursors = None
+    if args.formal_checkpoint_cadence:
+        from src.utils.tastemolnet_t12_formal_profile_v1 import (
+            FORMAL_PRODUCTION_CHECKPOINT_CURSORS,
+            configure_t12_formal_production_profile,
+        )
+
+        configure_t12_formal_production_profile()
+        checkpoint_cursors = FORMAL_PRODUCTION_CHECKPOINT_CURSORS
     result = verify_t12_generation(
-        production_root=args.production_root, verification_root=args.output_root
+        production_root=args.production_root,
+        verification_root=args.output_root,
+        checkpoint_cursors=checkpoint_cursors,
     )
     print(json.dumps(result, sort_keys=True), flush=True)
     print(GENERATION_PASS_MARKER, flush=True)

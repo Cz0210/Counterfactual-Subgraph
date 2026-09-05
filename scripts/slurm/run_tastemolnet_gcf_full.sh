@@ -31,6 +31,13 @@ python -c 'import torch; print(f"cuda_available={torch.cuda.is_available()} cuda
 nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.free --format=csv
 
 phase_args=()
+if [[ "${T12_FORMAL_CHECKPOINT_CADENCE:-0}" == "1" ]]; then
+  : "${T12_DISPOSABLE_INDEX_ROOT:?formal cadence requires node-local T12_DISPOSABLE_INDEX_ROOT}"
+  phase_args+=(--formal-checkpoint-cadence --disposable-index-root "$T12_DISPOSABLE_INDEX_ROOT")
+elif [[ -n "${T12_DISPOSABLE_INDEX_ROOT:-}" ]]; then
+  echo "T12_DISPOSABLE_INDEX_ROOT requires T12_FORMAL_CHECKPOINT_CADENCE=1" >&2
+  exit 2
+fi
 case "$T12_MODE" in
   fresh)
     if [[ -n "${T12_CHECKPOINT_MANIFEST:-}" ]]; then

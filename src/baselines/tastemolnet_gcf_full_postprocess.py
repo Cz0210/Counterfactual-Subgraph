@@ -33,6 +33,9 @@ from src.baselines.tastemolnet_gcf_full_verify import (
     GENERATION_PASS_MARKER,
     GENERATION_VERIFY_SCHEMA,
 )
+from src.utils.tastemolnet_t12_formal_profile_v1 import (
+    FORMAL_PRODUCTION_CHECKPOINT_CURSORS,
+)
 from src.baselines.tastemolnet_gcf_smoke import (
     TasteFrozenGINENativeAdapter,
     _semantic_sha256,
@@ -267,7 +270,11 @@ def _validate_generation_pass(
         or audit.get("marker") != GENERATION_PASS_MARKER
         or Path(str(audit.get("production_root"))) != generation_root
         or audit.get("run_identity_sha256") != sha256_file(run_path)
-        or audit.get("checkpoint_cursors") != [10_000, 20_000]
+        or audit.get("checkpoint_cursors")
+        not in (
+            [10_000, 20_000],
+            list(FORMAL_PRODUCTION_CHECKPOINT_CURSORS),
+        )
         or audit.get("external_transition_store_exact_reopen") is not True
         or audit.get("compact_history_exact_reopen") is not True
         or audit.get("trace_10k_prefix_retained") is not True

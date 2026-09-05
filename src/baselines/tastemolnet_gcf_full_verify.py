@@ -14,7 +14,7 @@ import json
 import os
 from pathlib import Path
 import stat
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from src.baselines.tastemolnet_gcf_candidate_store import (
     reopen_native_candidate_snapshot,
@@ -24,6 +24,7 @@ from src.baselines.tastemolnet_gcf_full import (
     PRODUCTION_RUN_SCHEMA,
 )
 from src.baselines.tastemolnet_gcf_full_resume import (
+    PRODUCTION_CHECKPOINT_CURSORS,
     PRODUCTION_TOTAL_STEPS,
     STAGE,
     TasteGCFFullResumeError,
@@ -163,9 +164,12 @@ def _receipt(
 
 
 def verify_t12_generation(
-    *, production_root: str | Path, verification_root: str | Path
+    *,
+    production_root: str | Path,
+    verification_root: str | Path,
+    checkpoint_cursors: Sequence[int] | None = None,
 ) -> dict[str, Any]:
-    """Reopen both checkpoints, journals, native result and candidate pool."""
+    """Reopen every configured checkpoint, journal, result, and candidate pool."""
 
     import torch
 
@@ -179,6 +183,20 @@ def verify_t12_generation(
     if output.resolve(strict=True) != output or output.is_symlink():
         raise TasteGCFFullResumeError("T12 verification root is an alias")
 
+    cursors = tuple(
+        sorted(PRODUCTION_CHECKPOINT_CURSORS)
+        if checkpoint_cursors is None
+        else checkpoint_cursors
+    )
+    if (
+        not cursors
+        or tuple(sorted(set(cursors))) != cursors
+        or any(type(cursor) is not int or cursor <= 0 for cursor in cursors)
+        or cursors[-1] != PRODUCTION_TOTAL_STEPS
+        or frozenset(cursors) != PRODUCTION_CHECKPOINT_CURSORS
+    ):
+        raise TasteGCFFullResumeError("T12 verification checkpoint cadence changed")
+
     run_path = root / "run_identity.json"
     run = _json(run_path, field="T12 production run identity")
     if run.get("schema_version") != PRODUCTION_RUN_SCHEMA:
@@ -186,7 +204,7 @@ def verify_t12_generation(
     identity_template = validate_checkpoint_identity(run.get("identity_template"))
     if (
         identity_template["purpose"] != "production"
-        or identity_template["checkpoint_cursor"] != 10_000
+        or identity_template["checkpoint_cursor"] != cursors[0]
         or identity_template["total_steps"] != PRODUCTION_TOTAL_STEPS
         or run.get("transition_contract_sha256")
         != production_transition_contract_sha256(identity_template)
@@ -201,7 +219,8 @@ def verify_t12_generation(
 
     checkpoint_facts: dict[int, dict[str, Any]] = {}
     trace_prefix: list[str] | None = None
-    for cursor in (10_000, 20_000):
+    previous_cursor = 0
+    for cursor in cursors:
         receipt, receipt_path = _receipt(
             root, cursor=cursor, expected_attempt=attempt, expected_token=token
         )
@@ -230,18 +249,16 @@ def verify_t12_generation(
             snapshot=history, output_root=output, cursor=cursor
         )
         traversed = list(official["traversed_hashes"])
-        if cursor == 10_000:
+        if cursor == cursors[0]:
             trace_prefix = traversed
-        elif trace_prefix != traversed[:10_000]:
+        elif trace_prefix != traversed[: cursors[0]]:
             raise TasteGCFFullResumeError(
-                "T12 terminal trace does not retain the committed 10k prefix"
+                "T12 later trace does not retain the first committed prefix"
             )
         native_path = Path(receipt["official_native_result"])
-        expected_segment = (
-            root
-            / ("segment-00001-10000" if cursor == 10_000 else "segment-10001-20000")
-            / "results/tastemolnet/runs/counterfactuals.pt"
-        )
+        expected_segment = root / (
+            f"segment-{previous_cursor + 1:05d}-{cursor:05d}"
+        ) / "results/tastemolnet/runs/counterfactuals.pt"
         if (
             native_path != expected_segment
             or _sha256_file(native_path)
@@ -298,25 +315,26 @@ def verify_t12_generation(
         }
         del native, expected_native, official, checkpoint
         gc.collect()
+        previous_cursor = cursor
 
-    first = checkpoint_facts[10_000]
-    terminal = checkpoint_facts[20_000]
-    if (
-        terminal["transition_segments"][
-            : len(first["transition_segments"])
-        ]
-        != first["transition_segments"]
-        or terminal["history"]["segments"][
-            : len(first["history"]["segments"])
-        ]
-        != first["history"]["segments"]
-    ):
-        raise TasteGCFFullResumeError(
-            "T12 terminal journals do not retain their exact 10k prefixes"
-        )
+    terminal = checkpoint_facts[cursors[-1]]
+    for cursor in cursors[:-1]:
+        prefix = checkpoint_facts[cursor]
+        if (
+            terminal["transition_segments"][: len(prefix["transition_segments"])]
+            != prefix["transition_segments"]
+            or terminal["history"]["segments"][: len(prefix["history"]["segments"])]
+            != prefix["history"]["segments"]
+        ):
+            raise TasteGCFFullResumeError(
+                f"T12 terminal journals do not retain their exact {cursor} prefixes"
+            )
 
     terminal_receipt, _unused = _receipt(
-        root, cursor=20_000, expected_attempt=attempt, expected_token=token
+        root,
+        cursor=cursors[-1],
+        expected_attempt=attempt,
+        expected_token=token,
     )
     candidate_manifest = Path(terminal_receipt["candidate_manifest"])
     if (
@@ -359,14 +377,15 @@ def verify_t12_generation(
         "run_identity_sha256": _sha256_file(run_path),
         "attempt_id": attempt,
         "generation_token": token,
-        "checkpoint_cursors": [10_000, 20_000],
+        "checkpoint_cursors": list(cursors),
         "checkpoints": {str(key): value for key, value in checkpoint_facts.items()},
         "candidate_manifest": str(candidate_manifest),
         "candidate_manifest_sha256": _sha256_file(candidate_manifest),
         "candidate_count": len(candidates["counterfactual_candidates"]),
         "external_transition_store_exact_reopen": True,
         "compact_history_exact_reopen": True,
-        "trace_10k_prefix_retained": True,
+        "trace_first_checkpoint_prefix_retained": True,
+        "trace_10k_prefix_retained": 10_000 in cursors,
         "official_native_result_exact": True,
         "lossless_candidate_persistence": True,
         "generated_to_original_neurosed": True,

@@ -32,6 +32,11 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available()); print("cuda_devices=", torch.cuda.device_count())'
 
+cadence=()
+if [[ "${T12_FORMAL_CHECKPOINT_CADENCE:-0}" == "1" ]]; then
+  cadence=(--formal-checkpoint-cadence)
+fi
+
 python scripts/verify_tastemolnet_gcf_full.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
@@ -45,4 +50,5 @@ python scripts/verify_tastemolnet_gcf_full.py \
   --molclr-checkpoint "$T12_MOLCLR_CHECKPOINT" \
   --threshold-contract "$T12_WNODE_THRESHOLD_CONTRACT" \
   --output-root "$T12_PAPER_ROOT" \
-  --verification-root "$T12_TERMINAL_VERIFICATION_ROOT"
+  --verification-root "$T12_TERMINAL_VERIFICATION_ROOT" \
+  "${cadence[@]}"

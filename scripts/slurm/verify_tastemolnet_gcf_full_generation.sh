@@ -19,8 +19,14 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print(f"cuda_available={torch.cuda.is_available()} cuda_count={torch.cuda.device_count()}")'
 
+cadence_args=()
+if [[ "${T12_FORMAL_CHECKPOINT_CADENCE:-0}" == "1" ]]; then
+  cadence_args+=(--formal-checkpoint-cadence)
+fi
+
 python scripts/verify_tastemolnet_gcf_full_generation.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
   --production-root "$T12_OUTPUT_ROOT" \
-  --output-root "$T12_VERIFICATION_ROOT"
+  --output-root "$T12_VERIFICATION_ROOT" \
+  "${cadence_args[@]}"

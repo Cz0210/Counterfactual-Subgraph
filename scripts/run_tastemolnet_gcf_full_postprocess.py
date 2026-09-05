@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--node-embedding-cache-dir", type=_absolute, required=True)
     parser.add_argument("--device", default="cuda:0", choices=("cuda:0",))
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--formal-checkpoint-cadence", action="store_true")
     return parser
 
 
@@ -57,6 +58,12 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("T12 paper postprocess requires configs/hpc.yaml")
     if args.set != ["inference.fallback_to_heuristic=false"]:
         raise RuntimeError("T12 paper postprocess requires fail-closed inference")
+    if args.formal_checkpoint_cadence:
+        from src.utils.tastemolnet_t12_formal_profile_v1 import (
+            configure_t12_formal_production_profile,
+        )
+
+        configure_t12_formal_production_profile()
     authority = load_input_authority(
         generation_root=args.generation_root,
         generation_verification_root=args.generation_verification_root,

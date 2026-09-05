@@ -124,6 +124,11 @@ def _segment(args: argparse.Namespace) -> int:
         scientific_source_equivalence_receipt_path=contract[
             "scientific_source_equivalence_receipt"
         ],
+        # This owner is a 250 -> 500 -> 510 diagnostic only.  Cursor 510 is
+        # not the production 20k terminal and must never materialize the
+        # native candidate universe.
+        materialize_terminal_candidates=False,
+        diagnostic_only=True,
     )
     print(json.dumps(result, sort_keys=True), flush=True)
     return 0

@@ -43,6 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--neurosed-threshold-authority", type=_absolute, required=True
     )
     parser.add_argument("--exact-replay-gate", type=_absolute, required=True)
+    parser.add_argument(
+        "--formal-checkpoint-cadence",
+        action="store_true",
+        help="use the final-16 100..20k recovery-only checkpoint schedule",
+    )
+    parser.add_argument(
+        "--disposable-index-root",
+        type=_absolute,
+        help="node-local root for non-authoritative history indexes",
+    )
     return parser
 
 
@@ -60,6 +70,20 @@ def main(argv: list[str] | None = None) -> int:
         raise TasteGCFFullResumeError(
             "T12 resume requires one 10k manifest; fresh forbids it"
         )
+    if args.formal_checkpoint_cadence:
+        if args.disposable_index_root is None:
+            raise TasteGCFFullResumeError(
+                "formal T12 production requires a node-local disposable index root"
+            )
+        from src.utils.tastemolnet_t12_formal_profile_v1 import (
+            configure_t12_formal_production_profile,
+        )
+
+        configure_t12_formal_production_profile()
+    elif args.disposable_index_root is not None:
+        raise TasteGCFFullResumeError(
+            "a disposable T12 index root requires the explicit formal cadence"
+        )
     result = run_t12_generation_segment(
         mode=args.mode,
         output_root=args.output_root,
@@ -72,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         official_root=args.official_root,
         threshold_authority_path=args.neurosed_threshold_authority,
         replay_gate_path=args.exact_replay_gate,
+        disposable_index_root=args.disposable_index_root,
     )
     print(json.dumps(result, sort_keys=True), flush=True)
     return 0

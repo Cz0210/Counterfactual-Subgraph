@@ -489,11 +489,20 @@ def run_t12_generation_segment(
     resume_run_identity_authority: str | Path | None = None,
     disposable_index_root: str | Path | None = None,
     scientific_source_equivalence_receipt_path: str | Path | None = None,
+    materialize_terminal_candidates: bool = True,
+    diagnostic_only: bool = False,
 ) -> dict[str, Any]:
     """Run exactly fresh 1..10k or resumed 10001..20k generation."""
 
     if mode not in {"fresh", "resume"}:
         raise TasteGCFFullResumeError("T12 production mode must be fresh/resume")
+    if diagnostic_only and (
+        materialize_terminal_candidates or PRODUCTION_TOTAL_STEPS != 510
+    ):
+        raise TasteGCFFullResumeError(
+            "T12 diagnostic-only generation must use the sealed 510 profile "
+            "without terminal candidate materialization"
+        )
     try:
         parsed = uuid.UUID(attempt_id)
     except (ValueError, AttributeError) as exc:
@@ -931,7 +940,10 @@ def run_t12_generation_segment(
                     torch=torch,
                 )
                 candidate_manifest = None
-                if plan["checkpoint_cursor"] == PRODUCTION_TOTAL_STEPS:
+                if (
+                    materialize_terminal_candidates
+                    and plan["checkpoint_cursor"] == PRODUCTION_TOTAL_STEPS
+                ):
                     candidate_manifest = orchestrator.materialize_terminal_candidates(
                         vrrw=vrrw,
                         completed_steps=PRODUCTION_TOTAL_STEPS,
@@ -954,6 +966,10 @@ def run_t12_generation_segment(
                         if candidate_manifest
                         else None
                     ),
+                    "terminal_candidate_materialization_requested": (
+                        materialize_terminal_candidates
+                    ),
+                    "diagnostic_only": diagnostic_only,
                     "official_native_result": str(native_result_path),
                     "official_native_result_sha256": native_result_sha,
                     "official_native_result_semantic_sha256": (

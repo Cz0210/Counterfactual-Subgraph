@@ -37,6 +37,10 @@ resume=()
 if [[ -s "$T12_PAPER_ROOT/checkpoint.json" ]]; then
   resume=(--resume)
 fi
+cadence=()
+if [[ "${T12_FORMAL_CHECKPOINT_CADENCE:-0}" == "1" ]]; then
+  cadence=(--formal-checkpoint-cadence)
+fi
 
 python scripts/run_tastemolnet_gcf_full_postprocess.py \
   --config configs/hpc.yaml \
@@ -53,4 +57,5 @@ python scripts/run_tastemolnet_gcf_full_postprocess.py \
   --output-root "$T12_PAPER_ROOT" \
   --wnode-cache-db "$T12_WNODE_CACHE_DB" \
   --node-embedding-cache-dir "$T12_NODE_EMBEDDING_CACHE_DIR" \
-  "${resume[@]}"
+  "${resume[@]}" \
+  "${cadence[@]}"

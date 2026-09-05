@@ -1,5 +1,36 @@
 # Decisions Log
 
+## [2026-09-05] Reconcile T12 diagnostic 510 without promoting it
+
+### Decision
+
+Treat the accelerated 250→500→510 branch as diagnostic-only evidence.  The
+sealed 500 and 510 checkpoints are independently reopened in a fresh verifier;
+the known failure after the 510 commit is recorded in a publication-excluded
+terminal overlay, without writing into or rerunning the science root.  The
+diagnostic segment explicitly disables terminal candidate materialization, so
+cursor 510 can never invoke the production-only 20k candidate writer.
+
+After exact PID/start-ticks death, a complete `/proc` cwd/writable-FD scan, and
+an unheld physical lease check, the canonical owner registry may retire only
+that owner as `TERMINAL_FAILED_ENGINEERING` and mark only its stale GPU lease
+`RELEASED`.  The existing T12 publisher claim is unchanged.
+
+The replacement main-table route is a fresh-from-zero 10k→20k run.  Its stage
+and existing-publisher handoff specs may be prebuilt, but remain explicitly
+non-dispatchable until a fresh independent diagnostic-parity receipt passes.
+No 250/500/510 diagnostic state may be relabelled or promoted into production.
+
+### Impact
+
+The completed 510 checkpoint is preserved as valid diagnostic evidence and is
+not recomputed merely to repair a post-commit control-flow bug.  Stale registry
+ownership no longer strands GPU1 once the physical writer checks pass, while
+production science, the unique matrix publisher, and the 20k candidate
+materialization contract remain fail closed.
+
+---
+
 ## [2026-09-05] Validate T14 Route C checkpoint cadence independently
 
 ### Decision
@@ -17906,3 +17937,32 @@ an exact comparison.
   newly built specs still require both GPU-lock fields.  The successor also
   binds the authorization receipt at its actual controller-scoped path rather
   than the nonexistent parent-directory shorthand.
+
+# 2026-09-05: Bound the final T14 engineering-corrected retry
+
+- Motivation: the first authorized Route-C retry failed at the reference-mode
+  step-50 checkpoint because transport cadence was incorrectly compared as a
+  scientific parameter.  It produced no committed checkpoint, so neither that
+  state nor the unrelated legacy step-161 state can be resumed safely.
+- Decision: permit exactly one second and final retry only when a self-hashed
+  owner-specific authorization, the preserved step-50 failure ledger, the
+  consumed first-retry receipt, and a formal cadence contract all agree.  The
+  corrected contract selects the 50/100/250/500 cadence from the explicit
+  Route-C flag for both reference and low-memory runs while independently
+  validating the frozen scientific parameters.  The retry must use a new UUID
+  and output root, start at step zero, retain the failed evidence, require
+  384 GiB launch headroom, and reserve 96 GiB at runtime.
+- Scientific binding: copy no inputs from memory.  The retry reopens the failed
+  retry's task spec and requires byte-identical dataset/train split, declared
+  cohort contract, T3 GINE, config, environment, Route-C state design, seed,
+  candidate capacity, resource caps, and minimum-rule contract.  The actual
+  failed reference cohort JSONL is independently hashed as preserved evidence.
+  A separate receipt must report an empty scientific-config diff.
+- Cadence binding: seal science-step and progress intervals, reference and
+  low-memory checkpoints (including the 22,500/25,000 fallback extension),
+  watchdog sampling, convergence audits, and publisher polling together with
+  the exact source-file hashes that implement each cadence.
+- Impact: a stale or committed failed checkpoint, a legacy step-161 state, an
+  unpinned correction commit, or a third retry fails closed.  The scientific
+  candidate-generation semantics and the 20k/25k resource-cap policy remain
+  unchanged.
