@@ -1,5 +1,19 @@
 # Refactor Plan
 
+## 2026-09-05: Accept the scoped T8 relay marker at the AutoDL import gate
+
+- [x] Keep the legacy `t8_hpc_package_ready_v1` relay contract readable.
+- [x] Explicitly accept `t8_hpc_package_ready_v2` only when its archive byte
+  count, independent AutoDL SHA verification, producer-valid relay attempt, UTC-aware
+  receipt time, evidence SHA, and no-matrix-write declaration all validate.
+- [x] Preserve the existing full streaming bundle, scientific provenance,
+  partition, shard, and train-only verification after the outer relay gate.
+- [x] Add focused v2 acceptance and fail-closed missing-receipt tests.
+- [ ] Deploy from a clean immutable commit and let the existing import owner
+  retry naturally; do not restart the owner or retransmit the sealed package.
+
+---
+
 ## 2026-09-05: T12 diagnostic terminal and fresh-zero handoff
 
 - [x] Prevent the diagnostic 510 endpoint from invoking the 20k-only native

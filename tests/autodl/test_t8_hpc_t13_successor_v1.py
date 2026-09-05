@@ -57,7 +57,12 @@ def _tar(path: Path, members: list[tuple[str, bytes]]) -> None:
             archive.addfile(info, io.BytesIO(payload))
 
 
-def _relay_package(tmp_path: Path, *, shard_count: int = 16) -> tuple[Path, dict]:
+def _relay_package(
+    tmp_path: Path,
+    *,
+    shard_count: int = 16,
+    relay_schema: str = importer.RELAY_READY_SCHEMA,
+) -> tuple[Path, dict]:
     package = tmp_path / f"relay-{shard_count}"
     package.mkdir()
     scientific_sha = "1" * 64
@@ -245,16 +250,23 @@ def _relay_package(tmp_path: Path, *, shard_count: int = 16) -> tuple[Path, dict
         "package_ready_sha256",
     )
     _json(package / "HIERARCHICAL_PACKAGE_READY.json", ready)
-    _json(
-        package / "HPC_PACKAGE_READY.json",
-        {
-            "schema_version": importer.RELAY_READY_SCHEMA,
-            "state": "HPC_PACKAGE_READY",
-            "archive_sha256": _sha(result_archive),
-            "hierarchical_evidence_sha256": _sha(evidence_archive),
-            "matrix_write_enabled": False,
-        },
-    )
+    relay_marker = {
+        "schema_version": relay_schema,
+        "state": "HPC_PACKAGE_READY",
+        "archive_sha256": _sha(result_archive),
+        "hierarchical_evidence_sha256": _sha(evidence_archive),
+        "matrix_write_enabled": False,
+    }
+    if relay_schema == importer.RELAY_READY_SCHEMA_V2:
+        relay_marker.update(
+            {
+                "relay_attempt_id": "relay.custom-1_2",
+                "archive_bytes": result_archive.stat().st_size,
+                "received_at": "2026-09-05T08:08:48.738732+00:00",
+                "independent_autodl_sha256_verified": True,
+            }
+        )
+    _json(package / "HPC_PACKAGE_READY.json", relay_marker)
     return package, {
         "execution_commit": execution_commit,
         "scientific_sha": scientific_sha,
@@ -394,6 +406,64 @@ def test_exact_relay_verifier_imports_only_complete_16_shard_train_bundle(
     assert manifest["calibration_test_export_pending_autodl"] is True
     assert not (output / "PASS").exists()
     assert not (output / "cell_root_locator.json").exists()
+
+
+def test_exact_relay_verifier_accepts_strict_scoped_v2_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package, identity = _relay_package(
+        tmp_path, relay_schema=importer.RELAY_READY_SCHEMA_V2
+    )
+    monkeypatch.setattr(
+        importer,
+        "stream_verify_storage_safe_bundle",
+        lambda *_args, **_kwargs: {
+            "status": "PASS",
+            "receipt_verified": True,
+            "matrix_write_enabled": False,
+            "scientific_input_sha256": identity["scientific_sha"],
+            "partition_manifest_sha256": identity["partition_sha"],
+            "merge_result_sha256": identity["merge_sha"],
+            "event_count": 1,
+            "pattern_count": 1,
+            "rejection_count": 0,
+        },
+    )
+    verified = importer.validate_relayed_hpc_package(
+        package,
+        expected_execution_commit=identity["execution_commit"],
+        expected_scientific_input_sha256=identity["scientific_sha"],
+        expected_partition_manifest_sha256=identity["partition_sha"],
+        proc_root=tmp_path / "absent-proc",
+    )
+    assert verified["status"] == "PASS"
+
+
+def test_scoped_v2_marker_requires_independent_autodl_hash_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package, identity = _relay_package(
+        tmp_path, relay_schema=importer.RELAY_READY_SCHEMA_V2
+    )
+    marker_path = package / "HPC_PACKAGE_READY.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker.pop("independent_autodl_sha256_verified")
+    _json(marker_path, marker)
+    monkeypatch.setattr(
+        importer,
+        "stream_verify_storage_safe_bundle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("deep stream verification must not precede the relay gate")
+        ),
+    )
+    with pytest.raises(importer.T8HPCAutoDLImportError, match="v2 relay/package"):
+        importer.validate_relayed_hpc_package(
+            package,
+            expected_execution_commit=identity["execution_commit"],
+            expected_scientific_input_sha256=identity["scientific_sha"],
+            expected_partition_manifest_sha256=identity["partition_sha"],
+            proc_root=tmp_path / "absent-proc",
+        )
 
 
 def test_relay_verifier_rejects_incomplete_array_before_import(

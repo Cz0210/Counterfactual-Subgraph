@@ -36,6 +36,8 @@ from src.baselines.globalgce_hpc_storage_safe import (
 
 
 RELAY_READY_SCHEMA = "t8_hpc_package_ready_v1"
+RELAY_READY_SCHEMA_V2 = "t8_hpc_package_ready_v2"
+RELAY_READY_SCHEMAS = frozenset({RELAY_READY_SCHEMA, RELAY_READY_SCHEMA_V2})
 IMPORT_MANIFEST_SCHEMA = "t8_hpc_autodl_import_manifest_v1"
 IMPORT_VERIFICATION_SCHEMA = "t8_hpc_autodl_import_verification_v1"
 MINING_ADOPTION_SCHEMA = "globalgce_hpc_t8_mining_adoption_v1"
@@ -99,6 +101,53 @@ def _is_commit(value: Any) -> bool:
         and len(value) == 40
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _validate_relay_ready_marker(
+    relay: Mapping[str, Any],
+    *,
+    archive_sha256: str,
+    archive_bytes: int,
+    hierarchical_evidence_sha256: str,
+) -> None:
+    """Validate either sealed relay marker without weakening v2 bindings."""
+
+    schema = relay.get("schema_version")
+    if schema not in RELAY_READY_SCHEMAS:
+        raise T8HPCAutoDLImportError("relay ready marker schema is unsupported")
+    if (
+        relay.get("state") != "HPC_PACKAGE_READY"
+        or relay.get("matrix_write_enabled") is not False
+        or relay.get("archive_sha256") != archive_sha256
+        or relay.get("hierarchical_evidence_sha256")
+        != hierarchical_evidence_sha256
+    ):
+        raise T8HPCAutoDLImportError("outer relay/package binding failed")
+    if schema == RELAY_READY_SCHEMA:
+        return
+
+    attempt_id = relay.get("relay_attempt_id")
+    if (
+        type(attempt_id) is not str
+        or not attempt_id
+        or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-" for character in attempt_id)
+    ):
+        raise T8HPCAutoDLImportError("v2 relay marker attempt ID is malformed")
+    received_at = relay.get("received_at")
+    try:
+        parsed_received_at = datetime.fromisoformat(str(received_at))
+    except (TypeError, ValueError) as exc:
+        raise T8HPCAutoDLImportError(
+            "v2 relay marker received_at is malformed"
+        ) from exc
+    if (
+        type(relay.get("archive_bytes")) is not int
+        or relay.get("archive_bytes") != archive_bytes
+        or relay.get("independent_autodl_sha256_verified") is not True
+        or parsed_received_at.tzinfo is None
+        or parsed_received_at.utcoffset() is None
+    ):
+        raise T8HPCAutoDLImportError("v2 relay/package binding failed")
 
 
 def _physical_dir(value: str | Path, *, label: str) -> Path:
@@ -475,14 +524,14 @@ def validate_relayed_hpc_package(
         root / "t8_exact_result_bundle.tar.gz", label="result archive"
     )
     archive_sha = _sha256(archive)
+    _validate_relay_ready_marker(
+        relay,
+        archive_sha256=archive_sha,
+        archive_bytes=archive.stat().st_size,
+        hierarchical_evidence_sha256=ready.get("evidence_archive_sha256"),
+    )
     if (
-        relay.get("schema_version") != RELAY_READY_SCHEMA
-        or relay.get("state") != "HPC_PACKAGE_READY"
-        or relay.get("matrix_write_enabled") is not False
-        or relay.get("archive_sha256") != archive_sha
-        or relay.get("hierarchical_evidence_sha256")
-        != ready.get("evidence_archive_sha256")
-        or ready.get("schema_version") != PACKAGE_READY_SCHEMA
+        ready.get("schema_version") != PACKAGE_READY_SCHEMA
         or ready.get("status") != "PASS"
         or ready.get("matrix_write_enabled") is not False
         or ready.get("result_archive_sha256") != archive_sha

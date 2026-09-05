@@ -1,5 +1,29 @@
 # Decisions Log
 
+## [2026-09-05] Bind both scoped-relay marker versions at T8 AutoDL import
+
+### Decision
+
+Treat `t8_hpc_package_ready_v2` as the current scoped-transfer envelope while
+retaining strict compatibility with the earlier v1 marker.  A v2 envelope is
+accepted only when it binds the actual archive byte count and SHA-256, the
+hierarchical evidence SHA-256, an exact producer-valid relay attempt, an offset-aware
+receipt time, the independent AutoDL SHA verification, and the disabled matrix
+writer.  Unknown schemas and incomplete v2 receipts fail before deep streaming.
+
+The sealed relay marker is not rewritten to masquerade as v1.  Every existing
+inner bundle, partition, shard, scientific-input, official-code, train-only,
+and no-matrix-write check remains mandatory.
+
+### Impact
+
+The already verified 6.10 GB T8 package can be consumed by the existing AutoDL
+import owner without retransmission or owner restart.  The change resolves a
+transport-schema wiring mismatch only; it grants no HPC matrix, GINE,
+calibration, or test authority and does not change GlobalGCE science.
+
+---
+
 ## [2026-09-05] Reconcile T12 diagnostic 510 without promoting it
 
 ### Decision
