@@ -5,6 +5,68 @@ This is a continuation of the actual
 missing history. **The final temperature-contract review supersedes the earlier
 core-PASS interpretation. No LLM science was launched.**
 
+## Final update: 2026-09-05 22:05:19 CST
+
+This update supersedes the earlier T8/T13 waiting snapshot below. Main is still
+12/16, with unchanged matrix SHA. Mut trace-on is241/500; trace-off has not
+started. T14 retry2 reference is261/500. T12 still has only sealed250 while its
+reference500 process remains alive. They were not restarted or modified.
+
+T8 import completed independently at21:27CST: `HPC_IMPORT_PASS`,20 selected
+patterns, train-only/input/partition hashes closed. No 6.10GB retransfer or
+mining rerun occurred. The old T13 owner219876 launched science283328, which
+failed before training: the command lacked `-I`, and the generator also lacked
+the previously verified official runtime source authority. Old owner/science
+both exited; empty target0 and all historical failure evidence remain preserved.
+
+The small repair was independently reviewed, passed36 focused tests and a real
+AutoDL CPU-only isolated official import/API/provenance preflight. Execution:
+`25e09df0bd9626d5c55873df4b8865c10108993e`, immutable worktree
+`/root/autodl-tmp/worktrees/t13-isolated-recovery-25e09df0`.
+No adapter provenance or chemistry gate was weakened. New commands use `-I -B`.
+
+Fresh T13 owner284476(start ticks35099305), science284493(ticks35099344) now
+run on GPU1/UUID`GPU-244f35a8-354a-ef1e-f589-bde7f8a7a690`.
+Control:`/autodl-fs/data/counterfactual-subgraph-runtime/control/t13-isolated-recovery-4381e5ca-20260905`.
+Science:`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/globalgce/t13-from-hpc/attempt-4381e5ca-63d9-47b2-9303-9a89b7fb4c18`.
+The observed native preprocessing counter progressed to803/3823; this is not an
+epoch count or T13 PASS. The existing owner will continue the original100epochs,
+targets0/2 and canonical publisher. Only this fresh T13 owner was launched.
+
+The existing owner registry was atomically reconciled using its existing
+validator, after checking all live identities and an unchanged source SHA.
+The old T13 row is terminal with a successor link; new T13 is RUNNING. GPU1's
+primary T13 reservation remains HELD, all publishers are unchanged, and the
+main matrix was not written. Original registry is preserved in the new control
+root's `registry_before.json`; new self SHA:
+`cb03c22c91b0de30f0b7511ee4d601b2365f7358ded2f74101a5895ebebae67b`.
+
+GPU0=Mut193180; GPU1=T13 284493; GPU2=T14 268321; GPU3=T12 173495.
+Effective cgroup headroom398830145536bytes; failcnt4306 unchanged. AutoDL
+persistent free1684386050048bytes/inodes98248. HPC scoped free28724871168bytes;
+the GNN heavy CPU chain has no remaining jobs.
+
+The temperature-contract correction is deployed, not merely proposed:
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/gnn/seed7-core-contract-review-90e6f119-20260905/temperature_contract_correction.json`.
+Its SHA is`7368b8d5d0d4db709fde2fc9790f805d49cb170eade9b545c3e1ab54a78ab0f6`;
+state`BLOCKED_TEMP_CALIBRATION_CONTRACT`, `llm_promotion_allowed=false`.
+Fresh LLM specs are bound to the new strict-gate implementation at
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/llm/core-native-ready-25e09df0-20260905`.
+Preparation completed; no LLM science/GPU process started. No main-count gate
+or secondary-seed gate was reintroduced. All four GPUs now have main science.
+
+Current exact status commands:
+
+```bash
+ssh -o BatchMode=yes autodl-a800 'cat /autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json /autodl-fs/data/counterfactual-subgraph-runtime/control/t13-isolated-recovery-4381e5ca-20260905/owner/heartbeat.json'
+ssh -o BatchMode=yes tongji-hpc 'sacct -X -j 2558894,2558895,2558896,2558897,2558898,2558899,2558901 --format=JobID,State,ExitCode,Elapsed -P'
+ssh -o BatchMode=yes autodl-a800 'cat /autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/gnn/seed7-core-contract-review-90e6f119-20260905/temperature_contract_correction.json /autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/llm/core-native-ready-25e09df0-20260905/llm_readiness.json'
+```
+
+No restart command is needed for healthy T13/Mut/T12/T14. The next GNN repair
+requires owner authorization for first-time validation-only temperature fitting
+of the four frozen alternatives in fresh overlays; do not run it yet.
+
 ## Outcome and required owner decision
 
 Main remains 12/16. All five seed7 classifiers were evaluated without retraining,
