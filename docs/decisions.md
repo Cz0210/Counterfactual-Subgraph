@@ -18304,3 +18304,17 @@ Fix only that classification and reopen the existing corrective archive in a fre
 verification attempt. Preserve failed Slurm job 2560779, the archive, all fits and
 evaluation results. No refit, model inference, OT or repack is authorized by this
 engineering retry. Record the temperature driver and the verifier driver separately.
+
+## 2026-09-06: Publish accepted corrected seed7 tables without repeated science scans
+
+- The portable correction and independent AutoDL import have completed. Adopt
+  the existing location acceptance, bind its small receipt and seven paper
+  outputs to the accepted manifest, and publish an additive GNN-only registry
+  entry. Do not reopen all models, parent records or compressed OT evidence for
+  ordinary status/publication. Full verification remains at adoption/transport
+  or changed-input boundaries; stale or conflicting evidence still fails closed.
+- Keep the old provisional package/audit, true worsened metrics and unavailable
+  training resource fields unchanged. No main matrix entry is added for an
+  ablation, and no temperature, residual prediction, selector or OT is rerun.
+- `scripts/ablations/gnn/publish_corrected_seed7.py` is the narrow publication
+  adapter; its paired Slurm wrapper is CPU-only by the explicit task override.
