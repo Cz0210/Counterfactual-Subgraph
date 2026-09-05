@@ -45,6 +45,7 @@ PY
 
 MODE=${CHEMLLM_2B_ISOLATED_MODE:-cpu-load}
 TINY_FORWARD_ARGS=()
+# Includes native model.build_inputs and one at-most-four-token greedy probe.
 if [[ "${CHEMLLM_2B_TINY_FORWARD:-0}" == "1" ]]; then
   TINY_FORWARD_ARGS+=(--tiny-forward)
 fi

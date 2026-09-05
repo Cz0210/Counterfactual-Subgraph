@@ -32,3 +32,11 @@ def test_gpu_gate_requires_explicit_negative_queue_and_reservations():
         e=evidence()
         e.pop(key)
         assert not gpu_allowed(e,family="gnn")["allowed"]
+
+
+def test_llm_does_not_require_main_cell_count_but_still_requires_resources():
+    e = {**evidence(), 'gnn_core_seed7_audit': 'PASS'}
+    e.pop('main_cells')
+    assert gpu_allowed(e, family='llm')['allowed']
+    assert not gpu_allowed({**e, 'gpu_main_reservation': True}, family='llm')['allowed']
+    assert not gpu_allowed({**e, 'gnn_core_seed7_audit': 'WAITING'}, family='llm')['allowed']

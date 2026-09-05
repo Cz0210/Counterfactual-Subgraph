@@ -5,7 +5,8 @@ The ordinary entrypoint creates a fresh evidence root and then re-executes
 itself as ``python -I -B`` with offline caches.  ``--mode metadata`` proves the
 isolated config/tokenizer/model-class import only.  ``--mode cpu-load`` also
 loads every weight on CPU and emits the actual tensor parameter report needed
-by the LLM scale-ablation runtime gate.  No mode acquires a GPU lock.
+by the LLM scale-ablation runtime gate. ``--tiny-forward`` also performs one
+native-chat greedy generation of at most four tokens. No mode acquires a GPU lock.
 """
 
 from __future__ import annotations

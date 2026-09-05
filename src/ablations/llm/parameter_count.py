@@ -95,12 +95,24 @@ def count_actual_loaded_parameters(model: object) -> ParameterCountReport:
         element_size = getattr(parameter, "element_size", None)
         if not callable(numel) or not callable(element_size):
             raise LLMAblationContractError(f"parameter {name} is not tensor-like")
-        count = int(numel())
+        physical_count = int(numel())
+        count = physical_count
+        # bitsandbytes stores two logical 4-bit values per physical byte.
+        # Its loaded quantization state retains the original tensor shape;
+        # count that actual shape, not the packed storage element count.
+        quant_state = getattr(parameter, "quant_state", None)
+        logical_shape = getattr(quant_state, "shape", None)
+        if logical_shape is not None:
+            import math
+            dimensions = tuple(int(value) for value in logical_shape)
+            if not dimensions or any(value <= 0 for value in dimensions):
+                raise LLMAblationContractError(f"parameter {name} has invalid loaded quantization shape")
+            count = math.prod(dimensions)
         bytes_per_element = int(element_size())
         if count < 0 or bytes_per_element <= 0:
             raise LLMAblationContractError(f"parameter {name} has invalid shape/dtype")
         total += count
-        weight_bytes += count * bytes_per_element
+        weight_bytes += physical_count * bytes_per_element
         dtypes.add(str(getattr(parameter, "dtype", "unknown")))
         is_trainable = bool(getattr(parameter, "requires_grad", False))
         if is_trainable:

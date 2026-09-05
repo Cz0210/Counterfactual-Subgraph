@@ -44,6 +44,8 @@ _BLOCKED_IMPORT_ROOTS = {
     "urllib",
 }
 _BLOCKED_CALLS = {
+    "copyfile",
+    "shutil.copyfile",
     "__import__",
     "compile",
     "eval",
@@ -80,6 +82,22 @@ _BLOCKED_CALLS = {
     "torch.hub.load",
     "urllib.request.urlopen",
 }
+
+# Reviewed exact upstream source files.  Their save_vocabulary method is an
+# explicit export API, not an import/load/inference path; callers below disable
+# that API on the tokenizer.  No filename-only or general write exception.
+_AUDITED_UNUSED_TOKENIZER_EXPORTS = {
+    ("tokenization_internlm2.py", "444d4c2b0da158e61c34b3c727943f0ad454770c74b307f4d881f03603335eef"),
+    ("tokenization_internlm.py", "880e2cebff1d30db2acb485b8fc00299fda7a5efb2c4d8400bd9adf60d1158e0"),
+}
+
+
+def disable_tokenizer_exports(tokenizer: Any) -> None:
+    """Inference/admission never saves or rewrites a tokenizer snapshot."""
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise LLMAblationContractError("Tokenizer export is disabled during isolated inference")
+    tokenizer.save_vocabulary = forbidden
+    tokenizer.save_pretrained = forbidden
 _BLOCKED_MUTATING_METHODS = {
     "mkdir",
     "rmdir",
@@ -361,6 +379,7 @@ def audit_remote_code(snapshot: ChemLLM2BSnapshotPin) -> dict[str, Any]:
 
     rows: list[dict[str, Any]] = []
     violations: list[dict[str, Any]] = []
+    unused_export_evidence: list[dict[str, Any]] = []
     for path in sorted(root.rglob("*.py")):
         relative = path.relative_to(root).as_posix()
         digest = sha256_file(path)
@@ -368,6 +387,14 @@ def audit_remote_code(snapshot: ChemLLM2BSnapshotPin) -> dict[str, Any]:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             raise LLMAblationContractError(f"remote source cannot be parsed: {relative}") from exc
+        excluded_lines: set[int] = set()
+        if (relative, digest) in _AUDITED_UNUSED_TOKENIZER_EXPORTS:
+            for function in ast.walk(tree):
+                if isinstance(function, ast.FunctionDef) and function.name == "save_vocabulary":
+                    excluded_lines.update(range(function.lineno, function.end_lineno + 1))
+                    unused_export_evidence.append({"path": relative, "sha256": digest,
+                        "method": "save_vocabulary", "first_line": function.lineno,
+                        "last_line": function.end_lineno, "runtime_export_disabled": True})
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -389,7 +416,7 @@ def audit_remote_code(snapshot: ChemLLM2BSnapshotPin) -> dict[str, Any]:
                     name in _BLOCKED_CALLS
                     or leaf in _BLOCKED_MUTATING_METHODS
                     or _write_open_call(node)
-                ):
+                ) and node.lineno not in excluded_lines:
                     violations.append(
                         {"file": relative, "line": node.lineno, "kind": "CALL", "name": name}
                     )
@@ -408,6 +435,7 @@ def audit_remote_code(snapshot: ChemLLM2BSnapshotPin) -> dict[str, Any]:
         "required_auto_map_modules": sorted(required_modules),
         "source_files": rows,
         "violation_count": 0,
+        "audited_unused_export_methods": unused_export_evidence,
         "policy": {
             "network_imports_blocked": True,
             "subprocess_calls_blocked": True,
@@ -583,7 +611,8 @@ def run_isolated_child_probe(
     }
     try:
         config = AutoConfig.from_pretrained(snapshot.root, **common)
-        tokenizer = AutoTokenizer.from_pretrained(snapshot.root, **common)
+        tokenizer = AutoTokenizer.from_pretrained(snapshot.root, use_fast=False, **common)
+        disable_tokenizer_exports(tokenizer)
         auto_map = getattr(config, "auto_map", None)
         model_reference = auto_map.get("AutoModelForCausalLM") if isinstance(auto_map, Mapping) else None
         if not isinstance(model_reference, str) or not model_reference:
@@ -637,18 +666,25 @@ def run_isolated_child_probe(
         parameter_report_sha = sha256_file(parameter_report_path)
         if tiny_forward:
             try:
-                tokenized = tokenizer(
-                    "MOLECULE_SMILES: CCO\nFRAGMENT_SMILES:",
-                    return_tensors="pt",
-                    add_special_tokens=True,
-                )
+                # The pinned model's native chat entrypoint is authoritative;
+                # its tokenizer_config carries a conflicting generic INST template.
+                prompt = "MOLECULE_SMILES: CCO\nFRAGMENT_SMILES:"
+                tokenized = model.build_inputs(tokenizer, prompt, history=[], meta_instruction="")
                 inputs = {key: value.to("cpu") for key, value in tokenized.items()}
                 with torch.inference_mode():
                     output = model(**inputs, use_cache=False)
                 logits = output.logits
+                with torch.inference_mode():
+                    generated = model.generate(**inputs, max_new_tokens=4, do_sample=False,
+                        num_return_sequences=1, use_cache=False,
+                        eos_token_id=[tokenizer.eos_token_id,
+                            tokenizer.convert_tokens_to_ids("<|im_end|>")],
+                        pad_token_id=tokenizer.pad_token_id)
             except Exception as exc:  # pragma: no cover - exercised on AutoDL
                 raise LLMAblationContractError("optional tiny forward failed") from exc
-            if logits.ndim != 3 or logits.shape[0] != 1 or not bool(torch.isfinite(logits).all()):
+            if (logits.ndim != 3 or logits.shape[0] != 1 or not bool(torch.isfinite(logits).all())
+                    or generated.ndim != 2 or generated.shape[0] != 1
+                    or not 0 < generated.shape[1] - inputs["input_ids"].shape[1] <= 4):
                 raise LLMAblationContractError("optional tiny forward produced invalid logits")
             forward_receipt = {
                 "status": "PASS",
@@ -656,6 +692,10 @@ def run_isolated_child_probe(
                 "sequence_length": int(logits.shape[1]),
                 "vocab_size": int(logits.shape[2]),
                 "finite": True,
+                "native_prompt_api": "model.build_inputs(history=[],meta_instruction='')",
+                "tiny_generation_token_count": int(generated.shape[1] - inputs["input_ids"].shape[1]),
+                "tiny_generation_max_new_tokens": 4,
+                "tiny_generation_only": True,
             }
     elif mode != "metadata":
         raise LLMAblationContractError("isolated load mode must be metadata or cpu-load")

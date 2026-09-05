@@ -20,7 +20,7 @@ def gpu_allowed(evidence, *, family):
     if family not in ("gnn", "llm"):
         raise ValueError("unknown ablation family")
     blockers = []
-    if evidence.get("main_cells", 0) < 12:
+    if family == "gnn" and evidence.get("main_cells", 0) < 12:
         blockers.append("MAIN_MATRIX_BELOW_12")
     for field in ("owners_healthy", "registry_healthy", "memory_safe", "storage_safe", "checkpoint_resume_pass"):
         if evidence.get(field) is not True:

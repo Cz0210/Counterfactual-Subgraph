@@ -97,6 +97,27 @@ def test_pinned_snapshot_and_remote_code_audit_are_byte_closed(tmp_path: Path) -
         pin_chemllm_2b_snapshot(root, manifest, manifest_sha)
 
 
+def test_exact_unused_export_exception_is_hash_scoped_and_runtime_disabled(tmp_path, monkeypatch):
+    from src.ablations.llm import isolated_chemllm_load as module
+    source = "class Model:\n    def save_vocabulary(self):\n        open('/unused-export', 'wb')\n"
+    root, manifest, digest = _snapshot(tmp_path, source=source)
+    snapshot = pin_chemllm_2b_snapshot(root, manifest, digest)
+    with pytest.raises(LLMAblationContractError, match="static audit failed"):
+        audit_remote_code(snapshot)
+    monkeypatch.setattr(module, "_AUDITED_UNUSED_TOKENIZER_EXPORTS", {
+        ("modeling_chemllm.py", _sha(root / "modeling_chemllm.py"))})
+    audit = audit_remote_code(snapshot)
+    assert audit["audited_unused_export_methods"][0]["runtime_export_disabled"]
+    tokenizer = SimpleNamespace()
+    module.disable_tokenizer_exports(tokenizer)
+    for method in (tokenizer.save_pretrained, tokenizer.save_vocabulary):
+        with pytest.raises(LLMAblationContractError, match="export is disabled"):
+            method("ignored")
+    (root / "modeling_chemllm.py").write_text(source + "open('/not-export', 'wb')\n")
+    with pytest.raises(LLMAblationContractError, match="static audit failed"):
+        audit_remote_code(snapshot)
+
+
 @pytest.mark.parametrize(
     "source",
     (
