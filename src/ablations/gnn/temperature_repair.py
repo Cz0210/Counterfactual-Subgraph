@@ -706,6 +706,106 @@ def verify_package(output_root):
     return read_json(verified/'result_package.json')
 
 
+def _verify_corrective_science_bindings(manifest, data, rows, proof):
+    """Reopen the independent replay's exact portable inputs; no inference/OT."""
+    files = manifest['files']
+    science = data('publication/independent_science_replay.json')
+    require(proof['independent_science_replay_sha256'] ==
+        files['publication/independent_science_replay.json']['sha256'], 'INDEPENDENT_CORRECTIVE_REPLAY_HASH')
+    require(science.get('state') == 'PASS'
+        and all(science.get(k) is True for k in ('global_calibration_selector_replayed',
+            'all_five_validation_temperatures_fitted_and_input_bound', 'classifier_metrics_replayed',
+            'native_common_metrics_replayed', 'per_match_flip_and_best_match_replayed', 'proposal_fixed'))
+        and all(science.get(k) is False for k in ('test_used_for_selection', 'ot_recomputed',
+            'classifier_inference_rerun', 'main_matrix_write', 'cross_seed_standard_deviation_claimed'))
+        and science.get('seed') == 7, 'PORTABLE_INDEPENDENT_SCIENTIFIC_PASS_REQUIRED')
+    run = data('evaluation/run_manifest.json')
+    producer = data('evaluation/gnn_seed7_final_audit.json')
+    require(science['source_final_audit_sha256'] == files['evaluation/gnn_seed7_final_audit.json']['sha256']
+        and science['scientific_engine_commit'] == run['execution_commit'] == manifest['scientific_engine_commit'],
+        'PORTABLE_INDEPENDENT_SOURCE_BINDING')
+    require(audit.required_files() <= set(producer['files']), 'PORTABLE_PRODUCER_INVENTORY_INCOMPLETE')
+    for rel, digest in producer['files'].items():
+        require(files.get('evaluation/' + rel, {}).get('sha256') == digest, 'PORTABLE_PRODUCER_FILE_DRIFT')
+    inp = data('inputs/bundle_manifest.json')
+    require(files['inputs/bundle_manifest.json']['sha256'] == run['bundle_sha256'] ==
+        science['cohort_contract']['bundle_manifest_sha256'], 'PORTABLE_ORIGINAL_BUNDLE_DRIFT')
+    require(science['cohort_contract']['native_eligibility'] == audit.ELIGIBILITY
+        and science['cohort_contract']['scientific_definition_changed'] is False,
+        'PORTABLE_SOURCE_COHORT_CONTRACT_DRIFT')
+    require(set(science['models']) == set(run['checkpoints']) == set(run['temperatures']) == set(core.BACKBONES),
+        'PORTABLE_MODEL_INVENTORY_INCOMPLETE')
+    for name in core.BACKBONES:
+        bound = science['models'][name]
+        for leaf, field in (('model.pt', 'model_sha256'), ('temperature_scaling.json', 'temperature_sha256'),
+                            ('model_card.json', 'model_card_sha256')):
+            require(files[f'classifiers/{name}/{leaf}']['sha256'] == bound[field], 'PORTABLE_REPLAY_MODEL_DRIFT')
+        require(bound['model_sha256'] == run['checkpoints'][name]
+            and float(data(f'classifiers/{name}/temperature_scaling.json')['temperature']) == float(run['temperatures'][name]),
+            'PORTABLE_REPLAY_TEMPERATURE_DRIFT')
+        require(files[f'evaluation/{name}/calibration_classifier_predictions.csv']['sha256'] ==
+            science['calibration_prediction_sha256s'][name], 'PORTABLE_CALIBRATION_PREDICTION_DRIFT')
+    evidence = science['parent_scientific_checkpoint_sha256s']
+    actual_parents = {rel.removeprefix('evaluation/') for rel in files if any(
+        rel.startswith(f'evaluation/{name}/{split}/parents/') for name in core.BACKBONES
+        for split in ('calibration', 'test'))}
+    require(set(evidence) == actual_parents, 'PORTABLE_PARENT_AUDIT_INVENTORY_DRIFT')
+    for rel, digest in evidence.items():
+        require(files['evaluation/' + rel]['sha256'] == digest, 'PORTABLE_PARENT_AUDIT_SHA_DRIFT')
+    freeze = data('evaluation/CALIBRATION_FREEZE.json')
+    require(freeze['all_five_calibration_orders_frozen'] is True and freeze['test_loaded'] is False
+        and freeze['binding_sha256'] == run['binding_sha256'], 'PORTABLE_TEST_BEFORE_GLOBAL_FREEZE')
+    for name in core.BACKBONES:
+        for mode in ('native', 'common'):
+            rel = f'evaluation/{name}/{mode}/selected_rules.json'
+            selected = data(rel)
+            require(files[rel]['sha256'] == freeze['source_files'][f'{name}/{mode}']
+                and selected['binding_sha256'] == run['binding_sha256'] and selected['split'] == 'calibration'
+                and selected['candidate_ids'] == freeze['selections'][name][mode]
+                and selected['backbone'] == name and selected['cohort'] == mode,
+                'PORTABLE_FROZEN_SELECTION_DRIFT')
+    expected_units = set()
+    split_ids = {}
+    for split in ('calibration', 'test'):
+        native = {}
+        reference = None
+        for name in core.BACKBONES:
+            records = rows(f'evaluation/{name}/{split}_classifier_predictions.csv')
+            ids = [r['parent_id'] for r in records]
+            labels = [int(r['label']) for r in records]
+            require(len(records) == inp['split_row_counts'][split] and len(ids) == len(set(ids))
+                and set(labels) <= {0, 1}, 'PORTABLE_PARENT_PREDICTION_UNIVERSE')
+            require(reference is None or reference == (ids, labels), 'PORTABLE_CROSS_BACKBONE_PARENT_DRIFT')
+            reference = (ids, labels)
+            temperature = float(run['temperatures'][name])
+            probabilities = scaled_probabilities([vector(r['logits']) for r in records], temperature)
+            require(np.allclose(probabilities, np.stack([vector(r['probabilities']) for r in records]), rtol=1e-9, atol=1e-12)
+                and all(int(r['predicted_label']) == int(p.argmax()) and r['checkpoint_id'] == run['checkpoints'][name]
+                    and float(r['temperature']) == temperature and r['backbone'] == name
+                    and int(r['source_label']) == 1 and int(r['num_classes']) == 2
+                    for r, p in zip(records, probabilities, strict=True)), 'PORTABLE_PARENT_RAW_LOGIT_BINDING')
+            native[name] = [pid for pid, label, p in zip(ids, labels, probabilities, strict=True) if label == 1 and p.argmax() == 1]
+            expected_units.update((name, split, pid) for pid in native[name])
+        common = sorted(set.intersection(*(set(native[name]) for name in core.BACKBONES)))
+        expected = dict(native=native, common=common, source_label=1,
+            definition='true_source_and_correctly_predicted_source', backbones=list(core.BACKBONES))
+        require(data(f'evaluation/{split}_cohorts.json') == expected, 'PORTABLE_NATIVE_COMMON_COHORT_DRIFT')
+        split_ids[split] = set(reference[0])
+    require(not split_ids['calibration'] & split_ids['test'], 'PORTABLE_CALIBRATION_TEST_OVERLAP')
+    return expected_units, set(evidence)
+
+
+def _claim_portable_reuse_parent(receipt, rel, expected_units, expected_paths, seen_units, seen_paths):
+    unit = (receipt['backbone'], receipt['split'], receipt['parent_id'])
+    require(unit in expected_units and unit not in seen_units, 'PORTABLE_REUSE_PARENT_DUPLICATE_OR_OUTSIDE_COHORT')
+    parent_rel = f"{receipt['backbone']}/{receipt['split']}/parents/{Path(rel).name}"
+    require(parent_rel in expected_paths and parent_rel not in seen_paths,
+        'PORTABLE_REUSE_PARENT_PATH_DUPLICATE_OR_UNAUDITED')
+    seen_units.add(unit)
+    seen_paths.add(parent_rel)
+    return parent_rel
+
+
 def verify_corrective_package(package, output_root=None):
     """Portable independent reopen of fits, raw logits and every reused match.
 
@@ -729,7 +829,11 @@ def verify_corrective_package(package, output_root=None):
             and proof['repair_contract_sha256']==manifest['files']['repair/repair_contract.json']['sha256']
             and contract['repair_selected_using_test'] is False and contract['test_artifacts_previously_evaluated'] is True,
             'CORRECTIVE_RESEARCH_SCOPE')
-        original=data('repair/original_package_manifest.json')['files']
+        original_manifest=data('repair/original_package_manifest.json')
+        from src.ablations.contracts import canonical_json_sha256
+        require(original_manifest['manifest_sha256'] == canonical_json_sha256({k:v for k,v in original_manifest.items()
+            if k != 'manifest_sha256'}), 'PORTABLE_ORIGINAL_INVENTORY_SELF_HASH')
+        original=original_manifest['files']
         inp=data('inputs/bundle_manifest.json')
         require(manifest['files']['inputs/validation.csv']['sha256']==inp['files'][inp['splits']['validation']]['sha256'],
                 'PORTABLE_VALIDATION_INPUT_CHANGED')
@@ -742,7 +846,11 @@ def verify_corrective_package(package, output_root=None):
             temp=data(f'classifiers/{n}/temperature_scaling.json')
             card=data(f'classifiers/{n}/model_card.json')
             predrows=rows(f'classifiers/{n}/validation_predictions.csv')
-            require([r['molecule_id'] for r in predrows]==validation_ids,'PORTABLE_VALIDATION_IDS_DRIFT')
+            require([r['molecule_id'] for r in predrows]==validation_ids
+                and all(int(r['label']) == int(v['label']) and r['smiles'] == v['smiles']
+                    for r,v in zip(predrows,validation,strict=True)), 'PORTABLE_VALIDATION_IDS_DRIFT')
+            require(manifest['files'][f'classifiers/{n}/validation_predictions.csv']['sha256'] ==
+                original[f'classifiers/{n}/validation_predictions.csv']['sha256'], 'PORTABLE_ORIGINAL_VALIDATION_LOGITS_CHANGED')
             audit.require_validation_fitted_temperature(temp,model_card=card,backbone=n,
                 validation_sha256=manifest['files']['inputs/validation.csv']['sha256'],
                 validation_predictions_sha256=manifest['files'][f'classifiers/{n}/validation_predictions.csv']['sha256'],validation_count=187)
@@ -750,13 +858,18 @@ def verify_corrective_package(package, output_root=None):
                 require(manifest['files'][f'classifiers/{n}/temperature_scaling.json']['sha256']==
                     original[f'classifiers/{n}/temperature_scaling.json']['sha256'], 'GINE_TEMPERATURE_CHANGED')
             else:
-                _verify_fit_values(data(f'classifiers/{n}/temperature_fit_receipt.json'),temp,predrows,weight,
+                fit_receipt=data(f'classifiers/{n}/temperature_fit_receipt.json')
+                require(fit_receipt['self_sha256'] == stable_sha256({k:v for k,v in fit_receipt.items() if k!='self_sha256'}),
+                    'PORTABLE_FIT_RECEIPT_SELF_HASH')
+                _verify_fit_values(fit_receipt,temp,predrows,weight,
                     manifest['files']['inputs/validation.csv']['sha256'])
         freeze=data('repair/selector_replay_receipt.json')
         require(freeze['all_ten_frozen'] is True and freeze['new_test_probabilities_read'] is False
             and freeze['freeze_sha256']==manifest['files']['evaluation/CALIBRATION_FREEZE.json']['sha256'],
             'PORTABLE_GLOBAL_FREEZE_BINDING')
+        expected_units, expected_parent_paths = _verify_corrective_science_bindings(manifest,data,rows,proof)
         counts={'calibration':0,'test':0}; used=0; inferred=0
+        seen_units=set(); seen_parent_paths=set()
         for rel in sorted(manifest['files']):
             if not rel.startswith('repair/reuse/'):
                 continue
@@ -769,11 +882,16 @@ def verify_corrective_package(package, output_root=None):
             require(source['science_sha256']==stable_sha256(source['science']), 'ORIGINAL_SCIENCE_HASH')
             name,split=receipt['backbone'],receipt['split']
             new_name=Path(rel).name
-            current=data(f'evaluation/{name}/{split}/parents/{new_name}')
+            parent_rel = _claim_portable_reuse_parent(receipt,rel,expected_units,expected_parent_paths,seen_units,seen_parent_paths)
+            current=data('evaluation/'+parent_rel)
             require(current['science_sha256']==stable_sha256(current['science'])
                 and manifest['files'][f'evaluation/{name}/{split}/parents/{new_name}']['sha256']==receipt['new_parent_sha256'],
                 'CORRECTED_PARENT_BINDING')
             old_by_key={(m['candidate_id'],m['match_index']):m for m in source['science']['match_rows']}
+            require(len(old_by_key)==len(source['science']['match_rows'])
+                and all(r['parent_id']==receipt['parent_id'] for r in current['science']['pair_rows'])
+                and all(r['parent_id']==receipt['parent_id'] for r in current['science']['match_rows']),
+                'PORTABLE_REUSE_PARENT_IDENTITY_DRIFT')
             t=data(f'classifiers/{name}/temperature_scaling.json')['temperature']
             raw=iter(receipt['raw_prediction_records'])
             for match in current['science']['match_rows']:
@@ -790,7 +908,8 @@ def verify_corrective_package(package, output_root=None):
                     used+=1
             require(next(raw,None) is None, 'EXTRA_RESIDUAL_LOGITS')
             counts[split]+=1
-        require(counts=={'calibration':288,'test':614} and proof['counts']==counts,
+        require(seen_units==expected_units and seen_parent_paths==expected_parent_paths
+            and counts=={'calibration':288,'test':614} and proof['counts']==counts,
             'PORTABLE_PARENT_UNITS_INCOMPLETE')
         require(proof['raw_ot_reused_count']==used and proof['raw_logit_inference_only_count']==inferred
             and proof['raw_ot_recomputed_count']==0 and proof['cache_provenance_gaps']==[], 'PORTABLE_REUSE_ACCOUNTING')

@@ -3,7 +3,7 @@
 # Submit once with --dependency=afterok:<corrected-package-job>; no GPU request.
 #SBATCH --partition=intel
 #SBATCH --job-name=bace-l0-corrected-core
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --signal=B:TERM@120
@@ -35,4 +35,4 @@ exec python -I -B scripts/hpc/llm/run_bace_l0_cpu.py \
   --corrected-gnn-archive "$GNN_CORRECTED_ARCHIVE" \
   --corrected-package-receipt "$GNN_CORRECTED_PACKAGE_RECEIPT" \
   --registry-root "$LLM_REGISTRY_ROOT" --output-root "$L0_OUTPUT_ROOT" \
-  --cpu-threads 2 "${extra[@]}"
+  --cpu-threads "${SLURM_CPUS_PER_TASK:-8}" --batch-size 256 "${extra[@]}"
