@@ -4,6 +4,8 @@
 
 - Scientific execution commit: `532e83733971701b0709086469d2ed8955a96e25`.
 - Corrected continuation driver commit: `8b7817906d352a3763424bb1f8ee26b347f7cc48`.
+- Publication-only driver commit: `31391b261750fd901d953d46f7769a597ad3d7e9`.
+- Publication driver worktree: `/share/home/u20526/czx/worktrees/bace-gnn-publication-31391b26`.
 - Continuation driver worktree: `/share/home/u20526/czx/worktrees/bace-gnn-resume-8b781790`.
 - Private branch: `feat/early-gnn-first-ablation-20260905`.
 - Mac development worktree: `/private/tmp/early-gnn-first-ablation-20260905`.
@@ -15,32 +17,31 @@
 
 ## Main authority and remaining cells
 
-Read-only observation: 2026-09-05 10:39:38 UTC / 18:39 CST.
-Matrix count and all protected PID identities were rechecked at11:08:52 UTC
-/19:08 CST and remain unchanged; the detailed step counts below are18:39.
+Read-only final observation: 2026-09-05 11:41:43 UTC / 19:41 CST.
+Matrix count and all protected PID/start-ticks/command identities remain unchanged.
 The unique authority remains **12/16** at
 `/autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json`.
 All BACE cells and Taste Ours are registered. Four missing cells remain:
 
 | Cell | Existing live route | Remaining gate |
 |---|---|---|
-| Mut ComRecGC | owner193161, science193180, post-AB193450, executor222378; trace-on231, trace-off not started | Complete same-contract sequential trace parity/reload; adopt only after evidence PASS; reuse pair store/DBSCAN |
-| Taste GlobalGCE | import272454, T13 owner219876; import rchar17.28GB, positive growth | Full HPC import validation has not emitted release; T13 waits for that release |
+| Mut ComRecGC | owner193161, science193180, post-AB193450, executor222378; trace-on234, trace-off not started | Complete same-contract sequential trace parity/reload; adopt only after evidence PASS; reuse pair store/DBSCAN |
+| Taste GlobalGCE | import272454, T13 owner219876; import rchar38.82GB, first heartbeat VERIFYING_HPC_PACKAGE | Full HPC import validation has not emitted release; T13 waits for that release |
 | Taste GCF | reference owner162844/science173495; sealed250, positive output growth | Complete reference251–500 and501–510 parity before authorized fresh-zero production; diagnostic checkpoint is not production |
-| Taste ComRecGC | retry2 owner268102/science268321; reference162 | Finish reference500/parity and the existing production continuation |
+| Taste ComRecGC | retry2 owner268102/science268321; reference195 | Finish reference500/parity and the existing production continuation |
 
-PID/start-ticks/command identities matched the earlier audit. T8 import has not
-yet emitted its first heartbeat, so it is **active with positive I/O**, not
-independently declared terminal PASS. T12 is in D state but has positive I/O;
+PID/start-ticks/command identities matched the earlier audit. T8 import first
+heartbeat is11:00:14Z, with subsequent positive I/O, not a terminal PASS.
+T12 is in D state but has positive I/O (+21.2MB wchar in62minutes);
 do not infer process death or restart it. No main READY GPU waiter was observed.
 GPU0=Mut; GPU1=reserved for T13 despite physical idleness; GPU2=T14; GPU3=T12.
 Reliable 16/16 completion time cannot yet be derived from these incomplete
 diagnostic/import gates. They are not four nearly-complete full experiments.
 
 Local audit evidence:
-`/private/tmp/final16-main-llm-preparation-audit-20260905T103938Z.json`.
-Persistent free space:1,685,825,503,232 bytes; free inodes99,828;
-cgroup headroom410,992,877,568 bytes; failcnt4306 unchanged.
+`/private/tmp/final16-closeout-live-audit-20260905T114143Z.json`.
+Persistent free space:approximately1.686TB; free inodes99,704;
+cgroup headroom approximately382GiB; failcnt4306 unchanged.
 
 ## Real BACE input contract and transfer
 
@@ -75,13 +76,31 @@ finished training at validation early stopping: GatedGCN+59, GIN72, GCN76,
 GATv236 epochs. Their Slurm state is FAILED solely because `/share` rejects
 the final renameat2(NOREPLACE) directory publication with EINVAL. Complete
 staging bundles, original selected models and terminal checkpoints exist.
-Evaluation2557861/package2557862 never started and have unsatisfied dependencies.
+Evaluation2557861/package2557862 never started; their unsatisfiable dependencies
+were precisely verified PENDING before cancellation. Logs/history are preserved.
+
+**Latest chain:** publication2558287 → afterok evaluation2558288 → afterok
+package2558289. `publication_submission.json` is the effective latest receipt.
+Fresh roots under the same campaign: `publication-repair-v1`,
+`evaluation-publication-v1`, `package-publication-v1`.
+Publication2558287 has completed0:0 in48seconds; its independent receipt is
+PASS with no errors. All four classifier terminals are TRAINING_PASS.
+Best validation epochs: GatedGCN+39, GIN52, GCN56, GATv216. Neither training
+nor temperature fitting was rerun, every staged file byte remained unchanged,
+and all original final checkpoints remain available. Historical training jobs
+still correctly show FAILED in sacct; publication completion does not rewrite
+Slurm history. The full explanation/native/common audit remains outstanding.
+Final handoff observation: evaluation2558288 is RUNNING and has created its
+`cpu_admission/` train-only probe root; `cpu_admission.json` and the core PASS
+marker do not yet exist. Package2558289 is PENDING on afterok. No measured
+full-evaluation ETA is claimed. Optional PyG extension GLIBC warnings use the
+already-tested pure Torch fallback; no package/environment mutation was made.
 
 The dataset-specific publication repair retains both existing exclusive locks,
 verifies BUNDLE_COMPLETE, selected weights and exact inventory, and publishes
 the same directory inode using POSIX rename to the strictly absent destination.
 It performs no training, inference-based recalibration or payload rewrite.
-`publication_submission.json` will supersede evaluation/package IDs while
+`publication_submission.json` supersedes evaluation/package IDs while
 preserving all training and earlier submission histories. Only exact unstarted
 obsolete dependency jobs are cancelled; all failed logs/checkpoints are kept.
 New evaluation still runs the original532e8373 scientific implementation.
@@ -154,6 +173,7 @@ because submission succeeded.
 
 HPC path admission at submission:free29,433,589,760 bytes,
 reserve5,886,717,952 bytes, projected persistent allowance2,147,483,648 bytes.
+After all training/publication, path free space is29,069,225,984 bytes.
 No cleanup was necessary. No `/ssdfs` use was necessary.
 
 ## Backbones and scientific evaluation
@@ -208,22 +228,33 @@ claim that a GPU worker or cross-host result-transfer watcher is running.
 
 ## Validation and commands
 
-89 focused tests PASS; compileall, git diff --check and relevant shell syntax
+99 focused tests PASS; compileall, git diff --check and relevant shell syntax
 checks PASS. Tests include epoch-resume equivalence, own-source GINE SHA,
 common architecture preservation, five backbones, pre-test selector freeze,
 empty cohorts, CPU admission, native/common evaluation and no-GPU dependencies.
 No real7B/20B model was loaded by a unit test.
+HPC lightweight POT import also PASS: torch2.7.1+cu118, PyG2.8.0,
+POT0.9.6.post1, RDKit2025.9.3. Publication tests use a real tiny completed
+training fixture followed by simulated EINVAL, verify byte/inode preservation,
+and reject active original locks, missing ready receipt or conflicting target.
+
+The publication submission was initially declined by auto-review on the old
+GNN-disabled policy. Re-reading the actual latest user-provided request's
+sections1.1/1.4 demonstrated the explicit replacement authorization for HPC CPU
+training/evaluation/packaging; the identical operation then passed review.
+No review bypass or broader permission was used, and no user action remains
+required for that resolved review issue.
 
 One-shot GNN status (do not poll continuously):
 
 ```bash
-ssh tongji-hpc '/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python /share/home/u20526/czx/worktrees/bace-gnn-resume-8b781790/scripts/hpc/gnn/status_bace_gnn_seed7.py --campaign-root /share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/gnn/runs/bace-seed7-20260905T105800Z'
+ssh tongji-hpc '/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python /share/home/u20526/czx/worktrees/bace-gnn-publication-31391b26/scripts/hpc/gnn/status_bace_gnn_seed7.py --campaign-root /share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/gnn/runs/bace-seed7-20260905T105800Z'
 ```
 
 Read-only main count:
 
 ```bash
-ssh autodl-a800 'jq . /autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json'
+ssh autodl-a800 '/root/miniconda3/envs/smiles_pip118/bin/python -c '\''import json,pathlib; s=json.loads(pathlib.Path("/autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json").read_text()); d=json.loads((pathlib.Path(s["latest_authority_root"])/"matrix_status.json").read_text()); print(json.dumps({k:d.get(k) for k in ("matrix_complete_cells","matrix_total_cells","all_cells_complete","audit_complete")}))'\'''
 ```
 
 LLM gate (after importing the completed ablation result to a fresh local root):
