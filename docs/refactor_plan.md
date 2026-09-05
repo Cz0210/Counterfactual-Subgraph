@@ -7,7 +7,7 @@
 - [x] Add complete tiny official eager/lazy parity and production boundary checks.
 - [x] Add real short two-target training/reload canary and memory boundary samples.
 - [x] Bind dataset index and epoch sampler cursor to existing atomic checkpoints.
-- [ ] Deploy the isolated canary under the existing AutoDL GPU1 T13 reservation.
+- [x] Deploy the isolated canary under the existing AutoDL GPU1 T13 reservation (owner 294806; 2026-09-06).
 - [ ] After parity and measured memory gates pass, consume one fresh full launch.
 - [ ] Continue ordinary calibration/test/export and canonical matrix publication.
 ## 2026-09-06: Mut observational selected-action causal lineage
