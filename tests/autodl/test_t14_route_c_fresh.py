@@ -457,6 +457,9 @@ def test_compact_transition_and_checkpoint_schedule() -> None:
         17_500,
         20_000,
     )
+    assert checkpoint_targets(
+        completed_step=20_000, stop_step=25_000, route_c=True
+    ) == (22_500, 25_000)
 
 
 def _ledger(path: Path, *, mutate_step: int | None = None) -> None:
@@ -885,3 +888,456 @@ def test_fresh_retry_contract_has_strict_memory_and_checkpoint_policy(
         250,
         500,
     )
+
+
+def _engineering_step50_failure(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, str]:
+    """Build the sealed shape of the deployed retry-1 REFERENCE_500 failure."""
+
+    original_attempt = str(uuid4())
+    original_owner = tmp_path / "original-owner"
+    original_output = tmp_path / "original-output"
+    original_pointer = tmp_path / "original-retired"
+    for path in (original_owner, original_output, original_pointer):
+        path.mkdir()
+    original_terminal = original_owner / "terminal.json"
+    original_terminal.write_text(
+        json.dumps({"status": "FAILED", "error": "resource watchdog"}),
+        encoding="utf-8",
+    )
+    first_retirement = {
+        "schema_version": route_c.FRESH_RETRY_RECEIPT_SCHEMA,
+        "terminal_state": "TERMINAL_FAILED_RESOURCE_WATCHDOG",
+        "retirement_state": "SUPERSEDED_BY_FRESH_RETRY",
+        "retry_index": 1,
+        "max_retries": 1,
+        "reuse_partial_step161": False,
+        "preserve_failed_attempt": True,
+        "old_attempt_uuid": original_attempt,
+        "old_owner_pid": 101,
+        "old_owner_start_ticks": 102,
+        "old_owner_root": str(original_owner),
+        "old_output_root": str(original_output),
+        "old_terminal_sha256": file_sha256(original_terminal),
+        "observed_uncommitted_step": 161,
+        "old_root_deleted": False,
+        "process_signal_sent": False,
+        "retired_pointer_root": str(original_pointer),
+        "retired_at": "2026-09-05T00:00:00+00:00",
+    }
+    first_retirement["receipt_sha256"] = stable_sha256(first_retirement)
+    first_receipt_path = original_pointer / "retirement_receipt.json"
+    first_receipt_path.write_text(json.dumps(first_retirement), encoding="utf-8")
+
+    failed_attempt = str(uuid4())
+    failed_owner = tmp_path / "owners" / f"route-c-{failed_attempt}"
+    failed_master = tmp_path / "science" / f"route-c-{failed_attempt}"
+    child_attempt = str(uuid4())
+    child_owner = failed_owner / "canaries" / "reference_500" / child_attempt
+    child_science = child_owner / f"science-{child_attempt}"
+    current = tmp_path / "control" / "t14_route_c" / "current"
+    proc = tmp_path / "proc"
+    for path in (failed_owner, child_science, current, proc):
+        path.mkdir(parents=True)
+    template_root = tmp_path / "template"
+    template_root.mkdir()
+    template_spec, _template_path = _route_spec(template_root)
+    failed_spec_path = failed_owner / "T14_ROUTE_C_FRESH_RETRY_TASK_SPEC.json"
+    failed_spec = {
+        "attempt_uuid": failed_attempt,
+        "execution_commit": route_c.ENGINEERING_FAILED_EXECUTION_COMMIT,
+        "owner_root": str(failed_owner),
+        "output_root": str(failed_master),
+        "storage_mode": "lowmemory",
+        "m_configured_max": 20_000,
+        "m_fallback_max": 25_000,
+        "science_environment": template_spec["science_environment"],
+        "route_c_state": template_spec["route_c_state"],
+        "fresh_retry": {
+            "retry_index": 1,
+            "max_retries": 1,
+            "retirement_receipt": str(first_receipt_path),
+            "retirement_receipt_sha256": file_sha256(first_receipt_path),
+            "dataset_sha256": "1" * 64,
+            "train_split_sha256": "2" * 64,
+            "cohort_sha256": "3" * 64,
+            "t3_gine_sha256": "4" * 64,
+            "config_sha256": "5" * 64,
+            "seed": 7,
+            "candidate_capacity": 50_000,
+            "m_configured_max": 20_000,
+            "m_fallback_max": 25_000,
+            "min_valid_unique": 10,
+        },
+    }
+    failed_spec_path.write_text(json.dumps(failed_spec), encoding="utf-8")
+    (failed_owner / "owner.json").write_text(
+        json.dumps(
+            {
+                "owner_pid": 321,
+                "owner_start_ticks": 654,
+                "task_spec": str(failed_spec_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (failed_owner / "terminal.json").write_text(
+        json.dumps(
+            {
+                "status": "FAILED",
+                "error": "Route C science phase failed: reference-500, exit=1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    child_spec_path = child_owner / "route_c_spec.json"
+    child_spec = {
+        "output_root": str(child_science),
+        "canary_role": "REFERENCE_500",
+        "storage_mode": "reference",
+    }
+    child_spec["spec_sha256"] = stable_sha256(child_spec)
+    child_spec_path.write_text(json.dumps(child_spec), encoding="utf-8")
+    (failed_owner / "owner_plan.json").write_text(
+        json.dumps(
+            {
+                "children": {
+                    "REFERENCE_500": {
+                        "output_root": str(child_science),
+                        "spec_path": str(child_spec_path),
+                        "spec_sha256": child_spec["spec_sha256"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cohort_jsonl = child_science / "cohort.jsonl"
+    cohort_jsonl.write_text(json.dumps({"parent_id": "p0"}) + "\n", encoding="utf-8")
+    (child_science / "cohort_manifest.json").write_text(
+        json.dumps(
+            {
+                "cohort_jsonl_sha256": file_sha256(cohort_jsonl),
+                "train_csv_sha256": "1" * 64,
+                "checkpoint_id": "4" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (child_science / "route_c_step_states.jsonl").write_text(
+        json.dumps({"completed_step": 50}) + "\n", encoding="utf-8"
+    )
+    (child_science / "checkpoints").mkdir()
+    (current / "owner.pid").write_text("321\n", encoding="utf-8")
+    (current / "owner.start_ticks").write_text("654\n", encoding="utf-8")
+    (current / "task_spec.path").write_text(
+        f"{failed_spec_path}\n", encoding="utf-8"
+    )
+    return current, proc, failed_spec_path, failed_attempt
+
+
+def _formal_cadence_sources() -> dict[str, Path]:
+    science = REPO_ROOT / "src/baselines/tastemolnet_comrecgc_full.py"
+    return {
+        "science_step": science,
+        "checkpoint": science,
+        "progress": science,
+        "watchdog": REPO_ROOT / "scripts/autodl/run_t14_route_c_owner.py",
+        "convergence_audit": REPO_ROOT
+        / "scripts/autodl/run_t14_route_c_owner.py",
+        "publisher": REPO_ROOT
+        / "src/baselines/tastemolnet_t14_route_c_continuation.py",
+    }
+
+
+def test_second_engineering_retry_retires_step50_without_checkpoint_reuse(
+    tmp_path: Path,
+) -> None:
+    current, proc, failed_spec_path, failed_attempt = _engineering_step50_failure(
+        tmp_path
+    )
+    authorization_path = tmp_path / "authorizations" / "retry-2.json"
+    corrected_commit = "2" * 40
+    authorization = route_c.write_engineering_retry_authorization_receipt(
+        path=authorization_path,
+        current_root=current,
+        corrected_execution_commit=corrected_commit,
+    )
+    receipt = retire_failed_route_c_current(
+        current_root=current,
+        retired_root=tmp_path / "control" / "t14_route_c" / "retired",
+        proc_root=proc,
+        retry_index=2,
+        authorization_receipt=authorization_path,
+    )
+
+    assert authorization["retry_index"] == 2
+    assert receipt["old_attempt_uuid"] == failed_attempt
+    assert receipt["observed_uncommitted_step"] == 50
+    assert receipt["committed_checkpoint_present"] is False
+    assert receipt["reuse_failed_checkpoint"] is False
+    assert receipt["reuse_partial_step161"] is False
+    assert Path(receipt["preserved_science_root"]).is_dir()
+    assert not current.exists()
+
+    new_attempt = str(uuid4())
+    new_output = tmp_path / "science" / f"route-c-{new_attempt}"
+    new_owner = tmp_path / "owners" / f"route-c-{new_attempt}"
+    scientific_diff_path = new_owner / "T14_ROUTE_C_SCIENTIFIC_CONFIG_DIFF.json"
+    reference_spec = json.loads(failed_spec_path.read_text(encoding="utf-8"))
+    route_c.write_scientific_config_diff_receipt(
+        path=scientific_diff_path,
+        reference_task_spec=failed_spec_path,
+        corrected_scientific_config=route_c._retry_scientific_config(reference_spec),
+        authorization_receipt=authorization_path,
+    )
+    cadence_path = new_owner / "T14_ROUTE_C_FORMAL_CADENCE_CONTRACT.json"
+    route_c.write_formal_cadence_contract(
+        path=cadence_path,
+        attempt_uuid=new_attempt,
+        execution_commit=corrected_commit,
+        cadence_sources=_formal_cadence_sources(),
+        authorization_receipt=authorization_path,
+        scientific_config_diff_receipt=scientific_diff_path,
+    )
+    retirement_path = (
+        Path(receipt["retired_pointer_root"]) / "retirement_receipt.json"
+    )
+    counters = tmp_path / "new-cgroup"
+    counters.mkdir()
+    for name, value in (("limit", "1"), ("current", "0"), ("failcnt", "0")):
+        (counters / name).write_text(value, encoding="utf-8")
+    matrix_root = tmp_path / "matrix"
+    matrix_root.mkdir()
+    retry = {
+        "schema_version": route_c.ENGINEERING_RETRY_CONTRACT_SCHEMA,
+        "retry_index": 2,
+        "max_retries": 2,
+        "max_attempts": 2,
+        "reuse_partial_step161": False,
+        "reuse_failed_checkpoint": False,
+        "preserve_failed_attempt": True,
+        "fresh_uuid": new_attempt,
+        "fresh_output_root": str(new_output),
+        "previous_attempt_uuid": failed_attempt,
+        "previous_output_root": receipt["old_output_root"],
+        "retirement_receipt": str(retirement_path),
+        "retirement_receipt_sha256": file_sha256(retirement_path),
+        "authorization_receipt": str(authorization_path),
+        "authorization_receipt_sha256": file_sha256(authorization_path),
+        "formal_cadence_contract": str(cadence_path),
+        "formal_cadence_contract_sha256": file_sha256(cadence_path),
+        "scientific_config_diff_receipt": str(scientific_diff_path),
+        "scientific_config_diff_receipt_sha256": file_sha256(
+            scientific_diff_path
+        ),
+        "previous_actual_cohort_jsonl": authorization[
+            "previous_actual_cohort_jsonl"
+        ],
+        "previous_actual_cohort_jsonl_sha256": authorization[
+            "previous_actual_cohort_jsonl_sha256"
+        ],
+        "dataset_sha256": "1" * 64,
+        "train_split_sha256": "2" * 64,
+        "cohort_sha256": "3" * 64,
+        "t3_gine_sha256": "4" * 64,
+        "seed": 7,
+        "config_sha256": "5" * 64,
+        "candidate_capacity": 50_000,
+        "m_configured_max": 20_000,
+        "m_fallback_max": 25_000,
+        "min_valid_unique": 10,
+        "gpu_index": 2,
+        "memory_policy": {
+            "start_headroom_bytes": 384 * 1024**3,
+            "runtime_reserve_bytes": 96 * 1024**3,
+            "launch_samples_required": 3,
+            "runtime_low_headroom_samples": 3,
+            "sample_seconds": 30.0,
+        },
+        "checkpoint_policy": {
+            "early_steps": [50, 100, 250, 500],
+            "production_steps": [
+                2_500,
+                5_000,
+                7_500,
+                10_000,
+                12_500,
+                15_000,
+                17_500,
+                20_000,
+            ],
+            "fresh_process_reload_each_checkpoint": True,
+            "route_c_500_promoted_to_full_without_replay": True,
+            "fallback_extension_steps": [22_500, 25_000],
+        },
+        "matrix_authority_root": str(matrix_root),
+        "matrix_authority_state": str(matrix_root / "state.json"),
+        "matrix_authority_lock": str(matrix_root / "publish.lock"),
+    }
+    spec = build_spec(
+        attempt_uuid=new_attempt,
+        execution_commit=corrected_commit,
+        python=Path(sys.executable).resolve(),
+        science_wrapper=REPO_ROOT
+        / "scripts/autodl/run_tastemolnet_t14_comrecgc_full.sh",
+        owner_entrypoint=REPO_ROOT / "scripts/autodl/run_t14_route_c_owner.py",
+        output_root=new_output,
+        owner_root=new_owner,
+        cgroup_limit_path=counters / "limit",
+        cgroup_current_path=counters / "current",
+        cgroup_failcnt_path=counters / "failcnt",
+        forbidden_legacy_root=tmp_path / "legacy-step161",
+        science_environment={
+            "RUN_TASTEMOLNET": "1",
+            "TASTE_RESEARCH_COMPUTE_ALLOWED": "1",
+            "TASTE_PAPER_RESULTS_ALLOWED": "1",
+            "TASTE_DATA_REDISTRIBUTION_ALLOWED": "0",
+            "RUN_GNN_ABLATION": "0",
+            "RUN_LLM_ABLATION": "0",
+        },
+        max_process_rss_bytes=64 * 1024**3,
+        launch_headroom_bytes=384 * 1024**3,
+        runtime_headroom_bytes=96 * 1024**3,
+        sample_seconds=30,
+        launch_samples_required=3,
+        runtime_low_headroom_samples=3,
+        fresh_retry=retry,
+    )
+    assert spec["fresh_retry"]["retry_index"] == 2
+    assert spec["fresh_retry"]["max_attempts"] == 2
+    assert spec["fresh_retry"]["reuse_failed_checkpoint"] is False
+
+
+def test_second_engineering_retry_fails_closed_if_checkpoint_exists(
+    tmp_path: Path,
+) -> None:
+    current, _proc, _failed_spec, _failed_attempt = _engineering_step50_failure(
+        tmp_path
+    )
+    task_spec = Path((current / "task_spec.path").read_text(encoding="utf-8").strip())
+    owner_root = task_spec.parent
+    plan = json.loads((owner_root / "owner_plan.json").read_text(encoding="utf-8"))
+    child_root = Path(plan["children"]["REFERENCE_500"]["output_root"])
+    (child_root / "checkpoints" / "step-000000000050.pt").write_bytes(b"stale")
+
+    with pytest.raises(T14RouteCFreshError, match="step-50 engineering failure"):
+        route_c.write_engineering_retry_authorization_receipt(
+            path=tmp_path / "retry-2.json",
+            current_root=current,
+            corrected_execution_commit="2" * 40,
+        )
+
+
+def test_second_engineering_retry_rejects_live_reference_child_writer(
+    tmp_path: Path,
+) -> None:
+    current, proc, task_spec, _failed_attempt = _engineering_step50_failure(tmp_path)
+    owner_root = task_spec.parent
+    plan = json.loads((owner_root / "owner_plan.json").read_text(encoding="utf-8"))
+    child_spec = plan["children"]["REFERENCE_500"]["spec_path"]
+    process = proc / "444"
+    process.mkdir()
+    (process / "cmdline").write_bytes(
+        b"python\0/worktree/scripts/autodl/run_tastemolnet_comrecgc_full.py\0"
+        + str(child_spec).encode("utf-8")
+        + b"\0"
+    )
+    authorization_path = tmp_path / "authorizations" / "retry-2.json"
+    route_c.write_engineering_retry_authorization_receipt(
+        path=authorization_path,
+        current_root=current,
+        corrected_execution_commit="2" * 40,
+    )
+
+    with pytest.raises(T14RouteCFreshError, match="exact writer"):
+        retire_failed_route_c_current(
+            current_root=current,
+            retired_root=tmp_path / "control" / "t14_route_c" / "retired",
+            proc_root=proc,
+            retry_index=2,
+            authorization_receipt=authorization_path,
+        )
+
+
+def test_second_retry_formal_cadence_binds_reference_and_lowmemory_step50(
+    tmp_path: Path,
+) -> None:
+    current, _proc, failed_spec, _failed_attempt = _engineering_step50_failure(
+        tmp_path
+    )
+    authorization_path = tmp_path / "authorizations" / "retry-2.json"
+    route_c.write_engineering_retry_authorization_receipt(
+        path=authorization_path,
+        current_root=current,
+        corrected_execution_commit="2" * 40,
+    )
+    reference = json.loads(failed_spec.read_text(encoding="utf-8"))
+    diff_path = tmp_path / "new-owner" / "scientific-diff.json"
+    route_c.write_scientific_config_diff_receipt(
+        path=diff_path,
+        reference_task_spec=failed_spec,
+        corrected_scientific_config=route_c._retry_scientific_config(reference),
+        authorization_receipt=authorization_path,
+    )
+    contract_path = tmp_path / "new-owner" / "cadence.json"
+    contract = route_c.write_formal_cadence_contract(
+        path=contract_path,
+        attempt_uuid=str(uuid4()),
+        execution_commit="2" * 40,
+        cadence_sources=_formal_cadence_sources(),
+        authorization_receipt=authorization_path,
+        scientific_config_diff_receipt=diff_path,
+    )
+
+    assert contract["route_c_storage_modes"] == ["reference", "lowmemory"]
+    assert contract["cadences"]["checkpoint"]["early_steps"][0] == 50
+    assert contract["cadences"]["checkpoint"]["fallback_extension_steps"] == [
+        22_500,
+        25_000,
+    ]
+    assert contract["cadences"]["science_step"]["interval_steps"] == 1
+    assert contract["cadences"]["watchdog"]["sample_seconds"] == 30.0
+    assert contract["cadences"]["convergence_audit"]["check_interval_steps"] == 2_500
+    assert contract["cadences"]["publisher"]["poll_seconds"] == 60
+    assert contract["parameters_validated_without_cursor_substitution"] is True
+    assert contract["failed_checkpoint_reused"] is False
+    assert checkpoint_targets(completed_step=0, stop_step=500, route_c=True)[0] == 50
+
+
+def test_second_retry_scientific_config_drift_fails_closed(tmp_path: Path) -> None:
+    current, _proc, failed_spec, _failed_attempt = _engineering_step50_failure(
+        tmp_path
+    )
+    authorization_path = tmp_path / "authorizations" / "retry-2.json"
+    route_c.write_engineering_retry_authorization_receipt(
+        path=authorization_path,
+        current_root=current,
+        corrected_execution_commit="2" * 40,
+    )
+    reference = json.loads(failed_spec.read_text(encoding="utf-8"))
+    corrected = route_c._retry_scientific_config(reference)
+    corrected["retry_scientific_inputs"]["candidate_capacity"] = 49_999
+
+    with pytest.raises(T14RouteCFreshError, match="drift is non-empty"):
+        route_c.write_scientific_config_diff_receipt(
+            path=tmp_path / "scientific-diff.json",
+            reference_task_spec=failed_spec,
+            corrected_scientific_config=corrected,
+            authorization_receipt=authorization_path,
+        )
+
+
+def test_second_retry_launcher_is_bounded_and_never_reuses_failed_checkpoint() -> None:
+    launcher = (REPO_ROOT / "scripts/autodl/launch_t14_route_c_once.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "ALLOW_T14_ENGINEERING_CORRECTED_SECOND_FRESH_RETRY" in launcher
+    assert 'T14_ROUTE_C_FRESH_RETRY_MAX_ATTEMPTS:-}" == "2"' in launcher
+    assert 'REUSE_FAILED_ROUTE_C_CHECKPOINT:-}" == "0"' in launcher
+    assert "superseded-by-fresh-retry-${RETRY_INDEX}" in launcher
+    assert "--formal-cadence-contract-out" in launcher
+    assert "--scientific-config-diff-out" in launcher
+    assert "--poll-seconds 60" in launcher
+    assert "requires a clean immutable checkout" in launcher

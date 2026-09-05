@@ -46,6 +46,7 @@ PRODUCTION_CHECKPOINT_STEPS = (
     15_000,
     17_500,
     20_000,
+    22_500,
     25_000,
 )
 GPU_INDEX = 2
@@ -59,6 +60,18 @@ RECOVERY_SCHEMA = "tastemolnet_t14_route_c_external_state_recovery_v1"
 CONVERGENCE_RECEIPT_SCHEMA = "tastemolnet_t14_route_c_convergence_receipt_v1"
 FRESH_RETRY_RECEIPT_SCHEMA = "tastemolnet_t14_route_c_failed_attempt_retirement_v1"
 FRESH_RETRY_CONTRACT_SCHEMA = "tastemolnet_t14_route_c_fresh_retry_task_v1"
+ENGINEERING_RETRY_AUTHORIZATION_SCHEMA = (
+    "tastemolnet_t14_engineering_corrected_retry_authorization_v1"
+)
+ENGINEERING_RETRY_RECEIPT_SCHEMA = (
+    "tastemolnet_t14_engineering_failed_attempt_retirement_v1"
+)
+ENGINEERING_RETRY_CONTRACT_SCHEMA = (
+    "tastemolnet_t14_engineering_corrected_fresh_retry_task_v1"
+)
+FORMAL_CADENCE_CONTRACT_SCHEMA = "tastemolnet_t14_formal_cadence_contract_v1"
+SCIENTIFIC_CONFIG_DIFF_SCHEMA = "tastemolnet_t14_scientific_config_diff_v1"
+ENGINEERING_FAILED_EXECUTION_COMMIT = "8343c7a42608e81b7a8f4c9b9ec5e3e7238b5770"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -2316,10 +2329,677 @@ def _is_within(candidate: Path, parent: Path) -> bool:
     return True
 
 
+def _physical_json_object(path: Path, *, field: str) -> dict[str, Any]:
+    source = _regular_physical_file(Path(path), field=field)
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise T14RouteCFreshError(f"Route C {field} is unreadable") from exc
+    if not isinstance(value, dict):
+        raise T14RouteCFreshError(f"Route C {field} is not an object")
+    return value
+
+
+_RETRY_SCIENTIFIC_INPUT_FIELDS = (
+    "dataset_sha256",
+    "train_split_sha256",
+    "cohort_sha256",
+    "t3_gine_sha256",
+    "config_sha256",
+    "seed",
+    "candidate_capacity",
+    "m_configured_max",
+    "m_fallback_max",
+    "min_valid_unique",
+)
+
+
+def _retry_scientific_config(spec: Mapping[str, Any]) -> dict[str, Any]:
+    retry = spec.get("fresh_retry")
+    if not isinstance(retry, Mapping):
+        raise T14RouteCFreshError("Route C prior retry scientific contract is absent")
+    inputs = {field: retry.get(field) for field in _RETRY_SCIENTIFIC_INPUT_FIELDS}
+    if any(value is None for value in inputs.values()):
+        raise T14RouteCFreshError("Route C prior retry scientific inputs are incomplete")
+    environment = spec.get("science_environment")
+    route_c_state = spec.get("route_c_state")
+    if not isinstance(environment, Mapping) or not isinstance(route_c_state, Mapping):
+        raise T14RouteCFreshError("Route C prior spec scientific state is incomplete")
+    return {
+        "retry_scientific_inputs": inputs,
+        "science_environment": dict(environment),
+        "route_c_state": dict(route_c_state),
+        "top_level_scientific_contract": {
+            "storage_mode": spec.get("storage_mode"),
+            "m_configured_max": spec.get("m_configured_max"),
+            "m_fallback_max": spec.get("m_fallback_max"),
+        },
+        "science_contract": spec.get("science_contract"),
+        "required_environment": spec.get("required_environment"),
+    }
+
+
+def _failed_reference_evidence(
+    *, owner_root: Path, declared_output_root: Path
+) -> dict[str, Any]:
+    """Resolve a failed owner's immutable REFERENCE_500 child without reuse."""
+
+    plan_path = _regular_physical_file(
+        owner_root / "owner_plan.json", field="failed owner plan"
+    )
+    plan = _physical_json_object(plan_path, field="failed owner plan")
+    reference = plan.get("children", {}).get("REFERENCE_500")
+    if not isinstance(reference, Mapping):
+        raise T14RouteCFreshError("Route C failed reference child is absent")
+    child_spec_path = _regular_physical_file(
+        Path(str(reference.get("spec_path", ""))),
+        field="failed reference child spec",
+    )
+    child_spec = _physical_json_object(
+        child_spec_path, field="failed reference child spec"
+    )
+    child_spec_unsigned = {
+        key: item for key, item in child_spec.items() if key != "spec_sha256"
+    }
+    expected_child_sha = str(reference.get("spec_sha256") or "")
+    child_root = Path(str(reference.get("output_root", "")))
+    if (
+        _SHA256.fullmatch(expected_child_sha) is None
+        or child_spec.get("spec_sha256") != expected_child_sha
+        or stable_sha256(child_spec_unsigned) != expected_child_sha
+        or child_spec.get("output_root") != str(child_root)
+        or child_spec.get("canary_role") != "REFERENCE_500"
+        or child_spec.get("storage_mode") != "reference"
+        or not child_root.is_dir()
+        or child_root.is_symlink()
+        or not _is_within(child_root, owner_root)
+    ):
+        raise T14RouteCFreshError("Route C failed reference child changed")
+    ledger = _regular_physical_file(
+        child_root / "route_c_step_states.jsonl",
+        field="failed reference step ledger",
+    )
+    completed_steps: list[int] = []
+    try:
+        with ledger.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                if line.strip():
+                    row = json.loads(line)
+                    completed_steps.append(int(row["completed_step"]))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        raise T14RouteCFreshError("Route C failed reference ledger is unreadable") from exc
+    if not completed_steps:
+        raise T14RouteCFreshError("Route C failed reference ledger is empty")
+    checkpoint_root = child_root / "checkpoints"
+    checkpoint_files = (
+        sorted(
+            str(path.relative_to(checkpoint_root))
+            for path in checkpoint_root.rglob("*")
+            if path.is_file() or path.is_symlink()
+        )
+        if checkpoint_root.is_dir() and not checkpoint_root.is_symlink()
+        else []
+    )
+    return {
+        "declared_output_root": str(declared_output_root),
+        "declared_output_materialized": declared_output_root.is_dir(),
+        "child_spec_path": str(child_spec_path),
+        "child_spec_sha256": expected_child_sha,
+        "science_root": str(child_root),
+        "ledger_path": str(ledger),
+        "ledger_sha256": file_sha256(ledger),
+        "observed_completed_step": max(completed_steps),
+        "checkpoint_root": str(checkpoint_root),
+        "checkpoint_files": checkpoint_files,
+        "committed_checkpoint_present": bool(checkpoint_files),
+    }
+
+
+def validate_engineering_retry_authorization_receipt(path: Path) -> dict[str, Any]:
+    receipt_path = Path(path)
+    value = _physical_json_object(
+        receipt_path, field="engineering retry authorization receipt"
+    )
+    required = {
+        "schema_version",
+        "status",
+        "authorized_by",
+        "authorization_scope",
+        "retry_index",
+        "max_attempts",
+        "previous_attempt_uuid",
+        "previous_task_spec",
+        "previous_task_spec_sha256",
+        "previous_execution_commit",
+        "previous_scientific_config_sha256",
+        "previous_actual_cohort_jsonl",
+        "previous_actual_cohort_jsonl_sha256",
+        "previous_cohort_manifest",
+        "previous_cohort_manifest_sha256",
+        "corrected_execution_commit",
+        "failure_signature",
+        "fresh_uuid_required",
+        "fresh_root_required",
+        "reuse_failed_checkpoint",
+        "reuse_legacy_step161_checkpoint",
+        "preserve_failed_evidence",
+        "authorized_at",
+        "authorization_sha256",
+    }
+    unsigned = {key: item for key, item in value.items() if key != "authorization_sha256"}
+    if (
+        set(value) != required
+        or value.get("schema_version") != ENGINEERING_RETRY_AUTHORIZATION_SCHEMA
+        or value.get("status") != "AUTHORIZED"
+        or value.get("authorized_by") != "user_project_owner"
+        or value.get("authorization_scope")
+        != "T14_SECOND_AND_FINAL_ENGINEERING_CORRECTED_FRESH_RETRY"
+        or value.get("retry_index") != 2
+        or value.get("max_attempts") != 2
+        or value.get("previous_execution_commit")
+        != ENGINEERING_FAILED_EXECUTION_COMMIT
+        or value.get("failure_signature")
+        != "REFERENCE_500_STEP50_PARAMETER_CADENCE_DRIFT"
+        or value.get("fresh_uuid_required") is not True
+        or value.get("fresh_root_required") is not True
+        or value.get("reuse_failed_checkpoint") is not False
+        or value.get("reuse_legacy_step161_checkpoint") is not False
+        or value.get("preserve_failed_evidence") is not True
+        or _GIT_SHA.fullmatch(str(value.get("corrected_execution_commit") or ""))
+        is None
+        or value.get("corrected_execution_commit")
+        == ENGINEERING_FAILED_EXECUTION_COMMIT
+        or value.get("authorization_sha256") != stable_sha256(unsigned)
+    ):
+        raise T14RouteCFreshError("Route C engineering retry authorization changed")
+    for field in (
+        "previous_scientific_config_sha256",
+        "previous_actual_cohort_jsonl_sha256",
+        "previous_cohort_manifest_sha256",
+    ):
+        if _SHA256.fullmatch(str(value.get(field) or "")) is None:
+            raise T14RouteCFreshError(
+                f"Route C engineering authorization {field} is invalid"
+            )
+    previous_spec = _regular_physical_file(
+        _absolute(value.get("previous_task_spec"), field="authorization.previous_task_spec"),
+        field="authorization previous task spec",
+    )
+    if file_sha256(previous_spec) != value.get("previous_task_spec_sha256"):
+        raise T14RouteCFreshError("Route C authorization previous spec changed")
+    old_spec = _physical_json_object(previous_spec, field="authorization previous task spec")
+    previous_config = _retry_scientific_config(old_spec)
+    cohort_jsonl = _regular_physical_file(
+        _absolute(
+            value.get("previous_actual_cohort_jsonl"),
+            field="authorization.previous_actual_cohort_jsonl",
+        ),
+        field="authorization previous cohort JSONL",
+    )
+    cohort_manifest_path = _regular_physical_file(
+        _absolute(
+            value.get("previous_cohort_manifest"),
+            field="authorization.previous_cohort_manifest",
+        ),
+        field="authorization previous cohort manifest",
+    )
+    cohort_manifest = _physical_json_object(
+        cohort_manifest_path, field="authorization previous cohort manifest"
+    )
+    if (
+        old_spec.get("attempt_uuid") != value.get("previous_attempt_uuid")
+        or old_spec.get("execution_commit") != value.get("previous_execution_commit")
+        or not isinstance(old_spec.get("fresh_retry"), Mapping)
+        or old_spec["fresh_retry"].get("retry_index") != 1
+        or stable_sha256(previous_config)
+        != value.get("previous_scientific_config_sha256")
+        or file_sha256(cohort_jsonl)
+        != value.get("previous_actual_cohort_jsonl_sha256")
+        or file_sha256(cohort_manifest_path)
+        != value.get("previous_cohort_manifest_sha256")
+        or cohort_manifest.get("cohort_jsonl_sha256")
+        != value.get("previous_actual_cohort_jsonl_sha256")
+        or cohort_manifest.get("train_csv_sha256")
+        != old_spec["fresh_retry"].get("dataset_sha256")
+        or cohort_manifest.get("checkpoint_id")
+        != old_spec["fresh_retry"].get("t3_gine_sha256")
+    ):
+        raise T14RouteCFreshError("Route C authorization previous attempt changed")
+    return value
+
+
+def write_engineering_retry_authorization_receipt(
+    *, path: Path, current_root: Path, corrected_execution_commit: str
+) -> dict[str, Any]:
+    """Seal the user's second-and-final retry decision against the failed owner."""
+
+    destination = Path(path)
+    if not destination.is_absolute() or destination.is_symlink():
+        raise T14RouteCFreshError("Route C authorization output path is invalid")
+    current = Path(current_root)
+    spec_path = _regular_physical_file(
+        current / "task_spec.path", field="current task spec pointer"
+    )
+    previous_spec = _regular_physical_file(
+        Path(spec_path.read_text(encoding="utf-8").strip()),
+        field="current task spec",
+    )
+    old_spec = _physical_json_object(previous_spec, field="current task spec")
+    old_retry = old_spec.get("fresh_retry")
+    owner_root = _absolute(old_spec.get("owner_root"), field="failed owner_root")
+    terminal = _physical_json_object(owner_root / "terminal.json", field="failed terminal")
+    evidence = _failed_reference_evidence(
+        owner_root=owner_root,
+        declared_output_root=_absolute(
+            old_spec.get("output_root"), field="failed output_root"
+        ),
+    )
+    previous_config = _retry_scientific_config(old_spec)
+    cohort_jsonl = _regular_physical_file(
+        Path(evidence["science_root"]) / "cohort.jsonl",
+        field="failed reference cohort JSONL",
+    )
+    cohort_manifest_path = _regular_physical_file(
+        Path(evidence["science_root"]) / "cohort_manifest.json",
+        field="failed reference cohort manifest",
+    )
+    cohort_manifest = _physical_json_object(
+        cohort_manifest_path, field="failed reference cohort manifest"
+    )
+    if (
+        old_spec.get("execution_commit") != ENGINEERING_FAILED_EXECUTION_COMMIT
+        or not isinstance(old_retry, Mapping)
+        or old_retry.get("retry_index") != 1
+        or old_retry.get("max_retries") != 1
+        or terminal.get("status") != "FAILED"
+        or terminal.get("error") != "Route C science phase failed: reference-500, exit=1"
+        or evidence["observed_completed_step"] != 50
+        or evidence["committed_checkpoint_present"] is not False
+        or cohort_manifest.get("cohort_jsonl_sha256") != file_sha256(cohort_jsonl)
+        or cohort_manifest.get("train_csv_sha256")
+        != old_retry.get("dataset_sha256")
+        or cohort_manifest.get("checkpoint_id") != old_retry.get("t3_gine_sha256")
+    ):
+        raise T14RouteCFreshError(
+            "Route C current is not the authorized step-50 engineering failure"
+        )
+    if _GIT_SHA.fullmatch(corrected_execution_commit) is None:
+        raise T14RouteCFreshError("Route C corrected execution commit is invalid")
+    payload: dict[str, Any] = {
+        "schema_version": ENGINEERING_RETRY_AUTHORIZATION_SCHEMA,
+        "status": "AUTHORIZED",
+        "authorized_by": "user_project_owner",
+        "authorization_scope": "T14_SECOND_AND_FINAL_ENGINEERING_CORRECTED_FRESH_RETRY",
+        "retry_index": 2,
+        "max_attempts": 2,
+        "previous_attempt_uuid": old_spec["attempt_uuid"],
+        "previous_task_spec": str(previous_spec),
+        "previous_task_spec_sha256": file_sha256(previous_spec),
+        "previous_execution_commit": old_spec["execution_commit"],
+        "previous_scientific_config_sha256": stable_sha256(previous_config),
+        "previous_actual_cohort_jsonl": str(cohort_jsonl),
+        "previous_actual_cohort_jsonl_sha256": file_sha256(cohort_jsonl),
+        "previous_cohort_manifest": str(cohort_manifest_path),
+        "previous_cohort_manifest_sha256": file_sha256(cohort_manifest_path),
+        "corrected_execution_commit": corrected_execution_commit,
+        "failure_signature": "REFERENCE_500_STEP50_PARAMETER_CADENCE_DRIFT",
+        "fresh_uuid_required": True,
+        "fresh_root_required": True,
+        "reuse_failed_checkpoint": False,
+        "reuse_legacy_step161_checkpoint": False,
+        "preserve_failed_evidence": True,
+        "authorized_at": _utc_now(),
+    }
+    payload["authorization_sha256"] = stable_sha256(payload)
+    if destination.exists():
+        existing = validate_engineering_retry_authorization_receipt(destination)
+        if (
+            existing["previous_attempt_uuid"] != payload["previous_attempt_uuid"]
+            or existing["corrected_execution_commit"] != corrected_execution_commit
+        ):
+            raise T14RouteCFreshError("Route C authorization path already differs")
+        return existing
+    atomic_json(destination, payload)
+    return validate_engineering_retry_authorization_receipt(destination)
+
+
+def validate_scientific_config_diff_receipt(path: Path) -> dict[str, Any]:
+    receipt_path = Path(path)
+    value = _physical_json_object(
+        receipt_path, field="scientific config diff receipt"
+    )
+    required = {
+        "schema_version",
+        "status",
+        "reference_task_spec",
+        "reference_task_spec_sha256",
+        "reference_scientific_config_sha256",
+        "corrected_scientific_config",
+        "corrected_scientific_config_sha256",
+        "scientific_differences",
+        "allowed_engineering_differences",
+        "authorization_receipt",
+        "authorization_receipt_sha256",
+        "created_at",
+        "receipt_sha256",
+    }
+    unsigned = {key: item for key, item in value.items() if key != "receipt_sha256"}
+    if (
+        set(value) != required
+        or value.get("schema_version") != SCIENTIFIC_CONFIG_DIFF_SCHEMA
+        or value.get("status") != "PASS"
+        or value.get("scientific_differences") != []
+        or value.get("allowed_engineering_differences")
+        != [
+            "attempt_uuid",
+            "execution_commit",
+            "owner_and_output_roots",
+            "checkpoint_transport_cadence",
+        ]
+        or not isinstance(value.get("corrected_scientific_config"), Mapping)
+        or value.get("corrected_scientific_config_sha256")
+        != stable_sha256(value["corrected_scientific_config"])
+        or value.get("receipt_sha256") != stable_sha256(unsigned)
+    ):
+        raise T14RouteCFreshError("Route C scientific config diff changed")
+    reference_path = _regular_physical_file(
+        _absolute(
+            value.get("reference_task_spec"),
+            field="scientific_diff.reference_task_spec",
+        ),
+        field="scientific diff reference task spec",
+    )
+    authorization_path = _regular_physical_file(
+        _absolute(
+            value.get("authorization_receipt"),
+            field="scientific_diff.authorization_receipt",
+        ),
+        field="scientific diff authorization receipt",
+    )
+    reference_spec = _physical_json_object(
+        reference_path, field="scientific diff reference task spec"
+    )
+    reference_config = _retry_scientific_config(reference_spec)
+    authorization = validate_engineering_retry_authorization_receipt(
+        authorization_path
+    )
+    if (
+        file_sha256(reference_path) != value.get("reference_task_spec_sha256")
+        or stable_sha256(reference_config)
+        != value.get("reference_scientific_config_sha256")
+        or dict(value["corrected_scientific_config"]) != reference_config
+        or file_sha256(authorization_path)
+        != value.get("authorization_receipt_sha256")
+        or authorization.get("previous_task_spec") != str(reference_path)
+    ):
+        raise T14RouteCFreshError("Route C scientific config drift is non-empty")
+    return value
+
+
+def write_scientific_config_diff_receipt(
+    *,
+    path: Path,
+    reference_task_spec: Path,
+    corrected_scientific_config: Mapping[str, Any],
+    authorization_receipt: Path,
+) -> dict[str, Any]:
+    """Prove that retry-2 changes engineering cadence, not science."""
+
+    destination = Path(path)
+    if destination.exists() or destination.is_symlink():
+        raise T14RouteCFreshError("Route C scientific diff output must be fresh")
+    reference_path = _regular_physical_file(
+        Path(reference_task_spec), field="scientific diff reference task spec"
+    )
+    reference_spec = _physical_json_object(
+        reference_path, field="scientific diff reference task spec"
+    )
+    reference_config = _retry_scientific_config(reference_spec)
+    corrected = dict(corrected_scientific_config)
+    differences = sorted(
+        key
+        for key in set(reference_config) | set(corrected)
+        if reference_config.get(key) != corrected.get(key)
+    )
+    if differences:
+        raise T14RouteCFreshError(
+            f"Route C scientific config drift is non-empty: {differences}"
+        )
+    authorization = validate_engineering_retry_authorization_receipt(
+        Path(authorization_receipt)
+    )
+    if authorization["previous_task_spec"] != str(reference_path):
+        raise T14RouteCFreshError("Route C scientific diff reference changed")
+    payload: dict[str, Any] = {
+        "schema_version": SCIENTIFIC_CONFIG_DIFF_SCHEMA,
+        "status": "PASS",
+        "reference_task_spec": str(reference_path),
+        "reference_task_spec_sha256": file_sha256(reference_path),
+        "reference_scientific_config_sha256": stable_sha256(reference_config),
+        "corrected_scientific_config": corrected,
+        "corrected_scientific_config_sha256": stable_sha256(corrected),
+        "scientific_differences": [],
+        "allowed_engineering_differences": [
+            "attempt_uuid",
+            "execution_commit",
+            "owner_and_output_roots",
+            "checkpoint_transport_cadence",
+        ],
+        "authorization_receipt": str(authorization_receipt),
+        "authorization_receipt_sha256": file_sha256(Path(authorization_receipt)),
+        "created_at": _utc_now(),
+    }
+    payload["receipt_sha256"] = stable_sha256(payload)
+    atomic_json(destination, payload)
+    return validate_scientific_config_diff_receipt(destination)
+
+
+def _formal_cadences() -> dict[str, Any]:
+    return {
+        "science_step": {"unit": "COMRECGC_MOVE", "interval_steps": 1},
+        "checkpoint": {
+            "early_steps": [50, 100, 250, 500],
+            "main_steps": [
+                2_500,
+                5_000,
+                7_500,
+                10_000,
+                12_500,
+                15_000,
+                17_500,
+                20_000,
+            ],
+            "fallback_extension_steps": [22_500, 25_000],
+            "resource_cap_boundary": 20_000,
+            "fallback_terminal_boundary": 25_000,
+        },
+        "progress": {"step_ledger_interval_steps": 1},
+        "watchdog": {
+            "sample_seconds": 30.0,
+            "launch_samples_required": 3,
+            "runtime_low_headroom_samples": 3,
+        },
+        "convergence_audit": {
+            "minimum_step": 10_000,
+            "check_interval_steps": 2_500,
+            "patience_checks": 2,
+            "pre_resource_cap_audit_steps": [10_000, 12_500, 15_000, 17_500],
+        },
+        "publisher": {"poll_seconds": 60},
+    }
+
+
+def validate_formal_cadence_contract(path: Path) -> dict[str, Any]:
+    contract_path = Path(path)
+    value = _physical_json_object(contract_path, field="formal cadence contract")
+    required = {
+        "schema_version",
+        "status",
+        "execution_commit",
+        "attempt_uuid",
+        "retry_index",
+        "cadence_selector",
+        "route_c_storage_modes",
+        "cadences",
+        "legacy_checkpoint_interval",
+        "parameters_validated_without_cursor_substitution",
+        "fresh_from_step_zero",
+        "failed_checkpoint_reused",
+        "legacy_step161_checkpoint_reused",
+        "cadence_sources",
+        "scientific_config_diff_receipt",
+        "scientific_config_diff_receipt_sha256",
+        "authorization_receipt",
+        "authorization_receipt_sha256",
+        "created_at",
+        "contract_sha256",
+    }
+    unsigned = {key: item for key, item in value.items() if key != "contract_sha256"}
+    if (
+        set(value) != required
+        or value.get("schema_version") != FORMAL_CADENCE_CONTRACT_SCHEMA
+        or value.get("status") != "PASS"
+        or value.get("retry_index") != 2
+        or value.get("cadence_selector") != "EXPLICIT_ROUTE_C_CONTRACT"
+        or value.get("route_c_storage_modes") != ["reference", "lowmemory"]
+        or value.get("cadences") != _formal_cadences()
+        or value.get("legacy_checkpoint_interval") != 2_500
+        or value.get("parameters_validated_without_cursor_substitution") is not True
+        or value.get("fresh_from_step_zero") is not True
+        or value.get("failed_checkpoint_reused") is not False
+        or value.get("legacy_step161_checkpoint_reused") is not False
+        or value.get("contract_sha256") != stable_sha256(unsigned)
+    ):
+        raise T14RouteCFreshError("Route C formal cadence contract changed")
+    cadence_sources = value.get("cadence_sources")
+    expected_source_names = {
+        "science_step",
+        "checkpoint",
+        "progress",
+        "watchdog",
+        "convergence_audit",
+        "publisher",
+    }
+    if not isinstance(cadence_sources, Mapping) or set(cadence_sources) != expected_source_names:
+        raise T14RouteCFreshError("Route C formal cadence sources changed")
+    for name, raw_source in cadence_sources.items():
+        if not isinstance(raw_source, Mapping) or set(raw_source) != {"path", "sha256"}:
+            raise T14RouteCFreshError(f"Route C {name} cadence source changed")
+        source = _regular_physical_file(
+            _absolute(raw_source.get("path"), field=f"cadence.{name}.path"),
+            field=f"{name} cadence source",
+        )
+        if file_sha256(source) != raw_source.get("sha256"):
+            raise T14RouteCFreshError(f"Route C {name} cadence source changed")
+    authorization = _regular_physical_file(
+        _absolute(
+            value.get("authorization_receipt"), field="cadence.authorization_receipt"
+        ),
+        field="cadence authorization receipt",
+    )
+    diff_path = _regular_physical_file(
+        _absolute(
+            value.get("scientific_config_diff_receipt"),
+            field="cadence.scientific_config_diff_receipt",
+        ),
+        field="cadence scientific config diff receipt",
+    )
+    if (
+        file_sha256(authorization) != value.get("authorization_receipt_sha256")
+        or file_sha256(diff_path)
+        != value.get("scientific_config_diff_receipt_sha256")
+    ):
+        raise T14RouteCFreshError("Route C formal cadence inputs changed")
+    authorized = validate_engineering_retry_authorization_receipt(authorization)
+    diff = validate_scientific_config_diff_receipt(diff_path)
+    if (
+        authorized["corrected_execution_commit"] != value.get("execution_commit")
+        or diff["authorization_receipt"] != str(authorization)
+    ):
+        raise T14RouteCFreshError("Route C cadence/authorization commit changed")
+    return value
+
+
+def write_formal_cadence_contract(
+    *,
+    path: Path,
+    attempt_uuid: str,
+    execution_commit: str,
+    cadence_sources: Mapping[str, Path],
+    authorization_receipt: Path,
+    scientific_config_diff_receipt: Path,
+) -> dict[str, Any]:
+    """Seal the corrected checkpoint cadence before retry-2 science starts."""
+
+    destination = Path(path)
+    if destination.exists() or destination.is_symlink():
+        raise T14RouteCFreshError("Route C cadence contract output must be fresh")
+    required_source_names = {
+        "science_step",
+        "checkpoint",
+        "progress",
+        "watchdog",
+        "convergence_audit",
+        "publisher",
+    }
+    if set(cadence_sources) != required_source_names:
+        raise T14RouteCFreshError("Route C cadence source inventory is incomplete")
+    sources = {
+        name: _regular_physical_file(
+            Path(source), field=f"{name} cadence source"
+        )
+        for name, source in cadence_sources.items()
+    }
+    authorization = validate_engineering_retry_authorization_receipt(
+        Path(authorization_receipt)
+    )
+    diff = validate_scientific_config_diff_receipt(
+        Path(scientific_config_diff_receipt)
+    )
+    code = sources["checkpoint"].read_text(encoding="utf-8")
+    if (
+        "parameters.validate()" not in code
+        or "if not route_c:" not in code
+        or code.count("route_c=route_c_contract is not None") < 2
+        or authorization["corrected_execution_commit"] != execution_commit
+        or diff["authorization_receipt"] != str(authorization_receipt)
+    ):
+        raise T14RouteCFreshError("Route C cadence fix is not present in science source")
+    payload: dict[str, Any] = {
+        "schema_version": FORMAL_CADENCE_CONTRACT_SCHEMA,
+        "status": "PASS",
+        "execution_commit": execution_commit,
+        "attempt_uuid": attempt_uuid,
+        "retry_index": 2,
+        "cadence_selector": "EXPLICIT_ROUTE_C_CONTRACT",
+        "route_c_storage_modes": ["reference", "lowmemory"],
+        "cadences": _formal_cadences(),
+        "legacy_checkpoint_interval": 2_500,
+        "parameters_validated_without_cursor_substitution": True,
+        "fresh_from_step_zero": True,
+        "failed_checkpoint_reused": False,
+        "legacy_step161_checkpoint_reused": False,
+        "cadence_sources": {
+            name: {"path": str(source), "sha256": file_sha256(source)}
+            for name, source in sorted(sources.items())
+        },
+        "scientific_config_diff_receipt": str(scientific_config_diff_receipt),
+        "scientific_config_diff_receipt_sha256": file_sha256(
+            Path(scientific_config_diff_receipt)
+        ),
+        "authorization_receipt": str(authorization_receipt),
+        "authorization_receipt_sha256": file_sha256(Path(authorization_receipt)),
+        "created_at": _utc_now(),
+    }
+    payload["contract_sha256"] = stable_sha256(payload)
+    atomic_json(destination, payload)
+    return validate_formal_cadence_contract(destination)
+
+
 def _validate_fresh_retry_contract(
     raw: Mapping[str, Any], *, spec: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Validate the one authorized post-watchdog retry without opening old state."""
+    """Validate an explicitly bounded fresh retry without opening old state."""
 
     value = dict(raw)
     required = {
@@ -2351,12 +3031,35 @@ def _validate_fresh_retry_contract(
         "matrix_authority_state",
         "matrix_authority_lock",
     }
-    if set(value) != required:
+    retry_index = value.get("retry_index")
+    engineering_required = {
+        "max_attempts",
+        "reuse_failed_checkpoint",
+        "previous_actual_cohort_jsonl",
+        "previous_actual_cohort_jsonl_sha256",
+        "authorization_receipt",
+        "authorization_receipt_sha256",
+        "scientific_config_diff_receipt",
+        "scientific_config_diff_receipt_sha256",
+        "formal_cadence_contract",
+        "formal_cadence_contract_sha256",
+    }
+    if retry_index == 1:
+        expected_schema = FRESH_RETRY_CONTRACT_SCHEMA
+        expected_max_retries = 1
+        expected_fields = required
+    elif retry_index == 2:
+        expected_schema = ENGINEERING_RETRY_CONTRACT_SCHEMA
+        expected_max_retries = 2
+        expected_fields = required | engineering_required
+    else:
+        raise T14RouteCFreshError("Route C fresh-retry index is not authorized")
+    if set(value) != expected_fields:
         raise T14RouteCFreshError("Route C fresh-retry contract fields changed")
     if (
-        value.get("schema_version") != FRESH_RETRY_CONTRACT_SCHEMA
-        or value.get("retry_index") != 1
-        or value.get("max_retries") != 1
+        value.get("schema_version") != expected_schema
+        or value.get("max_retries") != expected_max_retries
+        or (retry_index == 2 and value.get("max_attempts") != 2)
         or value.get("reuse_partial_step161") is not False
         or value.get("preserve_failed_attempt") is not True
         or value.get("fresh_uuid") != spec.get("attempt_uuid")
@@ -2397,6 +3100,8 @@ def _validate_fresh_retry_contract(
     retirement = validate_fresh_retry_retirement_receipt(retirement_path)
     if (
         file_sha256(retirement_path) != value["retirement_receipt_sha256"]
+        or retirement.get("retry_index") != retry_index
+        or retirement.get("max_retries") != expected_max_retries
         or retirement.get("old_attempt_uuid") != value["previous_attempt_uuid"]
         or retirement.get("old_output_root") != value["previous_output_root"]
     ):
@@ -2411,6 +3116,10 @@ def _validate_fresh_retry_contract(
     fresh_root = Path(str(spec["output_root"]))
     if not previous_root.is_dir() or previous_root.is_symlink():
         raise T14RouteCFreshError("Route C failed attempt was not preserved")
+    if retry_index == 2 and (fresh_root.exists() or fresh_root.is_symlink()):
+        raise T14RouteCFreshError(
+            "Route C engineering retry output root is not fresh"
+        )
     if previous_root == fresh_root or _is_within(previous_root, fresh_root) or _is_within(
         fresh_root, previous_root
     ):
@@ -2443,7 +3152,7 @@ def _validate_fresh_retry_contract(
     ):
         raise T14RouteCFreshError("Route C retry memory/spec binding changed")
     checkpoints = value.get("checkpoint_policy")
-    if checkpoints != {
+    expected_checkpoint_policy = {
         "early_steps": [50, 100, 250, 500],
         "production_steps": [
             2_500,
@@ -2457,9 +3166,232 @@ def _validate_fresh_retry_contract(
         ],
         "fresh_process_reload_each_checkpoint": True,
         "route_c_500_promoted_to_full_without_replay": True,
-    }:
+    }
+    if retry_index == 2:
+        expected_checkpoint_policy["fallback_extension_steps"] = [22_500, 25_000]
+    if checkpoints != expected_checkpoint_policy:
         raise T14RouteCFreshError("Route C retry checkpoint policy changed")
+    if retry_index == 2:
+        if value.get("reuse_failed_checkpoint") is not False:
+            raise T14RouteCFreshError("Route C failed checkpoint reuse was enabled")
+        for field in (
+            "authorization_receipt_sha256",
+            "previous_actual_cohort_jsonl_sha256",
+            "scientific_config_diff_receipt_sha256",
+            "formal_cadence_contract_sha256",
+        ):
+            if _SHA256.fullmatch(str(value.get(field) or "")) is None:
+                raise T14RouteCFreshError(f"Route C retry {field} is invalid")
+        authorization_path = _absolute(
+            value.get("authorization_receipt"),
+            field="fresh_retry.authorization_receipt",
+        )
+        cadence_path = _absolute(
+            value.get("formal_cadence_contract"),
+            field="fresh_retry.formal_cadence_contract",
+        )
+        previous_cohort_path = _absolute(
+            value.get("previous_actual_cohort_jsonl"),
+            field="fresh_retry.previous_actual_cohort_jsonl",
+        )
+        diff_path = _absolute(
+            value.get("scientific_config_diff_receipt"),
+            field="fresh_retry.scientific_config_diff_receipt",
+        )
+        authorization = validate_engineering_retry_authorization_receipt(
+            authorization_path
+        )
+        cadence = validate_formal_cadence_contract(cadence_path)
+        diff = validate_scientific_config_diff_receipt(diff_path)
+        old_spec_path = _regular_physical_file(
+            Path(retirement["old_task_spec"]),
+            field="engineering retry previous task spec",
+        )
+        old_spec = _physical_json_object(
+            old_spec_path, field="engineering retry previous task spec"
+        )
+        old_retry = old_spec.get("fresh_retry")
+        current_config = _retry_scientific_config(spec)
+        old_config = _retry_scientific_config(old_spec)
+        if (
+            file_sha256(authorization_path)
+            != value["authorization_receipt_sha256"]
+            or file_sha256(cadence_path) != value["formal_cadence_contract_sha256"]
+            or file_sha256(previous_cohort_path)
+            != value["previous_actual_cohort_jsonl_sha256"]
+            or file_sha256(diff_path)
+            != value["scientific_config_diff_receipt_sha256"]
+            or retirement.get("authorization_receipt")
+            != str(authorization_path)
+            or retirement.get("authorization_receipt_sha256")
+            != value["authorization_receipt_sha256"]
+            or authorization.get("corrected_execution_commit")
+            != spec.get("execution_commit")
+            or authorization.get("previous_actual_cohort_jsonl")
+            != str(previous_cohort_path)
+            or authorization.get("previous_actual_cohort_jsonl_sha256")
+            != value["previous_actual_cohort_jsonl_sha256"]
+            or cadence.get("execution_commit") != spec.get("execution_commit")
+            or cadence.get("attempt_uuid") != spec.get("attempt_uuid")
+            or cadence.get("scientific_config_diff_receipt") != str(diff_path)
+            or diff.get("corrected_scientific_config") != current_config
+            or current_config != old_config
+            or not isinstance(old_retry, Mapping)
+            or any(
+                value.get(field) != old_retry.get(field)
+                for field in _RETRY_SCIENTIFIC_INPUT_FIELDS
+            )
+        ):
+            raise T14RouteCFreshError(
+                "Route C engineering retry evidence binding changed"
+            )
     return value
+
+
+def _validate_engineering_retry_retirement_value(
+    value: Mapping[str, Any], *, receipt_path: Path
+) -> dict[str, Any]:
+    required = {
+        "schema_version",
+        "terminal_state",
+        "retirement_state",
+        "retry_index",
+        "max_retries",
+        "max_attempts",
+        "reuse_partial_step161",
+        "reuse_failed_checkpoint",
+        "preserve_failed_attempt",
+        "old_attempt_uuid",
+        "old_execution_commit",
+        "old_owner_pid",
+        "old_owner_start_ticks",
+        "old_owner_root",
+        "old_output_root",
+        "old_task_spec",
+        "old_task_spec_sha256",
+        "old_terminal_sha256",
+        "failed_phase",
+        "failure_signature",
+        "preserved_science_root",
+        "preserved_ledger_sha256",
+        "observed_uncommitted_step",
+        "committed_checkpoint_present",
+        "prior_retry_receipt",
+        "prior_retry_receipt_sha256",
+        "authorization_receipt",
+        "authorization_receipt_sha256",
+        "old_root_deleted",
+        "process_signal_sent",
+        "retired_pointer_root",
+        "retired_at",
+        "receipt_sha256",
+    }
+    unsigned = {key: item for key, item in value.items() if key != "receipt_sha256"}
+    if (
+        set(value) != required
+        or value.get("schema_version") != ENGINEERING_RETRY_RECEIPT_SCHEMA
+        or value.get("terminal_state") != "TERMINAL_FAILED_ENGINEERING_CADENCE"
+        or value.get("retirement_state")
+        != "SUPERSEDED_BY_ENGINEERING_CORRECTED_FRESH_RETRY"
+        or value.get("retry_index") != 2
+        or value.get("max_retries") != 2
+        or value.get("max_attempts") != 2
+        or value.get("reuse_partial_step161") is not False
+        or value.get("reuse_failed_checkpoint") is not False
+        or value.get("preserve_failed_attempt") is not True
+        or value.get("old_execution_commit")
+        != ENGINEERING_FAILED_EXECUTION_COMMIT
+        or value.get("failed_phase") != "REFERENCE_500"
+        or value.get("failure_signature")
+        != "REFERENCE_500_STEP50_PARAMETER_CADENCE_DRIFT"
+        or value.get("observed_uncommitted_step") != 50
+        or value.get("committed_checkpoint_present") is not False
+        or value.get("old_root_deleted") is not False
+        or value.get("process_signal_sent") is not False
+        or value.get("receipt_sha256") != stable_sha256(unsigned)
+    ):
+        raise T14RouteCFreshError("Route C engineering retirement receipt changed")
+    for field in (
+        "old_task_spec_sha256",
+        "old_terminal_sha256",
+        "preserved_ledger_sha256",
+        "prior_retry_receipt_sha256",
+        "authorization_receipt_sha256",
+    ):
+        if _SHA256.fullmatch(str(value.get(field) or "")) is None:
+            raise T14RouteCFreshError(
+                f"Route C engineering retirement {field} is invalid"
+            )
+    for field in (
+        "old_owner_root",
+        "old_output_root",
+        "old_task_spec",
+        "preserved_science_root",
+        "prior_retry_receipt",
+        "authorization_receipt",
+        "retired_pointer_root",
+    ):
+        _absolute(value.get(field), field=f"engineering_retirement.{field}")
+    old_owner = Path(value["old_owner_root"])
+    old_spec_path = _regular_physical_file(
+        Path(value["old_task_spec"]), field="engineering failed task spec"
+    )
+    old_terminal_path = _regular_physical_file(
+        old_owner / "terminal.json", field="engineering failed terminal"
+    )
+    old_spec = _physical_json_object(
+        old_spec_path, field="engineering failed task spec"
+    )
+    old_retry = old_spec.get("fresh_retry")
+    if (
+        not old_owner.is_dir()
+        or old_owner.is_symlink()
+        or old_spec_path.parent != old_owner
+        or file_sha256(old_spec_path) != value["old_task_spec_sha256"]
+        or file_sha256(old_terminal_path) != value["old_terminal_sha256"]
+        or old_spec.get("attempt_uuid") != value.get("old_attempt_uuid")
+        or old_spec.get("execution_commit") != value.get("old_execution_commit")
+        or not isinstance(old_retry, Mapping)
+        or old_retry.get("retry_index") != 1
+        or old_retry.get("max_retries") != 1
+    ):
+        raise T14RouteCFreshError("Route C engineering failed attempt changed")
+    evidence = _failed_reference_evidence(
+        owner_root=old_owner,
+        declared_output_root=Path(value["old_output_root"]),
+    )
+    if (
+        evidence["science_root"] != value["preserved_science_root"]
+        or evidence["ledger_sha256"] != value["preserved_ledger_sha256"]
+        or evidence["observed_completed_step"] != 50
+        or evidence["committed_checkpoint_present"] is not False
+    ):
+        raise T14RouteCFreshError("Route C engineering failure evidence changed")
+    prior_path = _regular_physical_file(
+        Path(value["prior_retry_receipt"]), field="prior retry retirement receipt"
+    )
+    authorization_path = _regular_physical_file(
+        Path(value["authorization_receipt"]), field="engineering retry authorization"
+    )
+    prior = validate_fresh_retry_retirement_receipt(prior_path)
+    authorization = validate_engineering_retry_authorization_receipt(
+        authorization_path
+    )
+    if (
+        file_sha256(prior_path) != value["prior_retry_receipt_sha256"]
+        or file_sha256(authorization_path) != value["authorization_receipt_sha256"]
+        or old_retry.get("retirement_receipt") != str(prior_path)
+        or prior.get("retry_index") != 1
+        or authorization.get("previous_attempt_uuid") != value["old_attempt_uuid"]
+    ):
+        raise T14RouteCFreshError("Route C engineering retry chain changed")
+    result = dict(value)
+    result["preservation_source"] = "OWNER_PLAN_REFERENCE_500"
+    result["declared_master_output_materialized"] = Path(
+        value["old_output_root"]
+    ).is_dir()
+    result["receipt_path"] = str(receipt_path)
+    return result
 
 
 def validate_fresh_retry_retirement_receipt(path: Path) -> dict[str, Any]:
@@ -2474,6 +3406,10 @@ def validate_fresh_retry_retirement_receipt(path: Path) -> dict[str, Any]:
         raise T14RouteCFreshError("Route C retirement receipt is unreadable") from exc
     if not isinstance(value, dict):
         raise T14RouteCFreshError("Route C retirement receipt is not an object")
+    if value.get("schema_version") == ENGINEERING_RETRY_RECEIPT_SCHEMA:
+        return _validate_engineering_retry_retirement_value(
+            value, receipt_path=receipt_path
+        )
     unsigned = {key: item for key, item in value.items() if key != "receipt_sha256"}
     if (
         value.get("schema_version") != FRESH_RETRY_RECEIPT_SCHEMA
@@ -2573,8 +3509,10 @@ def retire_failed_route_c_current(
     current_root: Path,
     retired_root: Path,
     proc_root: Path = Path("/proc"),
+    retry_index: int = 1,
+    authorization_receipt: Path | None = None,
 ) -> dict[str, Any]:
-    """Atomically retire only a dead resource-watchdog pointer for one fresh retry.
+    """Atomically retire one dead failed pointer for its authorized fresh retry.
 
     The failed science and owner roots are never modified or removed.  The
     caller must hold the Route C launch lock, making the absence check and
@@ -2613,8 +3551,22 @@ def retire_failed_route_c_current(
         raise T14RouteCFreshError("Route C failed task spec is unreadable") from exc
     if not isinstance(old_spec, dict):
         raise T14RouteCFreshError("Route C failed task spec is not an object")
-    if old_spec.get("fresh_retry") is not None:
-        raise T14RouteCFreshError("Route C one fresh retry was already consumed")
+    previous_retry = old_spec.get("fresh_retry")
+    if retry_index == 1:
+        if previous_retry is not None or authorization_receipt is not None:
+            raise T14RouteCFreshError("Route C first retry chain changed")
+    elif retry_index == 2:
+        if (
+            not isinstance(previous_retry, Mapping)
+            or previous_retry.get("retry_index") != 1
+            or previous_retry.get("max_retries") != 1
+            or authorization_receipt is None
+        ):
+            raise T14RouteCFreshError(
+                "Route C engineering retry lacks the consumed first retry"
+            )
+    else:
+        raise T14RouteCFreshError("Route C retry index is not authorized")
     old_owner_root = _absolute(old_spec.get("owner_root"), field="failed owner_root")
     old_output_root = _absolute(old_spec.get("output_root"), field="failed output_root")
     if spec_path.parent != old_owner_root:
@@ -2627,16 +3579,28 @@ def retire_failed_route_c_current(
     )
     owner = json.loads(owner_path.read_text(encoding="utf-8"))
     terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
-    if (
+    owner_identity_changed = (
         not isinstance(owner, dict)
         or owner.get("owner_pid") != old_pid
         or owner.get("owner_start_ticks") != old_ticks
         or owner.get("task_spec") != str(spec_path)
         or not isinstance(terminal, dict)
         or terminal.get("status") != "FAILED"
-        or "resource watchdog" not in str(terminal.get("error", "")).lower()
-    ):
+    )
+    if owner_identity_changed:
+        raise T14RouteCFreshError("Route C prior failed owner identity changed")
+    if retry_index == 1 and "resource watchdog" not in str(
+        terminal.get("error", "")
+    ).lower():
         raise T14RouteCFreshError("Route C prior attempt was not a resource-watchdog failure")
+    if retry_index == 2 and (
+        old_spec.get("execution_commit") != ENGINEERING_FAILED_EXECUTION_COMMIT
+        or terminal.get("error")
+        != "Route C science phase failed: reference-500, exit=1"
+    ):
+        raise T14RouteCFreshError(
+            "Route C prior attempt was not the step-50 engineering failure"
+        )
     live_stat = proc_root / str(old_pid) / "stat"
     if live_stat.is_file():
         try:
@@ -2667,7 +3631,11 @@ def retire_failed_route_c_current(
         if not any(Path(token).name in exact_entrypoints for token in tokens):
             continue
         command = "\0".join(tokens)
-        if str(old_output_root) in command or str(spec_path) in command:
+        if (
+            str(old_output_root) in command
+            or str(old_owner_root) in command
+            or str(spec_path) in command
+        ):
             raise T14RouteCFreshError("Route C failed root still has an exact writer")
     attempt = str(old_spec.get("attempt_uuid") or "")
     try:
@@ -2677,43 +3645,122 @@ def retire_failed_route_c_current(
     if attempt_uuid.version != 4 or str(attempt_uuid) != attempt:
         raise T14RouteCFreshError("Route C failed attempt UUID is not canonical")
     retired.mkdir(parents=True, exist_ok=True)
-    for prior_receipt in retired.glob(
-        "*-superseded-by-fresh-retry-1/retirement_receipt.json"
-    ):
-        if prior_receipt.is_file() and not prior_receipt.is_symlink():
-            validate_fresh_retry_retirement_receipt(prior_receipt)
-            raise T14RouteCFreshError("Route C one fresh retry was already consumed")
-    destination = retired / f"{attempt}-superseded-by-fresh-retry-1"
+    if retry_index == 1:
+        for prior_receipt in retired.glob(
+            "*-superseded-by-fresh-retry-1/retirement_receipt.json"
+        ):
+            if prior_receipt.is_file() and not prior_receipt.is_symlink():
+                validate_fresh_retry_retirement_receipt(prior_receipt)
+                raise T14RouteCFreshError(
+                    "Route C one fresh retry was already consumed"
+                )
+        destination = retired / f"{attempt}-superseded-by-fresh-retry-1"
+    else:
+        authorization_path = _regular_physical_file(
+            Path(authorization_receipt),
+            field="engineering retry authorization receipt",
+        )
+        authorization = validate_engineering_retry_authorization_receipt(
+            authorization_path
+        )
+        if authorization.get("previous_attempt_uuid") != attempt:
+            raise T14RouteCFreshError(
+                "Route C engineering authorization names another attempt"
+            )
+        prior_receipt_path = _regular_physical_file(
+            _absolute(
+                previous_retry.get("retirement_receipt"),
+                field="failed_retry.retirement_receipt",
+            ),
+            field="prior retry retirement receipt",
+        )
+        prior_receipt = validate_fresh_retry_retirement_receipt(prior_receipt_path)
+        if (
+            prior_receipt.get("retry_index") != 1
+            or file_sha256(prior_receipt_path)
+            != previous_retry.get("retirement_receipt_sha256")
+        ):
+            raise T14RouteCFreshError("Route C prior retry receipt changed")
+        failure_evidence = _failed_reference_evidence(
+            owner_root=old_owner_root,
+            declared_output_root=old_output_root,
+        )
+        if (
+            failure_evidence["observed_completed_step"] != 50
+            or failure_evidence["committed_checkpoint_present"] is not False
+        ):
+            raise T14RouteCFreshError(
+                "Route C failed attempt is not the authorized uncommitted step-50 state"
+            )
+        destination = retired / f"{attempt}-superseded-by-fresh-retry-2"
     if destination.exists() or destination.is_symlink():
         raise T14RouteCFreshError("Route C fresh retry was already consumed")
-    completed_step = 0
-    ledger = old_output_root / "route_c_step_states.jsonl"
-    if ledger.is_file() and not ledger.is_symlink():
-        with ledger.open("r", encoding="utf-8") as stream:
-            for line in stream:
-                if line.strip():
-                    row = json.loads(line)
-                    completed_step = max(completed_step, int(row["completed_step"]))
-    receipt: dict[str, Any] = {
-        "schema_version": FRESH_RETRY_RECEIPT_SCHEMA,
-        "terminal_state": "TERMINAL_FAILED_RESOURCE_WATCHDOG",
-        "retirement_state": "SUPERSEDED_BY_FRESH_RETRY",
-        "retry_index": 1,
-        "max_retries": 1,
-        "reuse_partial_step161": False,
-        "preserve_failed_attempt": True,
-        "old_attempt_uuid": attempt,
-        "old_owner_pid": old_pid,
-        "old_owner_start_ticks": old_ticks,
-        "old_owner_root": str(old_owner_root),
-        "old_output_root": str(old_output_root),
-        "old_terminal_sha256": file_sha256(terminal_path),
-        "observed_uncommitted_step": completed_step,
-        "old_root_deleted": False,
-        "process_signal_sent": False,
-        "retired_pointer_root": str(destination),
-        "retired_at": _utc_now(),
-    }
+    if retry_index == 1:
+        completed_step = 0
+        ledger = old_output_root / "route_c_step_states.jsonl"
+        if ledger.is_file() and not ledger.is_symlink():
+            with ledger.open("r", encoding="utf-8") as stream:
+                for line in stream:
+                    if line.strip():
+                        row = json.loads(line)
+                        completed_step = max(
+                            completed_step, int(row["completed_step"])
+                        )
+        receipt: dict[str, Any] = {
+            "schema_version": FRESH_RETRY_RECEIPT_SCHEMA,
+            "terminal_state": "TERMINAL_FAILED_RESOURCE_WATCHDOG",
+            "retirement_state": "SUPERSEDED_BY_FRESH_RETRY",
+            "retry_index": 1,
+            "max_retries": 1,
+            "reuse_partial_step161": False,
+            "preserve_failed_attempt": True,
+            "old_attempt_uuid": attempt,
+            "old_owner_pid": old_pid,
+            "old_owner_start_ticks": old_ticks,
+            "old_owner_root": str(old_owner_root),
+            "old_output_root": str(old_output_root),
+            "old_terminal_sha256": file_sha256(terminal_path),
+            "observed_uncommitted_step": completed_step,
+            "old_root_deleted": False,
+            "process_signal_sent": False,
+            "retired_pointer_root": str(destination),
+            "retired_at": _utc_now(),
+        }
+    else:
+        receipt = {
+            "schema_version": ENGINEERING_RETRY_RECEIPT_SCHEMA,
+            "terminal_state": "TERMINAL_FAILED_ENGINEERING_CADENCE",
+            "retirement_state": "SUPERSEDED_BY_ENGINEERING_CORRECTED_FRESH_RETRY",
+            "retry_index": 2,
+            "max_retries": 2,
+            "max_attempts": 2,
+            "reuse_partial_step161": False,
+            "reuse_failed_checkpoint": False,
+            "preserve_failed_attempt": True,
+            "old_attempt_uuid": attempt,
+            "old_execution_commit": old_spec["execution_commit"],
+            "old_owner_pid": old_pid,
+            "old_owner_start_ticks": old_ticks,
+            "old_owner_root": str(old_owner_root),
+            "old_output_root": str(old_output_root),
+            "old_task_spec": str(spec_path),
+            "old_task_spec_sha256": file_sha256(spec_path),
+            "old_terminal_sha256": file_sha256(terminal_path),
+            "failed_phase": "REFERENCE_500",
+            "failure_signature": "REFERENCE_500_STEP50_PARAMETER_CADENCE_DRIFT",
+            "preserved_science_root": failure_evidence["science_root"],
+            "preserved_ledger_sha256": failure_evidence["ledger_sha256"],
+            "observed_uncommitted_step": 50,
+            "committed_checkpoint_present": False,
+            "prior_retry_receipt": str(prior_receipt_path),
+            "prior_retry_receipt_sha256": file_sha256(prior_receipt_path),
+            "authorization_receipt": str(authorization_path),
+            "authorization_receipt_sha256": file_sha256(authorization_path),
+            "old_root_deleted": False,
+            "process_signal_sent": False,
+            "retired_pointer_root": str(destination),
+            "retired_at": _utc_now(),
+        }
     receipt["receipt_sha256"] = stable_sha256(receipt)
     atomic_json(current / "retirement_receipt.json", receipt)
     os.replace(current, destination)

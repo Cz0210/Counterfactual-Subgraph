@@ -15,11 +15,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.baselines.tastemolnet_t14_route_c_fresh import (  # noqa: E402
+    ENGINEERING_RETRY_CONTRACT_SCHEMA,
+    FRESH_RETRY_CONTRACT_SCHEMA,
     audit_no_live_t14_science_owner,
     audit_route_c_matrix_cell_absent,
     build_spec,
     file_sha256,
+    validate_engineering_retry_authorization_receipt,
     validate_fresh_retry_retirement_receipt,
+    write_formal_cadence_contract,
+    write_scientific_config_diff_receipt,
     write_spec,
 )
 
@@ -72,6 +77,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--launch-samples-required", type=int, default=3)
     parser.add_argument("--runtime-low-headroom-samples", type=int, default=3)
     parser.add_argument("--fresh-retry-receipt", type=_absolute)
+    parser.add_argument("--engineering-authorization-receipt", type=_absolute)
+    parser.add_argument("--formal-cadence-contract-out", type=_absolute)
+    parser.add_argument("--scientific-config-diff-out", type=_absolute)
     parser.add_argument("--spec-out", type=_absolute, required=True)
     parser.add_argument("--no-live-owner-receipt", type=_absolute, required=True)
     parser.add_argument("--matrix-authority-state", type=_absolute, required=True)
@@ -99,18 +107,46 @@ def main(argv: list[str] | None = None) -> int:
     )
     fresh_retry = None
     if args.fresh_retry_receipt is not None:
-        authorization = {
-            "ALLOW_T14_ROUTE_C_FRESH_RETRY_AFTER_RESOURCE_WATCHDOG": "1",
-            "T14_ROUTE_C_FRESH_RETRY_MAX_ATTEMPTS": "1",
-            "PRESERVE_FAILED_ROUTE_C_ATTEMPT": "1",
-            "REUSE_PARTIAL_STEP161": "0",
-        }
-        for name, expected in authorization.items():
-            if os.environ.get(name) != expected:
-                raise ValueError(f"T14 Route C retry authorization changed: {name}")
         retirement = validate_fresh_retry_retirement_receipt(
             args.fresh_retry_receipt
         )
+        retry_index = int(retirement["retry_index"])
+        if retry_index == 1:
+            authorization = {
+                "ALLOW_T14_ROUTE_C_FRESH_RETRY_AFTER_RESOURCE_WATCHDOG": "1",
+                "T14_ROUTE_C_FRESH_RETRY_MAX_ATTEMPTS": "1",
+                "PRESERVE_FAILED_ROUTE_C_ATTEMPT": "1",
+                "REUSE_PARTIAL_STEP161": "0",
+            }
+            if (
+                args.engineering_authorization_receipt is not None
+                or args.formal_cadence_contract_out is not None
+                or args.scientific_config_diff_out is not None
+            ):
+                raise ValueError(
+                    "T14 Route C first retry cannot consume engineering evidence"
+                )
+        elif retry_index == 2:
+            authorization = {
+                "ALLOW_T14_ENGINEERING_CORRECTED_SECOND_FRESH_RETRY": "1",
+                "T14_ROUTE_C_FRESH_RETRY_MAX_ATTEMPTS": "2",
+                "PRESERVE_FAILED_ROUTE_C_ATTEMPT": "1",
+                "REUSE_PARTIAL_STEP161": "0",
+                "REUSE_FAILED_ROUTE_C_CHECKPOINT": "0",
+            }
+            if (
+                args.engineering_authorization_receipt is None
+                or args.formal_cadence_contract_out is None
+                or args.scientific_config_diff_out is None
+            ):
+                raise ValueError(
+                    "T14 Route C engineering retry evidence paths are required"
+                )
+        else:  # validated receipts are currently limited to retries one and two
+            raise ValueError("T14 Route C retry index is unsupported")
+        for name, expected in authorization.items():
+            if os.environ.get(name) != expected:
+                raise ValueError(f"T14 Route C retry authorization changed: {name}")
         train_csv = Path(environment["TASTEMOLNET_TRAIN_CSV"])
         t3_checkpoint = (
             Path(environment["TASTEMOLNET_T3_OUTPUT_ROOT"])
@@ -132,11 +168,12 @@ def main(argv: list[str] | None = None) -> int:
         if not old_cohort_manifest.is_file() or old_cohort_manifest.is_symlink():
             raise ValueError("T14 Route C failed cohort manifest is absent")
         old_cohort = json.loads(old_cohort_manifest.read_text(encoding="utf-8"))
-        cohort_sha = str(old_cohort.get("cohort_jsonl_sha256") or "")
-        if len(cohort_sha) != 64 or any(
-            character not in "0123456789abcdef" for character in cohort_sha
+        actual_cohort_sha = str(old_cohort.get("cohort_jsonl_sha256") or "")
+        if len(actual_cohort_sha) != 64 or any(
+            character not in "0123456789abcdef" for character in actual_cohort_sha
         ):
             raise ValueError("T14 Route C failed cohort SHA is invalid")
+        cohort_sha = actual_cohort_sha
         if (
             args.launch_headroom_bytes != 384 * 1024**3
             or args.runtime_headroom_bytes != 96 * 1024**3
@@ -146,9 +183,13 @@ def main(argv: list[str] | None = None) -> int:
         ):
             raise ValueError("T14 Route C retry memory policy was weakened")
         fresh_retry = {
-            "schema_version": "tastemolnet_t14_route_c_fresh_retry_task_v1",
-            "retry_index": 1,
-            "max_retries": 1,
+            "schema_version": (
+                FRESH_RETRY_CONTRACT_SCHEMA
+                if retry_index == 1
+                else ENGINEERING_RETRY_CONTRACT_SCHEMA
+            ),
+            "retry_index": retry_index,
+            "max_retries": retry_index,
             "reuse_partial_step161": False,
             "preserve_failed_attempt": True,
             "fresh_uuid": args.attempt_uuid,
@@ -194,6 +235,116 @@ def main(argv: list[str] | None = None) -> int:
             "matrix_authority_state": str(args.matrix_authority_state),
             "matrix_authority_lock": str(args.matrix_authority_lock),
         }
+        if retry_index == 2:
+            engineering_authorization = (
+                validate_engineering_retry_authorization_receipt(
+                    args.engineering_authorization_receipt
+                )
+            )
+            reference_spec_path = Path(
+                engineering_authorization["previous_task_spec"]
+            )
+            reference_spec = json.loads(reference_spec_path.read_text(encoding="utf-8"))
+            reference_retry = reference_spec.get("fresh_retry")
+            if not isinstance(reference_retry, dict):
+                raise ValueError("T14 Route C reference retry contract is absent")
+            current_inputs = {
+                "dataset_sha256": file_sha256(train_csv),
+                "train_split_sha256": file_sha256(split_path),
+                "cohort_sha256": reference_retry.get("cohort_sha256"),
+                "t3_gine_sha256": file_sha256(model_path),
+                "config_sha256": file_sha256(args.config),
+                "seed": 7,
+                "candidate_capacity": 50_000,
+                "m_configured_max": 20_000,
+                "m_fallback_max": 25_000,
+                "min_valid_unique": 10,
+            }
+            current_scientific_config = {
+                "retry_scientific_inputs": current_inputs,
+                "science_environment": environment,
+                "route_c_state": reference_spec.get("route_c_state"),
+                "top_level_scientific_contract": {
+                    "storage_mode": "lowmemory",
+                    "m_configured_max": 20_000,
+                    "m_fallback_max": 25_000,
+                },
+                "science_contract": reference_spec.get("science_contract"),
+                "required_environment": reference_spec.get("required_environment"),
+            }
+            diff = write_scientific_config_diff_receipt(
+                path=args.scientific_config_diff_out,
+                reference_task_spec=reference_spec_path,
+                corrected_scientific_config=current_scientific_config,
+                authorization_receipt=args.engineering_authorization_receipt,
+            )
+            if (
+                engineering_authorization["previous_attempt_uuid"]
+                != retirement["old_attempt_uuid"]
+                or engineering_authorization["corrected_execution_commit"]
+                != args.execution_commit
+                or retirement["authorization_receipt"]
+                != str(args.engineering_authorization_receipt)
+                or actual_cohort_sha
+                != engineering_authorization["previous_actual_cohort_jsonl_sha256"]
+            ):
+                raise ValueError(
+                    "T14 Route C engineering authorization chain changed"
+                )
+            cadence = write_formal_cadence_contract(
+                path=args.formal_cadence_contract_out,
+                attempt_uuid=args.attempt_uuid,
+                execution_commit=args.execution_commit,
+                cadence_sources={
+                    "science_step": REPO_ROOT
+                    / "src/baselines/tastemolnet_comrecgc_full.py",
+                    "checkpoint": REPO_ROOT
+                    / "src/baselines/tastemolnet_comrecgc_full.py",
+                    "progress": REPO_ROOT
+                    / "src/baselines/tastemolnet_comrecgc_full.py",
+                    "watchdog": REPO_ROOT
+                    / "scripts/autodl/run_t14_route_c_owner.py",
+                    "convergence_audit": REPO_ROOT
+                    / "scripts/autodl/run_t14_route_c_owner.py",
+                    "publisher": REPO_ROOT
+                    / "src/baselines/tastemolnet_t14_route_c_continuation.py",
+                },
+                authorization_receipt=args.engineering_authorization_receipt,
+                scientific_config_diff_receipt=args.scientific_config_diff_out,
+            )
+            fresh_retry.update(current_inputs)
+            fresh_retry["checkpoint_policy"]["fallback_extension_steps"] = [
+                22_500,
+                25_000,
+            ]
+            fresh_retry.update(
+                {
+                    "max_attempts": 2,
+                    "reuse_failed_checkpoint": False,
+                    "previous_actual_cohort_jsonl": engineering_authorization[
+                        "previous_actual_cohort_jsonl"
+                    ],
+                    "previous_actual_cohort_jsonl_sha256": actual_cohort_sha,
+                    "authorization_receipt": str(
+                        args.engineering_authorization_receipt
+                    ),
+                    "authorization_receipt_sha256": file_sha256(
+                        args.engineering_authorization_receipt
+                    ),
+                    "scientific_config_diff_receipt": str(
+                        args.scientific_config_diff_out
+                    ),
+                    "scientific_config_diff_receipt_sha256": file_sha256(
+                        args.scientific_config_diff_out
+                    ),
+                    "formal_cadence_contract": str(
+                        args.formal_cadence_contract_out
+                    ),
+                    "formal_cadence_contract_sha256": file_sha256(
+                        args.formal_cadence_contract_out
+                    ),
+                }
+            )
     spec = build_spec(
         attempt_uuid=args.attempt_uuid,
         execution_commit=args.execution_commit,

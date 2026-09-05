@@ -5,14 +5,32 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 
-RETRY_REQUESTED="${ALLOW_T14_ROUTE_C_FRESH_RETRY_AFTER_RESOURCE_WATCHDOG:-0}"
+FIRST_RETRY_REQUESTED="${ALLOW_T14_ROUTE_C_FRESH_RETRY_AFTER_RESOURCE_WATCHDOG:-0}"
+SECOND_RETRY_REQUESTED="${ALLOW_T14_ENGINEERING_CORRECTED_SECOND_FRESH_RETRY:-0}"
+[[ "$FIRST_RETRY_REQUESTED" != "1" || "$SECOND_RETRY_REQUESTED" != "1" ]] \
+  || { echo "only one T14 fresh-retry authorization may be active" >&2; exit 64; }
+RETRY_REQUESTED=0
+RETRY_INDEX=0
+if [[ "$FIRST_RETRY_REQUESTED" == "1" ]]; then
+  RETRY_REQUESTED=1
+  RETRY_INDEX=1
+elif [[ "$SECOND_RETRY_REQUESTED" == "1" ]]; then
+  RETRY_REQUESTED=1
+  RETRY_INDEX=2
+fi
 [[ "${ALLOW_T14_ROUTE_C:-0}" == "1" || "$RETRY_REQUESTED" == "1" ]] \
   || { echo "ALLOW_T14_ROUTE_C=1 or the exact fresh-retry authorization is required" >&2; exit 64; }
-if [[ "$RETRY_REQUESTED" == "1" ]]; then
+if [[ "$FIRST_RETRY_REQUESTED" == "1" ]]; then
   [[ "${T14_ROUTE_C_FRESH_RETRY_MAX_ATTEMPTS:-}" == "1" \
     && "${PRESERVE_FAILED_ROUTE_C_ATTEMPT:-}" == "1" \
     && "${REUSE_PARTIAL_STEP161:-}" == "0" ]] \
     || { echo "T14 Route C fresh-retry contract is incomplete" >&2; exit 64; }
+elif [[ "$SECOND_RETRY_REQUESTED" == "1" ]]; then
+  [[ "${T14_ROUTE_C_FRESH_RETRY_MAX_ATTEMPTS:-}" == "2" \
+    && "${PRESERVE_FAILED_ROUTE_C_ATTEMPT:-}" == "1" \
+    && "${REUSE_PARTIAL_STEP161:-}" == "0" \
+    && "${REUSE_FAILED_ROUTE_C_CHECKPOINT:-}" == "0" ]] \
+    || { echo "T14 Route C engineering retry contract is incomplete" >&2; exit 64; }
 fi
 [[ "${RUN_GNN_ABLATION:-0}" == "0" && "${RUN_LLM_ABLATION:-0}" == "0" ]] \
   || { echo "Ablation science must remain disabled" >&2; exit 64; }
@@ -27,21 +45,35 @@ MATRIX_AUTHORITY_ROOT="$CONTROL/fast16_matrix_authority"
 MATRIX_STATE="$MATRIX_AUTHORITY_ROOT/state.json"
 MATRIX_LOCK="$MATRIX_AUTHORITY_ROOT/publish.lock"
 CURRENT="$CONTROL/t14_route_c/current"
+EXECUTION_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+if [[ "$SECOND_RETRY_REQUESTED" == "1" ]]; then
+  [[ -z "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=normal)" ]] \
+    || { echo "T14 engineering retry requires a clean immutable checkout" >&2; exit 74; }
+fi
 mkdir -p "$CONTROL/t14_route_c"
 exec 9>"$CONTROL/t14_route_c/launch.lock"
 flock -n 9 || { echo "another T14 Route C launch is in progress" >&2; exit 73; }
 FRESH_RETRY_RECEIPT=""
+ENGINEERING_AUTHORIZATION_RECEIPT=""
 
 # A prior launcher may have completed the atomic pointer retirement and then
 # stopped before creating the fresh owner. Resume that exact one-shot
 # transaction from its single sealed receipt; never consume a second retry.
 if [[ ! -e "$CURRENT" && ! -L "$CURRENT" && "$RETRY_REQUESTED" == "1" ]]; then
   mapfile -t RETIRED_RECEIPTS < <(find "$CONTROL/t14_route_c/retired" \
-    -mindepth 2 -maxdepth 2 -type f -name retirement_receipt.json -print 2>/dev/null | sort)
+    -path "*-superseded-by-fresh-retry-${RETRY_INDEX}/retirement_receipt.json" \
+    -type f -print 2>/dev/null | sort)
   if [[ "${#RETIRED_RECEIPTS[@]}" == "1" ]]; then
     "$PY" -I -B -c 'import pathlib,sys; sys.path.insert(0,sys.argv[2]); from src.baselines.tastemolnet_t14_route_c_fresh import validate_fresh_retry_retirement_receipt; validate_fresh_retry_retirement_receipt(pathlib.Path(sys.argv[1]))' \
       "${RETIRED_RECEIPTS[0]}" "$PROJECT_ROOT"
     FRESH_RETRY_RECEIPT="${RETIRED_RECEIPTS[0]}"
+    if [[ "$SECOND_RETRY_REQUESTED" == "1" ]]; then
+      ENGINEERING_AUTHORIZATION_RECEIPT="$($PY -I -B -c '
+import json,pathlib,sys
+value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(value["authorization_receipt"])
+' "$FRESH_RETRY_RECEIPT")"
+    fi
   elif [[ "${#RETIRED_RECEIPTS[@]}" -gt 1 ]]; then
     echo "multiple T14 fresh-retry retirement receipts require audit" >&2
     exit 74
@@ -122,17 +154,33 @@ print(owner_root)
 ' "$SEALED_SPEC" "$OLD_PID" "$OLD_TICKS")" \
     || { echo "sealed Route C task/owner evidence failed validation" >&2; exit 74; }
   if [[ "$RETRY_REQUESTED" == "1" ]]; then
-    FRESH_RETRY_RECEIPT="$($PY -I -B -c '
+    if [[ "$SECOND_RETRY_REQUESTED" == "1" ]]; then
+      OLD_ATTEMPT="$($PY -I -B -c 'import json,pathlib,sys; print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["attempt_uuid"])' "$SEALED_SPEC")"
+      ENGINEERING_AUTHORIZATION_RECEIPT="$CONTROL/t14_route_c/authorizations/${OLD_ATTEMPT}-engineering-corrected-retry-2.json"
+      "$PY" -I -B -c '
 import pathlib,sys
 sys.path.insert(0,sys.argv[4])
+from src.baselines.tastemolnet_t14_route_c_fresh import write_engineering_retry_authorization_receipt
+write_engineering_retry_authorization_receipt(
+    path=pathlib.Path(sys.argv[1]),
+    current_root=pathlib.Path(sys.argv[2]),
+    corrected_execution_commit=sys.argv[3],
+)
+' "$ENGINEERING_AUTHORIZATION_RECEIPT" "$CURRENT" "$EXECUTION_COMMIT" "$PROJECT_ROOT"
+    fi
+    FRESH_RETRY_RECEIPT="$($PY -I -B -c '
+import pathlib,sys
+sys.path.insert(0,sys.argv[5])
 from src.baselines.tastemolnet_t14_route_c_fresh import retire_failed_route_c_current
 receipt=retire_failed_route_c_current(
     current_root=pathlib.Path(sys.argv[1]),
     retired_root=pathlib.Path(sys.argv[2]),
+    retry_index=int(sys.argv[3]),
+    authorization_receipt=(pathlib.Path(sys.argv[4]) if sys.argv[4] else None),
 )
 print(pathlib.Path(receipt["retired_pointer_root"])/"retirement_receipt.json")
-' "$CURRENT" "$CONTROL/t14_route_c/retired" "$CONTROL" "$PROJECT_ROOT")" \
-      || { echo "failed Route C pointer was not eligible for its one fresh retry" >&2; exit 74; }
+' "$CURRENT" "$CONTROL/t14_route_c/retired" "$RETRY_INDEX" "$ENGINEERING_AUTHORIZATION_RECEIPT" "$PROJECT_ROOT")" \
+      || { echo "failed Route C pointer was not eligible for the authorized fresh retry" >&2; exit 74; }
     mkdir -m 700 "$CURRENT"
   else
     OWNER_PID="$(launch_owner "$SEALED_SPEC" "$SEALED_OWNER_ROOT" "$SEALED_CONTINUATION")"
@@ -149,10 +197,11 @@ if [[ "$RETRY_REQUESTED" == "1" && -z "$FRESH_RETRY_RECEIPT" ]]; then
 fi
 
 ATTEMPT="$($PY -c 'import uuid; print(uuid.uuid4())')"
-EXECUTION_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
 OWNER_ROOT="$CONTROL/t14_route_c/owners/route-c-$ATTEMPT"
 OUTPUT_ROOT="$RUNTIME/outputs/autodl/tastemolnet/comrecgc_route_c/route-c-$ATTEMPT"
-if [[ -n "$FRESH_RETRY_RECEIPT" ]]; then
+if [[ "$SECOND_RETRY_REQUESTED" == "1" ]]; then
+  SPEC="$OWNER_ROOT/T14_ROUTE_C_ENGINEERING_CORRECTED_FRESH_RETRY_TASK_SPEC.json"
+elif [[ -n "$FRESH_RETRY_RECEIPT" ]]; then
   SPEC="$OWNER_ROOT/T14_ROUTE_C_FRESH_RETRY_TASK_SPEC.json"
 else
   SPEC="$OWNER_ROOT/T14_ROUTE_C_TASK_SPEC.json"
@@ -188,6 +237,15 @@ SPEC_ARGS=(
 if [[ -n "$FRESH_RETRY_RECEIPT" ]]; then
   SPEC_ARGS+=(--fresh-retry-receipt "$FRESH_RETRY_RECEIPT")
 fi
+if [[ "$SECOND_RETRY_REQUESTED" == "1" ]]; then
+  CADENCE_CONTRACT="$OWNER_ROOT/T14_ROUTE_C_FORMAL_CADENCE_CONTRACT.json"
+  SCIENTIFIC_CONFIG_DIFF="$OWNER_ROOT/T14_ROUTE_C_SCIENTIFIC_CONFIG_DIFF.json"
+  SPEC_ARGS+=(
+    --engineering-authorization-receipt "$ENGINEERING_AUTHORIZATION_RECEIPT"
+    --formal-cadence-contract-out "$CADENCE_CONTRACT"
+    --scientific-config-diff-out "$SCIENTIFIC_CONFIG_DIFF"
+  )
+fi
 "${SPEC_ARGS[@]}"
 
 POSTPROCESS_SCIENCE_ROOT="${T14_ROUTE_C_POSTPROCESS_SCIENCE_ROOT:-$RUNTIME/outputs/autodl/tastemolnet/comrecgc_route_c_postprocess/science-$ATTEMPT}"
@@ -216,6 +274,7 @@ NODE_EMBEDDING_CACHE_DIR="${NODE_EMBEDDING_CACHE_DIR:-$RUNTIME/cache/tastemolnet
   --publisher-queue-manifest "${T14_ROUTE_C_PUBLISHER_QUEUE_MANIFEST:?required}" \
   --publisher-heartbeat "${T14_ROUTE_C_PUBLISHER_HEARTBEAT:?required}" \
   --publisher-pid-file "${T14_ROUTE_C_PUBLISHER_PID_FILE:?required}" \
+  --poll-seconds 60 \
   --spec-out "$CONTINUATION_SPEC"
 
 OWNER_PID="$(launch_owner "$SPEC" "$OWNER_ROOT" "$CONTINUATION_SPEC")"
@@ -227,6 +286,12 @@ if [[ -n "$FRESH_RETRY_RECEIPT" ]]; then
   echo "[T14_FRESH_RETRY_OWNER_PASS]"
   echo "[T14_ROUTE_C_FRESH_RETRY_LAUNCHED]"
   echo "t14_route_c_retry_retirement_receipt=$FRESH_RETRY_RECEIPT"
+  if [[ "$SECOND_RETRY_REQUESTED" == "1" ]]; then
+    echo "[T14_ENGINEERING_CORRECTED_SECOND_FRESH_RETRY_LAUNCHED]"
+    echo "t14_route_c_engineering_authorization_receipt=$ENGINEERING_AUTHORIZATION_RECEIPT"
+    echo "t14_route_c_formal_cadence_contract=$CADENCE_CONTRACT"
+    echo "t14_route_c_scientific_config_diff=$SCIENTIFIC_CONFIG_DIFF"
+  fi
 fi
 echo "t14_route_c_owner_pid=$OWNER_PID"
 echo "t14_route_c_task_spec=$SPEC"
