@@ -73,7 +73,9 @@ def build_bundle(*, reference_path, matrix_path, merged_pool_root, molclr_source
         add(f"data/{split}.csv", path, ref["dataset_split_hashes"][split])
     gine = Path(ref["gine_checkpoint_root"])
     for name in ("model.pt", "config.yaml", "feature_schema.json", "split_manifest.json",
-                 "temperature_scaling.json", "model_card.json", "label_map.json", "environment.json"):
+                 "temperature_scaling.json", "model_card.json", "label_map.json", "environment.json",
+                 "sha256sums.txt", "training_metrics.json", "validation_predictions.csv", "git_state.json",
+                 "test_evaluation_status.json", "b4_calibration.json"):
         digest = {"model.pt": ref["gine_checkpoint_sha"], "feature_schema.json": ref["feature_schema_sha"],
                   "temperature_scaling.json": ref["temperature_sha"]}.get(name)
         add(f"reference/gine/{name}", gine / name, digest)
