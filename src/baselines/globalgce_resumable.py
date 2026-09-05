@@ -1808,6 +1808,7 @@ def train_globalgce_resumable(
     expected_resume_checkpoint: Mapping[str, Any] | None = None,
     on_resume_checkpoint: Callable[[dict[str, Any]], None] | None = None,
     after_epoch_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    indexed_canary_output: str | Path | None = None,
 ) -> Any:
     """Run the official loop with atomic epoch checkpoints and exact RNG state."""
 
@@ -1899,6 +1900,22 @@ def train_globalgce_resumable(
     scheduler = torch_module.optim.lr_scheduler.StepLR(
         optimizer, step_size=10, gamma=0.9
     )
+    augmented_dataset = getattr(getattr(expanded_train, "dataset", None), "dataset", None)
+    augmented_identity = getattr(augmented_dataset, "identity", None)
+    if augmented_identity is not None:
+        if checkpoint is not None and checkpoint.get("augmented_dataset_identity") != augmented_identity:
+            raise ValueError("T13 augmented index/split/sampler checkpoint identity mismatch")
+        if checkpoint is not None and checkpoint.get("sampler_state") != dict(
+                augmented_identity["sampler"], next_epoch=int(checkpoint["next_epoch"])):
+            raise ValueError("T13 sampler cursor differs from committed optimizer-step boundary")
+        if indexed_canary_output is not None:
+            from src.baselines.t13_indexed_canary import run_training_parity, T13IndexedCanaryComplete
+            report = run_training_parity(model=model, fss=fss, train_loader=expanded_train,
+                learning_rate=learning_rate, output_root=indexed_canary_output,
+                resume_identity=normalized_resume_identity)
+            raise T13IndexedCanaryComplete(report)
+    elif indexed_canary_output is not None:
+        raise ValueError("T13 canary requires the real indexed augmented dataset")
     best_loss = float("inf")
     best_state: dict[str, Any] | None = None
     next_epoch = 0
@@ -2009,6 +2026,9 @@ def train_globalgce_resumable(
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "scheduler_state": scheduler.state_dict(),
+            **({"augmented_dataset_identity": augmented_identity,
+                "sampler_state": dict(augmented_identity["sampler"], next_epoch=epoch+1)}
+                if augmented_identity is not None else {}),
             "best_loss": best_loss,
             "best_state_seen": best_state is not None,
             "python_rng_state": random.getstate(),

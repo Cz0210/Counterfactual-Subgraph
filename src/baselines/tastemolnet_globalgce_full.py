@@ -2170,6 +2170,10 @@ def run_t13_full(
             require_isolated_imports=True,
             rules_only_min_valid_native_rules=0,
         )
+        if authority.gspan_adoption_proof is not None:
+            # Only the newly authorized, already-mined T13 route changes storage.
+            # The official mask/RNG/decoder/training/evaluation contract is fixed.
+            generator.t13_indexed_options = {"storage": "t13_indexed_augmentation_v1"}
         branch_manifests[target] = run_native_branch(
             target_label=target,
             generator=generator,

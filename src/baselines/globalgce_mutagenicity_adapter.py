@@ -4043,6 +4043,14 @@ class OfficialGlobalGCEMutagenicityGenerator:
             resolved_device,
             gnn_model,
         ).to(resolved_device)
+        indexed_options = getattr(self, "t13_indexed_options", None)
+        if indexed_options is not None:
+            if not (self.dataset_id == "tastemolnet" and self.num_classes == 3
+                    and self.source_label == 1 and self.target_label in {0, 2}
+                    and self.require_isolated_imports and gspan_adoption_proof is not None):
+                raise ValueError("T13 indexed materialization requires the isolated, adopted Taste route")
+            from src.baselines.t13_indexed_augmentation import install_t13_indexed_expansion
+            install_t13_indexed_expansion(globalgce_model.fsg, output_root=output_dir / "indexed_dataset")
         if can_resume_trained_model:
             random.seed(int(seed))
             frozen_rules = torch.load(
@@ -4132,6 +4140,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 expected_resume_checkpoint=expected_resume_checkpoint,
                 on_resume_checkpoint=on_resume_checkpoint,
                 after_epoch_checkpoint=after_epoch_checkpoint,
+                indexed_canary_output=(indexed_options.get("canary_output") if indexed_options else None),
             )
             augmented_dataset = augmented_test_loader.dataset.dataset
             if gspan_exact_top_k_pruning and not exact_top_k_proof:
@@ -4205,6 +4214,8 @@ class OfficialGlobalGCEMutagenicityGenerator:
             f"{self.dataset_name.lower()}_seed{seed}_epochs{epochs}_topk{top_k_native}"
         )
         training_summary = {
+            **({"indexed_augmentation": augmented_dataset.identity}
+                if indexed_options is not None else {}),
             "official_entrypoints": [
                 "data.data_preprocess-compatible dense molecular tensors",
                 (

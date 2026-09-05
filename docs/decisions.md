@@ -18336,3 +18336,20 @@ engineering retry. Record the temperature driver and the verifier driver separat
   full science. A failed formal attempt is not auto-restarted from zero; any
   later recovery must bind its actual committed checkpoint. Child devices
   use the complete CUDA UUID with internal cuda:0 mapping.
+## 2026-09-06: T13 exact indexed augmentation after pre-training process loss
+
+- The owner authorizes one fresh full successor only after complete data/short
+  training parity and measured resource admission. Keep failed T13 evidence,
+  existing train-only mining import, both targets0/2, seed7 and configured100.
+- Replace only per-instance eager augmented-data storage: unchanged official
+  mask enumeration/sampling, compact exact Cartesian-mask axes, shared parent
+  tensors and bounded mutable batch copies. Do not change decoder, loss,
+  Adam/StepLR, sample multiplicity/splits/order, batch500 or RNG behavior.
+- Bind full index/parent/mask/split digests and sampler cursor to the existing
+  first-optimizer-step checkpoint. A top-level INITIALIZED checkpoint does
+  not by itself establish resumable training. Canary checkpoints remain
+  diagnostic and cannot become a main result or formal generation checkpoint.
+- The AutoDL-only canary executes real eager-batch/lazy-batch updates and an
+  isolated checkpoint reopen, records instantaneous resource boundaries, and
+  leaves full launch to the existing owner and its one-shot authorization.
+  See `docs/AUTODL_T13_INDEXED_DATASET_REPAIR_20260906.md`.
