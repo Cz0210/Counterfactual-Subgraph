@@ -135,6 +135,7 @@ def _run_process(
     heartbeat: Path,
     state: str,
     poll_seconds: int,
+    resource_monitor: Any = None,
 ) -> None:
     with stdout_path.open("ab", buffering=0) as stdout, stderr_path.open(
         "ab", buffering=0
@@ -153,6 +154,18 @@ def _run_process(
             detail={"command": command, "cwd": str(cwd)},
         )
         while process.poll() is None:
+            if resource_monitor is not None:
+                try:
+                    resource_monitor(process.pid)
+                except Exception:
+                    # Only this newly created T13 child. Never a process group,
+                    # another main worker, a forced exit, or a historical PID.
+                    process.terminate()
+                    while process.poll() is None:
+                        _heartbeat(heartbeat,state="T13_SAFE_STOP_WAITING_EXIT",
+                            science_started=True,science_pid=process.pid)
+                        time.sleep(poll_seconds)
+                    raise
             _heartbeat(
                 heartbeat,
                 state=state,
@@ -174,6 +187,8 @@ def run_once(
     heartbeat: Path,
     owner_root: Path,
     poll_seconds: int,
+    lazy_repair_authorization: Path | None = None,
+    lazy_repair_authorization_sha256: str | None = None,
 ) -> dict[str, Any]:
     specs = validate_spec_set(spec_root, check_files=True)
     if not release_path.is_file():
@@ -231,12 +246,24 @@ def run_once(
         env = dict(os.environ)
         env.update(
             {
-                "CUDA_VISIBLE_DEVICES": str(t13["gpu_index"]),
+                "CUDA_VISIBLE_DEVICES": str(t13["gpu_uuid"]),
                 "PYTHONPATH": str(t13["repo_root"]),
                 "RUN_LLM_ABLATION": "0",
                 "RUN_GNN_ABLATION": "0",
             }
         )
+        if lazy_repair_authorization is not None:
+            from src.utils.t13_lazy_recovery_guard import T13LazyRecoveryGuard
+            guard=T13LazyRecoveryGuard(lazy_repair_authorization,
+                lazy_repair_authorization_sha256,t13,owner_root)
+            guard.admission()
+            if (lazy_repair_authorization.parent/"full_start.json").exists():
+                raise T13FromHPCOwnerError("T13 full start already consumed; checkpoint-specific recovery required")
+            _run_process(guard.command(),cwd=Path(t13["repo_root"]),env=env,
+                stdout_path=owner_root/"lazy_canary.stdout.log",stderr_path=owner_root/"lazy_canary.stderr.log",
+                heartbeat=heartbeat,state="T13_LAZY_CANARY_RUNNING",poll_seconds=min(10,poll_seconds),
+                resource_monitor=guard.sample)
+            guard.accept_canary_and_claim_full()
         _run_process(
             command,
             cwd=Path(t13["repo_root"]),
@@ -294,6 +321,8 @@ def run(
     owner_root: Path,
     poll_seconds: int,
     once: bool,
+    lazy_repair_authorization: Path | None = None,
+    lazy_repair_authorization_sha256: str | None = None,
 ) -> dict[str, Any]:
     while True:
         try:
@@ -303,6 +332,8 @@ def run(
                 heartbeat=heartbeat,
                 owner_root=owner_root,
                 poll_seconds=poll_seconds,
+                lazy_repair_authorization=lazy_repair_authorization,
+                lazy_repair_authorization_sha256=lazy_repair_authorization_sha256,
             )
         except Exception as error:
             # This is the fresh launcher's owner directory, never a science
@@ -347,6 +378,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--owner-root", type=_absolute, required=True)
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--lazy-repair-authorization", type=_absolute)
+    parser.add_argument("--lazy-repair-authorization-sha256")
     args = parser.parse_args(argv)
     if args.config not in (None, "configs/hpc.yaml"):
         raise SystemExit("--config must be configs/hpc.yaml when supplied")
@@ -354,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("unsupported --set override")
     if not 5 <= args.poll_seconds <= 3600:
         raise SystemExit("--poll-seconds must be in [5,3600]")
+    if bool(args.lazy_repair_authorization)!=bool(args.lazy_repair_authorization_sha256):
+        parser.error("lazy repair authorization path and SHA must be supplied together")
     result = run(
         spec_root=args.spec_root,
         release_path=args.release,
@@ -361,6 +396,8 @@ def main(argv: list[str] | None = None) -> int:
         owner_root=args.owner_root,
         poll_seconds=args.poll_seconds,
         once=args.once,
+        lazy_repair_authorization=args.lazy_repair_authorization,
+        lazy_repair_authorization_sha256=args.lazy_repair_authorization_sha256,
     )
     print(json.dumps(result, sort_keys=True), flush=True)
     return 0

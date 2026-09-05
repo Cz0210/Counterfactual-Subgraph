@@ -14,8 +14,14 @@ set -euo pipefail
 mkdir -p "$T13_HPC_OWNER_ROOT"
 cd "$T8_HPC_T13_REPO_ROOT"
 export PYTHONPATH=$PWD
+extra=()
+if [[ -n "${T13_LAZY_REPAIR_AUTHORIZATION:-}" ]]; then
+  : "${T13_LAZY_REPAIR_AUTHORIZATION_SHA256:?exact narrow repair receipt hash required}"
+  extra+=(--lazy-repair-authorization "$T13_LAZY_REPAIR_AUTHORIZATION"
+          --lazy-repair-authorization-sha256 "$T13_LAZY_REPAIR_AUTHORIZATION_SHA256")
+fi
 
-nohup "$AUTODL_PYTHON" scripts/autodl/run_t13_from_hpc_owner_v1.py \
+nohup "$AUTODL_PYTHON" -I -B scripts/autodl/run_t13_from_hpc_owner_v1.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
   --spec-root "$T8_HPC_T13_SPEC_ROOT" \
@@ -23,6 +29,7 @@ nohup "$AUTODL_PYTHON" scripts/autodl/run_t13_from_hpc_owner_v1.py \
   --heartbeat "$T13_HPC_OWNER_ROOT/heartbeat.json" \
   --owner-root "$T13_HPC_OWNER_ROOT" \
   --poll-seconds "${T13_HPC_OWNER_POLL_SECONDS:-30}" \
+  "${extra[@]}" \
   >"$T13_HPC_OWNER_ROOT/owner.log" 2>&1 &
 pid=$!
 printf '%s\n' "$pid" >"$T13_HPC_OWNER_ROOT/owner.pid"

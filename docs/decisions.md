@@ -18318,3 +18318,21 @@ engineering retry. Record the temperature driver and the verifier driver separat
   ablation, and no temperature, residual prediction, selector or OT is rerun.
 - `scripts/ablations/gnn/publish_corrected_seed7.py` is the narrow publication
   adapter; its paired Slurm wrapper is CPU-only by the explicit task override.
+
+## 2026-09-06: One conditional T13 indexed-data recovery in the existing owner
+
+- Preserve the failed eager-materialization attempt and all imported mining
+  evidence. Add an opt-in, hash-bound narrow authorization to the existing T13
+  owner; no new scheduler or GPU lock. It uses the existing reserved GPU UUID
+  and runs sequential indexed-data/training/reload canaries before one full
+  fresh attempt. Bounded parity is not labelled full-trajectory parity.
+- Admission retains a conservative 384 GiB parent-cgroup headroom floor,
+  192 GiB protected-main reserve, and a 96 GiB canary process-tree ceiling.
+  Full admission additionally includes twice the measured canary peak for
+  transient checkpoint allocation. Compact T13 outputs reserve 4096 inodes;
+  this does not lower the separate Mut 100000-inode guard. Resource pressure
+  stops only the newly spawned canary, preserving the existing main workers.
+- Persist a single full-start claim under the authorization before launching
+  full science. A failed formal attempt is not auto-restarted from zero; any
+  later recovery must bind its actual committed checkpoint. Child devices
+  use the complete CUDA UUID with internal cuda:0 mapping.
