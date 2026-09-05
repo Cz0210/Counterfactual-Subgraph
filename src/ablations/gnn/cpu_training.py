@@ -162,7 +162,9 @@ def effective_training_config(
     # Main-classifier quality thresholds must not censor poor ablation results.
     training["health_gate"] = {"enabled": False}
     config.setdefault("runtime", {}).update({"device": "cpu", "num_workers": 0})
-    return config
+    from src.ablations.gnn.temperature_preflight import prepare_new_ablation_temperature_config
+    # New effective config only: never rewrite the sealed reference/attempt.
+    return prepare_new_ablation_temperature_config(config, backbone=backbone)
 
 
 def _mapping_yaml(values: Mapping[str, Any], indent: int = 0) -> str:
@@ -245,8 +247,10 @@ def run_cpu_training(
         raise FileExistsError("CPU attempt root must be fresh; use --resume for its checkpoint")
     if resume and not output.is_dir():
         raise FileNotFoundError("Resume requires the existing attempt root")
-    output.mkdir(parents=True, exist_ok=resume)
     config = effective_training_config(root, manifest, backbone)
+    from src.ablations.gnn.temperature_preflight import validate_explicit_validation_temperature_config
+    validate_explicit_validation_temperature_config(config)
+    output.mkdir(parents=True, exist_ok=resume)
     config_file = output / "effective_config.yaml"
     from src.utils.env import load_yaml_config
     if resume:

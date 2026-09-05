@@ -1,5 +1,24 @@
 # Decisions Log
 
+## [2026-09-05] Keep Mut Route B blocked on its missing causal lineage producer
+
+The authorized closeout review found a scientific input mismatch, not merely
+four absent shell commands. Pinned trace-off generation seals its final payload
+without a selected-action history; the existing chemistry stage requires that
+history for exact action replay and deterministic repair. Old trace-on lineage
+cannot be relabeled as a new universe. No backup generation or pair/DBSCAN was
+launched. The new CPU-only read-only preflight hashes actual producer sources,
+retains the genuine A/B-divergence condition, drafts the real fresh-universe
+pair command, and reports `BLOCKED_SCIENCE_CRITICAL_LINEAGE_PRODUCER_MISSING`.
+
+The 100,000-free-inode guard is not lowered. Compact pair/checkpoint files are
+estimated separately from still-unmeasured cache and byte peaks; absent vector
+dimension/dtype stays unknown. Completing this preflight does not complete the
+requested end-to-end adapter. A future observational causal-history producer
+needs 500-step/RNG and checkpoint-reload parity before use. See
+`docs/MUT_ROUTE_B_CLOSEOUT_PREFLIGHT.md`. No current main-table code, root,
+owner, GPU lease, registry or matrix authority was changed.
+
 ## [2026-09-05] Correct GNN temperature-contract promotion before starting LLM
 
 The completed exact seed-7 evaluation contains 902 parent-model units and a
@@ -18241,3 +18260,37 @@ an exact comparison.
 - Impact: no decoder, chemical, oracle, split, budget, source-provenance, or
   test-selection semantics change. Old failed roots/specs remain preserved;
   this wiring repair does not itself claim a main-table cell PASS.
+
+## 2026-09-05: Make new BACE ablation temperature-fit intent explicit
+
+- Motivation: the copied historical classifier config named temperature scaling
+  but omitted `calibration.fit_on_validation`; the trainer correctly interpreted
+  the absent flag as disabled and published an explicitly `not_fit` placeholder.
+- Decision: only newly constructed effective GIN/GCN/GATv2/GatedGCN+ ablation
+  configs fill the omitted validation-fit flag with `true`. The config-only gate
+  requires the exact temperature-scaling method, validation split and a positive
+  integer iteration bound, and rejects explicitly contradictory settings. The
+  historical fitter default is 100 iterations; explicit matched test/config
+  bounds remain unchanged. Reference and previously sealed configs are never
+  edited, and GINE is excluded from this new-fit preparation path.
+- Impact: CPU preflight records `CONFIG_PREFLIGHT_PASS`, not a fit/science PASS.
+  The paired preflight wrapper remains CPU-only. A historical attempt cannot
+  silently resume with the corrected effective config; its existing frozen
+  weights require the separately authorized first-fit correction route.
+# 2026-09-05: First validation temperature fits and corrective seed7 release
+
+- The owner authorizes four previously omitted scalar fits in fresh overlays,
+  not classifier retraining or changes to GINE. Reopen all 187 ordered raw
+  validation predictions, reproduce the historical float32 serialization and
+  verify the selected best-state weight tensors before using the original
+  float64 temperature fitter. Original `not_fit` bundles remain immutable.
+- Reconcile probability-dependent records by frozen residual inference and
+  hash-bound per-match raw-distance reuse. No OT solver is imported by this
+  repair; unprovable cache entries fail closed. Replay all ten calibration
+  selectors before parsing this correction's test probabilities. The earlier
+  test evaluation is disclosed and never used to choose the remedy.
+- Publish an independently verified corrective archive and an additive ablation
+  import. Only this new proof can trigger the CPU L0 successor; old integrity
+  PASS cannot. L1/L2/L3 use the existing resource gate, no main cell-count or
+  secondary-seed prerequisite, no GPU borrowing and no reservation clearing.
+- See `docs/BACE_GNN_TEMPERATURE_CORRECTION_20260905.md` for real entrypoints.
