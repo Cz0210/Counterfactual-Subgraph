@@ -59,6 +59,21 @@ avoids relabelling a new scientific engine as the old one and avoids rerunning
 the five completed epochs. A continuation receipt supersedes stale job IDs in
 the status tool while preserving the original submission evidence.
 
+The four resumed jobs reached terminal validation early stopping (GIN72,
+GCN76, GATv236, GatedGCN+59 epochs), then the HPC `/share` filesystem rejected
+`renameat2(RENAME_NOREPLACE)` with EINVAL. Their complete BUNDLE_COMPLETE
+staging inventories and selected weights already existed. A dataset-specific
+publication-only one-shot verifies original training/parent authorities,
+terminal checkpoint, selected best weights and sealed inventory. Under both
+original exclusive locks it renames the same staging inode to the absent
+destination using same-parent-fd POSIX rename, then invokes the original
+publication/completion verification. It never calls training or temperature
+fitting, modifies sealed payload bytes, or overwrites an existing destination.
+The core filesystem protocol and immutable scientific execution tree are not
+changed. Unknown cumulative training resource values remain null. A separate
+publication submission receipt records new finalizer/evaluation/package job
+IDs without erasing failed-job history.
+
 ## [2026-09-05] Hash the real T12 GINE checkpoint as a sealed content tree
 
 ### Decision

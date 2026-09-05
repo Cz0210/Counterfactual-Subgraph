@@ -12,6 +12,7 @@ WRAPPERS = (
     "evaluate_bace_gnn_seed7.sh", "package_bace_gnn_seed7.sh",
     "build_bace_gnn_bundle.sh",
     "resume_bace_gnn_cpu.sh",
+    "finalize_bace_gnn_cpu.sh",
 )
 
 

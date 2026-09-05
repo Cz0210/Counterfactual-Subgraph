@@ -20,6 +20,15 @@ def main():
         receipt['jobs'].update(continuation['jobs'])
         receipt['resume_driver_commit']=continuation['resume_driver_commit']
         receipt['resume_receipt']=str(continuation_path)
+    publication_path=root/'publication_submission.json'
+    if publication_path.is_file():
+        publication=json.loads(publication_path.read_text())
+        if publication['source_bundle_manifest_sha256'] != receipt['bundle_manifest_sha256']:
+            raise ValueError('publication receipt input binding differs from original campaign')
+        receipt['pre_publication_jobs']=dict(receipt['jobs'])
+        receipt['jobs'].update(publication['jobs'])
+        receipt['publication_driver_commit']=publication['publication_driver_commit']
+        receipt['publication_receipt']=str(publication_path)
     states={}
     for name,path in receipt['attempt_roots'].items():
         states[name]={}

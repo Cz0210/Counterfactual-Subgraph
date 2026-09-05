@@ -70,12 +70,21 @@ temperature. No calibration-trained temperature is silently substituted.
 
 ## CPU dependency chains: current versus historical
 
-**Current continuation jobs** are2557856/2557857/2557858/2557859,
-with evaluation2557861 and package2557862. The first two resume GatedGCN+/GIN;
-the second pair resumes GCN/GATv2 after the respective lane becomes free.
-They start from the original committed epoch5, not from a new seed or root.
-`resume_submission.json` is the effective continuation receipt; the updated
-status tool reports these IDs and preserves `historical_jobs` separately.
+The four epoch5 continuation jobs2557856/2557857/2557858/2557859 have now
+finished training at validation early stopping: GatedGCN+59, GIN72, GCN76,
+GATv236 epochs. Their Slurm state is FAILED solely because `/share` rejects
+the final renameat2(NOREPLACE) directory publication with EINVAL. Complete
+staging bundles, original selected models and terminal checkpoints exist.
+Evaluation2557861/package2557862 never started and have unsatisfied dependencies.
+
+The dataset-specific publication repair retains both existing exclusive locks,
+verifies BUNDLE_COMPLETE, selected weights and exact inventory, and publishes
+the same directory inode using POSIX rename to the strictly absent destination.
+It performs no training, inference-based recalibration or payload rewrite.
+`publication_submission.json` will supersede evaluation/package IDs while
+preserving all training and earlier submission histories. Only exact unstarted
+obsolete dependency jobs are cancelled; all failed logs/checkpoints are kept.
+New evaluation still runs the original532e8373 scientific implementation.
 
 The five-model HPC environment preflight2557523 completed with exit0:0.
 All four original training jobs completed five real benchmark epochs, then
