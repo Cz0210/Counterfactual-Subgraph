@@ -901,6 +901,11 @@ def verify_corrective_package(package, output_root=None):
                     require(match[key]==old[key], 'PORTABLE_ARGMAX_OR_RAW_OT_OR_GRAPH_CHANGED')
                 if name!='gine' and match['delete_valid'] and match.get('residual_smiles'):
                     record=next(raw)
+                    require(record['checkpoint_id']==contract['source_model_files'][name]['model.pt']
+                        and record['backbone']==name and float(record['temperature'])==float(t)
+                        and int(record['num_classes'])==2 and int(record['source_label'])==1
+                        and int(record['predicted_label'])==int(match['pred_after']),
+                        'PORTABLE_RESIDUAL_CLASSIFIER_BINDING')
                     probs=scaled_probabilities([record['logits']],t)[0]
                     require(np.allclose(probs,match['p_after'],rtol=1e-12,atol=1e-12), 'PORTABLE_DOUBLE_SCALING_OR_SOFTMAX')
                     inferred+=1
