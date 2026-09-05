@@ -130,6 +130,20 @@ reservations. Current Mut recovery already requires restoring its own guard;
 do not wait for a hypothetical RouteB to address it. No files were deleted or
 archived this turn. Scientific results and checkpoints remain protected.
 
+The bounded read-only temporary-file inventory found no sufficient safe new
+cleanup target. Conventional tmp/scratch roots were absent; transfers hold
+current inputs; code_bundles has only three bundles. The old BACE cache's65724
+inodes were already released on2026-08-31; the remaining tar/manifests cannot
+release them again. At02:04 CST free inodes95113, current guard deficit4887;
+with RouteB's known2569 peak, minimum7456 before other reservations. User action:
+increase inode quota or identify additional regenerable terminal cache for
+scoped review. Engineering recovery of the observer is already authorized.
+Diagnosis: `/private/tmp/gnn-temp-repair-main-audit-20260905/mut-exit-diagnosis-20260905T180429Z.json`.
+
+T13 remained healthy at02:09:43 CST: observed process-tree RSS peak4656508928
+bytes, minimum measured headroom498435874816 bytes; formal_start still absent.
+These are interim measurements, not final memory or parity PASS.
+
 ## Paper artifacts and exact read-only commands
 
 GNN AutoDL paper tables:
