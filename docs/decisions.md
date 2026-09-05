@@ -1,5 +1,33 @@
 # Decisions Log
 
+## [2026-09-05] Run the authorized BACE seed-7 GNN study on HPC CPU before main16
+
+The project owner now permits BACE/Ours proposal-fixed GNN science at main
+12/16 on isolated HPC CPU resources. This supersedes the former resource-only
+GNN-after16 policy, not the main-table scientific or publication contracts.
+GINE is adopted; GIN, GCN, GATv2 and pinned GatedGCN+ use the same molecular
+schema, frozen candidate universe, validation checkpoint selection and main
+validation-fitted temperature convention. No separate project SFT is claimed.
+
+The minimal hashed input bundle includes four BACE splits, the frozen GINE,
+candidate universe/pool, MolCLR weights and model source, and fixed selector
+and WNode contracts. It excludes ChemLLM, active main roots and matrix state.
+The paired Slurm wrappers deliberately use the specifically authorized intel
+CPU partition, no GPU request, and an immutable worktree instead of the
+generic AGENTS A800 template. At most two GNN jobs run concurrently.
+
+Benchmarks stop at a committed epoch (five epochs or twenty minutes) and
+continue from exactly that checkpoint only when measured CPU time admits it.
+Unmeasured evaluation cost cannot be reported as full-route eligibility.
+The existing main classifier quality threshold is not a performance-based
+admission rule for ablations; finite numerical checks remain mandatory.
+The frozen BACE training contract selects ROC-AUC and fits temperature on
+validation, overriding stale generic backbone YAML macro-F1/calibration labels.
+
+Formal LLM GPU science now waits for all five seed-7 classifier, native/common
+cohort, explanation and audit outputs. Secondary seeds17/27 do not block LLM.
+The AutoDL main owners and unique matrix authority retain all their authority.
+
 ## [2026-09-05] Hash the real T12 GINE checkpoint as a sealed content tree
 
 ### Decision
