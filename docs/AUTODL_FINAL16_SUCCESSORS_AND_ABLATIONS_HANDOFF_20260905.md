@@ -1,5 +1,99 @@
 # Final16 successors and ablation gates — 2026-09-05
 
+## Live continuation update — 2026-09-05 17:11 CST
+
+This section supersedes the older observations below.  The canonical matrix is
+still 12/16: the missing cells are Mutagenicity/ComRecGC and
+TasteMolNet/{GCFExplainer, GlobalGCE, ComRecGC}.  No LLM or GNN ablation
+science is running.
+
+- T8/T13: scoped relay attempt `f70b55c0-8b4f-4473-b16b-6fb044da766b`
+  completed at 16:08 CST.  The immutable HPC package is preserved on the Mac
+  external disk and in the exact AutoDL relay root; both copies bind
+  `6,103,923,589` bytes and SHA-256
+  `06702fdc97ae2bb3661855497a336d19c6ceb33fd53f2304f41471781629346e`.
+  The original import owner `219867` was found to have the old in-memory
+  v1-only marker verifier.  After exact PID/start-ticks/command/root checks it
+  received SIGTERM (never SIGKILL), exited, and was replaced once by reviewed
+  v2-aware import owner `272454` from commit
+  `d1e7ab9dc2eabe9993f04c82ff7603609f9adef5`.  That owner was still CPU-bound
+  in the first deep streaming verification at 17:08 CST; no import PASS or
+  release marker existed yet.  T13 owner `219876` remains healthy in
+  `WAITING_HPC_IMPORT_PASS`, owns no physical GPU process, and will consume the
+  same canonical release path.  Neither HPC nor the relay/import worker may
+  write the matrix.  At 17:12 CST the registry was CAS-reconciled under the
+  matrix publication lock: the proven-dead v1 owner row is terminal, the live
+  heartbeat-backed T13 owner remains canonical, and the v2 one-shot is recorded
+  only in the handoff receipt until it emits its own heartbeat.  The resulting
+  registry file SHA-256 is
+  `17d3c4632e31128a1181b1dd8dcb17f27984c7ef3c18da694b3efc200beee702`
+  and its self-hash is
+  `ee742c0fba895b893651056bdba1d2c49e54406c29a437550cf461ed9e37ac59`.
+- T14: the user-authorized second and final engineering-corrected retry is now
+  live as fresh attempt `59f101cd-f30b-458d-aa8c-2eb93ae82609`, using commit
+  `d92975786391f9e211950b78456da07a730787f2`.  Owner PID `268102` and science
+  PID `268217` (active child `268321`) own GPU2.  The live state digest had
+  reached step 93 at 16:55 CST; the sealed step-50 checkpoint is complete and
+  proves that retry 2 passed retry 1's exact cadence-drift failure boundary.
+  Independent reload remains pending until reference step 500.  The failed attempt and its
+  ledger remain preserved; no failed checkpoint or legacy step-161 state was
+  reused.  Its owner/lease rows survived the later registry CAS unchanged.
+- T12: the accelerated step-510 engineering failure has a diagnostic-only
+  reconciliation overlay at
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/repairs/t12-diagnostic-510-reconcile-24203990-5d23-4ce2-a2f4-c998efa3aa00`.
+  It is not promotable.  Reference owner `162844` / science PID `173495`
+  remains at the sealed step-250 boundary on GPU3 and must not be restarted
+  while its I/O/process evidence remains live.  Formal production remains
+  blocked on full per-step 251--500 and 501--510 reference/accelerated parity.
+  Commit `25a0475e3c3f3526649cc9389c382090fc7ba208` adds a strictly
+  non-dispatchable fresh-zero plan that can bind the canonical future locator
+  without creating it and validates the real sealed GINE checkpoint directory
+  using the existing T3 content-tree contract.  The first build request failed
+  before that validation because the CLI rejected the conda `python` symlink;
+  it changed no science.  A corrected low-priority builder using the resolved
+  `python3.10` executable completed under tag
+  `20260905T091100Z-5cefc663-4d2f-4d06-91f7-566b997a73f1`.  The resulting plan
+  is `BLOCKED_WAITING_DIAGNOSTIC_PARITY`, contains all 12 formal generation
+  checkpoint boundaries plus generation/postprocess/terminal verification,
+  and records `science_started=false`, `gpu_lease_acquired=false`, and
+  `dispatchable=false` for every stage.  Plan SHA-256 is
+  `700e0cf9127b942178465ce51c0b5eb2bdf8898bf83dc50d383350f7582f4222`.
+  Its canonical path is
+  `/autodl-fs/data/counterfactual-subgraph-runtime/control/t12_fresh_zero_predeployment/20260905T091100Z-5cefc663-4d2f-4d06-91f7-566b997a73f1/fresh_zero_plan.json`.
+  It does not acquire a GPU lease and cannot dispatch production.  Because it
+  intentionally snapshots the registry that existed at build start, a future
+  parity-qualified dispatcher must rebind the then-current registry under the
+  existing publisher handoff; this does not weaken or delay today's parity
+  gate.
+- Mut: owner `193161`, active trace-on child `193180`, post-A/B continuation
+  `193450`, and final executor `222378` remain live.  The last sealed progress
+  observation was step 225 at 16:49 CST; do not restart or duplicate this run.  The normal
+  equivalence-to-adoption-to-publication successor is already deployed.
+
+The current long-running stages require no new scientific authorization.
+T14 retry-2, T12 diagnostic repair/fresh-zero planning, and the scoped T8 relay
+have already been authorized.  T12 production is an evidence gate, not an
+authorization gate.
+
+The previous read-only closeout observer could not parse the newly authorized
+terminal-engineering registry state and reported `BLOCKED_EVIDENCE`.  After
+exact identity checks it was gracefully replaced (SIGTERM only) by the same
+read-only implementation from commit `25a0475e`.  Successor controller
+`final16-successors-a9206944-989c-4638-8eea-578113a10c96`, PID `274368`, has a
+healthy `RUNNING_LONG_EXPERIMENTS` heartbeat at
+`/autodl-fs/data/counterfactual-subgraph-runtime/control/final16-successors-observer-25a0475e-20260905T091800Z-7012ad2f/heartbeat.json`.
+Its snapshot reports no stale owners/publishers, starts no science or publisher,
+takes no GPU lock, sends no science signal, and writes no matrix data.
+
+Read-only status commands:
+
+```bash
+bash scripts/local/status_t8_scoped_relay_v2.sh
+ssh autodl-a800 'cat /autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json'
+ssh autodl-a800 'cat /autodl-fs/data/counterfactual-subgraph-runtime/control/final16-owner-registry/current.json'
+ssh autodl-a800 'cat /autodl-fs/data/counterfactual-subgraph-runtime/control/t14_route_c/current/owner.pid'
+```
+
 ## Authority and current matrix
 
 - Matrix authority: `/autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/state.json`
@@ -84,23 +178,15 @@ the exact ready marker.  The T13 owner must not take a GPU before import PASS.
   hash-closed combined audit.
 - No ablation science is running.
 
-## Decisions still requiring explicit authorization
+## Authorization state
 
-No new algorithm choice is required.  Three operational authorizations remain:
-
-1. T14: allow one engineering-corrected second fresh retry, with
-   `ALLOW_T14_ENGINEERING_CORRECTED_SECOND_FRESH_RETRY=1` and
-   `T14_ROUTE_C_FRESH_RETRY_MAX_ATTEMPTS=2`.  It must use a fresh UUID/root and
-   must not resume the failed attempt.
-2. T12: allow a fresh accelerated production run from step zero, with
-   `ALLOW_T12_FRESH_ACCELERATED_PRODUCTION_FULL=1`,
-   `ALLOW_T12_EXISTING_PUBLISHER_LOCATOR_HANDOFF=1`, and
-   `ALLOW_T12_DIAGNOSTIC_CHECKPOINT_PROMOTION=0`.  The existing diagnostic
-   checkpoints remain parity evidence only.
-3. Mac relay: after the desktop auto-review rejection, give fresh informed
-   permission to start the scoped background `caffeinate` relay.  It will only
-   copy the completed hash-closed HPC package through the external disk to a
-   fresh AutoDL import root; it will not delete files or write the matrix.
+No new algorithm or operational authorization is pending.  The T14 second
+fresh retry, T12 diagnostic reconciliation/fresh-from-zero production policy,
+and scoped Mac relay are all explicitly authorized.  Their remaining gates are
+runtime or scientific evidence: T8 must finish transport/import verification;
+T12 must produce complete per-step parity; T14 must reach its sealed checkpoints
+and pass the existing resource/convergence policy.  None of these gates may be
+converted into a PASS by another user decision.
 
 ## Read-only status commands
 
