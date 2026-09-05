@@ -15,11 +15,11 @@ from src.eval.bace_frozen_gnn_contracts import (
 )
 
 
-def generation_calls(reference: Mapping[str, Any]) -> list[dict[str, Any]]:
+def generation_calls(reference: Mapping[str, Any], *, file_resolver=verified_file) -> list[dict[str, Any]]:
     generation = reference["candidate_generation"]
-    train = verified_file({"path": reference["frozen_downstream"]["dataset_split_paths"]["train"],
+    train = file_resolver({"path": reference["frozen_downstream"]["dataset_split_paths"]["train"],
                           "sha256": reference["frozen_downstream"]["dataset_split_hashes"]["train"]})
-    cohort = json.loads(verified_file(generation["parent_manifest"]).read_text())
+    cohort = json.loads(file_resolver(generation["parent_manifest"]).read_text())
     ids = cohort.get("parent_ids", [])
     if (cohort.get("schema_version") != "bace_frozen_parent_ids_v1"
             or cohort.get("split") != "train" or cohort.get("source_label") != 1
@@ -179,5 +179,14 @@ def prepare_bace_llm(*, reference_path: str | Path, reference_sha256: str,
         "variants": tasks, "model_source_blockers": blockers, "reference_contract_sha256": reference.file_sha256,
         "ppo_adoption": ppo_adoption_decision(values, rendering=common["prompt_rendering"]),
         "science_started": False, "gpu_lock_acquired": False, "main_matrix_write": False}
+    report["corrected_core_successors"] = {
+        "gate": "INDEPENDENT_GNN_CORE_SEED7_CORRECTED_PASS",
+        "cpu_l0_entrypoint": file_identity(project / "scripts/hpc/llm/run_bace_l0_cpu.py"),
+        "gpu_entrypoint": file_identity(project / "scripts/ablations/llm/run_bace_llm_successor.py"),
+        "gpu_generation_order": list(VARIANTS[1:]), "gpu_borrow_enabled": False,
+        "max_early_llm_gpus": 1, "idle_gpu_seconds": 1200,
+        "main_matrix_count_required": False, "secondary_seeds_required": False,
+        "existing_owner_lease_required": True, "main_reservation_precedence": True,
+    }
     atomic_json(output / "llm_readiness.json", report)
     return report

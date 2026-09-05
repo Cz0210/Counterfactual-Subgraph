@@ -1,7 +1,8 @@
 """One campaign's verified GNN package: HPC -> Mac external disk -> AutoDL.
 
 No scheduler, science launcher, GPU lease or matrix publisher lives here.
-Only the fixed fd98c5f2 campaign is accepted. Transport failures are terminal;
+Only the fixed fd98c5f2 campaign and its authorized temperature-correction
+successor are accepted. Transport failures are terminal;
 source files and partial destinations are retained for inspection.
 """
 from __future__ import annotations
@@ -83,6 +84,18 @@ class RelayPlan:
             raise RelayError("A canonical fresh UUIDv4 is required")
 
     @property
+    def hpc_receipt(self):
+        return HPC_RECEIPT
+
+    @property
+    def hpc_jobs(self):
+        return HPC_JOBS
+
+    @property
+    def autodl_parent(self):
+        return AUTODL_PARENT
+
+    @property
     def mac_root(self):
         return MAC_PARENT / self.attempt_id
 
@@ -115,8 +128,8 @@ class RelayPlan:
         return AUTODL_PARENT / ("import-" + self.attempt_id)
 
     def to_dict(self):
-        return {"attempt_id": self.attempt_id, "hpc_receipt": str(HPC_RECEIPT),
-            "hpc_job_chain": list(HPC_JOBS), "mac_root": str(self.mac_root),
+        return {"attempt_id": self.attempt_id, "hpc_receipt": str(self.hpc_receipt),
+            "hpc_job_chain": list(self.hpc_jobs), "mac_root": str(self.mac_root),
             "control_root": str(self.control), "autodl_incoming": str(self.incoming),
             "autodl_import_root": str(self.import_root), "poll_seconds": HEARTBEAT_SECONDS,
             "max_wait_seconds": MAX_WAIT_SECONDS, "transfer_retries": 0,
@@ -126,13 +139,73 @@ class RelayPlan:
             "main_matrix_write": False, "llm_started": False, "gpu_requested": False}
 
 
-def validate_receipt(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("state") != "PASS" or value.get("main_matrix_write") is not False:
+CORRECTED_HPC_ROOT = Path("/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/gnn/runs/bace-seed7-20260905T105800Z/temperature-repair-20260905T144600Z/verified")
+CORRECTED_MAC_PARENT = VOLUME / "counterfactual-hpc-offload/gnn-seed7-corrected-20260905T144600Z"
+CORRECTED_AUTODL_PARENT = Path("/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/gnn/seed7-corrected-20260905T144600Z")
+CORRECTED_ARCHIVE_NAME = "bace_gnn_seed7_corrected.tar.gz"
+
+
+@dataclass(frozen=True)
+class CorrectiveRelayPlan(RelayPlan):
+    """The single authorized corrective campaign, not an arbitrary path relay."""
+    jobs: tuple[str, ...]
+    repair_driver_commit: str
+    autodl_worktree: Path
+
+    def __post_init__(self):
+        super().__post_init__()
+        if (not self.jobs or len(self.jobs) > 32
+                or any(not job.isdigit() for job in self.jobs)
+                or len(set(self.jobs)) != len(self.jobs)):
+            raise RelayError("Exact submitted corrective job IDs required")
+        if len(self.repair_driver_commit) != 40 or any(c not in "0123456789abcdef" for c in self.repair_driver_commit):
+            raise RelayError("Pinned corrective driver commit required")
+        path = Path(self.autodl_worktree)
+        if path.parent != Path("/root/autodl-tmp/worktrees") or ".." in path.parts:
+            raise RelayError("Corrective importer must use a fixed immutable AutoDL worktree")
+
+    @property
+    def hpc_receipt(self): return CORRECTED_HPC_ROOT / "result_package.json"
+    @property
+    def hpc_jobs(self): return self.jobs
+    @property
+    def autodl_parent(self): return CORRECTED_AUTODL_PARENT
+    @property
+    def mac_root(self): return CORRECTED_MAC_PARENT / self.attempt_id
+    @property
+    def local_partial(self): return self.mac_root / (CORRECTED_ARCHIVE_NAME + ".partial")
+    @property
+    def local_final(self): return self.mac_root / CORRECTED_ARCHIVE_NAME
+    @property
+    def incoming(self): return self.autodl_parent / ("incoming-" + self.attempt_id)
+    @property
+    def import_root(self): return self.autodl_parent / ("import-" + self.attempt_id)
+    @property
+    def remote_partial(self): return self.incoming / (CORRECTED_ARCHIVE_NAME + ".partial")
+    @property
+    def remote_final(self): return self.incoming / CORRECTED_ARCHIVE_NAME
+
+    def to_dict(self):
+        return {**super().to_dict(), "schema_version": "gnn_seed7_corrective_mac_relay_v1",
+                "repair_driver_commit": self.repair_driver_commit,
+                "publication_driver_commit": self.repair_driver_commit,
+                "autodl_worktree": str(self.autodl_worktree),
+                "requires_independent_corrective_audit": True,
+                "historical_package_is_gate_pass": False}
+
+
+def validate_receipt(value: Any, plan: RelayPlan | None = None) -> dict[str, Any]:
+    corrected = isinstance(plan, CorrectiveRelayPlan)
+    expected_state = "GNN_CORE_SEED7_CORRECTED_PASS" if corrected else "PASS"
+    if not isinstance(value, dict) or value.get("state") != expected_state or value.get("main_matrix_write") is not False:
         raise RelayError("HPC package receipt is not an independent non-matrix PASS")
-    if value.get("path") != str(HPC_ROOT / ARCHIVE_NAME):
+    expected_archive = CORRECTED_HPC_ROOT / CORRECTED_ARCHIVE_NAME if corrected else HPC_ROOT / ARCHIVE_NAME
+    if value.get("path") != str(expected_archive):
         raise RelayError("Receipt path escapes the fixed campaign archive")
+    expected_driver = plan.repair_driver_commit if corrected else PUBLICATION_DRIVER_COMMIT
+    driver = value.get("repair_driver_commit") if corrected else value.get("publication_driver_commit")
     if (value.get("scientific_engine_commit") != SCIENTIFIC_ENGINE_COMMIT
-            or value.get("publication_driver_commit") != PUBLICATION_DRIVER_COMMIT):
+            or driver != expected_driver):
         raise RelayError("Receipt scientific engine/publication driver commit differs")
     size, digest = value.get("bytes"), value.get("sha256")
     if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
@@ -215,6 +288,15 @@ def transfer_command(source: str, destination: str) -> list[str]:
 
 
 def import_command(plan: RelayPlan, receipt: dict[str, Any]) -> list[str]:
+    if isinstance(plan, CorrectiveRelayPlan):
+        argv = [AUTODL_PYTHON, "-I", "-B", str(plan.autodl_worktree / "scripts/ablations/llm/import_corrected_gnn_core.py"),
+            "--config", "configs/hpc.yaml", "--archive-path", str(plan.remote_final),
+            "--expected-sha256", receipt["sha256"], "--output-root", str(plan.import_root),
+            "--expected-driver-commit", plan.repair_driver_commit]
+        remote = "cd " + shlex.quote(str(plan.autodl_worktree)) + " && " + shlex.join([
+            "env", "CUDA_VISIBLE_DEVICES=", "OMP_NUM_THREADS=1", "MKL_NUM_THREADS=1",
+            "OPENBLAS_NUM_THREADS=1", *argv])
+        return ["ssh", *SSH_OPTIONS, AUTODL_HOST, remote]
     argv = [AUTODL_PYTHON, str(AUTODL_WORKTREE / "scripts/hpc/gnn/import_bace_gnn_verified.py"),
         "--config", "configs/hpc.yaml", "--archive-path", str(plan.remote_final),
         "--expected-sha256", receipt["sha256"], "--output-root", str(plan.import_root)]
@@ -292,7 +374,7 @@ def _object(text: str) -> dict[str, Any]:
 
 
 def transfer_and_import(plan: RelayPlan, receipt: dict[str, Any], runner: CommandRunner, pulse: Heartbeat) -> dict[str, Any]:
-    receipt = validate_receipt(receipt)
+    receipt = validate_receipt(receipt, plan)
     atomic_json(plan.control / "source_result_package.json", receipt)
     source = _object(runner.run(ssh_python(HPC_HOST, HPC_PYTHON, VERIFY_ARCHIVE, receipt["path"], str(receipt["bytes"]), receipt["sha256"]), "VERIFY_HPC_ARCHIVE"))
     if source.get("sha256") != receipt["sha256"] or source.get("bytes") != receipt["bytes"]:
@@ -315,14 +397,21 @@ def transfer_and_import(plan: RelayPlan, receipt: dict[str, Any], runner: Comman
         os.close(directory)
     local["path"] = str(plan.local_final)
     atomic_json(plan.control / "mac_transport_receipt.json", local)
-    runner.run(ssh_python(AUTODL_HOST, AUTODL_PYTHON, PREPARE_AUTODL, str(AUTODL_PARENT), str(plan.incoming), str(plan.import_root)), "PREPARE_AUTODL_FRESH_ROOTS")
+    runner.run(ssh_python(AUTODL_HOST, AUTODL_PYTHON, PREPARE_AUTODL, str(plan.autodl_parent), str(plan.incoming), str(plan.import_root)), "PREPARE_AUTODL_FRESH_ROOTS")
     runner.run(transfer_command(str(plan.local_final), AUTODL_HOST + ":" + str(plan.remote_partial)), "MAC_TO_AUTODL")
     remote = _object(runner.run(ssh_python(AUTODL_HOST, AUTODL_PYTHON, VERIFY_ARCHIVE, str(plan.remote_partial), str(receipt["bytes"]), receipt["sha256"], str(plan.remote_final)), "VERIFY_AUTODL_ARCHIVE"))
     if remote.get("sha256") != receipt["sha256"] or remote.get("bytes") != receipt["bytes"] or remote.get("path") != str(plan.remote_final):
         raise RelayError("AutoDL transport identity differs")
     atomic_json(plan.control / "autodl_transport_receipt.json", remote)
     imported = _object(runner.run(import_command(plan, receipt), "AUTODL_INDEPENDENT_IMPORT"))
-    if (imported.get("state") != "PASS"
+    if isinstance(plan, CorrectiveRelayPlan):
+        if (imported.get("state") != "GNN_CORE_SEED7_CORRECTED_PASS"
+                or imported.get("archive_sha256") != receipt["sha256"]
+                or imported.get("audit_root") != str(plan.import_root)
+                or imported.get("repair_driver_commit") != plan.repair_driver_commit
+                or imported.get("main_matrix_write") is not False):
+            raise RelayError("AutoDL independent corrective audit did not PASS")
+    elif (imported.get("state") != "PASS"
             or imported.get("archive_sha256") != receipt["sha256"]
             or imported.get("evaluation_root") != str(plan.import_root / "evaluation")
             or imported.get("model_roots") != {name: str(plan.import_root / "classifiers" / name) for name in EXPECTED_BACKBONES}
@@ -344,7 +433,7 @@ def run_relay(plan: RelayPlan) -> dict[str, Any]:
         raise RelayError("External disk is not mounted; refusing local-disk fallback")
     if any(p.is_symlink() for p in (plan.mac_root, *plan.mac_root.parents)):
         raise RelayError("Mac staging ancestor may not be a symlink")
-    MAC_PARENT.mkdir(parents=True, exist_ok=True)
+    plan.mac_root.parent.mkdir(parents=True, exist_ok=True)
     plan.mac_root.mkdir(exist_ok=False)
     plan.control.mkdir()
     atomic_json(plan.control / "plan.json", plan.to_dict())
@@ -354,7 +443,7 @@ def run_relay(plan: RelayPlan) -> dict[str, Any]:
         started = time.monotonic()
         try:
             while True:
-                result = _object(runner.run(ssh_python(HPC_HOST, HPC_PYTHON, RECEIPT_QUERY, str(HPC_RECEIPT), ",".join(HPC_JOBS)), "READ_HPC_PACKAGE_STATUS"))
+                result = _object(runner.run(ssh_python(HPC_HOST, HPC_PYTHON, RECEIPT_QUERY, str(plan.hpc_receipt), ",".join(plan.hpc_jobs)), "READ_HPC_PACKAGE_STATUS"))
                 atomic_json(plan.control / "last_hpc_status.json", result)
                 if result.get("state") == "RECEIPT_READY":
                     terminal = transfer_and_import(plan, result["receipt"], runner, pulse)

@@ -126,6 +126,25 @@ def test_brics_old_manifest_without_direct_reference_closes_both_links(tmp_path)
     assert len(loaded) == 8 and sum(row["proposal_shortfall"] for row in loaded) == 7
     with pytest.raises(ValueError, match="BRICS_reference"):
         route.load_attempts(spec, tmp_path, "b" * 64)
+    # The same immutable BRICS JSONs remain readable on HPC: only physical
+    # lookup changes, never the embedded AutoDL provenance or its SHA.
+    from src.ablations.llm.portable_inputs import PortableInputs, SCHEMA
+    portable_root = tmp_path / "portable"
+    portable_root.mkdir()
+    sources = {}
+    for source in tmp_path.iterdir():
+        if not source.is_file():
+            continue
+        destination = portable_root / source.name
+        destination.write_bytes(source.read_bytes())
+        sources[str(source)] = {"relative": source.name, "sha256": sha256_file(source), "size": source.stat().st_size}
+    manifest = {"schema_version": SCHEMA, "variant": "BRICS_FIXED", "source_files": sources,
+        "original_manifests_modified": False, "model_weights_copied": False}
+    manifest["manifest_sha256"] = canonical_json_sha256(manifest)
+    atomic_json(portable_root / "portable_manifest.json", manifest)
+    relocated, evidence = route.load_attempts(spec, portable_root, "a" * 64,
+                                             file_resolver=PortableInputs(portable_root).resolve)
+    assert relocated == loaded and evidence["pool_sha256"] == sha256_file(tmp_path / "brics_proposal_pool.jsonl")
 
 
 def heldout_fixture(tmp_path, monkeypatch, *, empty=None):
@@ -214,12 +233,14 @@ def test_independent_registry_refuses_main_and_conflicting_variant(tmp_path):
 
 
 def test_independent_gnn_gate_precedes_every_model_or_output(tmp_path, monkeypatch):
-    import src.ablations.gnn.scientific_verification as verifier
+    import src.ablations.llm.corrected_core_gate as verifier
     archive = tmp_path / "archive.tar.gz"
     archive.write_bytes(b"fixture-not-science")
-    monkeypatch.setattr(verifier, "verify_package_archive", lambda _: {"state": "FAILED"})
+    def blocked(*_args):
+        raise ValueError("WAITING_GNN_CORE_SEED7_CORRECTED_PASS")
+    monkeypatch.setattr(verifier, "require_corrected_gnn_core", blocked)
     output = tmp_path / "must_not_exist"
-    with pytest.raises(ValueError, match="independent_GNN_core"):
+    with pytest.raises(ValueError, match="CORRECTED_PASS"):
         route.run_downstream(task_spec=tmp_path / "missing", candidate_root=tmp_path / "missing_pool",
             gnn_input_bundle=tmp_path / "missing_bundle", gnn_verified_archive=archive,
             gnn_verified_sha256=sha256_file(archive), registry_root=tmp_path / "llm_registry", output_root=output)

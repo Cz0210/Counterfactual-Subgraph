@@ -8,9 +8,10 @@
 #SBATCH --signal=B:TERM@120
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
-set -euo pipefail
+set -eo pipefail
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
 if [[ -n "${LLM_EXECUTION_WORKTREE:-}" ]]; then
@@ -29,8 +30,9 @@ echo "Python: $(command -v python)"
 python -c 'import sys,torch; print(sys.version); print("CUDA available:",torch.cuda.is_available())'
 extra=()
 if [[ "${LLM_RESUME:-0}" == 1 ]]; then extra+=(--resume); fi
-# Launcher obtains its own authorized lease; this script never acquires a main lease.
-exec python scripts/ablations/llm/run_bace_common_downstream.py \
+[[ -n "${L0_PORTABLE_INPUT_BUNDLE:-}" ]] && extra+=(--portable-input-bundle "$L0_PORTABLE_INPUT_BUNDLE")
+# L0 HPC uses run_bace_l0_cpu.sh; this existing generic wrapper never creates leases.
+exec python -I -B scripts/ablations/llm/run_bace_common_downstream.py \
   --config configs/hpc.yaml --set inference.fallback_to_heuristic=false \
   --task-spec "$LLM_TASK_SPEC" --candidate-root "$LLM_CANDIDATE_ROOT" \
   --gnn-input-bundle "$GNN_INPUT_BUNDLE" \

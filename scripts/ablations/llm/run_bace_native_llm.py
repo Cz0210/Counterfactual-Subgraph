@@ -23,7 +23,7 @@ from src.ablations.llm.bace_native_runtime import run_generation, verified_file
 from src.ablations.llm.bace_readiness import prepare_bace_llm
 from src.ablations.llm.contracts import canonical_json_sha256
 from src.ablations.gnn.early_policy import gpu_allowed
-from src.ablations.gnn.scientific_verification import verify_package_archive
+from src.ablations.llm.corrected_core_gate import require_corrected_gnn_core
 
 
 def resource_gate(evidence, held_fd):
@@ -115,8 +115,7 @@ def main(argv=None):
         if spec["task_spec_sha256"] != canonical_json_sha256(body) or spec["execution_commit"] != commit:
             raise ValueError("Task specification self hash/commit differs")
         archive = verified_file({"path": args.gnn_verified_archive, "sha256": args.gnn_verified_archive_sha256})
-        if verify_package_archive(archive)["state"] != "PASS":
-            raise ValueError("WAITING_GNN_CORE_SEED7")
+        require_corrected_gnn_core(archive, args.gnn_verified_archive_sha256)
         resource_path = verified_file({"path": args.resource_evidence, "sha256": args.resource_evidence_sha256})
         resource_gate(json.loads(resource_path.read_text()), args.held_gpu_lock_fd)
         if args.two_b_isolated_receipt or args.two_b_isolated_receipt_sha256:

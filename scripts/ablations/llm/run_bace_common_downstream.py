@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from src.ablations.llm.bace_common_downstream import run_downstream
 
@@ -16,6 +20,7 @@ def main() -> int:
                  "gnn-verified-sha256", "registry-root", "output-root"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--portable-input-bundle", help="Read original AutoDL manifest bytes through a SHA-bound L0 HPC mapping")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--cpu-threads", type=int, default=2)

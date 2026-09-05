@@ -20,5 +20,5 @@ export TOKENIZERS_PARALLELISM=false
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
-exec python scripts/ablations/llm/run_bace_native_llm.py \
+exec python -I -B scripts/ablations/llm/run_bace_native_llm.py \
   --config configs/hpc.yaml --set inference.fallback_to_heuristic=false "$@"

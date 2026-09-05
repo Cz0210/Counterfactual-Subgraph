@@ -86,11 +86,12 @@ def validate_attempts(rows: Sequence[Mapping[str, Any]], calls: Sequence[Mapping
         raise ValueError("PROPOSAL_ATTEMPT_COUNT_MISMATCH")
 
 
-def load_attempts(spec: Mapping[str, Any], candidate_root: Path, reference_sha: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def load_attempts(spec: Mapping[str, Any], candidate_root: Path, reference_sha: str,
+                  *, file_resolver=verified_file) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     variant = spec["variant"]
     if variant == "BRICS_FIXED":
         adopted = spec["adopted_brics"]
-        files = {name: verified_file(identity) for name, identity in adopted.items()}
+        files = {name: file_resolver(identity) for name, identity in adopted.items()}
         for path in files.values():
             path.resolve().relative_to(candidate_root)
         proposal = read_json(files["brics_proposal_manifest.json"])
@@ -98,7 +99,7 @@ def load_attempts(spec: Mapping[str, Any], candidate_root: Path, reference_sha: 
         shortfall = read_json(files["brics_proposal_shortfall_receipt.json"])
         for key, filename in (("vocabulary_manifest", "brics_vocab_manifest.json"),
                               ("shortfall_receipt", "brics_proposal_shortfall_receipt.json")):
-            _equal(verified_file(proposal[key]).resolve(), files[filename].resolve(), "BRICS_manifest_chain")
+            _equal(file_resolver(proposal[key]).resolve(), files[filename].resolve(), "BRICS_manifest_chain")
         for obj in (proposal, vocabulary, shortfall):
             _equal(obj["status"], "PASS", "BRICS_adoption")
             _equal(obj["calibration_loaded"], False, "BRICS_calibration")
@@ -111,9 +112,9 @@ def load_attempts(spec: Mapping[str, Any], candidate_root: Path, reference_sha: 
         _equal(shortfall["candidate_duplication_used"], False, "BRICS_duplication")
         _equal(shortfall["oracle_ranking_used"], False, "BRICS_oracle_ranking")
         _equal(shortfall["shortfall_is_not_backfilled"], True, "BRICS_shortfall")
-        pool = verified_file(proposal["candidate_pool"])
+        pool = file_resolver(proposal["candidate_pool"])
         _equal(pool.resolve(), files["brics_proposal_pool.jsonl"].resolve(), "BRICS_pool")
-        attempts_file = verified_file(proposal["attempt_records"])
+        attempts_file = file_resolver(proposal["attempt_records"])
         attempts_file.resolve().relative_to(candidate_root)
         _equal(shortfall["attempt_records"], proposal["attempt_records"], "BRICS_attempts")
         attempts = read_jsonl(attempts_file)
@@ -303,8 +304,8 @@ def _heldout(*, bundle: Path, manifest: Mapping[str, Any], output: Path, univers
 def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_input_bundle: str | Path,
                    gnn_verified_archive: str | Path, gnn_verified_sha256: str, registry_root: str | Path,
                    output_root: str | Path, resume: bool = False, device: str = "cpu", batch_size: int = 64,
-                   cpu_threads: int = 2) -> dict[str, Any]:
-    from src.ablations.gnn.scientific_verification import verify_package_archive
+                   cpu_threads: int = 2, portable_input_bundle: str | Path | None = None) -> dict[str, Any]:
+    from src.ablations.llm.corrected_core_gate import require_corrected_gnn_core
     from src.ablations.llm.bace_readiness import generation_calls
     from src.eval.bace_frozen_gnn_pool import _score_generated_candidates
     from src.oracles.gnn_oracle import GNNOracle
@@ -313,20 +314,29 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
     # No model is loaded and no science/output starts before independent GNN PASS.
     archive = Path(gnn_verified_archive).resolve(strict=True)
     _equal(sha256_file(archive), gnn_verified_sha256, "independent_GNN_archive")
-    gnn_pass = verify_package_archive(archive)
-    _equal(gnn_pass["state"], "PASS", "independent_GNN_core")
+    gnn_pass = require_corrected_gnn_core(archive, gnn_verified_sha256)
+    portable = None
+    resolve_file = verified_file
+    if portable_input_bundle is not None:
+        from src.ablations.llm.portable_inputs import PortableInputs
+        portable = PortableInputs(portable_input_bundle)
+        resolve_file = portable.resolve
+        _equal(Path(task_spec).resolve(), portable.task_spec_path(), "portable_task_spec")
     spec = read_json(Path(task_spec))
     _equal(spec["schema_version"], "bace_native_llm_task_v1", "spec_schema")
     if spec["variant"] not in VARIANTS:
         raise ValueError("UNKNOWN_LLM_VARIANT")
     _equal(spec["task_spec_sha256"], canonical_json_sha256({k: v for k, v in spec.items() if k != "task_spec_sha256"}), "task_self_hash")
-    reference = load_bace_reference_v2(spec["reference_contract"]["path"], spec["reference_contract"]["sha256"])
+    reference = load_bace_reference_v2(resolve_file(spec["reference_contract"]), spec["reference_contract"]["sha256"])
     _equal(spec["downstream_contract"], reference.payload["frozen_downstream"], "native_downstream")
-    _equal(spec["calls"], generation_calls(reference.payload), "native_call_contract")
+    _equal(spec["calls"], generation_calls(reference.payload, file_resolver=resolve_file), "native_call_contract")
     bundle, manifest = load_bundle(gnn_input_bundle)
+    if portable is not None:
+        _equal(sha256_file(bundle / "bundle_manifest.json"),
+               portable.manifest["gnn_input_bundle_manifest_sha256"], "portable_GNN_bundle")
     bind_downstream(bundle, manifest, reference.payload["frozen_downstream"])
     candidates_source = Path(candidate_root).resolve(strict=True)
-    attempts, pool_evidence = load_attempts(spec, candidates_source, reference.file_sha256)
+    attempts, pool_evidence = load_attempts(spec, candidates_source, reference.file_sha256, file_resolver=resolve_file)
     output = Path(output_root).resolve()
     registry = Path(registry_root).resolve()
     for source in (bundle, candidates_source, archive.parent, Path(reference.path).parent):
