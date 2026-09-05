@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Paired CLI only: allocation alone is not authorization or an existing lease.
+# --seal-dispatch-spec is CPU-only planning. Formal AutoDL execution must be
+# a child of gpu_lock.py run, with its bootstrap pipe and both held lease FDs.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --cpus-per-task=2

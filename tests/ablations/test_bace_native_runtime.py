@@ -113,7 +113,6 @@ def test_cli_requires_actual_held_existing_lease_and_rejects_borrow(tmp_path, mo
     module_spec = importlib.util.spec_from_file_location("native_cli", path)
     cli = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(cli)
-    monkeypatch.setattr(cli, "gpu_allowed", lambda *args, **kwargs: {"allowed": True, "blockers": []})
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-fixture")
     lock_path = tmp_path / "gpu-GPU-fixture.lock"
     with lock_path.open("w+") as held:
@@ -122,12 +121,16 @@ def test_cli_requires_actual_held_existing_lease_and_rejects_borrow(tmp_path, mo
         evidence = {"observed_at": datetime.now(timezone.utc).isoformat(), "gpu_lease_mode": "EXCLUSIVE_IDLE",
             "gpu_lock_path": str(lock_path), "gpu_uuid": "GPU-fixture", "gpu_index": 0,
             "gpu_owner_pid": os.getpid(), "target_gpu_uuid": "GPU-fixture"}
-        with pytest.raises(ValueError, match="held lock"):
+        # Historical single-FD/no-child/no-single-slot evidence is no longer
+        # dispatchable, even when its UUID lock really is held. Real owner to
+        # child/grandchild transport is exercised by the CPU subprocess suite.
+        with pytest.raises(ValueError, match="INVALID_OWNER_EVIDENCE"):
             cli.resource_gate(evidence, held.fileno())
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        assert cli.resource_gate(evidence, held.fileno())
-        with pytest.raises(ValueError, match="borrowing"):
+        with pytest.raises(ValueError, match="INVALID_OWNER_EVIDENCE"):
+            cli.resource_gate(evidence, held.fileno())
+        with pytest.raises(ValueError):
             cli.resource_gate({**evidence, "gpu_lease_mode": "BORROW"}, held.fileno())
         old = (datetime.now(timezone.utc) - timedelta(seconds=121)).isoformat()
-        with pytest.raises(ValueError, match="refreshed"):
+        with pytest.raises(ValueError, match="STALE"):
             cli.resource_gate({**evidence, "observed_at": old}, held.fileno())

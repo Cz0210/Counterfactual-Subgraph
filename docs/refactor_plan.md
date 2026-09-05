@@ -4256,3 +4256,7 @@ Mutagenicity roadmaps.
   explicit pinned official runtime source authority, and fresh-spec adoption of
   the deep-verified existing HPC import; preserve old artifacts and the sole
   canonical publisher rather than repeating mining/import.
+- [x] Repair the existing LLM owner FD/UUID transport with direct fresh resource
+  observations, a reused single-LLM slot, non-leaking descendants and immutable
+  corrected-GNN acceptance reuse. Keep one-shot execution behind the existing
+  outer queue; a live queue/GPU admission remains a deployment requirement.

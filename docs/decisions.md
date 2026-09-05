@@ -18353,3 +18353,23 @@ engineering retry. Record the temperature driver and the verifier driver separat
   isolated checkpoint reopen, records instantaneous resource boundaries, and
   leaves full launch to the existing owner and its one-shot authorization.
   See `docs/AUTODL_T13_INDEXED_DATASET_REPAIR_20260906.md`.
+## 2026-09-06: Repair the existing LLM GPU owner transport only
+
+- The old AutoDL owner held the UUID lock only in its parent and exposed a
+  physical CUDA index, so the strict native successor could not validate an
+  inherited lease. Reuse GPUFileLock and one ProjectGPUSlotLock; pass real held
+  FDs, bind child/owner PID generations through a one-use pipe, expose only the
+  physical UUID, and prevent fork/exec descendants retaining either lease.
+- Fresh source reads, not rewritten timestamps, drive the <=120-second runtime
+  evidence and 1200-second initial idle gate. Main reservations and READY work
+  retain priority; missing/stale coverage blocks launch. No matrix13/16 gate,
+  seed17/27 gate, borrowing platform, or new main controller is introduced.
+- One-shot dispatch uses the existing outer queue. A paused generation is
+  resumed from its actual committed call/RNG checkpoint, not treated as PASS.
+  Normal, failed and paused exits release locks only after the child exits.
+- Adopt the previously independently accepted corrective GNN import through
+  its small SHA-bound overlay/audit and one outer-archive check. Subsequent
+  unchanged archive identity reuses the sealed acceptance instead of unpacking
+  and replaying the package. Scientific inputs and all old receipts stay intact.
+- See `docs/BACE_LLM_EXISTING_OWNER_REPAIR_20260906.md` for the executable
+  existing-queue hook and resource-source config. CPU tests are not GPU science.
