@@ -4311,3 +4311,6 @@ Mutagenicity roadmaps.
 - [x] Add a narrow matched-deterministic contract path to the existing T13
   owner, retaining the original single-formal ledger, explicit worker backend
   readback and already-passed scientific evidence without a canary rerun.
+- [x] Add strict CPU-only LLM resource-dispatch seal/runtime validation that
+  preserves existing3b2605d6 science specs and commands, separates owner-driver
+  identity, and allows only the explicit future storage/resource option tail.

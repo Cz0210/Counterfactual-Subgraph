@@ -1,5 +1,20 @@
 # Decisions Log
 
+## [2026-09-07] Bind only future LLM owner resources without re-preparing science
+
+- Preserve the sealed3b2605d6 readiness, model/adapter/task descriptors,
+  generation command and all outputs. A fresh resource-only dispatch explicitly
+  distinguishes new owner-driver identity from original science identity.
+- Permit only a stage-file-policy descriptor added to the old resource config;
+  old thresholds/registry/locks stay intact. Future common evaluation changes
+  only its driver entry and exact policy/compact-cache tail, with lossless
+  storage validation separately required. Every other argv/spec delta fails.
+- The CPU-only sealer never acquires a lease, signals an owner, reads models,
+  activates GPU science or publishes a result. Existing live reservation,
+  resource evidence, real GPU smoke and shared-lock checks still govern launch.
+- See `docs/BACE_LLM_STAGE_RESOURCE_BINDING_20260907.md`; the matched paired
+  Slurm wrapper requests CPU only under the explicit metadata-task exception.
+
 ## [2026-09-06] Correct T14's pre-science GPU-mask bootstrap binding once
 
 The replacement owner failed before CUDA/science because a generic gpu_lock
