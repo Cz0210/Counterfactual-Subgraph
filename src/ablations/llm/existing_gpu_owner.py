@@ -262,7 +262,14 @@ class ResourceSampler:
                 try:
                     fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    metadata, _ = read_small(path)
+                    try:
+                        metadata, _ = read_small(path)
+                    except (ValueError, OSError) as exc:
+                        # Existing main coordination leases may deliberately
+                        # contain no JSON. Never interpret that as an idle GPU
+                        # or rewrite the held file; retain it as a blocker.
+                        blockers.append(f"HELD_LEASE_METADATA_UNAVAILABLE:{path}:{type(exc).__name__}")
+                        continue
                 else:
                     fcntl.flock(handle, fcntl.LOCK_UN)
                     continue

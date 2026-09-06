@@ -21,6 +21,22 @@ def test_dispatch_cohort_is_actual_main_true_source_not_gnn_native():
     assert bace_readiness.COHORT == "all_true_source_label_1_parents_as_main_BACE_load_bace_parents"
 
 
+def test_held_empty_main_coordination_lock_is_a_blocker_not_idle(tmp_path):
+    import fcntl
+    fixture = helper()
+    config, _ = fixture.source_fixture(tmp_path)
+    gpu = GPUObservation(0, 'GPU-fixture', 'CPU fixture', 1000, 0, 1000, 0)
+    Path(config['gpu_lock_root']).mkdir()
+    locked = Path(config['gpu_lock_root']) / 'gpu-main.coordination.lock'
+    with locked.open('w') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sampler = owner.ResourceSampler(config, 0, gpu.uuid, inventory=lambda: [gpu])
+        sample = sampler.sample()
+        assert not sample['owners_healthy']
+        assert any('HELD_LEASE_METADATA_UNAVAILABLE' in item for item in sample['source_blockers'])
+        assert locked.read_bytes() == b''
+
+
 def helper():
     source = Path(__file__).with_name("test_llm_existing_gpu_owner.py")
     spec = importlib.util.spec_from_file_location("owner_fixtures", source)

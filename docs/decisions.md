@@ -1,5 +1,13 @@
 # Decisions Log
 
+## [2026-09-06] Treat held empty coordination leases as resource blockers
+
+The first real sealed LLM dispatch observed a main coordination lock that is
+intentionally empty, unlike the JSON-bearing GPU task lock. The existing
+sampler now records missing held-lease metadata as a blocker while continuing
+real resource observation. It never rewrites/unlocks that file or regards an
+unclassified lease as free. A real flock fixture verifies this behavior.
+
 ## [2026-09-06] Make native dispatch cohort text match the shared evaluator
 
 Fresh L1/L2/L3 specifications now import the existing common evaluator's
