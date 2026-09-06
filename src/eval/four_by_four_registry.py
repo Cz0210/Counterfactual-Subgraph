@@ -1634,6 +1634,15 @@ def _empty_cell(dataset: str, method: str, status: CellStatus) -> dict[str, Any]
 
 
 def _downgrade_cross_cell_conflicts(rows: list[dict[str, Any]]) -> None:
+    # These rows have already passed _audit_candidate, including full frozen-v4
+    # exception validation. An explicitly approved absent legacy identity is
+    # unknown, not a second contradictory hash. Never populate it from a peer.
+    legacy_missing_waivers = {
+        "oracle_hash": "MISSING_ORACLE_HASH",
+        "dataset_hash": "MISSING_DATASET_HASH",
+        "split_hash": "MISSING_TEST_SPLIT_HASH",
+        "molclr_checkpoint_hash": "MISSING_MOLCLR_CHECKPOINT_HASH",
+    }
     conflict_fields = {
         "oracle_hash": CellStatus.STALE_ORACLE,
         "dataset_hash": CellStatus.STALE_DATASET,
@@ -1649,8 +1658,25 @@ def _downgrade_cross_cell_conflicts(rows: list[dict[str, Any]]) -> None:
             for row in rows
             if row["dataset"] == dataset and CellStatus(row["status"]) in PASS_STATUSES
         ]
+        approved_missing = {
+            (index, field_name)
+            for index, row in enumerate(passing)
+            for field_name, waiver in legacy_missing_waivers.items()
+            if dataset in {"AIDS", "Mutagenicity"}
+            and row.get("method") in {"Ours", "GCFExplainer", "GlobalGCE"}
+            and row.get("status") == CellStatus.ADOPTABLE_PASS.value
+            and row.get("registry_exception") == FROZEN_V4_APPROVAL_ID
+            and row.get("identity_evidence_status") == "USER_APPROVED_LEGACY_IDENTITIES_NOT_EMBEDDED"
+            and waiver in str(row.get("registry_exception_waivers") or "").split(";")
+            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("registry_exception_hash") or ""))
+            and row.get(field_name) in (None, "")
+        }
         for field_name, stale_status in conflict_fields.items():
-            values = {str(row.get(field_name) or "") for row in passing}
+            values = {
+                str(row.get(field_name) or "")
+                for index, row in enumerate(passing)
+                if (index, field_name) not in approved_missing
+            }
             if len(values) <= 1:
                 continue
             for row in passing:

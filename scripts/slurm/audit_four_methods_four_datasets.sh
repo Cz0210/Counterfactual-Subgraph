@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Static CLI-parity wrapper. The active four-by-four campaign is AutoDL-only.
+# Read-only metadata audit: no inference/heuristic path exists. Approved legacy
+# missing identities remain unknown; contradictory nonempty identities still fail.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --output=logs/%j.out

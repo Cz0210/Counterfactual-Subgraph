@@ -18693,3 +18693,17 @@ no distance. Legitimate undefined conditional costs remain missing, not zero.
 The explicit projection is verified through the existing publisher and sole
 matrix authority; producer identity is preserved independently of later reader
 commits. See `docs/MUT_REGISTRY_K10_PROJECTION_20260907.md`.
+
+### 2026-09-07 — Preserve approved legacy unknown identities during cross-method audit
+
+The validated Mut K10 projection reached publication, but the cross-method
+registry compared the three approved frozen-v4 methods' empty identity strings
+with ComRecGC's real oracle/dataset/cohort/MolCLR hashes and called them conflicts.
+Read-only metadata confirmed the legacy bundle explicitly lacks those identities;
+this was not a conflict between two known hashes or a reason to rewrite hashes.
+The registry now excludes only the corresponding empty field of an already
+validated AIDS/Mut frozen-v4 ADOPTABLE_PASS exception row with its explicit
+missing-identity waiver and unavailable-identity status. Original rows and metrics
+remain unchanged. Unknown unapproved fields and all different nonempty hashes
+still fail closed. The append receipt continues to report unavailable reference
+identities, never claimed equality. No inference, OT, dataset or selector rerun.

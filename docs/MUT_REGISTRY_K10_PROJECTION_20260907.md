@@ -90,3 +90,21 @@ passed: K10 Figure 4 SHA256
 `c1f10fbc0a0502fe53ba172d50af35194430c64103794992955cf3318990fc30`,
 601 rows, final threshold 0.0535 coverage 19/217, and undefined conditional-cost
 prefixes exactly 1, 2 and 3. This replay wrote no remote artifacts.
+
+## Approved legacy missing identities are not contradictory hashes
+
+The first real publication of the validated b8d11337 projection reached the
+cross-method gate and was rejected for oracle, dataset, split and MolCLR hash
+conflicts. Read-only inspection found no pair of different nonempty hashes:
+all three approved legacy Mut methods have these four identities explicitly
+unavailable under the existing checksum-validated `USER_APPROVED_FROZEN_V4`
+exception. The new ComRecGC cell has genuine, independently validated identities.
+
+The cross-method check now excludes an empty field from comparison only for an
+already validated AIDS/Mut Ours, GCFExplainer or GlobalGCE `ADOPTABLE_PASS` row,
+with that exact exception, its identity-unavailable status, valid exception hash
+and the corresponding missing-field waiver. It neither rewrites rows nor fills
+missing hashes from ComRecGC. Nonempty hash conflicts, unapproved missing fields,
+other datasets, other methods, thresholds and metric contracts retain fail-closed
+behavior. This matches the existing append compatibility receipt's explicit
+`reference_unavailable_fields`; it does not assert cross-method identity equality.

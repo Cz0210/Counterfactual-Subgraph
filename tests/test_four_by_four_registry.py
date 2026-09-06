@@ -26,6 +26,62 @@ def _sha_token(seed: str) -> str:
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
+def _approved_missing_identity_rows(dataset: str = "Mutagenicity") -> list[dict[str, object]]:
+    identity_fields = ("oracle_hash", "dataset_hash", "split_hash", "molclr_checkpoint_hash")
+    common = {"dataset": dataset, "distance_line": "MolCLR-Node-Wasserstein",
+              "cf_mode": "strict_flip", "threshold_config_hash": _sha_token("grid"),
+              "adoption_reason": "original decision", "rerun_reason": ""}
+    legacy = {**common, "method": "Ours", "status": "ADOPTABLE_PASS",
+        "registry_exception": "USER_APPROVED_FROZEN_V4",
+        "registry_exception_hash": _sha_token("verified original exception"),
+        "identity_evidence_status": "USER_APPROVED_LEGACY_IDENTITIES_NOT_EMBEDDED",
+        "registry_exception_waivers": "MISSING_ORACLE_HASH;MISSING_DATASET_HASH;MISSING_TEST_SPLIT_HASH;MISSING_MOLCLR_CHECKPOINT_HASH",
+        **{field: "" for field in identity_fields}}
+    current = {**common, "method": "ComRecGC", "status": "FROZEN_PASS",
+               **{field: _sha_token(field) for field in identity_fields}}
+    return [legacy, current]
+
+
+@pytest.mark.parametrize("dataset", ["AIDS", "Mutagenicity"])
+def test_approved_missing_identities_are_unknown_not_conflicting_hashes(dataset: str) -> None:
+    rows = _approved_missing_identity_rows(dataset)
+    original = [dict(row) for row in rows]
+    registry_module._downgrade_cross_cell_conflicts(rows)
+    assert rows == original  # No blank imputation, hash rewriting, or status change.
+
+
+@pytest.mark.parametrize("field,value", [
+    ("registry_exception", ""), ("identity_evidence_status", ""),
+    ("registry_exception_hash", "invalid"), ("registry_exception_waivers", ""),
+    ("status", "FROZEN_PASS"), ("method", "ComRecGC"), ("dataset", "BACE"),
+])
+def test_unapproved_or_wrong_scope_missing_identities_still_conflict(field: str, value: str) -> None:
+    rows = _approved_missing_identity_rows()
+    rows[0][field] = value
+    if field == "dataset":
+        rows[1][field] = value
+    registry_module._downgrade_cross_cell_conflicts(rows)
+    assert all(row["status"] not in {"ADOPTABLE_PASS", "FROZEN_PASS"} for row in rows)
+    assert "CROSS_METHOD_ORACLE_HASH_CONFLICT" in rows[1]["rerun_reason"]
+
+
+@pytest.mark.parametrize("field", ["oracle_hash", "dataset_hash", "split_hash", "molclr_checkpoint_hash"])
+def test_approved_exception_never_waives_nonempty_identity_conflict(field: str) -> None:
+    rows = _approved_missing_identity_rows()
+    rows[0][field] = _sha_token("genuinely different scientific identity")
+    registry_module._downgrade_cross_cell_conflicts(rows)
+    assert all(row["status"] not in {"ADOPTABLE_PASS", "FROZEN_PASS"} for row in rows)
+    assert f"CROSS_METHOD_{field.upper()}_CONFLICT" in rows[1]["rerun_reason"]
+
+
+def test_matching_waiver_is_required_for_each_missing_identity() -> None:
+    rows = _approved_missing_identity_rows()
+    rows[0]["registry_exception_waivers"] = "MISSING_ORACLE_HASH"
+    registry_module._downgrade_cross_cell_conflicts(rows)
+    assert "CROSS_METHOD_ORACLE_HASH_CONFLICT" not in rows[1]["rerun_reason"]
+    assert "CROSS_METHOD_DATASET_HASH_CONFLICT" in rows[1]["rerun_reason"]
+
+
 def _json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
