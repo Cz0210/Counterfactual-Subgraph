@@ -1,5 +1,13 @@
 # Decisions Log
 
+## [2026-09-06] Make native dispatch cohort text match the shared evaluator
+
+Fresh L1/L2/L3 specifications now import the existing common evaluator's
+all-true-source-label1 cohort definition. The older preparation description
+incorrectly said correctly-predicted subset; no evaluator or frozen parent list
+is changed. L0 calibration66/test141 are not the GNN native/common cohorts.
+The paired preparation/successor CLI and Slurm arguments remain unchanged.
+
 ## [2026-09-06] Seal LLM dispatch with a real GPU call/reload gate
 
 The corrected GNN core is already independently accepted. New native L1/L2/L3

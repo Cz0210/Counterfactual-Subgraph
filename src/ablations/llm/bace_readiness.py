@@ -9,6 +9,7 @@ from src.ablations.llm.bace_native_runtime import (
     SOURCE_PINS, VARIANTS, audit_native_source, verified_file, verified_2b_runtime_proof,
 )
 from src.ablations.llm.contracts import canonical_json_sha256
+from src.ablations.llm.bace_common_downstream import COHORT
 from src.ablations.llm.runtime_evidence import load_bace_reference_v2
 from src.eval.bace_frozen_gnn_contracts import (
     atomic_json, file_identity, fixed_parent_shard_map, load_bace_parents, sha256_file,
@@ -172,7 +173,7 @@ def prepare_bace_llm(*, reference_path: str | Path, reference_sha256: str,
         spec["downstream_implementation"] = {"execution_commit": execution_commit,
             "entrypoint": file_identity(downstream_entrypoint),
             "module": file_identity(downstream_module),
-            "cohort": "FROZEN_MAIN_GINE_TRUE_SOURCE_CORRECT_PREDICTION",
+            "cohort": COHORT,
             "calibration_only_selector": True, "test_only_after_freeze": True}
         spec["task_spec_sha256"] = canonical_json_sha256(spec)
         path = output / f"{variant}.task.json"

@@ -15,6 +15,12 @@ from src.utils.autodl_runtime import GPUObservation
 from src.utils.final16_owner_registry_v1 import build_owner_registry
 
 
+def test_dispatch_cohort_is_actual_main_true_source_not_gnn_native():
+    from src.ablations.llm import bace_readiness, bace_common_downstream
+    assert bace_readiness.COHORT == bace_common_downstream.COHORT
+    assert bace_readiness.COHORT == "all_true_source_label_1_parents_as_main_BACE_load_bace_parents"
+
+
 def helper():
     source = Path(__file__).with_name("test_llm_existing_gpu_owner.py")
     spec = importlib.util.spec_from_file_location("owner_fixtures", source)
