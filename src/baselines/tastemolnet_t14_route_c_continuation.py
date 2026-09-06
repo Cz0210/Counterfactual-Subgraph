@@ -471,7 +471,8 @@ def validate_continuation_spec(
         "created_at",
         "spec_sha256",
     }
-    if set(value) != required or value.get("schema_version") != SPEC_SCHEMA:
+    if (not required.issubset(value) or set(value) - required - {"formal_runtime_binding"}
+            or value.get("schema_version") != SPEC_SCHEMA):
         raise T14RouteCContinuationError("continuation spec fields/schema changed")
     _self_hash(value, field="spec_sha256")
     if (
@@ -493,6 +494,19 @@ def validate_continuation_spec(
         "generation_handoff": owner_root / "generation_to_postprocess_handoff.json",
         "continuation_root": owner_root / "continuation",
     }
+    if "formal_runtime_binding" in value:
+        from src.utils.t14_formal_binding import check
+
+        binding = check(value["formal_runtime_binding"])
+        if (binding.get("formal_execution_commit") != value["route_c_execution_commit"]
+                or binding.get("source_continuation") is None):
+            raise T14RouteCContinuationError("formal continuation execution binding changed")
+        original = check(binding["source_continuation"])
+        mutable = {"descriptor_path", "route_c_spec", "route_c_spec_sha256", "route_c_execution_commit",
+                   "continuation_entrypoint", "continuation_entrypoint_sha256", "formal_runtime_binding", "spec_sha256"}
+        if {k:v for k,v in value.items() if k not in mutable} != {k:v for k,v in original.items() if k not in mutable}:
+            raise T14RouteCContinuationError("formal continuation changed scientific/publisher contract")
+        expected_paths["descriptor_path"] = owner_root / "formal_execution_binding" / "continuation_spec.json"
     for field, expected in expected_paths.items():
         if _absolute(value.get(field), field=field) != expected:
             raise T14RouteCContinuationError(f"continuation path changed: {field}")

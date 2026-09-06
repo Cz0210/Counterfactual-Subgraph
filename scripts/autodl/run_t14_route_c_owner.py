@@ -750,6 +750,121 @@ def _ensure_promoted_boundary(
     )
 
 
+def _continue_formal(master, task_spec_path, continuation_spec_path, owner_root, continuous_ledger, receipts):
+    # The promotable root is the formal Route-C run.  Stop at every early
+    # boundary so this owner independently reloads and promotes each one.
+    # After parity, the same step-500 state continues to full; steps 1-500
+    # are not generated again.
+    for early_checkpoint in (*EARLY_CHECKPOINT_STEPS, 500):
+        _ensure_promoted_boundary(
+            master,
+            task_spec_path,
+            owner_root=owner_root,
+            target=early_checkpoint,
+            label=f"promotable-lowmemory-{early_checkpoint}",
+        )
+    promotable_ledger = Path(master["output_root"]) / "route_c_step_states.jsonl"
+    receipts["continuous_vs_promotable_1_500"] = compare_step_ledgers(
+        continuous_ledger, promotable_ledger, start_step=1, end_step=500
+    )
+    if receipts["continuous_vs_promotable_1_500"]["status"] != "PASS":
+        raise T14RouteCFreshError("T14 Route C promotable canary diverged")
+    parity = {
+        "schema_version": "tastemolnet_t14_route_c_parity_gate_v1",
+        "status": "PASS",
+        "receipts": receipts,
+        "checkpoint_250_reload_pass": True,
+        "steps_501_510_exact": True,
+        "promotable_checkpoint_step": 500,
+        "durable_early_checkpoints": [50, 100, 250, 500],
+        "formal_route_c_500_promoted_to_full_without_replay": True,
+        "legacy_checkpoint_loaded": False,
+        "written_at": _utc_now(),
+    }
+    atomic_json(owner_root / "parity.json", parity)
+
+    convergence_receipt: Path | None = None
+    convergence_root = owner_root / "convergence"
+    convergence_root.mkdir(parents=True, exist_ok=True)
+    existing_convergence = convergence_root / "early_stop_receipt.json"
+    if existing_convergence.is_file() and not existing_convergence.is_symlink():
+        raw_convergence = _json_object(existing_convergence)
+        convergence_step = int(raw_convergence.get("m_effective", -1))
+        promotion = validate_promotion_receipt(
+            promotion_receipt_path(master, convergence_step),
+            spec=master,
+            expected_step=convergence_step,
+        )
+        validate_route_c_convergence_receipt(
+            existing_convergence,
+            spec=master,
+            expected_step=convergence_step,
+            expected_checkpoint_digest=str(promotion["checkpoint_digest"]),
+        )
+        convergence_receipt = existing_convergence
+    checkpoints = (
+        ()
+        if convergence_receipt is not None
+        else (2_500, 5_000, 7_500, 10_000, 12_500, 15_000, 17_500)
+    )
+    for checkpoint in checkpoints:
+        if (_latest_step(master) or 0) >= M_MAX:
+            break
+        _ensure_promoted_boundary(
+            master,
+            task_spec_path,
+            owner_root=owner_root,
+            target=checkpoint,
+            label=f"full-to-{checkpoint}",
+        )
+        if checkpoint < 10_000:
+            continue
+        convergence = audit_route_c_convergence(master)
+        convergence["audited_at"] = _utc_now()
+        convergence["owner_pid"] = os.getpid()
+        convergence["audit_sha256"] = hashlib.sha256(
+            json.dumps(
+                convergence, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+        ).hexdigest()
+        atomic_json(
+            convergence_root / f"audit-{checkpoint:06d}.json", convergence
+        )
+        if convergence.get("converged") is True:
+            convergence_receipt = convergence_root / "early_stop_receipt.json"
+            write_route_c_convergence_receipt(
+                convergence_receipt, spec=master, audit=convergence
+            )
+            break
+
+    generation_root = Path(master["output_root"])
+    if (generation_root / "GENERATION_PASS").is_file():
+        from src.baselines.tastemolnet_comrecgc_full import validate_t14_full_output
+
+        generation_verification = validate_t14_full_output(generation_root)
+    else:
+        _run_science(
+            master,
+            task_spec_path,
+            owner_root=owner_root,
+            label="convergence-or-resource-cap-postprocess",
+            resume=True,
+            stop_step=None,
+            convergence_receipt=convergence_receipt,
+        )
+        from src.baselines.tastemolnet_comrecgc_full import validate_t14_full_output
+
+        generation_verification = validate_t14_full_output(generation_root)
+    publish_generation_handoff(
+        continuation_spec_path=continuation_spec_path,
+        generation_verification=generation_verification,
+        owner_pid=os.getpid(),
+        owner_start_ticks=_start_ticks(os.getpid()),
+    )
+    launch_continuation_owner(continuation_spec_path)
+    return 0
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=_absolute, required=True)
@@ -762,6 +877,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prepare-bootstrap-rebind", type=_absolute)
     parser.add_argument("--bootstrap-authorization", type=_absolute)
     parser.add_argument("--bootstrap-rebind", type=_absolute)
+    parser.add_argument("--formal-binding", type=_absolute)
     return parser.parse_args(argv)
 
 
@@ -782,6 +898,15 @@ def main(argv: list[str] | None = None) -> int:
     ):
         raise T14RouteCFreshError("T14 Route C owner spec is not promotable")
     owner_root = Path(master["owner_root"])
+    formal_plan = None
+    if args.formal_binding:
+        if any((args.failed_stage_replacement, args.bootstrap_rebind, args.prepare_bootstrap_rebind,
+                args.prepare_failed_stage_replacement, args.replacement_authorization,
+                args.bootstrap_authorization, args.dry_run)):
+            raise T14RouteCFreshError("T14 formal binding cannot launch or prepare canaries")
+        from src.utils.t14_formal_binding import ready_plan
+
+        formal_plan = ready_plan(master, args.formal_binding)
     owner_root.mkdir(parents=True, exist_ok=True)
     terminal_path = owner_root / "terminal.json"
     lock = (owner_root / "owner.lock").open("a+b")
@@ -818,8 +943,8 @@ def main(argv: list[str] | None = None) -> int:
         previous_owner = _json_object(owner_path) if owner_path.is_file() else None
         if previous_owner is not None and (
             previous_owner.get("schema_version") != OWNER_SCHEMA
-            or previous_owner.get("task_spec") != str(args.task_spec)
-            or previous_owner.get("task_spec_sha256") != master["spec_sha256"]
+            or (not formal_plan and previous_owner.get("task_spec") != str(args.task_spec))
+            or (not formal_plan and previous_owner.get("task_spec_sha256") != master["spec_sha256"])
         ):
             raise T14RouteCFreshError("T14 Route C prior owner evidence changed")
         terminal_path = owner_root / "terminal.json"
@@ -886,6 +1011,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             _phase(owner_root, phase="DRY_RUN_PASS", science_pid=None)
             return 0
+
+        if formal_plan:
+            # The prior owner naturally completed the canaries. Never execute
+            # their roots again and never promote either diagnostic checkpoint.
+            children = {role:_planned_child(formal_plan,role)[0] for role in formal_plan['children']}
+            reference_ledger = Path(children['REFERENCE_500']['output_root'])/'route_c_step_states.jsonl'
+            continuous_ledger = Path(children['LOW_MEMORY_CONTINUOUS_510']['output_root'])/'route_c_step_states.jsonl'
+            reload_ledger = Path(children['LOW_MEMORY_RELOAD_510']['output_root'])/'route_c_step_states.jsonl'
+            receipts = {
+                'reference_vs_lowmemory_1_500':compare_step_ledgers(reference_ledger,continuous_ledger,start_step=1,end_step=500),
+                'continuous_vs_reload_1_500':compare_step_ledgers(continuous_ledger,reload_ledger,start_step=1,end_step=500),
+                'continuous_vs_reload_501_510':compare_step_ledgers(continuous_ledger,reload_ledger,start_step=501,end_step=510),
+            }
+            if any(row['status'] != 'PASS' for row in receipts.values()):
+                raise T14RouteCFreshError('T14 existing canary ledgers changed at formal dispatch')
+            return _continue_formal(master,args.task_spec,args.continuation_spec,owner_root,continuous_ledger,receipts)
 
         plan = _load_or_create_plan(
             master, master_path=args.task_spec, owner_root=owner_root
@@ -1008,118 +1149,7 @@ def main(argv: list[str] | None = None) -> int:
             _phase(owner_root,phase=hold['status'],science_pid=None)
             return WAITING_EXIT
 
-        # The promotable root is the formal Route-C run.  Stop at every early
-        # boundary so this owner independently reloads and promotes each one.
-        # After parity, the same step-500 state continues to full; steps 1-500
-        # are not generated again.
-        for early_checkpoint in (*EARLY_CHECKPOINT_STEPS, 500):
-            _ensure_promoted_boundary(
-                master,
-                args.task_spec,
-                owner_root=owner_root,
-                target=early_checkpoint,
-                label=f"promotable-lowmemory-{early_checkpoint}",
-            )
-        promotable_ledger = Path(master["output_root"]) / "route_c_step_states.jsonl"
-        receipts["continuous_vs_promotable_1_500"] = compare_step_ledgers(
-            continuous_ledger, promotable_ledger, start_step=1, end_step=500
-        )
-        if receipts["continuous_vs_promotable_1_500"]["status"] != "PASS":
-            raise T14RouteCFreshError("T14 Route C promotable canary diverged")
-        parity = {
-            "schema_version": "tastemolnet_t14_route_c_parity_gate_v1",
-            "status": "PASS",
-            "receipts": receipts,
-            "checkpoint_250_reload_pass": True,
-            "steps_501_510_exact": True,
-            "promotable_checkpoint_step": 500,
-            "durable_early_checkpoints": [50, 100, 250, 500],
-            "formal_route_c_500_promoted_to_full_without_replay": True,
-            "legacy_checkpoint_loaded": False,
-            "written_at": _utc_now(),
-        }
-        atomic_json(owner_root / "parity.json", parity)
-
-        convergence_receipt: Path | None = None
-        convergence_root = owner_root / "convergence"
-        convergence_root.mkdir(parents=True, exist_ok=True)
-        existing_convergence = convergence_root / "early_stop_receipt.json"
-        if existing_convergence.is_file() and not existing_convergence.is_symlink():
-            raw_convergence = _json_object(existing_convergence)
-            convergence_step = int(raw_convergence.get("m_effective", -1))
-            promotion = validate_promotion_receipt(
-                promotion_receipt_path(master, convergence_step),
-                spec=master,
-                expected_step=convergence_step,
-            )
-            validate_route_c_convergence_receipt(
-                existing_convergence,
-                spec=master,
-                expected_step=convergence_step,
-                expected_checkpoint_digest=str(promotion["checkpoint_digest"]),
-            )
-            convergence_receipt = existing_convergence
-        checkpoints = (
-            ()
-            if convergence_receipt is not None
-            else (2_500, 5_000, 7_500, 10_000, 12_500, 15_000, 17_500)
-        )
-        for checkpoint in checkpoints:
-            if (_latest_step(master) or 0) >= M_MAX:
-                break
-            _ensure_promoted_boundary(
-                master,
-                args.task_spec,
-                owner_root=owner_root,
-                target=checkpoint,
-                label=f"full-to-{checkpoint}",
-            )
-            if checkpoint < 10_000:
-                continue
-            convergence = audit_route_c_convergence(master)
-            convergence["audited_at"] = _utc_now()
-            convergence["owner_pid"] = os.getpid()
-            convergence["audit_sha256"] = hashlib.sha256(
-                json.dumps(
-                    convergence, sort_keys=True, separators=(",", ":"), allow_nan=False
-                ).encode("utf-8")
-            ).hexdigest()
-            atomic_json(
-                convergence_root / f"audit-{checkpoint:06d}.json", convergence
-            )
-            if convergence.get("converged") is True:
-                convergence_receipt = convergence_root / "early_stop_receipt.json"
-                write_route_c_convergence_receipt(
-                    convergence_receipt, spec=master, audit=convergence
-                )
-                break
-
-        generation_root = Path(master["output_root"])
-        if (generation_root / "GENERATION_PASS").is_file():
-            from src.baselines.tastemolnet_comrecgc_full import validate_t14_full_output
-
-            generation_verification = validate_t14_full_output(generation_root)
-        else:
-            _run_science(
-                master,
-                args.task_spec,
-                owner_root=owner_root,
-                label="convergence-or-resource-cap-postprocess",
-                resume=True,
-                stop_step=None,
-                convergence_receipt=convergence_receipt,
-            )
-            from src.baselines.tastemolnet_comrecgc_full import validate_t14_full_output
-
-            generation_verification = validate_t14_full_output(generation_root)
-        publish_generation_handoff(
-            continuation_spec_path=args.continuation_spec,
-            generation_verification=generation_verification,
-            owner_pid=os.getpid(),
-            owner_start_ticks=_start_ticks(os.getpid()),
-        )
-        launch_continuation_owner(args.continuation_spec)
-        return 0
+        return _continue_formal(master, args.task_spec, args.continuation_spec, owner_root, continuous_ledger, receipts)
     except Exception as exc:
         if args.prepare_failed_stage_replacement or args.prepare_bootstrap_rebind:
             # A failed preparation cannot rewrite the prior scientific failure.
