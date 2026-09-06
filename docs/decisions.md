@@ -1,5 +1,20 @@
 # Decisions Log
 
+## [2026-09-06] LLM at-most-K and evaluation-only L0 successor
+
+The owner explicitly authorizes at-most-K for all four BACE LLM variants.
+Keep K_MAX20/Table2 K10, but use only min(K, actual eligible unique rules),
+with a disclosed plateau after exhaustion and no duplicate padding. Preserve
+the exact main selector/threshold kernels; GNN/main protocols do not change.
+Adopt the completed386×8 L0 train records and15-rule universe from failed
+Slurm2560839 into a fresh protocol/evaluation root, validating its committed
+parent records without new generation or train-oracle replay. The corrected
+GNN small acceptance is reused without unpacking/replaying its package.
+First missing L0 WNode distances are allowed and separately counted from cache
+reuse. An intel CPU-only evaluation→independent package dependency is the
+explicit exception to the default GPU Slurm template. No main matrix writes.
+See `docs/BACE_L0_AT_MOST_K_SUCCESSOR_20260906.md`.
+
 ## [2026-09-06] Add opt-in observational Mut causal records without promoting Route B
 
 The user authorized a selected-action causal-lineage producer for a possible
