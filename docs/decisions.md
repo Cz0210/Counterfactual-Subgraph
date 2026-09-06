@@ -1,5 +1,17 @@
 # Decisions Log
 
+## [2026-09-06] Replace only retry2's failed empty T14 canary stage
+
+The completed reference500 is preserved. A single user-bound replacement receipt
+selects fresh corrected continuous/reload low-memory stages inside the same retry2
+owner, with its existing lock, GPU2/resource gates and exact ledger checks. No
+retry3, reference regeneration, failed checkpoint adoption or old-plan edit is
+allowed. Actual new driver and original science commit are separately recorded.
+After parity the owner holds before formal generation because original master,
+authorization and cadence pin the prior execution. Do not loosen those checks
+or label new-driver output as old science. See
+`docs/T14_RETRY2_FAILED_STAGE_REPLACEMENT_20260906.md`.
+
 ## [2026-09-06] Seal LLM dispatch with a real GPU call/reload gate
 
 The corrected GNN core is already independently accepted. New native L1/L2/L3

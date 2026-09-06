@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -472,6 +473,136 @@ def _planned_child(plan: Mapping[str, Any], role: str) -> tuple[dict[str, Any], 
     return load_spec(path), path
 
 
+def _small_sha(path: Path) -> str:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 16*1024**2:
+        raise T14RouteCFreshError(f"T14 replacement requires bounded physical evidence: {path}")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _replacement_commit() -> str:
+    commit = subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
+    dirty = subprocess.check_output(["git", "-C", str(REPO_ROOT), "status", "--porcelain"], text=True).strip()
+    if dirty or len(commit) != 40:
+        raise T14RouteCFreshError("T14 replacement requires clean immutable driver")
+    return commit
+
+
+def prepare_failed_stage_replacement(
+    master: Mapping[str, Any], *, master_path: Path, authorization_path: Path,
+    output: Path, proc_root: Path = Path('/proc'),
+) -> dict[str, Any]:
+    """Bind two fresh storage-repaired canaries within retry2; never retry3."""
+    owner = Path(master['owner_root'])
+    if output != owner/'stage_replacement_retry2'/'receipt.json' or output.exists():
+        raise T14RouteCFreshError('T14 single fixed replacement binding already used or wrong path')
+    auth = _json_object(authorization_path)
+    expected = dict(schema_version='t14_retry2_failed_stage_replacement_authorization_v1',
+        authorized_by='user_project_owner',same_retry_index=2,max_stage_replacements=1,
+        stage='LOW_MEMORY_CONTINUOUS_510',allow_storage_only_driver_repair=True,
+        reference_rerun_allowed=False,old_failed_root_mutation_allowed=False,
+        retry3_allowed=False,formal_execution_rebind_required=True)
+    if any(auth.get(k) != v for k,v in expected.items()):
+        raise T14RouteCFreshError('T14 exact replacement authorization required')
+    if (master.get('fresh_retry',{}).get('retry_index') != 2
+            or auth.get('master_spec') != {'path':str(master_path),'sha256':_small_sha(master_path)}
+            or auth.get('driver_commit') != _replacement_commit()):
+        raise T14RouteCFreshError('T14 replacement master/retry/driver binding changed')
+    terminal_path=owner/'terminal.json'
+    terminal=_json_object(terminal_path)
+    if (terminal.get('status')!='FAILED' or
+            terminal.get('error')!='Route C science phase failed: lowmemory-continuous-510, exit=1'
+            or auth.get('failed_terminal') != {'path':str(terminal_path),'sha256':_small_sha(terminal_path)}):
+        raise T14RouteCFreshError('T14 replacement requires exact failed stage terminal')
+    if (proc_root/str(terminal['owner_pid'])).exists():
+        raise T14RouteCFreshError('T14 prior owner PID requires exact live review')
+    _small_sha(owner/'owner_plan.json')
+    plan=_load_or_create_plan(master,master_path=master_path,owner_root=owner)
+    reference,_=_planned_child(plan,'REFERENCE_500')
+    failed,_=_planned_child(plan,'LOW_MEMORY_CONTINUOUS_510')
+    unused,_=_planned_child(plan,'LOW_MEMORY_RELOAD_510')
+    # Only metadata and the short scientific ledger; never deserialize reference
+    # or forbidden legacy checkpoints just to replace an empty failed stage.
+    boundary=validate_checkpoint_boundary(reference,step=500,validate_envelope=False)
+    if not _ledger_has(Path(reference['output_root']),500):
+        raise T14RouteCFreshError('T14 completed reference500 ledger required')
+    failed_root=Path(failed['output_root'])
+    progress=_json_object(failed_root/'progress.json')
+    if int(progress.get('completed_step',progress.get('step',-1))) != 0:
+        raise T14RouteCFreshError('T14 failed-stage replacement requires exact step0')
+    checkpoints=failed_root/'checkpoints'
+    if (not checkpoints.is_dir() or any(checkpoints.iterdir())
+            or _ledger_has(failed_root,1) or Path(unused['output_root']).exists()
+            or Path(master['output_root']).exists()):
+        raise T14RouteCFreshError('T14 replacement cannot discard scientific progress')
+    old_tokens={str(master_path),str(failed_root),plan['children']['LOW_MEMORY_CONTINUOUS_510']['spec_path']}
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():continue
+        try:tokens=set((entry/'cmdline').read_bytes().decode().split('\0'))
+        except (OSError,UnicodeError):continue
+        if int(entry.name)!=os.getpid() and tokens & old_tokens:
+            raise T14RouteCFreshError('T14 replacement has an exact active writer')
+    output.parent.mkdir(parents=True,exist_ok=False)
+    runtime_master=dict(master,execution_commit=auth['driver_commit'],
+        science_wrapper=str(REPO_ROOT/'scripts/autodl/run_tastemolnet_t14_comrecgc_full.sh'),
+        owner_entrypoint=str(REPO_ROOT/'scripts/autodl/run_t14_route_c_owner.py'))
+    children={}
+    for role in ('LOW_MEMORY_CONTINUOUS_510','LOW_MEMORY_RELOAD_510'):
+        child,path=_child_spec(runtime_master,owner_root=owner,role=role,storage_mode='lowmemory')
+        children[role]={'spec_path':str(path),'spec_sha256':child['spec_sha256'],'output_root':child['output_root']}
+    receipt=dict(schema_version='t14_retry2_failed_stage_replacement_v1',retry_index=2,
+        max_stage_replacements=1,created_at=_utc_now(),authorization={'path':str(authorization_path),'sha256':_small_sha(authorization_path)},
+        master_spec={'path':str(master_path),'sha256':_small_sha(master_path)},
+        original_plan={'path':str(owner/'owner_plan.json'),'sha256':_small_sha(owner/'owner_plan.json')},
+        source_science_commit=master['execution_commit'],driver_commit=auth['driver_commit'],
+        driver_wrapper_sha256=_small_sha(Path(runtime_master['science_wrapper'])),
+        driver_owner_sha256=_small_sha(Path(runtime_master['owner_entrypoint'])),
+        failed_terminal=terminal,failed_terminal_sha256=_small_sha(terminal_path),
+        failed_child=plan['children']['LOW_MEMORY_CONTINUOUS_510'],
+        preserved_reference=plan['children']['REFERENCE_500'],reference_checkpoint_digest=boundary['boundary']['checkpoint_digest'],
+        children=children,reference_rerun=False,failed_checkpoint_loaded=False,
+        old_plan_modified=False,retry3_created=False,formal_execution_rebind_required=True)
+    receipt['receipt_sha256']=hashlib.sha256(json.dumps(receipt,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    atomic_json(output,receipt)
+    return receipt
+
+
+def load_failed_stage_replacement(master: Mapping[str,Any],master_path: Path,plan: dict[str,Any],path: Path) -> dict[str,Any]:
+    receipt=_json_object(path)
+    unsigned={k:v for k,v in receipt.items() if k!='receipt_sha256'}
+    if receipt.get('receipt_sha256')!=hashlib.sha256(json.dumps(unsigned,sort_keys=True,separators=(',',':')).encode()).hexdigest():
+        raise T14RouteCFreshError('T14 replacement self hash changed')
+    if (path!=Path(master['owner_root'])/'stage_replacement_retry2/receipt.json'
+            or receipt.get('schema_version')!='t14_retry2_failed_stage_replacement_v1'
+            or receipt.get('retry_index')!=2 or receipt.get('max_stage_replacements')!=1
+            or receipt.get('source_science_commit')!=master['execution_commit']
+            or receipt.get('driver_commit')!=_replacement_commit()
+            or receipt.get('master_spec')!={'path':str(master_path),'sha256':_small_sha(master_path)}
+            or receipt.get('preserved_reference')!=plan['children']['REFERENCE_500']
+            or receipt.get('failed_child')!=plan['children']['LOW_MEMORY_CONTINUOUS_510']):
+        raise T14RouteCFreshError('T14 replacement immutable binding changed')
+    for key in ('authorization','original_plan'):
+        row=receipt[key]
+        if _small_sha(Path(row['path']))!=row['sha256']:
+            raise T14RouteCFreshError('T14 replacement source changed:'+key)
+    for name,key in (('run_t14_route_c_owner.py','driver_owner_sha256'),('run_tastemolnet_t14_comrecgc_full.sh','driver_wrapper_sha256')):
+        if _small_sha(REPO_ROOT/'scripts/autodl'/name)!=receipt[key]:
+            raise T14RouteCFreshError('T14 replacement driver bytes changed')
+    children=dict(plan['children'])
+    for role in ('LOW_MEMORY_CONTINUOUS_510','LOW_MEMORY_RELOAD_510'):
+        row=receipt['children'][role];child=load_spec(Path(row['spec_path']))
+        if (child['spec_sha256']!=row['spec_sha256'] or child['output_root']!=row['output_root']
+                or child['canary_role']!=role or child['storage_mode']!='lowmemory'
+                or child['execution_commit']!=receipt['driver_commit']
+                or Path(child['owner_root']).parent.parent!=Path(master['owner_root'])/'canaries'):
+            raise T14RouteCFreshError('T14 replacement child changed')
+        for key in ('science_environment','memory','route_c_state','m_configured_max',
+                    'm_fallback_max','forbidden_legacy_root','production_checkpoint_steps'):
+            if child[key]!=master[key]:
+                raise T14RouteCFreshError('T14 replacement scientific/resource contract changed:'+key)
+        children[role]=row
+    return dict(plan,children=children,failed_stage_replacement=receipt)
+
+
 def _ledger_has(output_root: Path, step: int) -> bool:
     path = output_root / "route_c_step_states.jsonl"
     if not path.is_file() or path.is_symlink():
@@ -621,6 +752,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--task-spec", type=_absolute, required=True)
     parser.add_argument("--continuation-spec", type=_absolute, required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--prepare-failed-stage-replacement", type=_absolute)
+    parser.add_argument("--replacement-authorization", type=_absolute)
+    parser.add_argument("--failed-stage-replacement", type=_absolute)
     return parser.parse_args(argv)
 
 
@@ -642,12 +776,24 @@ def main(argv: list[str] | None = None) -> int:
         raise T14RouteCFreshError("T14 Route C owner spec is not promotable")
     owner_root = Path(master["owner_root"])
     owner_root.mkdir(parents=True, exist_ok=True)
+    terminal_path = owner_root / "terminal.json"
     lock = (owner_root / "owner.lock").open("a+b")
     try:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise T14RouteCFreshError("T14 Route C already has one owner") from exc
+        # Preparation only adds one fresh binding/child specs; never archives the
+        # failure, launches science or edits the immutable prior owner plan.
+        if args.prepare_failed_stage_replacement:
+            if not args.replacement_authorization or args.failed_stage_replacement or args.dry_run:
+                raise T14RouteCFreshError('T14 replacement preparation flags conflict')
+            receipt=prepare_failed_stage_replacement(master,master_path=args.task_spec,
+                authorization_path=args.replacement_authorization,output=args.prepare_failed_stage_replacement)
+            print(json.dumps(receipt,sort_keys=True),flush=True)
+            return 0
+        if args.replacement_authorization:
+            raise T14RouteCFreshError('T14 replacement authorization is preparation-only')
         owner_path = owner_root / "owner.json"
         previous_owner = _json_object(owner_path) if owner_path.is_file() else None
         if previous_owner is not None and (
@@ -724,6 +870,8 @@ def main(argv: list[str] | None = None) -> int:
         plan = _load_or_create_plan(
             master, master_path=args.task_spec, owner_root=owner_root
         )
+        if args.failed_stage_replacement:
+            plan=load_failed_stage_replacement(master,args.task_spec,plan,args.failed_stage_replacement)
         reference, reference_path = _planned_child(plan, "REFERENCE_500")
         continuous, continuous_path = _planned_child(
             plan, "LOW_MEMORY_CONTINUOUS_510"
@@ -731,8 +879,11 @@ def main(argv: list[str] | None = None) -> int:
         reload_spec, reload_path = _planned_child(plan, "LOW_MEMORY_RELOAD_510")
 
         reference_root = Path(reference["output_root"])
+        if args.failed_stage_replacement and not reference_root.is_dir():
+            raise T14RouteCFreshError('T14 replacement reference500 vanished; rerun forbidden')
         if reference_root.exists():
-            validate_checkpoint_boundary(reference, step=500, validate_envelope=True)
+            validate_checkpoint_boundary(reference, step=500,
+                validate_envelope=not bool(args.failed_stage_replacement))
             if not _ledger_has(reference_root, 500):
                 raise T14RouteCFreshError("Route C reference ledger is incomplete")
         else:
@@ -814,6 +965,22 @@ def main(argv: list[str] | None = None) -> int:
         }
         if any(value["status"] != "PASS" for value in receipts.values()):
             raise T14RouteCFreshError("T14 Route C semantic parity failed")
+
+        if args.failed_stage_replacement:
+            replacement=plan['failed_stage_replacement']
+            # The old retry2 master and authorization/cadence pin the original
+            # execution. Do not relabel new-driver full outputs as old science.
+            hold=dict(schema_version='t14_retry2_storage_repair_canary_result_v1',
+                status='CANARY_PARITY_PASS_FORMAL_EXECUTION_REBIND_REQUIRED',
+                retry_index=2,retry3_created=False,reference_rerun=False,
+                replacement_receipt_sha256=replacement['receipt_sha256'],receipts=receipts,
+                source_science_commit=master['execution_commit'],driver_commit=replacement['driver_commit'],
+                full_started=False,blocked_fields=['master.execution_commit',
+                    'fresh_retry.authorization_receipt.corrected_execution_commit',
+                    'fresh_retry.formal_cadence_contract.execution_commit'],written_at=_utc_now())
+            atomic_json(owner_root/'stage_replacement_retry2/canary_verification.json',hold)
+            _phase(owner_root,phase=hold['status'],science_pid=None)
+            return WAITING_EXIT
 
         # The promotable root is the formal Route-C run.  Stop at every early
         # boundary so this owner independently reloads and promotes each one.
@@ -928,6 +1095,9 @@ def main(argv: list[str] | None = None) -> int:
         launch_continuation_owner(args.continuation_spec)
         return 0
     except Exception as exc:
+        if args.prepare_failed_stage_replacement:
+            # A failed preparation cannot rewrite the prior scientific failure.
+            raise
         existing_terminal = (
             _json_object(terminal_path) if terminal_path.is_file() else {}
         )
