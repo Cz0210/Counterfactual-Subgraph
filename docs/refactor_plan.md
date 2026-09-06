@@ -1,5 +1,14 @@
 # Refactor Plan
 
+## 2026-09-06: Future-only T12 immutable local history cache
+
+- [x] Reuse original history and first-seen codecs through optional bounded local reads.
+- [x] Require closed producer, no live writer, exact committed bytes and one verified copy.
+- [x] Keep default active-reader path unchanged and prohibit writer use of the cache.
+- [x] Test record order, first-seen bytes and complete checkpoint-state equality.
+- [ ] Bind a future owner to a genuinely sealed source after its existing parity/resource gates.
+- [ ] Measure real local decode performance without reclassifying I/O as scientific progress.
+
 ## 2026-09-06: T14 retry2 failed-stage continuation
 
 - [x] Bind one fresh replacement for the empty failed low-memory canary.
