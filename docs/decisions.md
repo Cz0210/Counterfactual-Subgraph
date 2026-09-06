@@ -18560,3 +18560,18 @@ engineering retry. Record the temperature driver and the verifier driver separat
 - Keep timing of first copy separate from subsequent local decoding; do not
   claim cold kernel caches, scientific step progress or full-runtime speedup.
   See `docs/AUTODL_T12_FUTURE_HISTORY_CACHE_20260906.md`.
+
+# 2026-09-07: Bind T14 retry2 formal execution without rewriting old authority
+
+- Keep the healthy low-memory canary and original reference500 immutable.
+  Seal one runtime-identity overlay under the existing owner namespace; retain
+  the old authorization/retirement/scientific-config/cadence chain verbatim.
+- New explicit user authorization maps the three old formal version pins to
+  the real deployed runtime. Require all non-runtime fields unchanged and
+  current canary/formal scientific AST equality. This is not a blanket PASS
+  exception, a third retry, or a diagnostic-checkpoint promotion.
+- The existing owner accepts the overlay only after prior canary natural exit,
+  complete parity, exact no-writer checks and its original exclusive lock and
+  resource gate. The original unstarted promotable branch must generate and
+  independently reload its own0–500 before any full continuation. See
+  `docs/T14_FORMAL_VERSION_BINDING_20260907.md`.

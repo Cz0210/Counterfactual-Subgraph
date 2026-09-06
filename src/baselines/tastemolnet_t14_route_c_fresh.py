@@ -3993,7 +3993,7 @@ def validate_spec(
         "created_at",
         "spec_sha256",
     }
-    optional = {"fresh_retry"}
+    optional = {"fresh_retry", "formal_runtime_binding"}
     if not required.issubset(value) or set(value) - required - optional:
         raise T14RouteCFreshError("Route C spec fields changed")
     if value.get("schema_version") != SPEC_SCHEMA:
@@ -4147,7 +4147,14 @@ def validate_spec(
             raise T14RouteCFreshError(f"Route C memory.{field} is invalid")
     retry = value.get("fresh_retry")
     if retry is not None:
-        _validate_fresh_retry_contract(retry, spec=value)
+        if "formal_runtime_binding" in value:
+            from src.utils.t14_formal_binding import validate_runtime_spec
+
+            # Preserve the historical authorization/cadence/retirement chain.
+            # The explicit overlay separately binds the real runtime identity.
+            validate_runtime_spec(value)
+        else:
+            _validate_fresh_retry_contract(retry, spec=value)
     if check_files:
         for field in ("science_wrapper", "owner_entrypoint"):
             path = paths[field]
