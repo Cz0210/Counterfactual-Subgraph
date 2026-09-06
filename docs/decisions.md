@@ -15,6 +15,12 @@ reuse. An intel CPU-only evaluation→independent package dependency is the
 explicit exception to the default GPU Slurm template. No main matrix writes.
 See `docs/BACE_L0_AT_MOST_K_SUCCESSOR_20260906.md`.
 
+Its completed small result may be relayed HPC→Mac→a fresh AutoDL LLM root.
+Verify the new transport and inner inventory once, adopt the independent L0
+package audit, preserve original HPC manifests, and publish only the shared
+LLM registry with an additive location receipt. Do not replay evaluation/GNN
+or merge ablation results into the main matrix.
+
 ## [2026-09-06] Add opt-in observational Mut causal records without promoting Route B
 
 The user authorized a selected-action causal-lineage producer for a possible

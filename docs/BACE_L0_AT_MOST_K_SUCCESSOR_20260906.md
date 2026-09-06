@@ -59,3 +59,28 @@ All LLM common evaluation CLIs also accept paired `--gnn-acceptance` and
 small receipt and unchanged archive stat identity without archive hashing or
 GNN replay. The paired generic wrapper passes `GNN_ACCEPTANCE` and
 `GNN_ACCEPTANCE_SHA256`; absent flags retain first-adoption verification.
+
+## Actual completed evaluation and scoped import
+
+HPC execution commit `c6d5f0b507d75eaa93363dae49edbce0a5568141`:
+evaluation2567257 completed0:0 in2m20s; afterok package2567271 completed0:0
+in10s. The old2560839 failure remains unchanged. New L0 calibration has66
+true-source parents and test141; this is the original BACE main
+`load_bace_parents(source_label=1)` cohort, not GNN native/common filtering.
+
+AutoDL import is a separate CPU-only `import-result` action. It checks only
+this new small result's transport/inner hashes and previously independent
+package audit, extracts into a fresh LLM-only root, and calls the existing
+independent LLM registry publisher. It does not repeat model inference,
+selection, OT or GNN verification. Original run manifests retain HPC provenance;
+`publication_receipt.json` supplies the additive local locator.
+
+```
+python -I -B scripts/hpc/llm/run_bace_l0_evaluation_successor.py --config configs/hpc.yaml import-result \
+  --archive FRESH_INCOMING/bace_l0_at_most_k.tar.gz \
+  --package-receipt FRESH_INCOMING/result_package.json \
+  --output-root FRESH_LLM_IMPORT --registry-root INDEPENDENT_LLM_REGISTRY
+```
+
+The CLI accepts import output only under AutoDL's `outputs/autodl/ablations/llm`;
+the paired HPC wrapper refuses `import-result`. Neither route writes main control.
