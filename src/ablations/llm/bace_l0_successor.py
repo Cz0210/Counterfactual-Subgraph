@@ -7,6 +7,8 @@ all writes are additive under the explicitly authorized HPC project subtree.
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import json
 from pathlib import Path
 import tarfile
 from typing import Any
@@ -214,3 +216,65 @@ def package(*, science_root, gnn_input_bundle, output_root):
             "independent_audit_sha256": sha256_file(output / "independent_package_audit.json")}
         atomic_json(output / "result_package.json", receipt)
         return receipt
+
+
+def import_package(*, archive, package_receipt, output_root, registry_root):
+    """Fresh scoped LLM import of the small independently audited L0 package."""
+    from src.ablations.llm.bace_common_downstream import _index_result
+    archive = Path(archive).resolve(strict=True)
+    receipt = read_json(package_receipt)
+    if receipt.get("state") != "PASS" or receipt.get("K_EFFECTIVE") != 15 or receipt.get("main_matrix_write") is not False:
+        raise ValueError("L0_PACKAGE_RECEIPT_NOT_PASS")
+    if archive.stat().st_size != receipt["bytes"] or sha256_file(archive) != receipt["sha256"]:
+        raise ValueError("L0_TRANSFER_HASH_MISMATCH")
+    output = Path(output_root).resolve()
+    if output.exists() or output in archive.parents or archive.parent in output.parents:
+        raise ValueError("L0_IMPORT_REQUIRES_FRESH_DISJOINT_ROOT")
+    contents = {}
+    with tarfile.open(archive, "r:gz") as handle:
+        total = 0
+        for member in handle:
+            path = Path(member.name)
+            if (not member.isfile() or path.is_absolute() or ".." in path.parts or member.name in contents
+                    or not (member.name.startswith("result/") or member.name == "independent_package_audit.json")):
+                raise ValueError("L0_IMPORT_UNEXPECTED_ARCHIVE_MEMBER")
+            total += member.size
+            if total > 128 * 1024 * 1024:
+                raise ValueError("L0_SMALL_RESULT_PACKAGE_LIMIT_EXCEEDED")
+            contents[member.name] = handle.extractfile(member).read()
+    independent_bytes = contents["independent_package_audit.json"]
+    if hashlib.sha256(independent_bytes).hexdigest() != receipt["independent_audit_sha256"]:
+        raise ValueError("L0_INDEPENDENT_PACKAGE_AUDIT_HASH_MISMATCH")
+    independent = json.loads(independent_bytes)
+    expected = {"result/" + rel for rel in independent["files"]} | {"independent_package_audit.json"}
+    if set(contents) != expected or independent.get("state") != "PASS" or independent.get("selection_policy") != POLICY:
+        raise ValueError("L0_PACKAGE_INVENTORY_OR_PROTOCOL_MISMATCH")
+    for rel, identity in independent["files"].items():
+        data = contents["result/" + rel]
+        if len(data) != identity["size"] or hashlib.sha256(data).hexdigest() != identity["sha256"]:
+            raise ValueError("L0_INNER_RESULT_HASH_MISMATCH")
+    audit = json.loads(contents["result/final_audit.json"])
+    if audit.get("state") != "PASS" or audit.get("selection_policy") != POLICY or audit.get("main_matrix_write") is not False:
+        raise ValueError("L0_IMPORTED_FINAL_AUDIT_INVALID")
+    for rel, digest in audit["files"].items():
+        if hashlib.sha256(contents["result/" + rel]).hexdigest() != digest:
+            raise ValueError("L0_IMPORTED_FINAL_INVENTORY_INVALID")
+    output.mkdir(parents=True)
+    for rel, data in contents.items():
+        path = output / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as writer:
+            writer.write(data)
+            writer.flush()
+            __import__("os").fsync(writer.fileno())
+    result = output / "result"
+    _index_result(Path(registry_root).resolve(), "BRICS_FIXED", result, audit)
+    publication = {"state": "PASS", "schema_version": "bace_l0_scoped_result_import_v1",
+        "package_sha256": receipt["sha256"], "source_package": receipt["path"],
+        "imported_result_root": str(result), "registry_root": str(Path(registry_root).resolve()),
+        "final_audit_sha256": sha256_file(result / "final_audit.json"),
+        "K_EFFECTIVE": 15, "cohort_definition": "all_true_source_label_1_parents_as_main_BACE_load_bace_parents",
+        "main_matrix_write": False, "scientific_recomputation": False,
+        "GNN_native_common_cohort_used": False, "source_preserved": True}
+    atomic_json(output / "publication_receipt.json", publication)
+    return publication

@@ -26,18 +26,22 @@ def main(argv=None):
     package = phases.add_parser("package")
     for key in ("science-root", "gnn-input-bundle", "output-root"):
         package.add_argument("--" + key, required=True)
+    importer = phases.add_parser("import-result")
+    for key in ("archive", "package-receipt", "output-root", "registry-root"):
+        importer.add_argument("--" + key, required=True)
     args = vars(parser.parse_args(argv))
     if args.pop("config") != "configs/hpc.yaml" or set(args.pop("set")) - {"inference.fallback_to_heuristic=false"}:
         parser.error("Frozen reference only; arbitrary science overrides forbidden")
     phase = args.pop("phase")
     # This deployment is explicitly scoped to czx on HPC. Never write elsewhere.
-    allowed = Path("/share/home/u20526/czx")
+    allowed = Path("/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/ablations/llm") if phase == "import-result" else Path("/share/home/u20526/czx")
     for key in ("output_root", "registry_root"):
         if key in args:
             Path(args[key]).resolve().relative_to(allowed)
     if phase == "evaluate" and not 1 <= args["cpu_threads"] <= 8:
         parser.error("CPU threads must be 1..8")
-    result = {"prepare": route.prepare, "evaluate": route.run, "package": route.package}[phase](**args)
+    result = {"prepare": route.prepare, "evaluate": route.run, "package": route.package,
+              "import-result": route.import_package}[phase](**args)
     print(json.dumps(result, sort_keys=True, allow_nan=False))
     return 0 if phase == "prepare" or result.get("state") == "PASS" else 75
 

@@ -115,7 +115,8 @@ def test_real_saved_matrix_package_replays_without_model_or_ot(tmp_path, monkeyp
     atomic_json(bundle / "bundle_manifest.json", kwargs["manifest"])
     atomic_json(science / "run_manifest.json", {"bundle_sha256": sha256_file(bundle / "bundle_manifest.json")})
     atomic_jsonl(science / "candidate_universe.jsonl", kwargs["universe"])
-    audit = {"state": "PASS", "main_matrix_write": False,
+    audit = {"state": "PASS", "main_matrix_write": False, "selection_policy": successor.POLICY,
+             "binding_sha256": "b" * 64,
              "files": {p.name: sha256_file(p) for p in science.iterdir() if p.is_file() and p.name != "writer.lock"}}
     atomic_json(science / "final_audit.json", audit)
     monkeypatch.setattr(common.evaluation, "frozen_selector", lambda *_: kwargs["selector"])
@@ -127,3 +128,12 @@ def test_real_saved_matrix_package_replays_without_model_or_ot(tmp_path, monkeyp
         assert "result/test_pairs.jsonl" in archive.getnames()
         assert "result/final_audit.json" in archive.getnames()
         assert all("cache/" not in n for n in archive.getnames())
+    # Import checks small transport/inner hashes only; no numerical work repeats.
+    import_root = tmp_path / "autodl_fresh"
+    publication = successor.import_package(archive=result["path"], package_receipt=tmp_path / "package/result_package.json",
+        output_root=import_root, registry_root=tmp_path / "llm_registry")
+    assert publication["state"] == "PASS" and publication["scientific_recomputation"] is False
+    assert (import_root / "result/table2_k10.csv").read_bytes() == (science / "table2_k10.csv").read_bytes()
+    with pytest.raises(ValueError, match="FRESH_DISJOINT"):
+        successor.import_package(archive=result["path"], package_receipt=tmp_path / "package/result_package.json",
+            output_root=import_root, registry_root=tmp_path / "llm_registry")
