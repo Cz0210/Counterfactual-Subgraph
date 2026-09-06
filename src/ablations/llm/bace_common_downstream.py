@@ -308,7 +308,8 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                    gnn_verified_archive: str | Path, gnn_verified_sha256: str, registry_root: str | Path,
                    output_root: str | Path, resume: bool = False, device: str = "cpu", batch_size: int = 64,
                    cpu_threads: int = 2, portable_input_bundle: str | Path | None = None,
-                   train_adoption_overlay: str | Path | None = None) -> dict[str, Any]:
+                   train_adoption_overlay: str | Path | None = None,
+                   gnn_acceptance: str | Path | None = None, gnn_acceptance_sha256: str | None = None) -> dict[str, Any]:
     from src.ablations.llm.corrected_core_gate import require_corrected_gnn_core
     from src.ablations.llm.bace_readiness import generation_calls
     from src.eval.bace_frozen_gnn_pool import _score_generated_candidates
@@ -318,12 +319,17 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
     # No model is loaded and no science/output starts before independent GNN PASS.
     archive = Path(gnn_verified_archive).resolve(strict=True)
     adoption = None
+    if (gnn_acceptance is None) != (gnn_acceptance_sha256 is None):
+        raise ValueError("GNN_ACCEPTANCE_PATH_AND_SHA_MUST_BE_PAIRED")
     if train_adoption_overlay is not None:
         from src.ablations.llm.bace_l0_successor import load_train_adoption
         adoption = load_train_adoption(train_adoption_overlay)
         gnn_pass = adoption["source_manifest"]["gnn_independent_core"]
         _equal(gnn_pass["verified_archive_sha256"], gnn_verified_sha256, "adopted_GNN_archive")
         _equal(archive.stat().st_size, gnn_pass["bytes"], "adopted_GNN_archive_bytes")
+    elif gnn_acceptance is not None:
+        gnn_pass = require_corrected_gnn_core(archive, gnn_verified_sha256,
+            acceptance={"path": str(gnn_acceptance), "sha256": gnn_acceptance_sha256})
     else:
         _equal(sha256_file(archive), gnn_verified_sha256, "independent_GNN_archive")
         gnn_pass = require_corrected_gnn_core(archive, gnn_verified_sha256)

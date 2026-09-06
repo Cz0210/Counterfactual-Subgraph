@@ -31,6 +31,10 @@ python -c 'import sys,torch; print(sys.version); print("CUDA available:",torch.c
 extra=()
 if [[ "${LLM_RESUME:-0}" == 1 ]]; then extra+=(--resume); fi
 [[ -n "${L0_PORTABLE_INPUT_BUNDLE:-}" ]] && extra+=(--portable-input-bundle "$L0_PORTABLE_INPUT_BUNDLE")
+if [[ -n "${GNN_ACCEPTANCE:-}" ]]; then
+  : "${GNN_ACCEPTANCE_SHA256:?small acceptance SHA required}"
+  extra+=(--gnn-acceptance "$GNN_ACCEPTANCE" --gnn-acceptance-sha256 "$GNN_ACCEPTANCE_SHA256")
+fi
 # L0 HPC uses run_bace_l0_cpu.sh; this existing generic wrapper never creates leases.
 exec python -I -B scripts/ablations/llm/run_bace_common_downstream.py \
   --config configs/hpc.yaml --set inference.fallback_to_heuristic=false \

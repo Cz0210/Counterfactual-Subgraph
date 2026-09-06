@@ -21,6 +21,8 @@ def main() -> int:
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--portable-input-bundle", help="Read original AutoDL manifest bytes through a SHA-bound L0 HPC mapping")
+    parser.add_argument("--gnn-acceptance", help="Existing small corrected-GNN acceptance; avoids archive replay")
+    parser.add_argument("--gnn-acceptance-sha256")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--cpu-threads", type=int, default=2)
