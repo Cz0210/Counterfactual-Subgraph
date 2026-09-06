@@ -48,6 +48,8 @@ def evidence(tmp_path):
                 sample_count=10,materialization_rng_unchanged=True,all_masks_reconstructed_exactly=True,
                 sampler={'num_workers':0}))
     put(root/'canary.json',report)
+    put(root.parents[1]/'lazy_memory_progress.json',dict(samples=10,process_tree_peak_bytes=43*GIB,
+        min_headroom_bytes=419*GIB,failcnt=4306))
     return root
 
 
@@ -55,7 +57,8 @@ def test_complete_deterministic_evidence_reused_without_checkpoint_load(tmp_path
     root=evidence(tmp_path); before=(root.parent/'canary.json').read_bytes()
     result=d.inspect_evidence(root)
     assert result['backend']['cudnn_allow_tf32'] is True
-    assert result['process_peak_bytes']==23*GIB
+    assert result['process_peak_bytes']==43*GIB
+    assert result['single_pid_peak_bytes']==23*GIB
     assert set(result['targets'])=={'0','2'}
     assert before==(root.parent/'canary.json').read_bytes()
     assert not list(root.rglob('*.pt')) # No checkpoint reload or rehash during adoption.

@@ -145,8 +145,17 @@ def inspect_evidence(root):
                    for r in rows if "memory.limit_in_bytes" in r and "memory.usage_in_bytes" in r)
     if not failcnts or min(failcnts) != max(failcnts) or peak <= 0:
         raise ValueError("T13_MEMORY_EVENT_EVIDENCE_FAILED")
+    tree, tree_ref = bound_json(root.parents[1]/'lazy_memory_progress.json')
+    if (int(tree.get('samples',0))<1 or int(tree.get('process_tree_peak_bytes',0))<=0
+            or int(tree['failcnt'])!=max(failcnts)):
+        raise ValueError('T13_OWNER_PROCESS_TREE_EVIDENCE_REQUIRED')
+    refs['owner_process_tree_memory']=tree_ref
+    single_pid_peak=peak
+    peak=max(peak,int(tree['process_tree_peak_bytes']))
+    headroom=min(headroom,int(tree['min_headroom_bytes']))
     return dict(evidence=refs, targets=targets, backend=BACKEND,
-                process_peak_bytes=peak, min_headroom_bytes=headroom,
+                process_peak_bytes=peak, single_pid_peak_bytes=single_pid_peak,
+                min_headroom_bytes=headroom,
                 canary_failcnt_increment=0)
 
 
