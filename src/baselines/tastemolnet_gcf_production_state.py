@@ -475,7 +475,11 @@ class T12FirstSeenEmbeddingStore:
         feature_schema_sha256: str,
         resume_snapshot: Mapping[str, Any] | None = None,
         open_writer: bool = True,
+        history_read_cache: Any | None = None,
     ) -> None:
+        if history_read_cache is not None and (open_writer or resume_snapshot is None):
+            raise TasteT12ProductionStateError("T12 history cache is future read-only input")
+        self._history_read_cache = history_read_cache
         self.root = _normalized_absolute(root, field="T12 first embedding root")
         self.bounds = bounds
         self.contract_sha256 = _require_sha256(
@@ -589,7 +593,7 @@ class T12FirstSeenEmbeddingStore:
         locator = self._locators.get(graph_hash)
         if locator is None:
             return None
-        with locator.path.open("rb", buffering=0) as stream:
+        with self._open_read(locator.path) as stream:
             stream.seek(locator.raw_offset)
             raw = stream.read(locator.raw_length)
         if len(raw) != locator.raw_length or _sha256_bytes(raw) != locator.raw_sha256:
@@ -793,7 +797,7 @@ class T12FirstSeenEmbeddingStore:
             raise TasteT12ProductionStateError(
                 "T12 first embedding committed prefix is incomplete"
             )
-        with path.open("rb", buffering=0) as stream:
+        with self._open_read(path) as stream:
             magic = stream.read(len(FIRST_EMBEDDING_MAGIC))
             raw_header_length = stream.read(4)
             if magic != FIRST_EMBEDDING_MAGIC or len(raw_header_length) != 4:
@@ -1004,6 +1008,10 @@ class T12FirstSeenEmbeddingStore:
         self.chain_head = chain_head
         self._segments = restored
 
+    def _open_read(self, path: Path):
+        return (path.open("rb", buffering=0) if self._history_read_cache is None
+                else self._history_read_cache.open(path))
+
     def close(self) -> None:
         if self._active_stream is not None:
             self._active_stream.close()
@@ -1024,7 +1032,13 @@ class T12CompactHistoryJournal:
         generation_token: str,
         resume_snapshot: Mapping[str, Any] | None = None,
         open_writer: bool = True,
+        history_read_cache: Any | None = None,
     ) -> None:
+        if history_read_cache is not None:
+            if open_writer or resume_snapshot is None:
+                raise TasteT12ProductionStateError("T12 history cache is future read-only input")
+            history_read_cache.require_snapshot(dict(resume_snapshot))
+        self._history_read_cache = history_read_cache
         self.root = _normalized_absolute(root, field="T12 history root")
         self.index_root = _normalized_absolute(
             index_root, field="T12 history index root"
@@ -1566,7 +1580,8 @@ class T12CompactHistoryJournal:
         )
         if not stat.S_ISREG(info.st_mode) or info.st_size < committed_bytes:
             raise TasteT12ProductionStateError("T12 history prefix is incomplete")
-        with path.open("rb", buffering=0) as stream:
+        with (path.open("rb", buffering=0) if self._history_read_cache is None
+              else self._history_read_cache.open(path)) as stream:
             magic = stream.read(len(HISTORY_MAGIC))
             raw_length = stream.read(4)
             if magic != HISTORY_MAGIC or len(raw_length) != 4:
@@ -1765,6 +1780,7 @@ class T12CompactHistoryJournal:
                 ),
                 resume_snapshot=embedding_snapshot,
                 open_writer=False,
+                history_read_cache=self._history_read_cache,
             )
             self._first_embedding_store_required = True
             self._validate_first_embedding_alignment()

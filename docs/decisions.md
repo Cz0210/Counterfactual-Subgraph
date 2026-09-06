@@ -18530,3 +18530,17 @@ engineering retry. Record the temperature driver and the verifier driver separat
 - The owning native canary forwards a resource-stop SIGTERM only to its newly
   created deterministic child and waits for exit before releasing the GPU lease.
   No process-group signals or forced kill are used.
+# 2026-09-06: Future-only local T12 history reads without active-reader intervention
+
+- The user permits a new reader to use an immutable local copy of a sealed,
+  no-writer history; the current reader173495 and owner162844 remain untouched.
+- Reuse the exact original journal/first-seen decoder and state contracts.
+  One source-copy hash and one local verification bind read-only cache files;
+  unchanged subsequent openings use small manifest/stat checks, not repeated
+  large source SHA scans. Local streams use a bounded1MiB buffer.
+- Require a dead producer, no writable source FDs, exact committed byte counts,
+  fresh local paths and unchanged explicit byte/inode reserves. Never copy
+  an unproven active history, promote diagnostic state, or open a cache writer.
+- Keep timing of first copy separate from subsequent local decoding; do not
+  claim cold kernel caches, scientific step progress or full-runtime speedup.
+  See `docs/AUTODL_T12_FUTURE_HISTORY_CACHE_20260906.md`.
