@@ -262,3 +262,20 @@ def test_independent_gnn_gate_precedes_every_model_or_output(tmp_path, monkeypat
             gnn_input_bundle=tmp_path / "missing_bundle", gnn_verified_archive=archive,
             gnn_verified_sha256=sha256_file(archive), registry_root=tmp_path / "llm_registry", output_root=output)
     assert not output.exists()
+
+
+def test_existing_small_acceptance_avoids_outer_archive_scan(tmp_path, monkeypatch):
+    import src.ablations.llm.corrected_core_gate as verifier
+    archive = tmp_path / "archive.tar.gz"
+    archive.write_bytes(b"fixture")
+    def accepted(path, sha, *, acceptance):
+        assert path == archive and sha == "a" * 64
+        assert acceptance == {"path": str(tmp_path / "accepted.json"), "sha256": "b" * 64}
+        raise RuntimeError("STOP_AFTER_SMALL_ACCEPTANCE")
+    monkeypatch.setattr(verifier, "require_corrected_gnn_core", accepted)
+    monkeypatch.setattr(route, "sha256_file", lambda *_: pytest.fail("No archive scan before acceptance"))
+    with pytest.raises(RuntimeError, match="STOP_AFTER_SMALL_ACCEPTANCE"):
+        route.run_downstream(task_spec=tmp_path / "missing", candidate_root=tmp_path / "missing",
+            gnn_input_bundle=tmp_path / "missing", gnn_verified_archive=archive,
+            gnn_verified_sha256="a" * 64, registry_root=tmp_path / "registry", output_root=tmp_path / "fresh",
+            gnn_acceptance=tmp_path / "accepted.json", gnn_acceptance_sha256="b" * 64)

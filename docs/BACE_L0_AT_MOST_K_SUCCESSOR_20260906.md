@@ -53,3 +53,9 @@ a fresh AutoDL LLM result import; do not transport T8/GNN packages again.
 Tests: `tests/test_bace_llm_common_downstream.py` and
 `tests/test_bace_l0_evaluation_successor.py`. Tests use CPU tiny fixtures and
 explicitly preserve old source bytes; no full model is loaded.
+
+All LLM common evaluation CLIs also accept paired `--gnn-acceptance` and
+`--gnn-acceptance-sha256` flags. The existing owner acceptance verifies its
+small receipt and unchanged archive stat identity without archive hashing or
+GNN replay. The paired generic wrapper passes `GNN_ACCEPTANCE` and
+`GNN_ACCEPTANCE_SHA256`; absent flags retain first-adoption verification.
