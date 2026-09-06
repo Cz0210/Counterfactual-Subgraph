@@ -160,7 +160,8 @@ class ResourceSampler:
         retired = set()
         for row in registry["tasks"]:
             successor = task_by_id.get(row.get("successor_task_id"))
-            terminal = row["owner_state"] in {"TERMINAL_FAILED_ENGINEERING", "SUPERSEDED", "RETIRED"}
+            terminal = row["owner_state"] in {"TERMINAL_FAILED_ENGINEERING", "SUPERSEDED", "RETIRED"} or (
+                row["owner_state"] == "BLOCKED" and successor is not None)
             held = any(lease["task_id"] == row["task_id"] and lease["state"] != "RELEASED"
                        for lease in registry["gpu_leases"])
             same_cell_successor = successor and all(successor[k] == row[k] for k in ("dataset", "method"))
@@ -175,6 +176,12 @@ class ResourceSampler:
                                 "reservation_released_by_this_sampler": False})
         if not heartbeat_paths:
             blockers.append("MAIN_READY_SOURCE_COVERAGE_UNAVAILABLE")
+        # A configured predecessor source can be retired only through the
+        # existing registry's explicit same-cell successor and released lease.
+        # The successor's real PID/heartbeat is still checked below. This does
+        # not suppress an arbitrary stale source or clear any reservation.
+        heartbeat_paths.difference_update(row.get("heartbeat") for row in registry["tasks"]
+                                         if row["task_id"] in retired)
         for row in registry["tasks"]:
             if row["task_id"] in retired:
                 continue

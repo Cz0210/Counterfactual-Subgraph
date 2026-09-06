@@ -18622,3 +18622,9 @@ Future LLM common evaluation may use lossless node embeddings inside its own
 existing distance DB, validated against the original NPZ path and exact OT
 caller. This is storage-only, not a new encoder/distance or a conversion of
 completed GNN/L0 caches. See `docs/STAGE_RESOURCE_POLICY_20260907.md`.
+
+The existing LLM provider may retire a configured predecessor heartbeat only
+after the canonical registry explicitly binds a same-cell successor and the old
+GPU reservation is released. The successor's live PID and fresh heartbeat still
+must pass. A legacy BLOCKED owner with an explicit successor is not relabeled
+as scientifically PASS; arbitrary stale paths and unbound failures still block.

@@ -108,6 +108,28 @@ def test_busy_inventory_resets_idle_even_with_fresh_json(tmp_path):
     assert "FOREIGN_CUDA_PROCESS_ON_TARGET_GPU" in result["source_blockers"]
 
 
+def test_retired_configured_source_requires_real_same_cell_successor(tmp_path):
+    cfg, heartbeat = source_fixture(tmp_path)
+    path = Path(cfg["main_registry_path"])
+    registry = json.loads(path.read_text())
+    predecessor = dict(registry["tasks"][0])
+    predecessor.update(task_id="retired-t13", owner_state="BLOCKED", owner_pid=None,
+        owner_start_ticks=None, heartbeat=str(tmp_path / "old-stale.json"), successor_task_id="t13")
+    atomic_json(tmp_path / "old-stale.json", {"state": "RUNNING", "updated_epoch": 0})
+    cfg["main_ready_sources"] = [predecessor["heartbeat"]]
+    registry = build_owner_registry(registry_id="fixture", matrix_authority_root=tmp_path,
+        tasks=[predecessor, registry["tasks"][0]], publishers=registry["publishers"],
+        gpu_leases=registry["gpu_leases"], check_processes=False)
+    atomic_json(path, registry)
+    gpu = GPUObservation(0, "GPU-fixture", "CPU fake", 1000, 0, 1000, 0)
+    result = owner.ResourceSampler(cfg, 0, gpu.uuid, inventory=lambda: [gpu]).sample()
+    assert result["owners_healthy"]
+    assert all("old-stale" not in error for error in result["source_blockers"])
+    (tmp_path / "proc/41/stat").unlink()
+    result = owner.ResourceSampler(cfg, 0, gpu.uuid, inventory=lambda: [gpu]).sample()
+    assert not result["owners_healthy"]
+
+
 class TransportSampler:
     """Fixture ONLY for transport: actual clocks, fake GPU measurement."""
     def __init__(self, config):
