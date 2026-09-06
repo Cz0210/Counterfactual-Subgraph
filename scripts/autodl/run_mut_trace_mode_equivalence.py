@@ -466,19 +466,28 @@ def _sqlite_logical_audit(path: Path) -> dict[str, Any]:
         connection.close()
 
 
-def _checkpoint_state_audit(checkpoint_dir: Path, *, mode: str) -> dict[str, Any]:
+def _checkpoint_state_audit(checkpoint_dir: Path, *, mode: str,
+                            expected_step: int = STEPS_TO_COMPARE) -> dict[str, Any]:
     root = _absolute(checkpoint_dir)
     state_path = root / "generation_state.pt"
     sqlite_path = root / "authoritative_graph_store.sqlite3"
     manifest_path = root / "checkpoint_manifest.json"
+    manifest = _physical_json(manifest_path)
+    payload_hashes = {}
+    for path in (state_path, sqlite_path):
+        identity = manifest.get("files", {}).get(path.name, {})
+        digest = sha256_file(path)
+        if path.stat().st_size != identity.get("bytes") or digest != identity.get("sha256"):
+            raise ValueError(f"Checkpoint payload does not match sealed manifest: {path}")
+        payload_hashes[path.name] = digest
     state = _torch_load(state_path)
     if (
-        int(state.get("completed_step", -1)) != STEPS_TO_COMPARE
-        or int(state.get("next_step", -1)) != STEPS_TO_COMPARE + 1
+        int(state.get("completed_step", -1)) != expected_step
+        or int(state.get("next_step", -1)) != expected_step + 1
         or state.get("fully_completed_step") is not True
         or int(state.get("total_steps", -1)) != FORMAL_M_MAX
     ):
-        raise ValueError(f"Invalid step-500 checkpoint state: {root}")
+        raise ValueError(f"Invalid step-{expected_step} checkpoint state: {root}")
     algorithm = state.get("algorithm_state")
     rng = state.get("rng_state")
     trace_state = state.get("trace_state")
@@ -522,12 +531,13 @@ def _checkpoint_state_audit(checkpoint_dir: Path, *, mode: str) -> dict[str, Any
     algorithm_scientific = _checkpoint_scientific_plain(algorithm)
     rng_plain = _science_plain(rng)
     sqlite_audit = _sqlite_logical_audit(sqlite_path)
-    manifest = _physical_json(manifest_path)
     return {
+        "completed_step": expected_step,
+        "next_step": expected_step + 1,
         "checkpoint_dir": str(root),
         "checkpoint_manifest_sha256": sha256_file(manifest_path),
         "checkpoint_digest": manifest.get("checkpoint_digest"),
-        "state_file_sha256": sha256_file(state_path),
+        "state_file_sha256": payload_hashes[state_path.name],
         "trace_state_intentionally_excluded_from_scientific_digest": True,
         "trace_state_schema": trace_state.get("schema_version"),
         "algorithm_full_state_sha256": stable_json_sha256(algorithm_full),
@@ -1052,7 +1062,8 @@ class _CommonStepObserver:
 
     def __init__(self, path: Path, *, phase: str, trace_mode: str,
                  checkpoint_root: Path | None = None,
-                 resume_boundary: Mapping[str, Any] | None = None) -> None:
+                 resume_boundary: Mapping[str, Any] | None = None,
+                 stop_step: int = STEPS_TO_COMPARE + POST_RELOAD_STEPS) -> None:
         self.path = path
         self.phase = phase
         self.trace_mode = trace_mode
@@ -1063,6 +1074,9 @@ class _CommonStepObserver:
         self.populate_event_scope = "pre_step_initialization"
         self.history_digest = "0" * 64
         self.checkpoint_root = checkpoint_root
+        if stop_step not in (250, STEPS_TO_COMPARE + POST_RELOAD_STEPS):
+            raise ValueError("Only the authorized 250 replay or 510 diagnostic boundary is allowed")
+        self.stop_step = stop_step
         self.expected_next_step = 1
         if resume_boundary is not None:
             if phase != "continuous":
@@ -1633,9 +1647,7 @@ class _CommonStepObserver:
 
             def observed_boundary(state: Any) -> None:
                 observer.completed_boundary(state, module, original_boundary)
-                if int(state.completed_step) == (
-                    STEPS_TO_COMPARE + POST_RELOAD_STEPS
-                ):
+                if int(state.completed_step) == observer.stop_step:
                     # The complete JSONL row is fsync'd before this exact-PID
                     # self-stop.  No step-511 code can run and no broad process
                     # lookup or extra RNG draw is introduced.
@@ -1712,6 +1724,7 @@ def _run_one(args: argparse.Namespace) -> int:
         trace_mode=args.trace_mode,
         checkpoint_root=output / "generation_checkpoints",
         resume_boundary=resume_boundary if args.phase == "continuous" else None,
+        stop_step=args.stop_step,
     )
     observer.install(runtime)
     scientific_argv = (
@@ -1891,6 +1904,7 @@ def _stop_after(
     phase: str,
     marker: Path,
     observer: Path,
+    exact_stop_step: int = STEPS_TO_COMPARE + POST_RELOAD_STEPS,
 ) -> dict[str, Any]:
     log.parent.mkdir(parents=True, exist_ok=True)
     environment = {
@@ -1943,7 +1957,6 @@ def _stop_after(
                     allow_unterminated_live_tail=True,
                 )
                 observed_max = max(rows, default=0)
-                exact_stop_step = STEPS_TO_COMPARE + POST_RELOAD_STEPS
                 if observed_max > exact_stop_step:
                     stop_reason = "observer_overran_exact_step_510_boundary"
                     break
@@ -1964,12 +1977,16 @@ def _stop_after(
                     -signal.SIGTERM,
                     128 + signal.SIGTERM,
                 } and marker.is_file():
-                    _validate_observer_log(
-                        observer,
-                        trace_mode=mode,
-                        require_reload=phase == "reload",
-                    )
-                    stop_reason = "self_signaled_exact_step_510_boundary"
+                    if exact_stop_step == 250 and phase == "continuous":
+                        _common_boundary_module().observer_prefix(
+                            observer, phase=phase, trace_mode=mode, stop_step=250,
+                            science_digest=_CommonStepObserver.row_digest,
+                        )
+                    else:
+                        _validate_observer_log(
+                            observer, trace_mode=mode, require_reload=phase == "reload",
+                        )
+                    stop_reason = f"self_signaled_exact_step_{exact_stop_step}_boundary"
                 else:
                     stop_reason = "unexpected_process_exit"
         finally:
@@ -1991,7 +2008,7 @@ def _stop_after(
         raise RuntimeError(f"{mode}/{phase} produced no exact process receipt")
     if timed_out:
         raise TimeoutError(f"{mode}/{phase} did not reach step 510 in 72 hours")
-    if stop_reason != "self_signaled_exact_step_510_boundary":
+    if stop_reason != f"self_signaled_exact_step_{exact_stop_step}_boundary":
         raise RuntimeError(
             f"{mode}/{phase} exited before the verified boundary: "
             f"reason={stop_reason}, returncode={returncode}"
@@ -2005,9 +2022,10 @@ def _stop_after(
         "pid": process.pid,
         "pid_start_ticks": start_ticks,
         "returncode": returncode,
-        "checkpoint_500": str(marker.parent),
-        "checkpoint_500_complete": marker.is_file(),
+        ("checkpoint_250" if exact_stop_step == 250 else "checkpoint_500"): str(marker.parent),
+        ("checkpoint_250_complete" if exact_stop_step == 250 else "checkpoint_500_complete"): marker.is_file(),
         "observed_through_step": max(_phase_rows(observer, phase), default=0),
+        "exact_stop_step": exact_stop_step,
         "started_at_unix": started,
         "stopped_at_unix": stopped,
         "signal": "SIGTERM_SELF_AT_EXACT_BOUNDARY",
@@ -2039,6 +2057,106 @@ def _command(args: argparse.Namespace, *, mode: str, phase: str, arm: Path) -> l
     ]
 
 
+def _replay_contract(path: Path) -> dict[str, Any]:
+    value = _physical_json(path)
+    digest = value.get("contract_sha256")
+    if digest != stable_json_sha256({k: v for k, v in value.items() if k != "contract_sha256"}):
+        raise ValueError("Mut replay contract self hash changed")
+    expected = {"schema_version": "mut_resource_replay_250_v1", "replay_range": [1, 250],
+                "last_joint_completed_step": 0, "observed_event_range": [1, 249],
+                "skip_event_250": False, "route_b_on_resource_failure": False,
+                "source_algorithm_commit": SOURCE_COMMIT,
+                "instrumentation_commit": INSTRUMENTATION_COMMIT,
+                "pythonhashseed": "0"}
+    if any(value.get(key) != item for key, item in expected.items()):
+        raise ValueError("Mut authorized replay contract changed")
+    old = _absolute(value["original_checkpoint"])
+    binding = _common_boundary_module().checkpoint_binding(old, step=250)
+    if binding["manifest_sha256"] != value["original_checkpoint_manifest_sha256"]:
+        raise ValueError("Mut original250 small manifest binding changed")
+    return value
+
+
+def _require_no_checkpoint_writer(roots: Sequence[Path]) -> None:
+    """Before immutable SQLite reads, reject any writable FD to either snapshot."""
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            fds = list((process / "fd").iterdir())
+        except FileNotFoundError:
+            continue
+        for fd in fds:
+            try:
+                target = Path(os.readlink(fd))
+                if not any(target == root or root in target.parents for root in roots):
+                    continue
+                info = (process / "fdinfo" / fd.name).read_text()
+                flags = next(int(line.split()[1], 8) for line in info.splitlines()
+                             if line.startswith("flags:"))
+                if flags & os.O_ACCMODE != os.O_RDONLY:
+                    raise ValueError(f"Checkpoint has writable FD: PID={process.name}, FD={fd.name}")
+            except FileNotFoundError:
+                continue
+
+
+def _compare_replayed_250(args: argparse.Namespace) -> int:
+    """Separate verifier process, after replay child exit and before step251."""
+    contract = _replay_contract(_absolute(args.recovery_contract))
+    old = _absolute(contract["original_checkpoint"])
+    arm = _absolute(args.replayed_arm)
+    checkpoint = arm / "generation_checkpoints/step-000000000250"
+    observer = arm / "common_step_state.jsonl"
+    joint = _resume_common_boundary(arm, observer, phase="continuous", trace_mode="on")
+    if joint["checkpoint"]["completed_step"] != 250:
+        raise ValueError("Replayed A did not stop at a real jointly committed250")
+    _require_no_checkpoint_writer((old, checkpoint))
+    science = _absolute(args.science_project_root)
+    if _git_head(science) != INSTRUMENTATION_COMMIT:
+        raise ValueError("Replay verifier scientific checkout changed")
+    _install_science_root(science)
+    # Sequential deserialization bounds memory. Only known read-only sealed
+    # snapshots are audited; live graph SQLite/WAL are never opened.
+    before = _checkpoint_state_audit(old, mode="on", expected_step=250)
+    after = _checkpoint_state_audit(checkpoint, mode="on", expected_step=250)
+    keys = ("completed_step", "next_step", "algorithm_scientific_state_sha256",
+            "rng_state_sha256", "serialized_candidate_records_sha256",
+            "ordered_candidate_graph_hashes_sha256", "candidate_universe_sha256",
+            "graph_registry_mapping_sha256")
+    differences = [key for key in keys if before[key] != after[key]]
+    if before["sqlite"]["logical_database_sha256"] != after["sqlite"]["logical_database_sha256"]:
+        differences.append("checkpoint_sqlite_logical_state")
+    old_observer = _absolute(contract["original_observer"])
+    if sha256_file(old_observer) != contract["original_observer_sha256"]:
+        raise ValueError("Original observation ledger changed after recovery sealing")
+    original_rows = _phase_rows(old_observer, "continuous")
+    replay_rows = _phase_rows(observer, "continuous")
+    if list(original_rows) != list(range(1, 250)):
+        raise ValueError("Original common observer is not the authorized1..249 prefix")
+    first_prefix_difference = next((step for step in original_rows
+        if _row_science(original_rows[step]) != _row_science(replay_rows[step])), None)
+    if first_prefix_difference is not None:
+        differences.append("original1..249_observer_prefix")
+    result = {"schema_version": "mut_replayed250_comparison_v1",
+              "status": "PASS" if not differences else "BLOCKED_REPLAY_STATE_MISMATCH",
+              "replay_contract_sha256": contract["contract_sha256"],
+              "replay_range": [1, 250], "joint_boundary": joint,
+              "old_checkpoint": before, "replayed_checkpoint": after,
+              "independent_checkpoint_deserialization": True,
+              "runtime_restore251_not_yet_performed": True,
+              "missing_event_skipped": False, "resource_failure_triggers_route_b": False,
+              "first_observer_divergence_step": first_prefix_difference,
+              "differing_components": differences}
+    result["receipt_sha256"] = stable_json_sha256(result)
+    output = _absolute(args.output, exists=False)
+    if output.exists():
+        raise FileExistsError(output)
+    _atomic_json(output, result)
+    if differences:
+        raise RuntimeError(f"Replay250 mismatch; no Route B: {differences}")
+    return 0
+
+
 def _run_pair(args: argparse.Namespace) -> int:
     legacy = _absolute(args.legacy_project_root)
     execution = _absolute(args.execution_project_root)
@@ -2066,6 +2184,7 @@ def _run_pair(args: argparse.Namespace) -> int:
         raise ValueError("Checkpoint instrumentation source delta is not reviewed")
     run_root = _absolute(args.run_root, exists=False)
     output = _absolute(args.output_dir, exists=False)
+    recovery = _replay_contract(_absolute(args.recovery_contract)) if args.recovery_contract else None
     if run_root.exists() or output.exists():
         raise FileExistsError("Trace-mode roots must be fresh")
     run_root.mkdir(parents=True)
@@ -2147,6 +2266,7 @@ def _run_pair(args: argparse.Namespace) -> int:
         "arms_sequential": True,
         "max_concurrent_arms": 1,
         "common_boundary_policy": "observer_fsync_before_checkpoint_joint_receipt_v1",
+        "resource_recovery_contract_sha256": recovery["contract_sha256"] if recovery else None,
         "observer_driver_sha256": sha256_file(Path(__file__).resolve()),
         "common_boundary_driver_sha256": sha256_file(
             CONTROLLER_ROOT / "src/utils/autodl_mut_common_boundary_v1.py"
@@ -2200,13 +2320,34 @@ def _run_pair(args: argparse.Namespace) -> int:
     input_manifest["manifest_sha256"] = stable_json_sha256(input_manifest)
     _atomic_json(run_root / "equivalence_input_manifest.json", input_manifest)
     arm_receipts: list[dict[str, Any]] = []
+    replay_receipt = None
     for mode in ("on", "off"):
         arm = run_root / f"trace_{mode}"
         observer = arm / "common_step_state.jsonl"
         marker = arm / "checkpoint-mirror/step-000000000500/_CHECKPOINT_MIRRORED.json"
+        continuous_command = _command(args, mode=mode, phase="continuous", arm=arm)
+        if mode == "on" and recovery is not None:
+            arm_receipts.append(_stop_after(
+                [*continuous_command, "--stop-step", "250"],
+                log=run_root / "trace_on_replay_1_250.log", active=active,
+                mode=mode, phase="continuous", observer=observer,
+                marker=arm / "checkpoint-mirror/step-000000000250/_CHECKPOINT_MIRRORED.json",
+                exact_stop_step=250,
+            ))
+            comparison_path = run_root / "replayed250_comparison.json"
+            subprocess.run([
+                str(_absolute(args.python)), "-I", "-B", str(Path(__file__).resolve()),
+                "compare-replayed-250", "--recovery-contract", str(_absolute(args.recovery_contract)),
+                "--replayed-arm", str(arm), "--science-project-root", str(execution),
+                "--output", str(comparison_path),
+            ], check=True, env={**os.environ, "PYTHONHASHSEED": "0"})
+            replay_receipt = _physical_json(comparison_path)
+            if replay_receipt.get("status") != "PASS":
+                raise RuntimeError("Replay250 verifier did not pass; no step251 dispatch")
+            continuous_command.append("--resume")
         arm_receipts.append(
             _stop_after(
-                _command(args, mode=mode, phase="continuous", arm=arm),
+                continuous_command,
                 log=run_root / f"trace_{mode}_continuous.log",
                 active=active,
                 mode=mode,
@@ -2560,7 +2701,10 @@ def _run_pair(args: argparse.Namespace) -> int:
         "arms_overlapped": overlap_audit["arms_overlapped"],
         "max_concurrent_arms": overlap_audit["max_concurrent_arms"],
         "execution_overlap_audit": overlap_audit,
-        "execution_order": ["trace_on_continuous", "trace_on_reload", "trace_off_continuous", "trace_off_reload"],
+        "execution_order": (["trace_on_replay_1_250", "independent_compare_old250",
+                             "trace_on_resume_251_510", "trace_on_reload_501_510",
+                             "trace_off_continuous", "trace_off_reload"] if recovery else
+                            ["trace_on_continuous", "trace_on_reload", "trace_off_continuous", "trace_off_reload"]),
         "calibration_loaded": False,
         "test_loaded": False,
         "input_manifest": str(run_root / "equivalence_input_manifest.json"),
@@ -2572,6 +2716,8 @@ def _run_pair(args: argparse.Namespace) -> int:
         "trace_off_checkpoint_state_audit": trace_off_checkpoint,
         "checkpoint_gates": checkpoint_gates,
         "arm_receipts": arm_receipts,
+        "resource_recovery_contract": recovery,
+        "replayed250_comparison": replay_receipt,
         "failures": failures,
     }
     result["summary_sha256"] = stable_json_sha256(result)
@@ -2661,6 +2807,12 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--trace-mode", choices=("on", "off"), required=True)
     one.add_argument("--phase", choices=("continuous", "reload"), required=True)
     one.add_argument("--resume", action="store_true")
+    one.add_argument("--stop-step", type=int, choices=(250, 510), default=510)
+    replay = commands.add_parser("compare-replayed-250")
+    replay.add_argument("--recovery-contract", required=True)
+    replay.add_argument("--replayed-arm", required=True)
+    replay.add_argument("--science-project-root", required=True)
+    replay.add_argument("--output", required=True)
     pair = commands.add_parser("run-pair")
     pair.add_argument("--python", required=True)
     pair.add_argument("--legacy-project-root", required=True)
@@ -2670,6 +2822,7 @@ def build_parser() -> argparse.ArgumentParser:
     pair.add_argument("--active-arm-path")
     pair.add_argument("--historical-artifact-root", required=True)
     pair.add_argument("--rf-oracle", required=True)
+    pair.add_argument("--recovery-contract")
     for target in (one, pair):
         target.add_argument("--upstream-root", required=True)
         target.add_argument("--dataset-dir", required=True)
@@ -2685,6 +2838,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.action == "plan-recovery":
         return _plan_recovery(args)
+    if args.action == "compare-replayed-250":
+        return _compare_replayed_250(args)
     return _run_one(args) if args.action == "run-one" else _run_pair(args)
 
 

@@ -22,6 +22,8 @@ echo "AutoDL-only guarded trace-mode gate; do not submit this Slurm wrapper."
 #   plan-recovery --arm-root /absolute/failed/trace_on --trace-mode on
 # `run-one --phase continuous --resume` requires a real jointly committed
 # boundary from this repaired driver; it cannot adopt the legacy missing250 row.
+# run-pair --recovery-contract uses fresh1..250, independent old250 comparison,
+# then joint-boundary251 continuation. This wrapper never launches that science.
 # This wrapper intentionally remains non-submitting/non-scientific.
 python scripts/autodl/run_mut_trace_mode_equivalence.py \
   --config configs/hpc.yaml \

@@ -73,6 +73,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--task-spec", type=_absolute, required=True)
     args = parser.parse_args(argv)
     spec = validate_same_contract_ab_spec(_json(args.task_spec), check_files=True)
+    if "recovery_contract" in spec:
+        # Admission precedes acquiring either lease. Existing files are not
+        # charged again;160 is the known new compact-layout reserve, not a claim
+        # that unknown dynamic peaks are zero.
+        storage = Path(spec["run_root"])
+        while not storage.exists():
+            storage = storage.parent
+        fs = os.statvfs(storage)
+        if (fs.f_favail < 100160 or fs.f_bavail * fs.f_frsize < 50 * 1024**3
+                or fs.f_bavail / max(1, fs.f_blocks) < 0.02):
+            raise RuntimeError("SEALED_WAITING_INODE: unchanged100000 guard +160 fixed reserve")
     if os.environ.get("CUDA_VISIBLE_DEVICES") != str(spec["gpu_index"]):
         raise RuntimeError("Mut A/B owner requires the exact assigned physical GPU")
     for field in ("run_root", "output_dir", "control_root"):

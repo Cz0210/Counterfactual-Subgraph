@@ -121,6 +121,8 @@ def build_same_contract_ab_spec(
         "gpu_uuid",
         "gpu_index",
     }
+    if "recovery_contract" in value:
+        required.add("recovery_contract")
     if set(value) != required:
         raise MutSameContractABSpecError(
             f"A/B template keys differ: missing={sorted(required - set(value))}, "
@@ -243,6 +245,8 @@ def build_same_contract_ab_spec(
         "bound_file_sha256s": bound_hashes,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if "recovery_contract" in value:
+        spec["recovery_contract_sha256"] = file_sha256(paths["recovery_contract"])
     spec["spec_sha256"] = stable_sha256(spec)
     return validate_same_contract_ab_spec(spec, check_files=check_files)
 
@@ -323,6 +327,22 @@ def validate_same_contract_ab_spec(
     if not deployed_pre_gpu_lock_spec:
         path_fields = (*path_fields, "gpu_lock_root")
     paths = {field: _absolute(value.get(field), field=field) for field in path_fields}
+    if "recovery_contract" in value:
+        path = _absolute(value["recovery_contract"], field="recovery_contract")
+        if file_sha256(path) != value.get("recovery_contract_sha256"):
+            raise MutSameContractABSpecError("Recovery contract bytes changed")
+        contract = json.loads(path.read_text())
+        expected_recovery = {"schema_version": "mut_resource_replay_250_v1",
+                             "replay_range": [1, 250], "last_joint_completed_step": 0,
+                             "observed_event_range": [1, 249], "skip_event_250": False,
+                             "route_b_on_resource_failure": False,
+                             "source_algorithm_commit": SOURCE_COMMIT,
+                             "instrumentation_commit": INSTRUMENTATION_COMMIT,
+                             "pythonhashseed": "0"}
+        if any(contract.get(k) != v for k, v in expected_recovery.items()):
+            raise MutSameContractABSpecError("Recovery scientific contract changed")
+        if stable_sha256({k: v for k, v in contract.items() if k != "contract_sha256"}) != contract.get("contract_sha256"):
+            raise MutSameContractABSpecError("Recovery contract self hash changed")
     if value.get("gpu_index") != 0 or isinstance(value.get("gpu_index"), bool):
         raise MutSameContractABSpecError("Mut A/B is pinned to physical GPU0")
     if not deployed_pre_gpu_lock_spec:
@@ -421,6 +441,8 @@ def same_contract_ab_command(spec: Mapping[str, Any]) -> list[str]:
         "cuda:0",
         "--batch-size",
         "128",
+        *(["--recovery-contract", str(value["recovery_contract"])]
+          if "recovery_contract" in value else []),
     ]
 
 
