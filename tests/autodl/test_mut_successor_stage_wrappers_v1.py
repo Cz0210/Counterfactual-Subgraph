@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+import scripts.autodl.append_non_taste_matrix_authority as append_cli
+import scripts.autodl.publish_mut_successor_v1 as publish_cli
+import scripts.autodl.reopen_mut_successor_export_v1 as export_cli
 import scripts.autodl.run_mut_next_stage_executor_v1 as executor_cli
 import scripts.autodl.run_mut_route_b_closeout_v1 as route_b_cli
 from src.utils.autodl_mut_next_stage_executor_v1 import MutNextStageError
@@ -56,19 +59,38 @@ def _validator(root: Path, **_kwargs: object) -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize("with_startup_repair", [False, True])
 def test_strict_reopen_seals_existing_exports_without_recomputation(
-    tmp_path: Path,
+    tmp_path: Path, with_startup_repair: bool,
 ) -> None:
     source = _source(tmp_path)
     proc = tmp_path / "proc"
     proc.mkdir()
     output = tmp_path / "export-stage"
+    repair_kwargs = (
+        {"startup_repair_receipt": tmp_path / "startup-repair.json"}
+        if with_startup_repair
+        else {}
+    )
+    validator_calls: list[Path] = []
+
+    def validator(
+        root: Path, *, proc_root: Path, require_writer_audit: bool, **kwargs: object
+    ) -> dict[str, object]:
+        assert proc_root == proc
+        assert require_writer_audit is True
+        assert kwargs == repair_kwargs
+        validator_calls.append(root)
+        return _validator(root)
+
     terminal = reopen_completed_export(
         terminal_root=source,
         output_root=output,
         proc_root=proc,
-        terminal_validator=_validator,
+        terminal_validator=validator,
+        **repair_kwargs,
     )
+    assert validator_calls == [source]
     assert terminal["schema_version"] == EXPORT_SCHEMA
     assert terminal["status"] == "PASS"
     assert terminal["scientific_metrics_recomputed"] is False
@@ -131,16 +153,36 @@ def _registry(
     return _json(tmp_path / "registry.json", value)
 
 
-def test_publish_appends_once_and_then_writes_canonical_locator(tmp_path: Path) -> None:
+@pytest.mark.parametrize("with_startup_repair", [False, True])
+def test_publish_appends_once_and_then_writes_canonical_locator(
+    tmp_path: Path, with_startup_repair: bool,
+) -> None:
     source = _source(tmp_path)
     proc = tmp_path / "proc"
     proc.mkdir()
     export_root = tmp_path / "export-stage"
+    repair_kwargs = (
+        {"startup_repair_receipt": tmp_path / "startup-repair.json"}
+        if with_startup_repair
+        else {}
+    )
+    validator_calls: list[Path] = []
+
+    def validator(
+        root: Path, *, proc_root: Path, require_writer_audit: bool, **kwargs: object
+    ) -> dict[str, object]:
+        assert proc_root == proc
+        assert require_writer_audit is True
+        assert kwargs == repair_kwargs
+        validator_calls.append(root)
+        return _validator(root)
+
     reopen_completed_export(
         terminal_root=source,
         output_root=export_root,
         proc_root=proc,
-        terminal_validator=_validator,
+        terminal_validator=validator,
+        **repair_kwargs,
     )
     authority = tmp_path / "authority"
     authority.mkdir()
@@ -159,6 +201,9 @@ def test_publish_appends_once_and_then_writes_canonical_locator(tmp_path: Path) 
     calls: list[str] = []
 
     def append_cell(**kwargs: object) -> dict[str, object]:
+        assert {
+            key: value for key, value in kwargs.items() if key == "startup_repair_receipt"
+        } == repair_kwargs
         calls.append("cell")
         Path(str(kwargs["output_root"])).mkdir()
         return {
@@ -185,10 +230,12 @@ def test_publish_appends_once_and_then_writes_canonical_locator(tmp_path: Path) 
         output_root=tmp_path / "publish-stage",
         proc_root=proc,
         git_identity={"commit": commit, "tree": "b" * 40},
-        terminal_validator=_validator,
+        terminal_validator=validator,
         append_cell=append_cell,
         append_pointer=append_pointer,
+        **repair_kwargs,
     )
+    assert validator_calls == [source, source]
     assert calls == ["pointer", "cell"]
     assert terminal["status"] == "PASS"
     locator_payload = json.loads(locator.read_text(encoding="utf-8"))
@@ -343,6 +390,62 @@ def test_route_b_cli_uses_executor_bound_consumed_decision(
     monkeypatch.setattr(route_b_cli, "write_route_b_adapter_blocker", blocker)
     assert route_b_cli.main(["--output-root", str(tmp_path / "blocked")]) == 0
     assert observed["decision_path"] == decision.resolve()
+
+
+@pytest.mark.parametrize("route", ["export", "publish", "append"])
+@pytest.mark.parametrize("with_startup_repair", [False, True])
+def test_startup_repair_cli_argument_is_forwarded_only_when_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    route: str, with_startup_repair: bool,
+) -> None:
+    paths = {
+        "terminal-root": tmp_path / "source-terminal",
+        "output-root": tmp_path / "stage-output",
+    }
+    if route == "export":
+        module = export_cli
+        function_name = "reopen_completed_export"
+    elif route == "publish":
+        module = publish_cli
+        function_name = "publish_canonical_mut_cell"
+        paths.update({
+            "export-receipt": tmp_path / "export/terminal.json",
+            "owner-registry": tmp_path / "registry.json",
+            "publisher-locator": tmp_path / "locator.json",
+            "publisher-lease-path": tmp_path / "publisher.lock",
+            "matrix-authority-root": tmp_path / "authority",
+            "matrix-output-root": tmp_path / "matrix-output",
+        })
+    else:
+        module = append_cli
+        function_name = "append_non_taste_matrix_cell"
+        paths["cell-terminal-root"] = paths.pop("terminal-root")
+
+        def append_pointer(**kwargs: object) -> dict[str, object]:
+            return dict(kwargs["append"](tmp_path / "prior-authority"))
+
+        monkeypatch.setattr(module, "append_under_authority_pointer", append_pointer)
+    argv = [part for key, value in paths.items() for part in (f"--{key}", str(value))]
+    if route == "publish":
+        argv.extend(["--publisher-id", "mut-publisher"])
+    elif route == "append":
+        argv.extend(["--dataset", "Mutagenicity", "--method", "ComRecGC"])
+    receipt_path = tmp_path / "startup-repair.json"
+    if with_startup_repair:
+        argv.extend(["--startup-repair-receipt", str(receipt_path)])
+    calls: list[dict[str, object]] = []
+
+    def stage(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"status": "PASS", "marker": "[TEST_ONLY]"}
+
+    monkeypatch.setattr(module, function_name, stage)
+    assert module.main(argv) == 0
+    assert len(calls) == 1
+    if with_startup_repair:
+        assert calls[0]["startup_repair_receipt"] == receipt_path
+    else:
+        assert "startup_repair_receipt" not in calls[0]
 
 
 def test_slurm_wrappers_follow_the_pinned_repository_contract() -> None:

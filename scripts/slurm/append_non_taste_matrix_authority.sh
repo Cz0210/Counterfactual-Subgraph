@@ -19,6 +19,7 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
+echo "Optional --startup-repair-receipt /absolute/receipt.json binds typed Mut startup repair; strict terminal checks remain required."
 exec python scripts/autodl/append_non_taste_matrix_authority.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \

@@ -1025,6 +1025,36 @@ def test_mut_fast_accurate_terminal_rejects_false_trace_parity_claim(
         )
 
 
+def test_mut_startup_supersession_is_explicit_and_keeps_scientific_gate(tmp_path, monkeypatch):
+    from src.eval import mut_startup_repair_supersession as repair
+    fixture = _mut_fast_accurate_final_fixture(tmp_path)
+    root = Path(fixture["root"])
+    _json(root / "FAILED.json", {"preserved": "startup failure"})
+    with pytest.raises(NonTasteMatrixAppendError, match="failure sentinel"):
+        _validate_mut_terminal(root, proc_root=tmp_path / "proc", require_writer_audit=False)
+    receipt = tmp_path / "explicit-control-receipt.json"
+    seen = []
+    def supersession(source, explicit_receipt, **kwargs):
+        seen.append((source, explicit_receipt))
+        return {"status": "RESOLVED_PRE_SCIENCE_STARTUP_FAILURE", "scientific_validation_bypassed": False}
+    monkeypatch.setattr(repair, "validate_startup_repair_supersession", supersession)
+    monkeypatch.setattr(append_module, "validate_mut_historical_adoption", lambda *a, **k: fixture["historical"])
+    monkeypatch.setattr(append_module, "verify_mut_adopted_generation_integrity", lambda *a: fixture["reopened_integrity"])
+    evidence = _validate_mut_terminal(root, proc_root=tmp_path / "proc", require_writer_audit=False,
+        startup_repair_receipt=receipt)
+    assert seen == [(root, receipt)]
+    assert evidence["startup_failure_supersession"]["scientific_validation_bypassed"] is False
+    # A valid control-only supersession cannot excuse a scientifically false
+    # trace-parity claim in otherwise matching terminal manifests.
+    run = json.loads((root / "run_manifest.json").read_text())
+    run["trace_parity_passed"] = True
+    for name in ("run_manifest.json", "final_gate.json"): _json(root / name, run)
+    _json(root / "_RUN_COMPLETE.json", {**run, "run_complete": True})
+    with pytest.raises(NonTasteMatrixAppendError, match="terminal contract changed"):
+        _validate_mut_terminal(root, proc_root=tmp_path / "proc", require_writer_audit=False,
+            startup_repair_receipt=receipt)
+
+
 def test_mut_fast_accurate_terminal_rejects_pair_universe_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -18667,3 +18667,14 @@ the pinned original runner, scientific argv and imports unchanged. New control
 and original scientific commits are recorded separately. This does not repeat
 chemistry, generation, pair-store or DBSCAN, nor authorize partial-evaluation
 recovery. See `docs/MUT_CHEMISTRY_STARTUP_REPAIR_20260907.md`.
+
+### 2026-09-07 — Explicit publication of a resolved startup failure
+
+The Mut repair completed all three original post-chemistry stages, but the
+preserved earlier FAILED.json still triggered the publication sentinel guard.
+An explicit startup-repair receipt may now prove this exact, pre-science
+control failure was superseded. Pinned repair/source identities, preserved
+bytes, ordered original stage receipts, final closure and no-writer checks
+are required; other failures remain rejected. Ordinary scientific validation
+still runs. The publication driver is recorded separately from the unchanged
+fbefa4ca science, and no old terminal is deleted or relabeled.

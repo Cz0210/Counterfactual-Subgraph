@@ -40,11 +40,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--matrix-output-root", type=_absolute, required=True)
     parser.add_argument("--output-root", type=_absolute, required=True)
     parser.add_argument("--proc-root", type=_absolute, default=Path("/proc"))
+    parser.add_argument(
+        "--startup-repair-receipt",
+        type=_absolute,
+        help="Explicit typed Mut startup-repair receipt; does not waive terminal checks.",
+    )
     args = parser.parse_args(argv)
     if args.config not in (None, "configs/hpc.yaml"):
         raise ValueError("--config must be configs/hpc.yaml")
     if args.set not in ([], ["inference.fallback_to_heuristic=false"]):
         raise ValueError("unsupported --set override")
+    repair_kwargs = (
+        {"startup_repair_receipt": args.startup_repair_receipt}
+        if args.startup_repair_receipt is not None
+        else {}
+    )
     result = publish_canonical_mut_cell(
         terminal_root=args.terminal_root,
         export_receipt=args.export_receipt,
@@ -56,6 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         matrix_output_root=args.matrix_output_root,
         output_root=args.output_root,
         proc_root=args.proc_root,
+        **repair_kwargs,
     )
     print(json.dumps(result, sort_keys=True), flush=True)
     print("[MUT_SUCCESSOR_CANONICAL_PUBLISH_PASS]", flush=True)

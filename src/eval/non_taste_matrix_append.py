@@ -1457,11 +1457,21 @@ def _validate_mut_fast_accurate_terminal(
     *,
     proc_root: str | Path,
     require_writer_audit: bool,
+    startup_repair_receipt: str | Path | None = None,
 ) -> dict[str, Any]:
     """Reopen the historical trace-on 50k adoption terminal truthfully."""
 
     root = _physical_directory(root_like, label="Mut fast-accurate standardization root")
-    if any((root / name).exists() for name in ("FAILED", "FAILED.json", "FAIL.json")):
+    startup_supersession = None
+    if startup_repair_receipt is not None:
+        from src.eval.mut_startup_repair_supersession import validate_startup_repair_supersession
+        try:
+            startup_supersession = validate_startup_repair_supersession(
+                root, Path(startup_repair_receipt), proc_root=Path(proc_root))
+        except Exception as exc:
+            raise NonTasteMatrixAppendError(f"Mut startup-repair supersession rejected: {exc}") from exc
+    if any((root / name).exists() or (root / name).is_symlink()
+           for name in (("FAILED", "FAIL.json") if startup_supersession else ("FAILED", "FAILED.json", "FAIL.json"))):
         raise NonTasteMatrixAppendError(
             "Mut fast-accurate standardization root contains a failure sentinel"
         )
@@ -1712,6 +1722,7 @@ def _validate_mut_fast_accurate_terminal(
     )
     return {
         "terminal_kind": "MUT_FAST_ACCURATE_STANDARDIZATION_FINAL",
+        "startup_failure_supersession": startup_supersession,
         "root": str(root),
         "run_manifest_sha256": _sha(root / "run_manifest.json"),
         "final_gate_sha256": _sha(root / "final_gate.json"),
@@ -2031,6 +2042,7 @@ def _validate_mut_terminal(
     *,
     proc_root: str | Path,
     require_writer_audit: bool,
+    startup_repair_receipt: str | Path | None = None,
 ) -> dict[str, Any]:
     """Dispatch only between the explicit Mut production terminals."""
 
@@ -2040,6 +2052,8 @@ def _validate_mut_terminal(
         label="Mut run manifest",
     )
     schema = run.get("schema_version")
+    if startup_repair_receipt is not None and schema != MUT_FAST_ACCURATE_RUN_SCHEMA:
+        raise NonTasteMatrixAppendError("Startup-repair receipt requires the exact Mut fast-accurate route")
     if schema == _MUT_PARITY_RUN_SCHEMA:
         return _validate_mut_parity_terminal(
             root,
@@ -2051,6 +2065,7 @@ def _validate_mut_terminal(
             root,
             proc_root=proc_root,
             require_writer_audit=require_writer_audit,
+            startup_repair_receipt=startup_repair_receipt,
         )
     if schema == MUT_RUN_SCHEMA:
         return _validate_mut_exact_terminal(
@@ -2145,6 +2160,7 @@ def append_non_taste_matrix_cell(
     cell_terminal_root: str | Path,
     output_root: str | Path,
     aids_controller_manifest: str | Path | None = None,
+    startup_repair_receipt: str | Path | None = None,
     proc_root: str | Path = "/proc",
     require_writer_audit: bool = True,
     git_identity: Mapping[str, str] | None = None,
@@ -2156,6 +2172,8 @@ def append_non_taste_matrix_cell(
         raise NonTasteMatrixAppendError(f"Unsupported non-Taste matrix cell: {key}")
     if dataset != "AIDS" and aids_controller_manifest is not None:
         raise NonTasteMatrixAppendError("--aids-controller-manifest is AIDS-only")
+    if startup_repair_receipt is not None and key != ("Mutagenicity", "ComRecGC"):
+        raise NonTasteMatrixAppendError("--startup-repair-receipt is Mutagenicity/ComRecGC-only")
     prior = _verify_authority(prior_authority_root)
     prior_rows = prior["rows"]
     passing = {status.value for status in PASS_STATUSES}
@@ -2187,6 +2205,7 @@ def append_non_taste_matrix_cell(
             cell_terminal_root,
             proc_root=proc_root,
             require_writer_audit=require_writer_audit,
+            startup_repair_receipt=startup_repair_receipt,
         )
     cell_root = Path(str(terminal["root"])).resolve(strict=True)
     registry_cell_root = (

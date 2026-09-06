@@ -239,6 +239,7 @@ def reopen_completed_export(
     terminal_root: str | os.PathLike[str],
     output_root: str | os.PathLike[str],
     proc_root: str | os.PathLike[str] = "/proc",
+    startup_repair_receipt: str | os.PathLike[str] | None = None,
     terminal_validator: Callable[..., Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Strictly reopen one completed Mut terminal and seal existing exports."""
@@ -247,9 +248,14 @@ def reopen_completed_export(
     destination = _absolute(output_root, label="Mut export stage output")
     proc = _absolute(proc_root, label="proc root", must_exist=True)
     validator = terminal_validator or _validate_mut_fast_accurate_terminal
+    repair_kwargs = (
+        {"startup_repair_receipt": startup_repair_receipt}
+        if startup_repair_receipt is not None
+        else {}
+    )
     try:
         evidence = dict(
-            validator(source, proc_root=proc, require_writer_audit=True)
+            validator(source, proc_root=proc, require_writer_audit=True, **repair_kwargs)
         )
     except Exception as exc:
         raise MutSuccessorStageError(f"strict Mut terminal reopen failed: {exc}") from exc
@@ -410,6 +416,7 @@ def publish_canonical_mut_cell(
     matrix_output_root: str | os.PathLike[str],
     output_root: str | os.PathLike[str],
     proc_root: str | os.PathLike[str] = "/proc",
+    startup_repair_receipt: str | os.PathLike[str] | None = None,
     git_identity: Mapping[str, str] | None = None,
     terminal_validator: Callable[..., Mapping[str, Any]] | None = None,
     append_cell: Callable[..., Mapping[str, Any]] | None = None,
@@ -429,6 +436,11 @@ def publish_canonical_mut_cell(
     matrix_output = _absolute(matrix_output_root, label="new matrix authority output")
     destination = _absolute(output_root, label="Mut publish stage output")
     proc = _absolute(proc_root, label="proc root", must_exist=True)
+    repair_kwargs = (
+        {"startup_repair_receipt": startup_repair_receipt}
+        if startup_repair_receipt is not None
+        else {}
+    )
     for fresh, label in (
         (locator, "canonical Mut locator"),
         (matrix_output, "new matrix authority output"),
@@ -470,7 +482,7 @@ def publish_canonical_mut_cell(
         validator = terminal_validator or _validate_mut_fast_accurate_terminal
         try:
             reopened = dict(
-                validator(source, proc_root=proc, require_writer_audit=True)
+                validator(source, proc_root=proc, require_writer_audit=True, **repair_kwargs)
             )
         except Exception as exc:
             raise MutSuccessorStageError(
@@ -492,6 +504,7 @@ def publish_canonical_mut_cell(
                 proc_root=proc,
                 require_writer_audit=True,
                 git_identity=identity,
+                **repair_kwargs,
             )
 
         result = dict(

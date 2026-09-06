@@ -17,6 +17,7 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
+echo "Optional --startup-repair-receipt /absolute/receipt.json binds typed Mut startup repair; strict terminal checks remain required."
 exec python scripts/autodl/publish_mut_successor_v1.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \

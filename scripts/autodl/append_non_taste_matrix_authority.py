@@ -40,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cell-terminal-root", type=_absolute, required=True)
     parser.add_argument("--aids-controller-manifest", type=_absolute)
     parser.add_argument(
+        "--startup-repair-receipt",
+        type=_absolute,
+        help="Explicit typed Mut startup-repair receipt; does not waive terminal checks.",
+    )
+    parser.add_argument(
         "--prior-authority-root",
         type=_absolute,
         help="Required only to initialize a missing shared pointer; otherwise omit it.",
@@ -64,6 +69,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--set may only be inference.fallback_to_heuristic=false"
         )
 
+    repair_kwargs = (
+        {"startup_repair_receipt": args.startup_repair_receipt}
+        if args.startup_repair_receipt is not None
+        else {}
+    )
+
     def _append(prior: Path) -> dict[str, object]:
         return append_non_taste_matrix_cell(
             prior_authority_root=prior,
@@ -73,6 +84,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             aids_controller_manifest=args.aids_controller_manifest,
             output_root=args.output_root,
             proc_root=args.proc_root,
+            **repair_kwargs,
         )
 
     result = append_under_authority_pointer(
