@@ -23,4 +23,5 @@ python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 # the LLM-specific UUID/FD dispatch contract is separate and unchanged.
 # New AutoDL-only stage-file overlays are consumed by this same owner; no
 # Slurm quota mutation or GPU lease borrowing is performed by this wrapper.
+# Live heartbeat freshness is checked after each source read; no CLI change.
 python scripts/autodl/gpu_lock.py --config configs/hpc.yaml list

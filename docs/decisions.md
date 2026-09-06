@@ -1,5 +1,21 @@
 # Decisions Log
 
+## [2026-09-07] Compare LLM heartbeat freshness after the actual source read
+
+The existing LLM owner paused at committed call259 when a concurrent T12
+heartbeat was130.7ms newer than the sampler's start-time clock. Check each
+reopened heartbeat against the clock immediately after its read instead.
+Keep the strict0..120s window, reject genuinely future or expired timestamps,
+and never restamp source data or the sample-start evidence timestamp. Child
+lease validation already takes its clock after its caller reads the evidence.
+CPU fixtures cover the read race and both freshness boundaries without GPUs.
+
+No scientific command, model, task, checkpoint, resource threshold, reservation
+or lease behavior changes. Resume uses the existing sealed dispatch with a
+fresh owner-control root; the original successor automatically supplies native
+`generate --resume` for the same committed generation root. The paired Slurm
+wrapper remains a read-only inventory with unchanged arguments.
+
 ## [2026-09-07] Bind only future LLM owner resources without re-preparing science
 
 - The real preparation descriptor carries generator/downstream readiness

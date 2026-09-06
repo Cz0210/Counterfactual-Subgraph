@@ -221,7 +221,10 @@ class ResourceSampler:
         for path in sorted(heartbeat_paths):
             try:
                 heartbeat, source = read_small(path)
-                fresh(heartbeat, now=now)
+                # A live writer may publish after sampling began. Compare with
+                # the clock after this read, without changing source timestamps
+                # or relaxing rejection of genuinely future/expired evidence.
+                fresh(heartbeat, now=self.clock())
             except (ValueError, OSError) as exc:
                 blockers.append(f"MAIN_SOURCE_NOT_CURRENT:{path}:{exc}")
                 continue

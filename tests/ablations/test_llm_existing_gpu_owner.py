@@ -85,6 +85,47 @@ def test_sampler_reopens_sources_and_never_launders_old_timestamp(tmp_path):
     assert result["main_ready_waiting_gpu"] and result["gpu_idle_seconds"] == 0
 
 
+@pytest.mark.parametrize("age_after_read, healthy", [
+    (0.0, True), (120.0, True), (-0.001, False), (120.001, False),
+])
+def test_sampler_checks_freshness_after_each_live_read(
+    tmp_path, monkeypatch, age_after_read, healthy,
+):
+    cfg, heartbeat = source_fixture(tmp_path)
+    sample_started, read_completed = 1000.0, 1000.25
+    now = [sample_started]
+    stamp = read_completed - age_after_read
+    atomic_json(heartbeat, {
+        "state": "RUNNING", "pid": 41, "start_ticks": 123, "updated_epoch": stamp,
+    })
+    original_bytes = heartbeat.read_bytes()
+    read_small = owner.read_small
+
+    def complete_live_read(path):
+        result = read_small(path)
+        if Path(path) == heartbeat:
+            # Model a concurrent publication / elapsed read without sleeping.
+            now[0] = read_completed
+        return result
+
+    monkeypatch.setattr(owner, "read_small", complete_live_read)
+    gpu = GPUObservation(0, "GPU-fixture", "CPU fake", 1000, 0, 1000, 0)
+    sampler = owner.ResourceSampler(
+        cfg, 0, gpu.uuid, inventory=lambda: [gpu],
+        clock=lambda: now[0], monotonic=lambda: now[0],
+    )
+    result = sampler.sample()
+    assert result["owners_healthy"] is healthy
+    assert heartbeat.read_bytes() == original_bytes
+    # The read-time comparison does not restamp either evidence or its source.
+    assert datetime.fromisoformat(result["observed_at"]).timestamp() == sample_started
+    if healthy:
+        source = next(row for row in result["source_observations"] if row.get("path") == str(heartbeat))
+        assert source["source_observed_at"] == stamp
+    else:
+        assert any("LIVE_SOURCE_STALE" in error for error in result["source_blockers"])
+
+
 def test_failed_primary_reservation_and_missing_ready_sources_block(tmp_path):
     cfg, heartbeat = source_fixture(tmp_path, reserved=True)
     gpu = GPUObservation(1, "GPU-fixture", "CPU fake", 1000, 0, 1000, 0)
