@@ -42,6 +42,28 @@ SOURCE_PINS = {
                "tokenization_internlm2.py": "444d4c2b0da158e61c34b3c727943f0ad454770c74b307f4d881f03603335eef"}},
 }
 
+_LOADED_FILE_BINDINGS = {}
+
+
+def verified_loader_file(identity):
+    """Hash once per immutable stat identity during smoke/reload in one child.
+
+    Routine status does not use this. Changed files still undergo full checksum
+    validation; no persistent trust cache or new authority is introduced.
+    """
+    path = Path(identity["path"])
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Expected physical loader file")
+    st = path.stat()
+    key = (str(path), identity["sha256"], st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    if key not in _LOADED_FILE_BINDINGS:
+        verified_file(identity)
+        after = path.stat()
+        if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError("Loader file changed during verification")
+        _LOADED_FILE_BINDINGS[key] = True
+    return path
+
 
 def verified_file(identity: Mapping[str, Any]) -> Path:
     path = Path(str(identity["path"]))
@@ -100,7 +122,7 @@ class BACEHFNativeRuntime:
         for name, digest in model_spec["files"].items():
             if Path(name).name != name:
                 raise ValueError("Model inventory path must be a direct child")
-            verified_file({"path": str(root / name), "sha256": digest})
+            verified_loader_file({"path": str(root / name), "sha256": digest})
         self.tokenizer = _build_tokenizer(base_model_path=root, trust_remote_code=True, local_files_only=True)
         disable_tokenizer_exports(self.tokenizer)
         adapter = spec.get("ppo_adapter")
@@ -108,7 +130,7 @@ class BACEHFNativeRuntime:
             if not adapter:
                 raise ValueError("PPO row requires the exact existing 300-update adapter")
             for name, identity in adapter["files"].items():
-                if verified_file(identity).parent != Path(adapter["root"]):
+                if verified_loader_file(identity).parent != Path(adapter["root"]):
                     raise ValueError("PPO adapter file escaped pinned root")
             self.model = _build_lora_model(base_model_path=root, adapter_path=Path(adapter["root"]),
                 trust_remote_code=True, local_files_only=True)
@@ -119,6 +141,19 @@ class BACEHFNativeRuntime:
         self.model.eval()
         self.parameter_report = count_actual_loaded_parameters(self.model).to_dict()
         self.torch = torch
+
+    def finite_forward(self, call: Mapping[str, Any]) -> bool:
+        # Smoke-only inference; preserve all RNG so this cannot alter formal calls.
+        saved = _rng(self.torch)
+        try:
+            encoded = render_native_inputs(self.model, self.tokenizer, call["prompt"], self.size)
+            device = next(self.model.parameters()).device
+            encoded = {key: value.to(device) for key, value in encoded.items()}
+            with self.torch.no_grad():
+                output = self.model(**encoded, use_cache=False)
+                return bool(self.torch.isfinite(output.logits).all().item())
+        finally:
+            _restore_rng(saved, self.torch)
 
     def generate_call(self, call: Mapping[str, Any]) -> list[dict[str, Any]]:
         from src.eval.full_candidate_pool import (FullPoolGenerationConfig, build_generation_kwargs,

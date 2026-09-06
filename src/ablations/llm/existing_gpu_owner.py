@@ -34,7 +34,8 @@ def validate_resource_config(config):
     required = {"main_registry_path", "main_ready_sources", "proc_root", "cgroup_memory_root",
                 "persistent_root", "gpu_lock_root", "minimum_gpu_free_mb", "maximum_idle_utilization_percent",
                 "minimum_memory_headroom_bytes", "minimum_persistent_free_bytes", "checkpoint_resume_pass"}
-    if set(config) != required:
+    optional = {"minimum_free_inodes", "reserved_new_inodes"}
+    if not required <= set(config) or set(config) - required - optional:
         raise ValueError("LLM_RESOURCE_SOURCE_CONFIG_FIELDS_CHANGED")
     for field in ("main_registry_path", "proc_root", "cgroup_memory_root", "persistent_root", "gpu_lock_root"):
         if not Path(config[field]).is_absolute():
@@ -48,6 +49,9 @@ def validate_resource_config(config):
         raise ValueError("INVALID_IDLE_UTILIZATION_THRESHOLD")
     if config["checkpoint_resume_pass"] is not True:
         raise ValueError("REAL_CHECKPOINT_RESUME_REQUIRED")
+    for field in optional:
+        if field in config and (type(config[field]) is not int or config[field] < 0):
+            raise ValueError("INVALID_INODE_BUDGET:" + field)
     return config
 
 
@@ -143,9 +147,28 @@ class ResourceSampler:
         pending = []
         heartbeat_paths = set(cfg["main_ready_sources"])
         identities = {}
+        task_by_id = {row["task_id"]: row for row in registry["tasks"]}
+        retired = set()
+        for row in registry["tasks"]:
+            successor = task_by_id.get(row.get("successor_task_id"))
+            terminal = row["owner_state"] in {"TERMINAL_FAILED_ENGINEERING", "SUPERSEDED", "RETIRED"}
+            held = any(lease["task_id"] == row["task_id"] and lease["state"] != "RELEASED"
+                       for lease in registry["gpu_leases"])
+            same_cell_successor = successor and all(successor[k] == row[k] for k in ("dataset", "method"))
+            alternate = any(other["task_id"] != row["task_id"]
+                and all(other[k] == row[k] for k in ("dataset", "method"))
+                and other["owner_state"] not in FAILED
+                and process_start_ticks(proc, other.get("owner_pid")) == other.get("owner_start_ticks")
+                and other.get("owner_pid") for other in registry["tasks"])
+            if terminal and not held and (same_cell_successor or alternate):
+                retired.add(row["task_id"])
+                sources.append({"task_id": row["task_id"], "role": "EXPLICIT_TERMINAL_WITH_SAME_CELL_SUCCESSOR",
+                                "reservation_released_by_this_sampler": False})
         if not heartbeat_paths:
             blockers.append("MAIN_READY_SOURCE_COVERAGE_UNAVAILABLE")
         for row in registry["tasks"]:
+            if row["task_id"] in retired:
+                continue
             # Failed primary work keeps its declared GPU until the authority
             # explicitly releases it. An empty nvidia-smi list is not release.
             if row["gpu"] == self.index and row["owner_state"] != "PASS":
@@ -165,14 +188,27 @@ class ResourceSampler:
         for row in registry["publishers"]:
             if row["owner_state"] in {"PASS", "SUPERSEDED_DUPLICATE_CLAIM"}:
                 continue
+            if (row["owner_state"] == "PREDEPLOYED" and row.get("owner_pid") is None
+                    and any(task.get("publisher_id") == row["publisher_id"] and task.get("heartbeat")
+                            and task.get("owner_pid") and process_start_ticks(proc, task["owner_pid"]) == task.get("owner_start_ticks")
+                            for task in registry["tasks"] if task["task_id"] not in retired)):
+                # This is an explicit conditional successor, not an empty READY
+                # queue. Its live predecessor is sampled above and still blocks
+                # launch when ready, stale or failed. No fabricated publisher PID.
+                sources.append({"publisher_id": row["publisher_id"], "role": "PREDEPLOYED_BOUND_TO_LIVE_PREDECESSOR"})
+                continue
             if row.get("heartbeat"):
                 heartbeat_paths.add(row["heartbeat"])
                 identities[row["heartbeat"]] = (row.get("owner_pid"), row.get("owner_start_ticks"))
             elif row["owner_state"] not in {"PASS", "SUPERSEDED_DUPLICATE_CLAIM"}:
                 blockers.append("PUBLISHER_READY_SOURCE_UNAVAILABLE:" + row["publisher_id"])
         for path in sorted(heartbeat_paths):
-            heartbeat, source = read_small(path)
-            fresh(heartbeat, now=now)
+            try:
+                heartbeat, source = read_small(path)
+                fresh(heartbeat, now=now)
+            except (ValueError, OSError) as exc:
+                blockers.append(f"MAIN_SOURCE_NOT_CURRENT:{path}:{exc}")
+                continue
             if path in identities:
                 pid, ticks = identities[path]
                 actual_pid = heartbeat.get("owner_pid", heartbeat.get("pid"))
@@ -198,6 +234,7 @@ class ResourceSampler:
         headroom = memory_headroom(proc, Path(cfg["cgroup_memory_root"]))
         disk = os.statvfs(cfg["persistent_root"])
         free_bytes = disk.f_frsize * disk.f_bavail
+        required_inodes = cfg.get("minimum_free_inodes", 1) + cfg.get("reserved_new_inodes", 0)
         clean_idle = (not gpu.processes and not reserved and not pending and not blockers
                       and gpu.memory_free_mb >= cfg["minimum_gpu_free_mb"]
                       and gpu.utilization_gpu_percent <= cfg["maximum_idle_utilization_percent"])
@@ -243,7 +280,8 @@ class ResourceSampler:
                 "owners_healthy": not blockers, "registry_healthy": True,
                 "memory_headroom_bytes": headroom, "persistent_free_bytes": free_bytes,
                 "memory_safe": headroom >= cfg["minimum_memory_headroom_bytes"],
-                "storage_safe": free_bytes >= cfg["minimum_persistent_free_bytes"] and disk.f_favail > 0,
+                "free_inodes": disk.f_favail, "required_free_inodes": required_inodes,
+                "storage_safe": free_bytes >= cfg["minimum_persistent_free_bytes"] and disk.f_favail >= required_inodes,
                 "checkpoint_resume_pass": cfg["checkpoint_resume_pass"] is True,
                 "active_early_ablation_gpus": other_llm,
                 "active_gpu_count_semantics": "OTHER_OWNERS_EXCLUDING_VERIFIED_CURRENT_LEASE",

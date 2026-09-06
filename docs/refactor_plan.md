@@ -1,5 +1,16 @@
 # Refactor Plan
 
+## 2026-09-06: LLM existing-owner dispatch and real GPU-smoke successor
+
+- [x] Test exact two-call/1+1 checkpoint state comparison using tiny CPU fixtures.
+- [x] Require actual single-GPU runtime and finite forward before formal native generation.
+- [x] Keep corrected GNN acceptance separate from resource/real-GPU readiness.
+- [x] Preserve current primary reservations while excluding explicitly retired history.
+- [x] Support inode guard plus explicit new-output reservations in the existing sampler.
+- [ ] Seal and deploy fresh task/dispatch specs at the integrated execution commit.
+- [ ] Run actual GPU smoke only after unreserved1200s idle and all current resources pass.
+- [ ] Complete L1/L2/L3 generation and their separate at-most-K evaluation/publication.
+
 ## 2026-09-06: Exact low-memory Taste T13 augmentation
 
 - [x] Keep original official mask/sample/RNG/decoder/training semantics.

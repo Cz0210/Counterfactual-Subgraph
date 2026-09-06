@@ -5,6 +5,22 @@ PPO LoRA with matched regeneration, then L3 off-the-shelf 2B. No training,
 SFT, borrowing, main-matrix count gate, or secondary-seed dependency is added.
 The corrected GNN core remains mandatory. No main owner or reservation changes.
 
+Update20260906: corrected GNN is already accepted. Fresh native task specs
+require `gpu_smoke_required_before_formal=true`: three fresh model loads compare
+two continuous original calls to one call plus serialized-state reload and the
+next call. This is a separate diagnostic root with finite-forward and exact
+state/RNG proof; none of its attempts is adopted into the formal candidate pool.
+The restored model instances run in the same existing leased child, not falsely
+described as independent processes. The final full generator remains a fresh
+matched3088-attempt experiment. `--gpu-smoke-root` is passed by the existing
+successor, not a second lease allocator. Any failed smoke remains failed and
+blocks full generation; a CPU test cannot supply its acceptance receipt.
+
+New resource configs may declare `minimum_free_inodes` and
+`reserved_new_inodes`; their sum is checked against actual statvfs availability.
+`checkpoint_resume_pass` records the tested call-boundary implementation, not
+a real GPU-smoke claim. Real GPU parity is separately mandatory in the child.
+
 ## CPU preparation
 
 Run the existing `run_bace_native_llm.py prepare` in the deployed immutable

@@ -76,8 +76,9 @@ def test_sampler_reopens_sources_and_never_launders_old_timestamp(tmp_path):
     assert len(calls) == 41
     old = json.loads(heartbeat.read_text())
     now[0] += 121
-    with pytest.raises(ValueError, match="LIVE_SOURCE_STALE"):
-        sampler.sample()
+    stale = sampler.sample()
+    assert not stale["owners_healthy"]
+    assert any("LIVE_SOURCE_STALE" in value for value in stale["source_blockers"])
     assert json.loads(heartbeat.read_text()) == old
     atomic_json(heartbeat, {**old, "state": "READY_WAITING_GPU", "updated_epoch": now[0]})
     result = sampler.sample()

@@ -122,6 +122,10 @@ def prepare_bace_llm(*, reference_path: str | Path, reference_sha256: str,
         "created_during_cpu_preparation": True, "gnn_core_required_before_science": True,
         "main_matrix_13_required": False, "test_loaded_during_generation": False,
         "formal_safe_gpu_release_seconds_measured": None}
+    common["gpu_smoke_required_before_formal"] = True
+    common["gpu_smoke_contract"] = {"original_calls": 2, "checkpoint_after_calls": 1,
+        "finite_forward_required": True, "resume_parity": "EXACT_STATE_VALUES",
+        "diagnostic_pool_adopted": False, "fresh_runtime_instances": 3}
     tasks = {}
     project = Path(__file__).resolve().parents[3]
     downstream_entrypoint = project / "scripts/ablations/llm/run_bace_common_downstream.py"
@@ -148,7 +152,7 @@ def prepare_bace_llm(*, reference_path: str | Path, reference_sha256: str,
         else:
             size = "2b" if variant == VARIANTS[3] else "7b"
             spec["model"] = model_specs.get(size)
-            spec["generator_state"] = "LOADER_AND_RESUME_READY_WAITING_GNN_CORE" if size in model_specs else "BLOCKED_MODEL_SOURCE"
+            spec["generator_state"] = "LOADER_IMPLEMENTED_GPU_SMOKE_REQUIRED_AT_DISPATCH" if size in model_specs else "BLOCKED_MODEL_SOURCE"
             spec["blocker"] = blockers.get(size)
             if size == "2b":
                 spec["isolated_cpu_load_receipt_required_before_generation"] = True
@@ -164,7 +168,7 @@ def prepare_bace_llm(*, reference_path: str | Path, reference_sha256: str,
         # This is code-entrypoint readiness, never a result/metric PASS. The
         # real single-GINE adapter has focused tests; it still requires the
         # independently verified GNN package and real candidate pool at runtime.
-        spec["downstream_state"] = "EXECUTABLE_ENTRYPOINT_READY_WAITING_GNN_CORE"
+        spec["downstream_state"] = "EXECUTABLE_ENTRYPOINT_CORRECTED_CORE_CHECK_AT_DISPATCH"
         spec["downstream_implementation"] = {"execution_commit": execution_commit,
             "entrypoint": file_identity(downstream_entrypoint),
             "module": file_identity(downstream_module),

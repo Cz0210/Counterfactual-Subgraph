@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -53,6 +54,7 @@ def parser():
     gen.add_argument("--gnn-acceptance")
     gen.add_argument("--gnn-acceptance-sha256")
     gen.add_argument("--resume", action="store_true")
+    gen.add_argument("--gpu-smoke-root", help="Existing-owner diagnostic scope; never a formal candidate pool")
     gen.add_argument("--two-b-isolated-receipt")
     gen.add_argument("--two-b-isolated-receipt-sha256")
     return result
@@ -127,6 +129,24 @@ def main(argv=None):
                 return resource_gate(current, args.held_gpu_lock_fd, args.held_project_slot_fd)
             except (ValueError, OSError, KeyError):
                 return False
+        if spec.get("gpu_smoke_required_before_formal"):
+            from src.ablations.llm.native_gpu_smoke import accepted_smoke, run_smoke
+            if not args.gpu_smoke_root:
+                raise ValueError("FORMAL_NATIVE_TASK_REQUIRES_SCOPED_GPU_SMOKE")
+            smoke = Path(args.gpu_smoke_root).absolute()
+            if scope not in smoke.parents or smoke == destination or destination in smoke.parents:
+                raise ValueError("GPU_SMOKE_MUST_BE_SEPARATE_LLM_SCOPE")
+            accepted = smoke / "accepted_smoke.json"
+            if accepted.is_file():
+                accepted_smoke(accepted, spec)
+            else:
+                smoke.mkdir(parents=True, exist_ok=True)
+                result = run_smoke(spec=spec, output_root=smoke / str(uuid.uuid4()), continue_guard=current_permission)
+                from src.eval.bace_frozen_gnn_contracts import atomic_json
+                atomic_json(accepted, result)
+                accepted_smoke(accepted, spec)
+            if not current_permission():
+                raise ValueError("RESOURCE_CHANGED_AFTER_GPU_SMOKE")
         result = run_generation(spec=spec, output_root=args.output_root, resume=args.resume,
                                 continue_guard=current_permission)
     print(json.dumps(result, sort_keys=True, allow_nan=False), flush=True)

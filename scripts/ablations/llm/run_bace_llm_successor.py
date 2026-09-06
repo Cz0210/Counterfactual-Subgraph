@@ -170,6 +170,7 @@ def main(argv=None):
     if acceptance:
         command.extend(["--gnn-acceptance", acceptance["path"], "--gnn-acceptance-sha256", acceptance["sha256"]])
     if result["resume"]: command.append("--resume")
+    command.extend(["--gpu-smoke-root", str(Path(args.output_root).absolute() / "gpu-smoke" / result["variant"])])
     # Same process/parent identity reaches the existing lock-owner validator.
     os.set_inheritable(args.held_gpu_lock_fd, True)
     os.set_inheritable(args.held_project_slot_fd, True)

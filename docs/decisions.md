@@ -1,5 +1,36 @@
 # Decisions Log
 
+## [2026-09-06] Seal LLM dispatch with a real GPU call/reload gate
+
+The corrected GNN core is already independently accepted. New native L1/L2/L3
+specifications no longer describe it as unfinished; they require a separate
+real-GPU loader, finite-forward, two-original-call continuous versus 1+1 resumed
+comparison before formal generation. Smoke uses three fresh model instances
+in the same leased child, retains exact call/RNG values, is excluded from the
+formal pool, and cannot consume calibration/test. CPU fixtures prove wiring,
+not real GPU readiness. The existing owner keeps both inherited lock FDs and
+fresh resource sampling; no GPU borrowing or new controller is introduced.
+
+Explicitly retired registry rows with no held lease and a same-cell successor
+no longer demand a live historical PID forever. Their replacement still must
+be healthy; a failed current Mut/T13 primary and all held reservations continue
+to block. A PREDEPLOYED publisher can bind its live predecessor without
+inventing a PID. All stale/missing sources remain blockers while the sampler
+continues collecting current GPU/cgroup/disk evidence. New resource configs can
+bind the unchanged inode guard plus not-yet-created reservations.
+
+The loader verifies an unchanged model file once per child/stat identity, then
+reuses that in-memory binding across smoke reloads. Mutation causes revalidation
+and failure on mismatch; no persistent trust service or broad SHA status scan.
+Formal generation, at-most-K downstream evaluation, and paper publication are
+distinct stages. A sealed specification is not a running science PID or PASS.
+
+The one bounded mount audit reports persistent fuse.autofs total200000/free
+about95104 with the Mut100000 guard unchanged; this is BELOW_GUARD, not proven
+ENOSPC. NVMe has only about2.85GiB available and project-inode quota is unknown.
+No new cleanup whitelist passed; a platform request is prepared, not submitted
+as a purchase or claimed completed. Active main roots and GNN results unchanged.
+
 ## [2026-09-06] Add opt-in observational Mut causal records without promoting Route B
 
 The user authorized a selected-action causal-lineage producer for a possible
