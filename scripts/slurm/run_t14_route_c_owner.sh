@@ -18,6 +18,8 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "route_c_formal_canary_promotes_step500_without_replaying_steps_1_500"
+# The paired owner includes the hashlib import required by its >=10k
+# convergence receipt. Do not use this wrapper to restart a healthy owner.
 
 : "${T14_ROUTE_C_TASK_SPEC:?required}"
 : "${T14_ROUTE_C_CONTINUATION_SPEC:?required}"

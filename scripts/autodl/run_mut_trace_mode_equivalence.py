@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -991,10 +992,67 @@ def _candidate_population_event(
     return event
 
 
+_COMMON_BOUNDARY_MODULE: Any = None
+
+
+def _common_boundary_module() -> Any:
+    # Keep controller-only persistence code outside the pinned scientific src
+    # namespace. Importing the controller's src before _install_science_root
+    # would otherwise poison the exact 66487c module authority.
+    global _COMMON_BOUNDARY_MODULE
+    if _COMMON_BOUNDARY_MODULE is None:
+        path = CONTROLLER_ROOT / "src/utils/autodl_mut_common_boundary_v1.py"
+        spec = importlib.util.spec_from_file_location("_mut_common_boundary_driver_v1", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Mut common-boundary driver is absent")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _COMMON_BOUNDARY_MODULE = module
+    return _COMMON_BOUNDARY_MODULE
+
+
+def _resume_common_boundary(output: Path, observer: Path, *, phase: str,
+                            trace_mode: str) -> dict[str, Any]:
+    module = _common_boundary_module()
+    candidates = []
+    for path in (output / "generation_checkpoints").iterdir():
+        if (path.is_dir() and path.name.startswith("step-")
+                and len(path.name[5:]) == 12 and path.name[5:].isdigit()):
+            step = int(path.name[5:])
+            if (path / "_CHECKPOINT_COMPLETE.json").is_file():
+                module.checkpoint_binding(path, step=step)
+                candidates.append((step, path))
+    if not candidates:
+        raise ValueError("No committed algorithm checkpoint for common-boundary resume")
+    step, checkpoint = max(candidates)
+    if phase == "reload" and step != STEPS_TO_COMPARE:
+        raise ValueError("Diagnostic reload requires the actual step-500 checkpoint")
+    if phase == "reload" and any(row.get("phase") == "reload" for row in _read_jsonl(observer)):
+        raise ValueError("Existing reload rows cannot be duplicated; fresh verifier planning required")
+    return module.reopen_joint_boundary(
+        receipt=observer.parent / "common_boundaries" / f"step-{step:012d}.json",
+        checkpoint=checkpoint, observer=observer, trace_mode=trace_mode,
+        science_digest=_CommonStepObserver.row_digest,
+        require_exact_end=phase == "continuous",
+    )
+
+
+def _require_start_storage(output: Path) -> None:
+    parent = output
+    while not parent.exists():
+        parent = parent.parent
+    vfs = os.statvfs(parent)
+    if (vfs.f_favail < 100_000 or vfs.f_bavail * vfs.f_frsize < 50 * 1024**3
+            or vfs.f_bavail / max(1, vfs.f_blocks) < 0.02):
+        raise RuntimeError("MUT_STORAGE_ADMISSION_BLOCKED: unchanged inode/byte/ratio guard")
+
+
 class _CommonStepObserver:
     """Observe identical state boundaries in both trace modes."""
 
-    def __init__(self, path: Path, *, phase: str, trace_mode: str) -> None:
+    def __init__(self, path: Path, *, phase: str, trace_mode: str,
+                 checkpoint_root: Path | None = None,
+                 resume_boundary: Mapping[str, Any] | None = None) -> None:
         self.path = path
         self.phase = phase
         self.trace_mode = trace_mode
@@ -1004,6 +1062,13 @@ class _CommonStepObserver:
         self.populate_events: list[dict[str, Any]] = []
         self.populate_event_scope = "pre_step_initialization"
         self.history_digest = "0" * 64
+        self.checkpoint_root = checkpoint_root
+        self.expected_next_step = 1
+        if resume_boundary is not None:
+            if phase != "continuous":
+                raise ValueError("Partial common-boundary resume is continuous-only")
+            self.history_digest = str(resume_boundary["observer"]["history_digest"])
+            self.expected_next_step = int(resume_boundary["observer"]["next_step"])
         if phase == "reload" and path.is_file():
             continuous = [
                 row
@@ -1014,6 +1079,65 @@ class _CommonStepObserver:
             if len(continuous) != 1:
                 raise ValueError("Reload observer cannot bind the unique continuous step 500")
             self.history_digest = str(continuous[0]["history_digest"])
+            self.expected_next_step = STEPS_TO_COMPARE + 1
+
+    @staticmethod
+    def row_digest(row: Mapping[str, Any]) -> str:
+        return stable_json_sha256(_equivalence_scientific_projection({
+            key: value for key, value in row.items()
+            if key not in {"phase", "trace_mode", "schema_version",
+                           "scientific_checkpoint_digest", "history_digest"}
+        }))
+
+    def completed_boundary(self, state: Any, module: Any, original_boundary: Any) -> None:
+        """Fsync actual observer event before the checkpoint/storage-stop hook."""
+        if int(state.completed_step) != self.expected_next_step:
+            raise ValueError("Common observer next step differs; no skipped/duplicate event")
+        if self.last_move is None:
+            raise ValueError("Completed step has no common move observation")
+        populate_events = list(self.populate_events)
+        if [row.get("event_index") for row in populate_events] != list(range(len(populate_events))):
+            raise ValueError("Populate event indices are not contiguous")
+        self.last_move = {
+            **self.last_move, "populate_event_count": len(populate_events),
+            "populate_events": populate_events,
+            "populate_events_sha256": stable_json_sha256(populate_events),
+            "candidate_state_at_step_boundary": _candidate_state(module),
+        }
+        scientific = {
+            "step": int(state.completed_step), "next_step": int(state.next_step),
+            "start_graph_hashes": [str(item) for item in state.start_graph_hashes],
+            "current_graph_hashes": [str(item) for item in state.current_graph_hashes],
+            "restart_indices": [int(item) for item in state.restart_indices],
+            "rng_state_sha256": stable_json_sha256(_rng_state()),
+            "move": self.last_move, "candidate_state": _candidate_state(module),
+        }
+        step_digest = stable_json_sha256(_equivalence_scientific_projection(scientific))
+        history = hashlib.sha256(bytes.fromhex(self.history_digest) + bytes.fromhex(step_digest)).hexdigest()
+        _append_jsonl(self.path, {
+            **scientific, "schema_version": "mut_trace_common_step_state_v1",
+            "phase": self.phase, "trace_mode": self.trace_mode,
+            "scientific_checkpoint_digest": step_digest, "history_digest": history,
+        })
+        self.history_digest = history
+        self.expected_next_step += 1
+        self.populate_events = []
+        self.populate_event_scope = "between_completed_steps"
+        # A storage guard may raise *after* saving its checkpoint.  Preserve
+        # that exception, but commit its joint boundary in the finally block.
+        # If checkpoint serialization itself failed there is no joint receipt.
+        try:
+            if original_boundary is not None:
+                original_boundary(state)
+        finally:
+            if self.checkpoint_root is not None and self.phase == "continuous":
+                checkpoint = self.checkpoint_root / f"step-{state.completed_step:012d}"
+                if (checkpoint / "_CHECKPOINT_COMPLETE.json").is_file():
+                    _common_boundary_module().seal_joint_boundary(
+                        checkpoint=checkpoint, observer=self.path,
+                        step=int(state.completed_step), phase=self.phase,
+                        trace_mode=self.trace_mode, science_digest=self.row_digest,
+                    )
 
     def install(self, runtime: Any) -> None:
         original_loop = runtime.run_generation_loop
@@ -1508,53 +1632,7 @@ class _CommonStepObserver:
                 return result
 
             def observed_boundary(state: Any) -> None:
-                if original_boundary is not None:
-                    original_boundary(state)
-                if observer.last_move is None:
-                    raise ValueError("Completed step has no common move observation")
-                populate_events = list(observer.populate_events)
-                if [row.get("event_index") for row in populate_events] != list(
-                    range(len(populate_events))
-                ):
-                    raise ValueError("Populate event indices are not contiguous")
-                observer.last_move = {
-                    **observer.last_move,
-                    "populate_event_count": len(populate_events),
-                    "populate_events": populate_events,
-                    "populate_events_sha256": stable_json_sha256(
-                        populate_events
-                    ),
-                    "candidate_state_at_step_boundary": _candidate_state(module),
-                }
-                scientific = {
-                    "step": int(state.completed_step),
-                    "next_step": int(state.next_step),
-                    "start_graph_hashes": [str(item) for item in state.start_graph_hashes],
-                    "current_graph_hashes": [str(item) for item in state.current_graph_hashes],
-                    "restart_indices": [int(item) for item in state.restart_indices],
-                    "rng_state_sha256": stable_json_sha256(_rng_state()),
-                    "move": observer.last_move,
-                    "candidate_state": _candidate_state(module),
-                }
-                step_digest = stable_json_sha256(
-                    _equivalence_scientific_projection(scientific)
-                )
-                observer.history_digest = hashlib.sha256(
-                    bytes.fromhex(observer.history_digest) + bytes.fromhex(step_digest)
-                ).hexdigest()
-                _append_jsonl(
-                    observer.path,
-                    {
-                        **scientific,
-                        "schema_version": "mut_trace_common_step_state_v1",
-                        "phase": observer.phase,
-                        "trace_mode": observer.trace_mode,
-                        "scientific_checkpoint_digest": step_digest,
-                        "history_digest": observer.history_digest,
-                    },
-                )
-                observer.populate_events = []
-                observer.populate_event_scope = "between_completed_steps"
+                observer.completed_boundary(state, module, original_boundary)
                 if int(state.completed_step) == (
                     STEPS_TO_COMPARE + POST_RELOAD_STEPS
                 ):
@@ -1606,6 +1684,14 @@ def _run_one(args: argparse.Namespace) -> int:
     output = _absolute(args.output_root, exists=bool(args.resume))
     if not args.resume and output.exists():
         raise FileExistsError(f"Fresh trace-mode arm already exists: {output}")
+    observer_path = _absolute(args.observer_output, exists=bool(args.resume))
+    if observer_path != output / "common_step_state.jsonl":
+        raise ValueError("Common observer must remain inside this exact arm output")
+    resume_boundary = (
+        _resume_common_boundary(output, observer_path, phase=args.phase,
+                                trace_mode=args.trace_mode) if args.resume else None
+    )
+    _require_start_storage(output)
     _install_science_root(science_root)
     from src.baselines.comrecgc.contracts import GenerationParameters
     from src.baselines.comrecgc.generation_checkpoint import scientific_command_sha256
@@ -1621,9 +1707,11 @@ def _run_one(args: argparse.Namespace) -> int:
     if int(parameters.steps) != FORMAL_M_MAX or int(parameters.candidate_capacity) != 100_000:
         raise ValueError("Formal trace-mode parameters changed")
     observer = _CommonStepObserver(
-        _absolute(args.observer_output, exists=bool(args.resume)),
+        observer_path,
         phase=args.phase,
         trace_mode=args.trace_mode,
+        checkpoint_root=output / "generation_checkpoints",
+        resume_boundary=resume_boundary if args.phase == "continuous" else None,
     )
     observer.install(runtime)
     scientific_argv = (
@@ -2058,6 +2146,11 @@ def _run_pair(args: argparse.Namespace) -> int:
         "device": str(args.device),
         "arms_sequential": True,
         "max_concurrent_arms": 1,
+        "common_boundary_policy": "observer_fsync_before_checkpoint_joint_receipt_v1",
+        "observer_driver_sha256": sha256_file(Path(__file__).resolve()),
+        "common_boundary_driver_sha256": sha256_file(
+            CONTROLLER_ROOT / "src/utils/autodl_mut_common_boundary_v1.py"
+        ),
         "calibration_loaded": False,
         "test_loaded": False,
         "historical_artifact_root": str(historical_root),
@@ -2512,11 +2605,54 @@ def _run_pair(args: argparse.Namespace) -> int:
     return 0
 
 
+def _plan_recovery(args: argparse.Namespace) -> int:
+    arm = _absolute(args.arm_root)
+    observer = arm / "common_step_state.jsonl"
+    module = _common_boundary_module()
+    rows = _read_jsonl(observer)
+    continuous = [row for row in rows if row.get("phase") == "continuous"]
+    through = len(continuous)
+    if through:
+        module.observer_prefix(observer, phase="continuous", trace_mode=args.trace_mode,
+                               stop_step=through, science_digest=_CommonStepObserver.row_digest)
+    checkpoints, joint = [], []
+    reasons = []
+    checkpoint_root = arm / "generation_checkpoints"
+    for path in sorted(checkpoint_root.iterdir()) if checkpoint_root.exists() else []:
+        if not (path.name.startswith("step-") and path.name[5:].isdigit() and path.is_dir()):
+            continue
+        step = int(path.name[5:])
+        module.checkpoint_binding(path, step=step)
+        checkpoints.append(step)
+        receipt = arm / "common_boundaries" / f"step-{step:012d}.json"
+        try:
+            module.reopen_joint_boundary(receipt=receipt, checkpoint=path,
+                                        observer=observer, trace_mode=args.trace_mode,
+                                        science_digest=_CommonStepObserver.row_digest)
+            joint.append(step)
+        except (OSError, ValueError) as exc:
+            reasons.append({"checkpoint_step": step, "reason": str(exc)})
+    result = module.recovery_plan(checkpoint_steps=checkpoints,
+                                  valid_observer_through=through,
+                                  joint_committed_steps=joint)
+    result.update(arm_root=str(arm), algorithm_checkpoint_steps=checkpoints,
+                  common_observer_through=through, joint_boundary_failures=reasons,
+                  checkpoint_payload_loaded=False, active_sqlite_read=False,
+                  observer_numbering="1_based_completed_step",
+                  debug_trace_numbering="0_based_move_index_not_common_step",
+                  source_event_inference_allowed=False)
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="action", required=True)
+    plan = commands.add_parser("plan-recovery", help="read-only small-manifest/observer audit")
+    plan.add_argument("--arm-root", required=True)
+    plan.add_argument("--trace-mode", choices=("on", "off"), required=True)
     one = commands.add_parser("run-one")
     one.add_argument("--science-project-root", required=True)
     one.add_argument("--output-root", required=True)
@@ -2547,6 +2683,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.action == "plan-recovery":
+        return _plan_recovery(args)
     return _run_one(args) if args.action == "run-one" else _run_pair(args)
 
 
