@@ -417,6 +417,7 @@ def publish_canonical_mut_cell(
     output_root: str | os.PathLike[str],
     proc_root: str | os.PathLike[str] = "/proc",
     startup_repair_receipt: str | os.PathLike[str] | None = None,
+    registry_projection: str | os.PathLike[str] | None = None,
     git_identity: Mapping[str, str] | None = None,
     terminal_validator: Callable[..., Mapping[str, Any]] | None = None,
     append_cell: Callable[..., Mapping[str, Any]] | None = None,
@@ -495,6 +496,11 @@ def publish_canonical_mut_cell(
         pointer_fn = append_pointer or append_under_authority_pointer
 
         def _append(prior: Path) -> Mapping[str, Any]:
+            projection_kwargs = (
+                {"registry_projection": registry_projection}
+                if registry_projection is not None
+                else {}
+            )
             return cell_fn(
                 prior_authority_root=prior,
                 dataset="Mutagenicity",
@@ -505,6 +511,7 @@ def publish_canonical_mut_cell(
                 require_writer_audit=True,
                 git_identity=identity,
                 **repair_kwargs,
+                **projection_kwargs,
             )
 
         result = dict(
@@ -529,6 +536,12 @@ def publish_canonical_mut_cell(
             "method": "ComRecGC",
             "terminal_root": str(source),
         }
+        if registry_projection is not None:
+            projection_root = Path(registry_projection).resolve()
+            locator_payload.update({
+                "registry_projection": str(projection_root),
+                "standardized_output_root": str(projection_root / "standardized"),
+            })
         _atomic_json(locator, locator_payload, replace=False)
         if _read_json(locator, label="canonical Mut locator") != locator_payload:
             raise MutSuccessorStageError("canonical Mut locator changed on reopen")
@@ -553,6 +566,21 @@ def publish_canonical_mut_cell(
             "test_used_for_selection": False,
             "published_at": _utc_now(),
         }
+        if registry_projection is not None:
+            terminal.update({
+                "registry_projection": str(Path(registry_projection).resolve()),
+                "standardized_output_root": locator_payload["standardized_output_root"],
+                "aggregate_reexport": True,
+                "figure_table_recomputed": True,
+                "inference_rerun": False,
+                "ot_rerun": False,
+                "selector_rerun": False,
+                "test_dataset_rerun": False,
+                "scientific_metrics_recomputed_scope": (
+                    "fresh inference/OT/selector/test-dataset execution; "
+                    "excludes the explicit deterministic aggregate re-export"
+                ),
+            })
         terminal["receipt_sha256"] = stable_sha256(terminal)
         return _seal_root(destination, terminal=terminal, marker="PASS")
     finally:

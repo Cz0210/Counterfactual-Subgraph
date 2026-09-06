@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import sys
+from types import ModuleType
 
 import pytest
 
@@ -1149,8 +1151,9 @@ def test_mut_accepts_only_full_exact_postprocess_and_reopens_old_append_as_evide
         )
 
 
+@pytest.mark.parametrize("projection_case", ["original", "projected", "bad_threshold", "bad_oracle"])
 def test_mut_shared_pointer_append_uses_current_authority_not_old_fork(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, projection_case: str,
 ) -> None:
     prior, _cells = _bace_campaign(tmp_path)
     science_root = tmp_path / "mut-final"
@@ -1173,8 +1176,47 @@ def test_mut_shared_pointer_append_uses_current_authority_not_old_fork(
         "root": str(science_root.resolve()),
         "standardized": {"root": str((science_root / "standardized").resolve())},
     }
+    projection_calls = []
+    projection_kwargs = {}
+    if projection_case != "original":
+        terminal.update({
+            "terminal_kind": "MUT_FAST_ACCURATE_STANDARDIZATION_FINAL",
+            "startup_failure_supersession": {
+                "status": "RESOLVED_PRE_SCIENCE_STARTUP_FAILURE",
+                "scientific_validation_bypassed": False,
+            },
+        })
+        projection_root = tmp_path / "registry-projection"
+        projected_standardized = projection_root / "standardized"
+        shutil.copytree(science_root / "standardized", projected_standardized)
+        if projection_case in {"bad_threshold", "bad_oracle"}:
+            field = "threshold_config_hash" if projection_case == "bad_threshold" else "oracle_hash"
+            for name in ("summary.json", "run_manifest.json", "final_artifact_audit.json"):
+                path = projected_standardized / name
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload[field] = "f" * 64
+                _json(path, payload)
+        projection_kwargs = {
+            "registry_projection": projection_root,
+            "startup_repair_receipt": tmp_path / "startup-repair.json",
+        }
+
+        def project(root, *, terminal, reference, startup_repair_receipt, proc_root):
+            assert root == projection_root
+            assert startup_repair_receipt == projection_kwargs["startup_repair_receipt"]
+            assert reference["method"] == "Ours"
+            projection_calls.append((terminal, dict(reference)))
+            return {
+                "schema_version": "mut_registry_k10_projection_v1",
+                "status": "PASS",
+                "standardized_root": str(projected_standardized),
+            }
+
+        projection_module = ModuleType("src.eval.mut_registry_k10_projection")
+        projection_module.validate_registry_projection = project
+        monkeypatch.setitem(sys.modules, projection_module.__name__, projection_module)
     monkeypatch.setattr(append_module, "_validate_mut_terminal", lambda *_args, **_kwargs: terminal)
-    result = append_non_taste_matrix_cell(
+    append_kwargs = dict(
         prior_authority_root=prior,
         dataset="Mutagenicity",
         method="ComRecGC",
@@ -1182,7 +1224,14 @@ def test_mut_shared_pointer_append_uses_current_authority_not_old_fork(
         output_root=tmp_path / "authority-mut-9",
         require_writer_audit=False,
         git_identity={"commit": "a" * 40, "tree": "b" * 40},
+        **projection_kwargs,
     )
+    if projection_case in {"bad_threshold", "bad_oracle"}:
+        with pytest.raises(NonTasteMatrixAppendError, match="ordinary frozen registry gate"):
+            append_non_taste_matrix_cell(**append_kwargs)
+        assert not (tmp_path / "authority-mut-9").exists()
+        return
+    result = append_non_taste_matrix_cell(**append_kwargs)
     assert result["matrix_complete_cells"] == 9
     receipt = json.loads(
         (Path(result["output_root"]) / "append_authority.json").read_text(encoding="utf-8")
@@ -1190,7 +1239,37 @@ def test_mut_shared_pointer_append_uses_current_authority_not_old_fork(
     assert receipt["prior_authority_root"] == str(prior.resolve())
     assert receipt["appended_cell"]["terminal_evidence"][
         "terminal_kind"
-    ] == "MUT_EXACT_POSTPROCESS_FINAL"
+    ] == terminal["terminal_kind"]
+    assert receipt["appended_cell"]["cell_terminal_root"] == str(science_root)
+    if projection_case == "projected":
+        assert len(projection_calls) == 1
+        assert projection_calls[0][0] == terminal
+        assert receipt["mut_registry_projection"]["status"] == "PASS"
+        assert receipt["identity_compatibility"]["equivalent_mismatched_fields"] == []
+        assert receipt["appended_cell"]["registry_row"]["standardized_output_root"] == str(projected_standardized)
+    else:
+        assert receipt["mut_registry_projection"] is None
+
+
+@pytest.mark.parametrize("field", ["threshold_config_hash", "oracle_hash"])
+def test_mut_projection_cannot_waive_shared_identity_mismatch(field):
+    reference = {field: "a" * 64 for field in append_module._RF_SHARED_FIELDS}
+    reference.update({"dataset": "Mutagenicity", "method": "Ours", "status": "FROZEN_PASS"})
+    target = {**reference, "method": "ComRecGC", field: "b" * 64}
+    with pytest.raises(NonTasteMatrixAppendError, match="target differs"):
+        append_module._identity_compatibility(dataset="Mutagenicity", target=target, reference=reference)
+
+
+@pytest.mark.parametrize("dataset,method,receipt", [
+    ("Mutagenicity", "ComRecGC", None), ("BACE", "GlobalGCE", None),
+])
+def test_registry_projection_requires_mut_cell_and_explicit_startup_receipt(tmp_path, dataset, method, receipt):
+    with pytest.raises(NonTasteMatrixAppendError, match="registry-projection requires"):
+        append_non_taste_matrix_cell(
+            prior_authority_root=tmp_path / "prior", dataset=dataset, method=method,
+            cell_terminal_root=tmp_path / "terminal", output_root=tmp_path / "new",
+            registry_projection=tmp_path / "projection", startup_repair_receipt=receipt,
+        )
 
 
 def test_cli_exposes_shared_pointer_and_rejects_relative_paths() -> None:

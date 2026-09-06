@@ -7,6 +7,7 @@ import pytest
 
 import scripts.autodl.append_non_taste_matrix_authority as append_cli
 import scripts.autodl.publish_mut_successor_v1 as publish_cli
+import scripts.autodl.project_mut_registry_k10 as projection_cli
 import scripts.autodl.reopen_mut_successor_export_v1 as export_cli
 import scripts.autodl.run_mut_next_stage_executor_v1 as executor_cli
 import scripts.autodl.run_mut_route_b_closeout_v1 as route_b_cli
@@ -166,6 +167,10 @@ def test_publish_appends_once_and_then_writes_canonical_locator(
         if with_startup_repair
         else {}
     )
+    projection_kwargs = (
+        {"registry_projection": tmp_path / "fresh-registry-projection"}
+        if with_startup_repair else {}
+    )
     validator_calls: list[Path] = []
 
     def validator(
@@ -204,6 +209,9 @@ def test_publish_appends_once_and_then_writes_canonical_locator(
         assert {
             key: value for key, value in kwargs.items() if key == "startup_repair_receipt"
         } == repair_kwargs
+        assert {
+            key: value for key, value in kwargs.items() if key == "registry_projection"
+        } == projection_kwargs
         calls.append("cell")
         Path(str(kwargs["output_root"])).mkdir()
         return {
@@ -234,18 +242,48 @@ def test_publish_appends_once_and_then_writes_canonical_locator(
         append_cell=append_cell,
         append_pointer=append_pointer,
         **repair_kwargs,
+        **projection_kwargs,
     )
     assert validator_calls == [source, source]
     assert calls == ["pointer", "cell"]
     assert terminal["status"] == "PASS"
+    assert terminal["source_terminal_root"] == str(source)
+    assert terminal["export_receipt"] == str(export_root / "terminal.json")
+    assert terminal["scientific_metrics_recomputed"] is False
+    if projection_kwargs:
+        assert terminal["aggregate_reexport"] is True
+        assert terminal["figure_table_recomputed"] is True
+        for field in ("inference_rerun", "ot_rerun", "selector_rerun", "test_dataset_rerun"):
+            assert terminal[field] is False
+        assert "aggregate re-export" in terminal["scientific_metrics_recomputed_scope"]
+    else:
+        assert "aggregate_reexport" not in terminal
     locator_payload = json.loads(locator.read_text(encoding="utf-8"))
-    assert locator_payload == {
+    expected_locator = {
         "schema_version": LOCATOR_SCHEMA,
         "status": "READY",
         "dataset": "Mutagenicity",
         "method": "ComRecGC",
         "terminal_root": str(source.resolve()),
     }
+    if projection_kwargs:
+        projection_root = projection_kwargs["registry_projection"]
+        expected_locator.update({
+            "registry_projection": str(projection_root),
+            "standardized_output_root": str(projection_root / "standardized"),
+        })
+        assert terminal["standardized_output_root"] == str(projection_root / "standardized")
+    assert locator_payload == expected_locator
+    # The shared locator consumer accepts supported additive metadata while
+    # preserving its terminal-validation target; metric readers use the
+    # projected standardized root recorded above or the canonical matrix row.
+    from scripts.autodl.run_fast16_matrix_publisher_queue import _locator_root
+    locator_root, locator_state = _locator_root({
+        "cell_id": MUT_CELL_ID, "dataset": "Mutagenicity", "method": "ComRecGC",
+        "terminal_root_locator": str(locator),
+    })
+    assert locator_root == source
+    assert locator_state.startswith("LOCATOR:")
 
 
 def test_publish_rejects_another_canonical_publisher_identity(tmp_path: Path) -> None:
@@ -433,6 +471,8 @@ def test_startup_repair_cli_argument_is_forwarded_only_when_explicit(
     receipt_path = tmp_path / "startup-repair.json"
     if with_startup_repair:
         argv.extend(["--startup-repair-receipt", str(receipt_path)])
+        if route in {"publish", "append"}:
+            argv.extend(["--registry-projection", str(tmp_path / "registry-projection")])
     calls: list[dict[str, object]] = []
 
     def stage(**kwargs: object) -> dict[str, object]:
@@ -446,12 +486,54 @@ def test_startup_repair_cli_argument_is_forwarded_only_when_explicit(
         assert calls[0]["startup_repair_receipt"] == receipt_path
     else:
         assert "startup_repair_receipt" not in calls[0]
+    if with_startup_repair and route in {"publish", "append"}:
+        assert calls[0]["registry_projection"] == tmp_path / "registry-projection"
+    else:
+        assert "registry_projection" not in calls[0]
+
+
+@pytest.mark.parametrize("explicit_proc", [False, True])
+def test_projection_creation_cli_forwards_required_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_proc: bool,
+) -> None:
+    expected = {
+        "terminal_root": tmp_path / "original-terminal",
+        "reference_standardized_root": tmp_path / "ours-reference",
+        "startup_repair_receipt": tmp_path / "startup-repair.json",
+        "output_root": tmp_path / "fresh-projection",
+    }
+    argv = [part for key, value in expected.items()
+            for part in ("--" + key.replace("_", "-"), str(value))]
+    expected["proc_root"] = tmp_path / "proc" if explicit_proc else Path("/proc")
+    if explicit_proc:
+        argv.extend(["--proc-root", str(expected["proc_root"])])
+    argv.extend(["--config", "configs/hpc.yaml", "--set", "inference.fallback_to_heuristic=false"])
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return {"schema_version": "mut_registry_k10_projection_v1", "status": "PASS"}
+
+    monkeypatch.setattr(projection_cli, "create_registry_projection", create)
+    assert projection_cli.main(argv) == 0
+    assert calls == [expected]
+
+
+def test_projection_creation_cli_requires_all_authority_paths() -> None:
+    with pytest.raises(SystemExit):
+        projection_cli.main(["--terminal-root", "/original", "--output-root", "/projection"])
+    with pytest.raises(SystemExit):
+        projection_cli.main([
+            "--terminal-root", "relative", "--reference-standardized-root", "/reference",
+            "--startup-repair-receipt", "/receipt.json", "--output-root", "/projection",
+        ])
 
 
 def test_slurm_wrappers_follow_the_pinned_repository_contract() -> None:
     for name in (
         "reopen_mut_successor_export_v1.sh",
         "publish_mut_successor_v1.sh",
+        "project_mut_registry_k10.sh",
         "run_mut_route_b_closeout_v1.sh",
     ):
         text = (Path("scripts/slurm") / name).read_text(encoding="utf-8")

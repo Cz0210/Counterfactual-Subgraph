@@ -18678,3 +18678,18 @@ bytes, ordered original stage receipts, final closure and no-writer checks
 are required; other failures remain rejected. Ordinary scientific validation
 still runs. The publication driver is recorded separately from the unchanged
 fbefa4ca science, and no old terminal is deleted or relabeled.
+
+### 2026-09-07 — Match Mut Figure4 to the already frozen K10 publication protocol
+
+The completed native ComRecGC exporter used K20 for Figure4 while the approved
+Mut main-table protocol and the other three frozen methods use K10. Publication
+therefore requires a fresh deterministic K10 projection of the already sealed
+217-parent prefix summaries. It is not sufficient to waive a registry hash or
+metadata mismatch. The original K20, Figure3, Table2, scientific terminal and
+historical failures remain unchanged; no generation, inference, OT or selector
+is rerun. All 601 threshold strings come from the approved frozen reference,
+with a per-parent check that historical float serialization differences cross
+no distance. Legitimate undefined conditional costs remain missing, not zero.
+The explicit projection is verified through the existing publisher and sole
+matrix authority; producer identity is preserved independently of later reader
+commits. See `docs/MUT_REGISTRY_K10_PROJECTION_20260907.md`.

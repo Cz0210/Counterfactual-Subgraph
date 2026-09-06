@@ -558,7 +558,16 @@ def _validate_standardized_csvs(
                 )
                 for row in rows3
             ]
+            undefined_cost_prefixes: set[int] = set()
+            if method == "ComRecGC" and any(row[cost_field] == "" for row in rows3):
+                from src.eval.mut_registry_k10_projection import validated_undefined_cost_prefixes
+                undefined_cost_prefixes = validated_undefined_cost_prefixes(root)
             for row in rows3:
+                if (cost_field in ("conditional_median_cost", "conditional_mean_cost")
+                        and row[cost_field] == "" and int(row["k"]) in undefined_cost_prefixes
+                        and int(row.get("num_any_strict_flip_parents", "-1")) == 0
+                        and float(row[coverage_field]) == 0.0):
+                    continue  # Typed source-backed missing value; never impute a cost.
                 _validate_finite(row[cost_field], field_name=cost_field, path=figure3)
             if any(right + 1e-12 < left for left, right in zip(coverages, coverages[1:])):
                 reasons.append("FIGURE3_COVERAGE_NOT_MONOTONE")

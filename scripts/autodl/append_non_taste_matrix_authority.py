@@ -45,6 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit typed Mut startup-repair receipt; does not waive terminal checks.",
     )
     parser.add_argument(
+        "--registry-projection", type=_absolute,
+        help="Verified fresh Mut K10 registry projection root; requires --startup-repair-receipt.",
+    )
+    parser.add_argument(
         "--prior-authority-root",
         type=_absolute,
         help="Required only to initialize a missing shared pointer; otherwise omit it.",
@@ -74,6 +78,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.startup_repair_receipt is not None
         else {}
     )
+    if args.registry_projection is not None:
+        repair_kwargs["registry_projection"] = args.registry_projection
 
     def _append(prior: Path) -> dict[str, object]:
         return append_non_taste_matrix_cell(

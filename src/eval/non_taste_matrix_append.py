@@ -2161,6 +2161,7 @@ def append_non_taste_matrix_cell(
     output_root: str | Path,
     aids_controller_manifest: str | Path | None = None,
     startup_repair_receipt: str | Path | None = None,
+    registry_projection: str | Path | None = None,
     proc_root: str | Path = "/proc",
     require_writer_audit: bool = True,
     git_identity: Mapping[str, str] | None = None,
@@ -2174,6 +2175,12 @@ def append_non_taste_matrix_cell(
         raise NonTasteMatrixAppendError("--aids-controller-manifest is AIDS-only")
     if startup_repair_receipt is not None and key != ("Mutagenicity", "ComRecGC"):
         raise NonTasteMatrixAppendError("--startup-repair-receipt is Mutagenicity/ComRecGC-only")
+    if registry_projection is not None and (
+        key != ("Mutagenicity", "ComRecGC") or startup_repair_receipt is None
+    ):
+        raise NonTasteMatrixAppendError(
+            "--registry-projection requires Mutagenicity/ComRecGC and an explicit startup-repair receipt"
+        )
     prior = _verify_authority(prior_authority_root)
     prior_rows = prior["rows"]
     passing = {status.value for status in PASS_STATUSES}
@@ -2218,6 +2225,30 @@ def append_non_taste_matrix_cell(
         cell_root,
         registry_cell_root,
     }
+    mut_registry_projection: dict[str, Any] | None = None
+    if registry_projection is not None:
+        from src.eval.mut_registry_k10_projection import validate_registry_projection
+
+        projection_root = _physical_directory(
+            registry_projection, label="Mut registry projection root"
+        )
+        mut_registry_projection = validate_registry_projection(
+            projection_root,
+            terminal=terminal,
+            reference=reference,
+            startup_repair_receipt=startup_repair_receipt,
+            proc_root=proc_root,
+        )
+        if (
+            mut_registry_projection.get("schema_version") != "mut_registry_k10_projection_v1"
+            or mut_registry_projection.get("status") != "PASS"
+        ):
+            raise NonTasteMatrixAppendError("Mut registry projection proof is invalid")
+        registry_cell_root = _physical_directory(
+            mut_registry_projection.get("standardized_root", ""),
+            label="Mut projected standardized root",
+        )
+        protected.update({projection_root, registry_cell_root})
     reconciliation_root = terminal.get("reconciliation_root")
     if reconciliation_root is not None:
         protected.add(Path(str(reconciliation_root)).resolve(strict=True))
@@ -2345,6 +2376,7 @@ def append_non_taste_matrix_cell(
         "reference_cell": dict(reference),
         "identity_compatibility": compatibility,
         "aids_zero_threshold_grid_equivalence": aids_zero_threshold_equivalence,
+        "mut_registry_projection": mut_registry_projection,
         "unchanged_non_target_rows": True,
         "new_matrix_complete_cells": expected_complete,
         "new_matrix_total_cells": 16,

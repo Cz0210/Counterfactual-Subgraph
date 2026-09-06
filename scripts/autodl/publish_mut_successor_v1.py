@@ -45,6 +45,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=_absolute,
         help="Explicit typed Mut startup-repair receipt; does not waive terminal checks.",
     )
+    parser.add_argument(
+        "--registry-projection", type=_absolute,
+        help="Verified fresh Mut K10 registry projection root; original terminal remains authoritative.",
+    )
     args = parser.parse_args(argv)
     if args.config not in (None, "configs/hpc.yaml"):
         raise ValueError("--config must be configs/hpc.yaml")
@@ -55,6 +59,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.startup_repair_receipt is not None
         else {}
     )
+    if args.registry_projection is not None:
+        repair_kwargs["registry_projection"] = args.registry_projection
     result = publish_canonical_mut_cell(
         terminal_root=args.terminal_root,
         export_receipt=args.export_receipt,
