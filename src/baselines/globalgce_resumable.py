@@ -1912,7 +1912,8 @@ def train_globalgce_resumable(
             from src.baselines.t13_indexed_canary import run_training_parity, T13IndexedCanaryComplete
             report = run_training_parity(model=model, fss=fss, train_loader=expanded_train,
                 learning_rate=learning_rate, output_root=indexed_canary_output,
-                resume_identity=normalized_resume_identity)
+                resume_identity=normalized_resume_identity,
+                diagnostic_profile=getattr(model.fsg, 't13_diagnostic_profile', 'native'))
             raise T13IndexedCanaryComplete(report)
     elif indexed_canary_output is not None:
         raise ValueError("T13 canary requires the real indexed augmented dataset")

@@ -18411,3 +18411,19 @@ engineering retry. Record the temperature driver and the verifier driver separat
   and replaying the package. Scientific inputs and all old receipts stay intact.
 - See `docs/BACE_LLM_EXISTING_OWNER_REPAIR_20260906.md` for the executable
   existing-queue hook and resource-source config. CPU tests are not GPU science.
+
+## 2026-09-06: Preserve T13 component differences before retrying exact parity
+
+- The failed native canary proved compact mask/data construction, but discarded
+  the loss/gradient/update/RNG distinction behind one exception. Persist bounded
+  raw component evidence and exact leaf differences before any diagnostic exit.
+- Perform three independent eager controls from the same model, optimizer and
+  RNG start. Preserve any drift; do not bypass the third control or use a numeric
+  tolerance. Compare lazy data and checkpoint continuation against that reference.
+- Only native eager self-repeat failure triggers a fresh matched deterministic
+  diagnostic, using strict algorithms rather than warn-only. Keep its result
+  distinct from native parity and the existing one-shot formal launch gate.
+- Reuse the existing owner/lease/resource monitor. No full-start allowance is
+  consumed by these diagnostics; no mining, split, decoder, budget, model weight,
+  original result, or main-table policy is changed. See
+  `docs/AUTODL_T13_COMPONENT_DIAGNOSTIC_20260906.md`.

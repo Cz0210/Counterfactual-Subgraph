@@ -18,6 +18,8 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
-python -I -B scripts/autodl/canary_t13_indexed_dataset.py --config configs/hpc.yaml --help >/dev/null
+python -I -B scripts/autodl/canary_t13_indexed_dataset.py --config configs/hpc.yaml --diagnostic-profile native --help >/dev/null
+# GPU execution is dispatched only through the existing AutoDL T13 reservation.
+# A fresh deterministic diagnostic is not permission to change formal numerics.
 echo "REFUSING_HPC_EXECUTION: T13 train/GINE canary is AutoDL-only." >&2
 exit 78

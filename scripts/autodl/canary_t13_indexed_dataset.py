@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 from pathlib import Path
@@ -27,13 +28,19 @@ def main(argv=None):
     parser.add_argument('--gspan-adoption-proof',type=Path)
     parser.add_argument('--targets',default='0,2')
     parser.add_argument('--device',default='cuda:0')
+    parser.add_argument('--diagnostic-profile',choices=('native','deterministic'),default='native')
     parser.add_argument('--verify-checkpoint-only',type=Path)
     args=parser.parse_args(argv)
     if not sys.flags.isolated or not sys.dont_write_bytecode:
         raise ValueError('T13_CANARY_REQUIRES_PYTHON_I_B')
     if args.set!=['inference.fallback_to_heuristic=false'] or not args.config.is_file():
         raise ValueError('T13_CANARY_CONFIG_CONTRACT')
-    from src.baselines.t13_indexed_canary import checkpoint_reopen,T13IndexedCanaryComplete
+    if args.diagnostic_profile=='deterministic':
+        # Fresh process, before torch/CUDA imports. Native mode keeps its environment.
+        if 'torch' in sys.modules:
+            raise ValueError('T13_DETERMINISTIC_PROFILE_REQUIRES_FRESH_PROCESS')
+        os.environ['CUBLAS_WORKSPACE_CONFIG']=':4096:8'
+    from src.baselines.t13_indexed_canary import checkpoint_reopen,T13IndexedCanaryComplete,T13CanaryParityError
     from src.eval.bace_frozen_gnn_contracts import atomic_json,sha256_file
     if args.verify_checkpoint_only is not None:
         if args.output_root.exists():raise ValueError('T13_FRESH_RELOAD_RECEIPT_REQUIRED')
@@ -77,7 +84,7 @@ def main(argv=None):
             atomic_json(args.output_root/'memory_progress.json',{'samples':samples[-120:],'total_samples':len(samples)})
             stop.wait(5)
     started=time.monotonic();thread=threading.Thread(target=monitor,daemon=True);thread.start()
-    reports={}
+    reports={};failure=None
     try:
         for target in (0,2):
             branch=args.output_root/f'target_{target}'
@@ -86,13 +93,17 @@ def main(argv=None):
                 source_label=1,target_label=target,num_classes=3,
                 official_source_authority=official['runtime_source_authority'],require_isolated_imports=True,
                 rules_only_min_valid_native_rules=0)
-            generator.t13_indexed_options={'storage':'t13_indexed_augmentation_v1','canary_output':branch/'training_canary'}
+            generator.t13_indexed_options={'storage':'t13_indexed_augmentation_v1','canary_output':branch/'training_canary',
+                                          'diagnostic_profile':args.diagnostic_profile}
             try:
                 generator.generate(selected,output_dir=branch,seed=7,epochs=100,top_k_native=20,
                     learning_rate=0.1,dropout=0.5,device=args.device,resume=False,
                     gspan_adoption_proof=args.gspan_adoption_proof,rules_only=True)
             except T13IndexedCanaryComplete as complete:
                 reports[str(target)]=complete.report
+            except T13CanaryParityError as error:
+                failure=dict(target=target,**error.report)
+                break
             else:raise ValueError('T13_CANARY_DID_NOT_STOP_BEFORE_FORMAL_TRAINING')
             checkpoint=branch/'training_canary/training_checkpoint.pt'
             fresh=branch/'independent_reload'
@@ -105,8 +116,51 @@ def main(argv=None):
     finally:
         stop.set();thread.join(timeout=10)
         atomic_json(args.output_root/'memory_samples.json',{'samples':samples})
-    report=dict(state='T13_INDEXED_DATA_AND_SHORT_TRAINING_CANARY_PASS',targets=reports,
+    if failure is not None:
+        failure_report=dict(state='T13_COMPONENT_DIAGNOSTIC_FAILED',diagnostic_profile=args.diagnostic_profile,
+            failure=failure,targets_completed=list(reports),targets_order=[0,2],seed=7,configured_epochs=100,
+            train_only=True,test_loaded=False,calibration_loaded=False,mining_recomputed=False,
+            full_successor_started=False,formal_launch_allowed=False,tolerance_used=False)
+        atomic_json(args.output_root/'canary.json',failure_report)
+        # Only a demonstrated native eager self-repeat failure triggers this fresh
+        # matched diagnosis. It never consumes the owner's one formal-start claim.
+        if (args.diagnostic_profile=='native' and failure.get('eager_repetitions_completed')==3
+                and failure.get('eager_self_repeatable') is False):
+            gc.collect()
+            import torch
+            torch.cuda.empty_cache()
+            child=args.output_root/'matched-deterministic'
+            command=[sys.executable,'-I','-B',str(Path(__file__).resolve()),'--config',str(args.config),
+                '--set','inference.fallback_to_heuristic=false','--output-root',str(child),
+                '--official-root',str(args.official_root),'--train-csv',str(args.train_csv),
+                '--gnn-checkpoint',str(args.gnn_checkpoint),'--gspan-adoption-proof',str(args.gspan_adoption_proof),
+                '--device',args.device,'--targets','0,2','--diagnostic-profile','deterministic']
+            completed=subprocess.run(command,check=False)
+            diagnostic_path=child/f"target_{failure['target']}"/'training_canary/component_diagnostics.json'
+            matched=None
+            if diagnostic_path.is_file() and (child/'train_cohort_manifest.json').is_file():
+                other=json.loads(diagnostic_path.read_text())
+                left=failure.get('initial_state_bindings',[])
+                right=other.get('initial_state_bindings',[])
+                matched=dict(
+                    initial_model_optimizer_scheduler_rng_index_exact=bool(left and right and
+                        left[0]['state_sha256']==right[0]['state_sha256']),
+                    source_cohort_exact=sha256_file(args.output_root/'train_cohort_manifest.json')==
+                        sha256_file(child/'train_cohort_manifest.json'),
+                    deterministic_diagnostics_sha256=sha256_file(diagnostic_path))
+            failure_report['matched_deterministic_diagnostic']={
+                'root':str(child),'returncode':completed.returncode,
+                'canary_json':str(child/'canary.json'),
+                'matched_start_evidence':matched,
+                'native_failure_preserved':True,'formal_launch_allowed':False}
+            atomic_json(args.output_root/'canary.json',failure_report)
+        print(json.dumps(failure_report,sort_keys=True))
+        return 1
+    report=dict(state=('T13_INDEXED_DATA_AND_SHORT_TRAINING_CANARY_PASS' if args.diagnostic_profile=='native'
+                       else 'T13_MATCHED_DETERMINISTIC_DIAGNOSTIC_PASS'),targets=reports,
         seed=7,configured_epochs=100,targets_order=[0,2],train_only=True,calibration_loaded=False,test_loaded=False,
+        diagnostic_profile=args.diagnostic_profile,formal_launch_allowed=args.diagnostic_profile=='native',
+        deterministic_diagnostic_not_formal_approval=args.diagnostic_profile=='deterministic',
         full_successor_started=False,mining_recomputed=False,independent_reload_pass=True,
         index_contract_pass=all(r['dataset_identity']['sample_count']>0 and r['dataset_identity']['index_sha256'] for r in reports.values()),
         mask_rng_batch_parity=all(r['dataset_identity']['all_masks_reconstructed_exactly']

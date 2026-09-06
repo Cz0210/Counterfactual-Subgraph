@@ -1,5 +1,14 @@
 # Refactor Plan
 
+## 2026-09-06: T13 component-exact repeatability diagnosis
+
+- [x] Persist per-batch loss/RNG and pre-zero gradient plus update state on failure.
+- [x] Require three independent eager first-update controls from identical state.
+- [x] Add a fresh strict deterministic diagnostic only after native self-repeat failure.
+- [x] Keep deterministic evidence separate from native/full launch approval.
+- [ ] Run the short production diagnosis under the unchanged T13 resource/lease guard.
+- [ ] Identify the first real differing component; no tolerance or numerical-policy change.
+
 ## 2026-09-06: Exact low-memory Taste T13 augmentation
 
 - [x] Keep original official mask/sample/RNG/decoder/training semantics.
