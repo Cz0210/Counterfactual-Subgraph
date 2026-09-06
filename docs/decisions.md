@@ -18655,3 +18655,15 @@ after the canonical registry explicitly binds a same-cell successor and the old
 GPU reservation is released. The successor's live PID and fresh heartbeat still
 must pass. A legacy BLOCKED owner with an explicit successor is not relabeled
 as scientifically PASS; arbitrary stale paths and unbound failures still block.
+
+### 2026-09-07 — Mut chemistry-to-evaluation startup bookkeeping repair
+
+The sealed chemistry stage completed, but its shared PASS stage-state was read
+as a resumable unified-evaluation state. The first evaluation activation failed
+before starting a science child. A narrowly scoped adapter now gives the three
+remaining stages independent startup checkpoints in a fresh control directory.
+It preserves the original chemistry boundary, state and failure bytes and runs
+the pinned original runner, scientific argv and imports unchanged. New control
+and original scientific commits are recorded separately. This does not repeat
+chemistry, generation, pair-store or DBSCAN, nor authorize partial-evaluation
+recovery. See `docs/MUT_CHEMISTRY_STARTUP_REPAIR_20260907.md`.
