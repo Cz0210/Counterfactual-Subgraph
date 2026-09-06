@@ -826,15 +826,21 @@ def run_mutagenicity_chemistry_audit(
     common_root = Path(common_recourse_dir).expanduser().resolve()
     generation_manifest = _load_json(generation_root / "run_manifest.json")
     counterfactuals = Path(generation_manifest["counterfactuals_path"]).expanduser().resolve()
-    actual_sha = sha256_file(counterfactuals)
-    if actual_sha != str(generation_manifest["counterfactuals_sha256"]):
-        raise ValueError("Mutagenicity generation artifact differs from its manifest.")
-    if expected_counterfactuals_sha256 and actual_sha != expected_counterfactuals_sha256:
-        raise ValueError("Mutagenicity generation artifact differs from the frozen blocker SHA256.")
     trace_evidence = validate_chemistry_trace_evidence(
         trace_parity_path,
         dataset=dataset,
     )
+    # The independently adopted immutable source already has a complete
+    # historical payload hash plus current stat/writer binding. Do not scan
+    # that multi-GB file again merely to enter the real chemistry replay.
+    reused_sha = trace_evidence.get("source_payload_sha256")
+    if reused_sha and Path(trace_evidence["source_payload_path"]).resolve() != counterfactuals:
+        raise ValueError("Independent adoption chemistry payload path mismatch")
+    actual_sha = reused_sha or sha256_file(counterfactuals)
+    if actual_sha != str(generation_manifest["counterfactuals_sha256"]):
+        raise ValueError("Mutagenicity generation artifact differs from its manifest.")
+    if expected_counterfactuals_sha256 and actual_sha != expected_counterfactuals_sha256:
+        raise ValueError("Mutagenicity generation artifact differs from the frozen blocker SHA256.")
     lineage_path = Path(trace_lineage_path).expanduser().resolve()
     lineage_contract, lineage_count, lineage_format = _lineage_contract(lineage_path)
     evidence_candidate_count = trace_evidence.get("candidate_count")

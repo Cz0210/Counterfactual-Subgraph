@@ -65,6 +65,16 @@ def same_immutable_stat(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
                ("size", "inode", "mtime_ns", "ctime_ns", "mode"))
 
 
+def selected_rows(path: Path) -> list[dict[str, Any]]:
+    """The native selected-recourse artifact is a JSON array, not a manifest."""
+    require(path.is_file() and not path.is_symlink() and path.stat().st_size <= SMALL_FILE_LIMIT,
+            "selected_common_recourses", "METADATA_OR_PATH_GAP")
+    rows = json.loads(path.read_text())
+    require(isinstance(rows, list) and len(rows) == 100 and all(isinstance(row, dict) for row in rows),
+            "native_selected_recourse_count")
+    return rows
+
+
 def _fields(value: Mapping[str, Any], expected: Mapping[str, Any], prefix: str) -> None:
     for key, item in expected.items():
         require(value.get(key) == item, f"{prefix}.{key}")
@@ -219,8 +229,10 @@ def audit(*, source_root: Path, common_root: Path, inventory_path: Path,
         # producer manifest is bound by the completed common-recourse manifest.
         old_large(path, {"size": path.stat().st_size, "sha256": dbscan[field + "_sha256"]},
                   cm["completed_at"])
-    for name in ("_RUN_COMPLETE.json", "selected_common_recourses.json"):
-        small(common / name)
+    small(common / "_RUN_COMPLETE.json")
+    selected_path = common / "selected_common_recourses.json"
+    selected_rows(selected_path)
+    metadata[str(selected_path)] = {"sha256": sha256_file(selected_path), "stat": stat_identity(selected_path)}
     reps = Path(cm["representative_counterfactuals_path"])
     require(reps.parent == common and reps.stat().st_size <= SMALL_FILE_LIMIT, "representative_payload")
     require(sha256_file(reps) == cm["representative_counterfactuals_sha256"], "representatives_sha")

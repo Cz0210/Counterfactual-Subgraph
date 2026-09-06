@@ -79,6 +79,16 @@ def test_science_disagreement_never_becomes_metadata_gap():
     assert caught.value.category == "SCIENCE_INVALID"
 
 
+def test_native_selected_rules_use_actual_list_schema(tmp_path):
+    p = tmp_path / "selected_common_recourses.json"
+    rows = [{"rank": k} for k in range(100)]
+    m.write_json(p, rows)
+    assert m.selected_rows(p) == rows
+    m.write_json(p, rows[:-1])
+    with pytest.raises(m.AdoptionError, match="SCIENCE_INVALID"):
+        m.selected_rows(p)
+
+
 def test_cli_has_no_generation_or_signal_interface():
     source = (Path(__file__).resolve().parents[2] / "scripts/autodl/adopt_mut_historical_independent.py").read_text()
     assert 'choices=("audit", "seal")' in source
