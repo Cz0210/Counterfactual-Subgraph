@@ -2,6 +2,7 @@
 import ast
 import copy
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -144,3 +145,19 @@ def test_formal_identity_pin_fields_are_individually_declared():
     assert "'field':'fresh_retry.authorization_receipt.corrected_execution_commit'" in source
     assert "'field':'fresh_retry.formal_cadence_contract.execution_commit'" in source
     assert 'ORIGINAL_UNSTARTED_PROMOTABLE_ROOT_FRESH_0_TO_500_THEN_PROMOTE' in source
+
+
+def test_extracted_formal_loop_exact_ast_matches_original_driver():
+    repo=Path(owner.__file__).resolve().parents[2]
+    old=subprocess.check_output(['git','-C',str(repo),'show',
+        '56fcd3c7fa64abec204a237621d1f71bfc75c1e8:scripts/autodl/run_t14_route_c_owner.py'],text=True)
+    lines=old.splitlines()
+    start=next(i for i,line in enumerate(lines) if 'for early_checkpoint in (*EARLY_CHECKPOINT_STEPS, 500):' in line)
+    end=next(i for i,line in enumerate(lines[start:],start) if 'launch_continuation_owner(args.continuation_spec)' in line)
+    original='\n'.join(line[8:] for line in lines[start:end+1])
+    original=original.replace('args.task_spec','task_spec_path').replace('args.continuation_spec','continuation_spec_path')
+    expected=ast.parse(original).body
+    tree=ast.parse(Path(owner.__file__).read_text())
+    actual=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=='_continue_formal').body[:-1]
+    assert ast.dump(ast.Module(body=expected,type_ignores=[]),include_attributes=False)==ast.dump(
+        ast.Module(body=actual,type_ignores=[]),include_attributes=False)
