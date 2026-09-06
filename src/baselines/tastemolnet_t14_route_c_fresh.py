@@ -52,7 +52,7 @@ PRODUCTION_CHECKPOINT_STEPS = (
 GPU_INDEX = 2
 M_MAX = 20_000
 M_FALLBACK_MAX = 25_000
-GRAPH_STORE_SCHEMA = "tastemolnet_t14_route_c_append_only_graph_store_v1"
+GRAPH_STORE_SCHEMA = "tastemolnet_t14_route_c_append_only_graph_store_v2"
 CANDIDATE_STATE_SCHEMA = "tastemolnet_t14_route_c_mmap_candidate_state_v1"
 STEP_LEDGER_SCHEMA = "tastemolnet_t14_route_c_step_state_v1"
 PARITY_SCHEMA = "tastemolnet_t14_route_c_parity_v1"
@@ -140,6 +140,22 @@ class RouteCAppendOnlyGraphStore:
             )
             """
         )
+        key_table_exists = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_keys'"
+        ).fetchone()
+        if key_table_exists is None and self._connection.execute(
+            "SELECT COUNT(*) FROM graphs"
+        ).fetchone()[0]:
+            self._connection.close()
+            self._data.close()
+            raise T14RouteCFreshError(
+                "Route C v1 graph store cannot be upgraded in place; use a fresh stage"
+            )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS graph_keys ("
+            "graph_id INTEGER PRIMARY KEY, key_blob BLOB NOT NULL, "
+            "key_sha256 TEXT NOT NULL UNIQUE)"
+        )
         self._connection.commit()
         self._lru_capacity = int(lru_capacity)
         self._lru: OrderedDict[int, Any] = OrderedDict()
@@ -174,12 +190,42 @@ class RouteCAppendOnlyGraphStore:
             raise T14RouteCFreshError("Route C stable numeric graph ID changed")
         return graph_id
 
+    def reserve_key(self, key: Any) -> int:
+        """Bind a storage ID without materializing or activating a graph.
+
+        Official non-lead heads append candidates *before* writing graph_map.
+        This key-only reservation preserves that order and never makes contains
+        or graph_id report an available graph payload. It uses the existing
+        index file and consumes neither RNG draws nor science sequence IDs.
+        """
+
+        self._assert_writer()
+        key_blob, key_sha, graph_id = self._key(key)
+        existing = self._connection.execute(
+            "SELECT graph_id,key_blob FROM graph_keys WHERE key_sha256=?", (key_sha,)
+        ).fetchone()
+        if existing is not None:
+            if int(existing[0]) != graph_id or bytes(existing[1]) != key_blob:
+                raise T14RouteCFreshError("Route C reserved graph key identity changed")
+            return graph_id
+        collision = self._connection.execute(
+            "SELECT key_sha256 FROM graph_keys WHERE graph_id=?", (graph_id,)
+        ).fetchone()
+        if collision is not None:
+            raise T14RouteCFreshError("Route C stable numeric graph-ID collision")
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO graph_keys VALUES (?,?,?)", (graph_id, key_blob, key_sha)
+            )
+        return graph_id
+
     def contains(self, key: Any) -> bool:
         return self.graph_id(key) is not None
 
     def put(self, key: Any, value: Any, *, sequence_id: int) -> int:
         self._assert_writer()
         key_blob, key_sha, graph_id = self._key(key)
+        self.reserve_key(key)
         existing = self._connection.execute(
             "SELECT graph_id,payload_sha256,graph_sha256 FROM graphs WHERE key_sha256=?",
             (key_sha,),
@@ -290,6 +336,10 @@ class RouteCAppendOnlyGraphStore:
             "data_path": self.data_path.name,
             "index_path": self.index_path.name,
             "entry_count": self.count(),
+            "reserved_key_count": int(
+                self._connection.execute("SELECT COUNT(*) FROM graph_keys").fetchone()[0]
+            ),
+            "candidate_key_policy": "RESERVE_ID_BEFORE_OFFICIAL_MATERIALIZATION",
             "data_bytes": self.data_path.stat().st_size,
             "chain_sha256": str(last[0]) if last else "0" * 64,
             "lru_capacity": self._lru_capacity,
@@ -304,11 +354,18 @@ class RouteCAppendOnlyGraphStore:
             or state.get("index_path") != self.index_path.name
             or state.get("append_only") is not True
             or state.get("graph_objects_in_checkpoint") != 0
+            or state.get("candidate_key_policy")
+            != "RESERVE_ID_BEFORE_OFFICIAL_MATERIALIZATION"
             or int(state.get("lru_capacity", -1)) != self._lru_capacity
         ):
             raise T14RouteCFreshError("Route C graph-store checkpoint contract changed")
         count = int(state.get("entry_count", -1))
         data_bytes = int(state.get("data_bytes", -1))
+        reserved_count = int(state.get("reserved_key_count", -1))
+        if reserved_count < count or reserved_count != int(
+            self._connection.execute("SELECT COUNT(*) FROM graph_keys").fetchone()[0]
+        ):
+            raise T14RouteCFreshError("Route C reserved graph key boundary changed")
         if self.count() != count or self.data_path.stat().st_size != data_bytes:
             raise T14RouteCFreshError(
                 "Route C graph-store differs from the clean checkpoint boundary"
@@ -776,9 +833,10 @@ class RouteCMMapCandidateState(MutableSequence[MutableMapping[str, Any]]):
         if record_id >= self.record_capacity:
             raise T14RouteCFreshError("Route C candidate record capacity exhausted")
         graph_hash = value["graph_hash"]
-        graph_id = self.graph_store.graph_id(graph_hash)
-        if graph_id is None:
-            raise T14RouteCFreshError("Route C candidate graph is not in graph store")
+        # A non-lead official head reaches populate() before graph_map[hash].
+        # Reserve only its stable key; do not change official map membership or
+        # bypass/reinforcement decisions by materializing the graph early.
+        graph_id = self.graph_store.reserve_key(graph_hash)
         immutable = {key: item for key, item in value.items() if key != "frequency"}
         payload, payload_sha = _pickle_sha256(immutable)
         self._payload_file.seek(0, os.SEEK_END)
@@ -1792,6 +1850,8 @@ def recover_route_c_external_state(
     candidate_state = updater_state.get("candidates")
     if not isinstance(graph_state, Mapping) or not isinstance(candidate_state, Mapping):
         raise T14RouteCFreshError("Route C external checkpoint payload is malformed")
+    if graph_state.get("schema_version") != GRAPH_STORE_SCHEMA:
+        raise T14RouteCFreshError("Route C graph-store recovery schema changed")
     if live_state.get("store") != graph_state:
         raise T14RouteCFreshError("Route C graph-store checkpoint copies diverged")
 
@@ -1823,6 +1883,9 @@ def recover_route_c_external_state(
 
     graph_bytes = int(graph_state.get("data_bytes", -1))
     graph_count = int(graph_state.get("entry_count", -1))
+    reserved_count = int(graph_state.get("reserved_key_count", -1))
+    if reserved_count < graph_count:
+        raise T14RouteCFreshError("Route C reserved-key checkpoint count is invalid")
     candidate_bytes = int(candidate_state.get("payload_bytes", -1))
     candidate_index_bytes = int(candidate_state.get("payload_index_bytes", -1))
     candidate_count = int(candidate_state.get("record_count", -1))
@@ -1855,10 +1918,24 @@ def recover_route_c_external_state(
             "graph_sha256,sequence_id,chain_sha256 "
             "FROM graphs ORDER BY sequence_id,graph_id"
         ).fetchall()
+        reserved_rows = connection.execute(
+            "SELECT graph_id,key_blob,key_sha256 FROM graph_keys ORDER BY graph_id"
+        ).fetchall()
     finally:
         connection.close()
     if integrity != "ok" or len(rows) != graph_count:
         raise T14RouteCFreshError("Route C sealed graph index failed recovery validation")
+    if len(reserved_rows) != reserved_count:
+        raise T14RouteCFreshError("Route C sealed reserved-key count changed")
+    reserved_keys = {}
+    for graph_id, key_blob, key_sha in reserved_rows:
+        key_blob = bytes(key_blob)
+        if (
+            hashlib.sha256(key_blob).hexdigest() != str(key_sha)
+            or _stable_numeric_graph_id(pickle.loads(key_blob)) != int(graph_id)
+        ):
+            raise T14RouteCFreshError("Route C sealed reserved graph key changed")
+        reserved_keys[int(graph_id)] = str(key_sha)
     previous_chain = "0" * 64
     expected_offset = 0
     with graph_blob.open("rb") as stream:
@@ -1870,6 +1947,7 @@ def recover_route_c_external_state(
             if (
                 hashlib.sha256(key_blob).hexdigest() != str(key_sha)
                 or _stable_numeric_graph_id(pickle.loads(key_blob)) != int(graph_id)
+                or reserved_keys.get(int(graph_id)) != str(key_sha)
             ):
                 raise T14RouteCFreshError("Route C graph key identity changed")
             stream.seek(int(offset))
@@ -1924,6 +2002,17 @@ def recover_route_c_external_state(
                 "payload_sha256"
             ):
                 raise T14RouteCFreshError("Route C committed candidate payload changed")
+            candidate_value = pickle.loads(payload)
+            if not isinstance(candidate_value, dict) or "graph_hash" not in candidate_value:
+                raise T14RouteCFreshError("Route C committed candidate key is absent")
+            _key_blob, key_sha, graph_id = RouteCAppendOnlyGraphStore._key(
+                candidate_value["graph_hash"]
+            )
+            if (
+                int(row.get("graph_id", -1)) != graph_id
+                or reserved_keys.get(graph_id) != key_sha
+            ):
+                raise T14RouteCFreshError("Route C committed candidate key binding changed")
             expected_offset += length
     if expected_offset != candidate_bytes:
         raise T14RouteCFreshError("Route C candidate payload boundary changed")
@@ -1937,6 +2026,11 @@ def recover_route_c_external_state(
         or metadata.shape != (candidate_count,)
     ):
         raise T14RouteCFreshError("Route C candidate mmap checkpoint shapes changed")
+    if any(
+        int(metadata[index]["graph_id"]) != int(row["graph_id"])
+        for index, row in enumerate(index_rows)
+    ):
+        raise T14RouteCFreshError("Route C candidate mmap graph key binding changed")
     record_capacity = int(candidate_state.get("record_capacity", -1))
     capacity = int(candidate_state.get("capacity", -1))
     expected_mmap_sizes = {

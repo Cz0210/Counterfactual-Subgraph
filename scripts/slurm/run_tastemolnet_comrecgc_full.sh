@@ -30,6 +30,8 @@ exit 64
 #   --checkpoint-only-step "$TASTEMOLNET_T14_CHECKPOINT_ONLY_STEP" \
 #   --set inference.fallback_to_heuristic=false
 # Fresh Route C accepts durable early boundaries 50, 100, 250, and 500.
+# Candidate-first non-lead ordering requires the fresh Route C graph-store v2
+# key-reservation schema; do not resume a failed v1 stage or replay reference500.
 # Add --resume only after the fresh route has atomically published
 # "$TASTEMOLNET_T14_OUTPUT/checkpoints/LATEST"; the AutoDL wrapper exposes this
 # as TASTEMOLNET_T14_RESUME=1.
