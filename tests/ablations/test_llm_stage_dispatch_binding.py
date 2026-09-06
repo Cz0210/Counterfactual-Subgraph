@@ -30,11 +30,14 @@ def case(tmp_path):
         for rel in (binding.GENERATION_ENTRY, binding.DOWNSTREAM_ENTRY):
             p = root / rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_text("# tiny entry\n")
     variants = {}
+    metadata = {"generator_state": "LOADER_IMPLEMENTED_GPU_SMOKE_REQUIRED_AT_DISPATCH",
+                "downstream_state": "EXECUTABLE_ENTRYPOINT_CORRECTED_CORE_CHECK_AT_DISPATCH"}
     for variant in binding.ORDER:
-        variants[variant] = write_json(tmp_path / (variant + ".json"), signed({
+        variants[variant] = {**write_json(tmp_path / (variant + ".json"), signed({
             "variant": variant, "execution_commit": binding.ORIGINAL_SCIENCE_COMMIT,
             "model": {"path": "/DO_NOT_OPEN_MODEL_WEIGHTS", "sha256": "b" * 64},
-            "calls": [{"parent_id": "train-1", "attempt": 0}], "seed": 7}, "task_spec_sha256"))
+            "calls": [{"parent_id": "train-1", "attempt": 0}], "seed": 7,
+            **metadata}, "task_spec_sha256")), **metadata}
     ready = write_json(tmp_path / "readiness.json", {"schema_version": "bace_llm_native_readiness_v1", "variants": variants})
     resource = {"minimum_free_inodes": 100000, "minimum_memory_headroom_bytes": 64 * 1024**3,
                 "minimum_persistent_free_bytes": 100 * 1024**3, "gpu_lock_root": "/existing/locks",
@@ -92,6 +95,22 @@ def test_seal_preserves_original_generation_tasks_models_and_outputs(case):
     assert result["science_execution_commit"] == binding.ORIGINAL_SCIENCE_COMMIT
     assert result["owner_driver_commit"] == DRIVER
     assert not result["resource_admission_evaluated"]
+
+
+@pytest.mark.parametrize("mutation", ["unknown_field", "missing_field", "metadata_drift"])
+def test_actual_readiness_reference_metadata_is_checked_not_silently_discarded(case, mutation):
+    original = deepcopy(case["old"])
+    path = Path(original["readiness"]["path"])
+    readiness = json.loads(path.read_text())
+    ref = readiness["variants"][binding.ORDER[0]]
+    if mutation == "unknown_field": ref["command"] = ["/unapproved/command"]
+    elif mutation == "missing_field": del ref["generator_state"]
+    else: ref["generator_state"] = "GPU_SMOKE_ALREADY_PASS"
+    original["downstream_commands"][binding.ORDER[0]]["task_spec"] = deepcopy(ref)
+    original["readiness"] = write_json(path, readiness)
+    case["original_dispatch"] = write_json(Path(case["original_dispatch"]["path"]), signed(original))
+    with pytest.raises(ValueError, match="TASK_REFERENCE_"): seal(case)
+    assert not case["output_path"].exists()
 
 
 @pytest.mark.parametrize("field,value", [

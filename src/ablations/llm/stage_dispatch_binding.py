@@ -92,11 +92,21 @@ def _original_contract(original: Mapping[str, Any]) -> None:
     for variant in ORDER:
         task_ref = readiness["variants"][variant]
         _require(_same(rows[variant]["task_spec"], task_ref), "UNCHANGED_TASK_DESCRIPTOR:" + variant)
-        task = _read_json(task_ref)
+        # bace_readiness.prepare emits these two metadata fields alongside the
+        # file identity. They remain part of the unchanged dispatch contract;
+        # only the checked file-identity pair is passed to the strict reader.
+        _require(isinstance(task_ref, dict) and set(task_ref) == {
+            "path", "sha256", "generator_state", "downstream_state"}, "TASK_REFERENCE_FIELDS:" + variant)
+        task = _read_json({k: task_ref[k] for k in ("path", "sha256")})
         _require(task.get("execution_commit") == ORIGINAL_SCIENCE_COMMIT
                  and task.get("variant") == variant, "ORIGINAL_TASK_COMMIT:" + variant)
         _require(task.get("task_spec_sha256") == canonical_json_sha256({
             k: v for k, v in task.items() if k != "task_spec_sha256"}), "TASK_SELF_SHA:" + variant)
+        for field, expected in (
+            ("generator_state", "LOADER_IMPLEMENTED_GPU_SMOKE_REQUIRED_AT_DISPATCH"),
+            ("downstream_state", "EXECUTABLE_ENTRYPOINT_CORRECTED_CORE_CHECK_AT_DISPATCH"),
+        ):
+            _require(task_ref[field] == task.get(field) == expected, "TASK_REFERENCE_METADATA:" + field)
 
 
 def _expected_commands(original: Mapping[str, Any], root: Path, policy: Mapping[str, Any]) -> dict[str, Any]:

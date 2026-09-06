@@ -2,6 +2,10 @@
 
 ## [2026-09-07] Bind only future LLM owner resources without re-preparing science
 
+- The real preparation descriptor carries generator/downstream readiness
+  metadata in addition to path/SHA. Preserve exactly those four fields, bind
+  metadata to the verified task contents, and pass only the identity pair to
+  the strict small-file reader. Unknown descriptor fields remain rejected.
 - Preserve the sealed3b2605d6 readiness, model/adapter/task descriptors,
   generation command and all outputs. A fresh resource-only dispatch explicitly
   distinguishes new owner-driver identity from original science identity.

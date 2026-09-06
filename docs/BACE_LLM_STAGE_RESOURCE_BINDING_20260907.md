@@ -12,6 +12,13 @@ generation command and all input/output paths remain unchanged. Only small
 JSON descriptors are reopened (2MiB maximum each); model weights, datasets,
 candidate pools and accepted GNN archives are not scanned or loaded.
 
+The real `bace_readiness.prepare` task descriptor has exactly four fields:
+`path`, `sha256`, `generator_state`, `downstream_state`. Preserve all four
+verbatim and bind the two known metadata values to the SHA-verified task file.
+Only the verified path/SHA pair is passed to the small-file reader; additional
+unknown fields, omitted metadata or metadata drift fail closed. A path/SHA-only
+unit fixture is not a valid substitute for this actual3b2605d6 source schema.
+
 `execution_commit` in a fresh dispatch denotes **owner_driver_commit**, not a
 claim that old scientific specs were prepared with the new driver. The additive
 `resource_only_overlay` binds the original dispatch bytes, old science commit,
