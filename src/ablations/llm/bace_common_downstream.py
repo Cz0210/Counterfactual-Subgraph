@@ -22,6 +22,7 @@ from src.ablations.gnn.cpu_training import load_bundle
 from src.ablations.llm.bace_native_runtime import VARIANTS, verified_file
 from src.ablations.llm.contracts import canonical_json_sha256
 from src.ablations.llm.runtime_evidence import load_bace_reference_v2
+from src.ablations.llm.at_most_k import POLICY, explanation_metrics as llm_explanation_metrics, select_calibration as llm_select_calibration
 from src.eval.bace_frozen_gnn_contracts import (
     atomic_csv, atomic_json, atomic_jsonl, load_bace_parents, read_json,
     read_jsonl, sha256_file, stable_sha256,
@@ -264,15 +265,16 @@ def _heldout(*, bundle: Path, manifest: Mapping[str, Any], output: Path, univers
         matrix = evaluation.matrix_from_pairs([p.parent_id for p in parents], candidates, pairs, root=output, split=split)
         matrices[split] = matrix
         if split == "calibration":
-            sequence, trace = evaluation.select_calibration(matrix, selector)
-            if len(sequence) != 20:
-                raise ValueError("SCIENTIFIC_FAILED_INSUFFICIENT_VALID_UNIQUE_RULES")
+            sequence, trace = llm_select_calibration(matrix, selector)
+            if len(sequence) != min(20, len(universe)) or len(set(sequence)) != len(sequence):
+                raise ValueError("LLM_AT_MOST_K_SELECTION_INCOMPLETE")
             frozen = {"schema_version": "bace_llm_calibration_selector_v1", "binding_sha256": binding,
                 "selection_frozen": True, "test_loaded": False, "cohort_definition": COHORT,
                 "selector_input_sha256": selector["input_sha256"], "calibration_pairs_sha256": sha256_file(output / "calibration_pairs.jsonl"),
-                "ordered_rule_ids": [universe[i]["candidate_id"] for i in sequence], "trace": trace}
+                "ordered_rule_ids": [universe[i]["candidate_id"] for i in sequence], "trace": trace,
+                "selection_policy": POLICY, "K_MAX": 20, "K_EFFECTIVE": len(sequence)}
             _sealed_json(output / "selector_manifest.json", frozen)
-    metrics = evaluation.explanation_metrics(matrices["test"], range(20), selector["thresholds"])
+    metrics = llm_explanation_metrics(matrices["test"], range(len(selected)), selector["thresholds"])
     matrix = matrices["test"]
     theta = selector["thresholds"].theta_star
     if matrix.parent_ids:
@@ -281,7 +283,8 @@ def _heldout(*, bundle: Path, manifest: Mapping[str, Any], output: Path, univers
         for _ in range(1000):
             indices = rng.integers(0, len(matrix.parent_ids), size=len(matrix.parent_ids))
             for k in (10, 20):
-                statistics[f"CCRCov@{k}"].append(float(np.mean(np.min(matrix.distances[indices, :k], axis=1) <= theta)))
+                best = np.min(matrix.distances[indices, :k], axis=1) if selected else np.full(len(indices), np.inf)
+                statistics[f"CCRCov@{k}"].append(float(np.mean(best <= theta)))
         ci = {key: {"lower": float(np.quantile(values, .025)), "upper": float(np.quantile(values, .975))}
               for key, values in statistics.items()}
     else:
@@ -304,7 +307,8 @@ def _heldout(*, bundle: Path, manifest: Mapping[str, Any], output: Path, univers
 def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_input_bundle: str | Path,
                    gnn_verified_archive: str | Path, gnn_verified_sha256: str, registry_root: str | Path,
                    output_root: str | Path, resume: bool = False, device: str = "cpu", batch_size: int = 64,
-                   cpu_threads: int = 2, portable_input_bundle: str | Path | None = None) -> dict[str, Any]:
+                   cpu_threads: int = 2, portable_input_bundle: str | Path | None = None,
+                   train_adoption_overlay: str | Path | None = None) -> dict[str, Any]:
     from src.ablations.llm.corrected_core_gate import require_corrected_gnn_core
     from src.ablations.llm.bace_readiness import generation_calls
     from src.eval.bace_frozen_gnn_pool import _score_generated_candidates
@@ -313,8 +317,16 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
 
     # No model is loaded and no science/output starts before independent GNN PASS.
     archive = Path(gnn_verified_archive).resolve(strict=True)
-    _equal(sha256_file(archive), gnn_verified_sha256, "independent_GNN_archive")
-    gnn_pass = require_corrected_gnn_core(archive, gnn_verified_sha256)
+    adoption = None
+    if train_adoption_overlay is not None:
+        from src.ablations.llm.bace_l0_successor import load_train_adoption
+        adoption = load_train_adoption(train_adoption_overlay)
+        gnn_pass = adoption["source_manifest"]["gnn_independent_core"]
+        _equal(gnn_pass["verified_archive_sha256"], gnn_verified_sha256, "adopted_GNN_archive")
+        _equal(archive.stat().st_size, gnn_pass["bytes"], "adopted_GNN_archive_bytes")
+    else:
+        _equal(sha256_file(archive), gnn_verified_sha256, "independent_GNN_archive")
+        gnn_pass = require_corrected_gnn_core(archive, gnn_verified_sha256)
     portable = None
     resolve_file = verified_file
     if portable_input_bundle is not None:
@@ -356,6 +368,12 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
         with (output / "writer.lock").open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             selector = evaluation.frozen_selector(bundle, manifest)
+            if adoption is not None:
+                old = adoption["source_manifest"]
+                for key, value in {"task_spec_sha256": sha256_file(Path(task_spec)),
+                    "reference_sha256": reference.file_sha256, "bundle_sha256": sha256_file(bundle / "bundle_manifest.json"),
+                    "pool": pool_evidence, "selector_input_sha256": selector["input_sha256"], "variant": spec["variant"]}.items():
+                    _equal(old[key], value, "train_adoption_" + key)
             sources = [Path(__file__), Path(evaluation.__file__), Path(__import__("src.eval.bace_frozen_gnn_pool", fromlist=["_"]).__file__),
                        Path(__import__("src.eval.bace_frozen_gnn_verification", fromlist=["_"]).__file__)]
             driver_commit = subprocess.check_output(["git", "rev-parse", "HEAD"],
@@ -369,7 +387,9 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                 "execution_commit": driver_commit, "generation_execution_commit": spec["execution_commit"],
                 "gnn_input_scientific_commit": manifest["execution_commit"],
                 "main_matrix_write": False, "training_performed": False,
-                "cohort_definition": COHORT, "bootstrap_scope": "within_seed7_parent_only_not_across_seed_std"}
+                "cohort_definition": COHORT, "bootstrap_scope": "within_seed7_parent_only_not_across_seed_std",
+                "selection_policy": POLICY,
+                "train_adoption": adoption["overlay_identity"] if adoption else None}
             binding = stable_sha256(contract)
             _sealed_json(output / "run_manifest.json", {**contract, "binding_sha256": binding})
             if (output / "final_audit.json").is_file():
@@ -384,9 +404,9 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
             featurizer = evaluation._featurizer(bundle, manifest)
             parents = {p.parent_id: p for p in load_bace_parents(evaluation.bundle_file(bundle, manifest, manifest["splits"]["train"]), source_label=1)}
             by_parent = {}
-            for row in attempts:
+            for row in attempts if adoption is None else []:
                 by_parent.setdefault(str(row["parent_id"]), []).append(row)
-            scored = []
+            scored = list(adoption["scored"]) if adoption is not None else []
             for parent_id, rows in sorted(by_parent.items()):
                 if pause():
                     return {"state": "PAUSED_AT_SAFE_PARENT_BOUNDARY", "phase": "train_verification"}
@@ -414,11 +434,6 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
             atomic_jsonl(output / "candidate_pool.jsonl", merged)
             atomic_jsonl(output / "candidate_universe.jsonl", universe)
             atomic_json(output / "candidate_metrics.json", candidate_metrics(scored, attempts))
-            if len(universe) < 20:
-                blocked = {"state": "SCIENTIFIC_FAILED_INSUFFICIENT_VALID_UNIQUE_RULES", "valid_unique_rules": len(universe),
-                           "required_rules": 20, "test_loaded": False, "candidate_padding_used": False}
-                atomic_json(output / "terminal.json", blocked)
-                return blocked
             atomic_json(output / "verification_manifest.json", {"state": "TRAIN_CANDIDATES_FROZEN", "test_loaded": False,
                 "calibration_loaded": False, "candidate_universe_sha256": sha256_file(output / "candidate_universe.jsonl"),
                 "binding_sha256": binding, "attempt_count": len(attempts), "universe_count": len(universe)})
@@ -428,6 +443,12 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                     selector=selector, oracle=oracle, featurizer=featurizer, distance=distance,
                     binding=binding, batch_size=batch_size, pause=pause)
             finally:
+                statistics = distance.stats_dict()
+                atomic_json(output / "distance_resource_receipt.json", {"statistics": statistics,
+                    "reused_pair_distances": statistics["pair_distance_cache_hits"],
+                    "new_pair_distance_cache_misses": statistics["pair_distance_cache_misses"],
+                    "gnn_evaluation_replayed": False, "old_L0_had_heldout_distance_cache": False,
+                    "distance_work": "FIRST_MISSING_L0_DISTANCES_OR_SAME_ROOT_CACHE_HITS"})
                 distance.close()
             if result["state"] != "PASS":
                 return result
@@ -436,6 +457,8 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
             audit = {"schema_version": SCHEMA, "state": "PASS", "binding_sha256": binding, "files": files,
                 "calibration_selection_before_test": True, "test_selection": False, "main_matrix_write": False,
                 "valid_zero_result": result["metrics"].get("strict_flip_rate") == 0,
+                "selection_policy": POLICY, "K_MAX": 20, "K_EFFECTIVE": result["metrics"]["K_EFFECTIVE"],
+                "valid_unique_rule_count": len(universe),
                 "evaluation_scope": "one_frozen_GINE_proposal_generator_only", "gnn_core_verified": True}
             atomic_json(output / "final_audit.json", audit)
             _index_result(registry, spec["variant"], output, audit)

@@ -147,7 +147,7 @@ def test_brics_old_manifest_without_direct_reference_closes_both_links(tmp_path)
     assert relocated == loaded and evidence["pool_sha256"] == sha256_file(tmp_path / "brics_proposal_pool.jsonl")
 
 
-def heldout_fixture(tmp_path, monkeypatch, *, empty=None):
+def heldout_fixture(tmp_path, monkeypatch, *, empty=None, rule_count=20):
     bundle, output = tmp_path / "bundle", tmp_path / "result"
     bundle.mkdir()
     output.mkdir()
@@ -162,7 +162,7 @@ def heldout_fixture(tmp_path, monkeypatch, *, empty=None):
         if path.stem == "test":
             freeze = read_json(output / "selector_manifest.json")
             assert freeze["selection_frozen"] is True and freeze["test_loaded"] is False
-            assert len(freeze["ordered_rule_ids"]) == 20
+            assert len(freeze["ordered_rule_ids"]) == min(20, rule_count)
         return [] if path.stem == empty else [BACEParent(path.stem + "_p", "CCC", 1, 0)]
     monkeypatch.setattr(route, "load_bace_parents", load)
     # Deliberately wrong-predicted true-source parent is still in main cohort.
@@ -174,9 +174,26 @@ def heldout_fixture(tmp_path, monkeypatch, *, empty=None):
                  "applicable": True, "pair_strict_flip": False, "wnode_distance": None, "cf_drop": None}
                 for p in parents for c in candidates]
     monkeypatch.setattr(route.evaluation, "_pairs", pairs)
-    kwargs = dict(bundle=bundle, manifest=manifest, output=output, universe=rules(), selector=selector(),
+    kwargs = dict(bundle=bundle, manifest=manifest, output=output, universe=rules()[:rule_count], selector=selector(),
                   oracle=object(), featurizer=None, distance=None, binding="b" * 64, batch_size=2, pause=lambda: False)
     return kwargs, observed
+
+
+@pytest.mark.parametrize("rule_count", [0, 1, 7, 15, 20])
+def test_at_most_k_preserves_real_rules_and_platform(tmp_path, monkeypatch, rule_count):
+    kwargs, observed = heldout_fixture(tmp_path, monkeypatch, rule_count=rule_count)
+    result = route._heldout(**kwargs)
+    assert observed == ["calibration", "test"]
+    assert result["state"] == "PASS"
+    assert result["metrics"]["K_EFFECTIVE"] == rule_count
+    rows = result["metrics"]["prefix_rows"]
+    assert len(rows) == 20
+    assert [r["effective_k"] for r in rows] == [min(k, rule_count) for k in range(1, 21)]
+    assert all(r["ccrcov_theta_star"] == 0 for r in rows)
+    selected = read_json(kwargs["output"] / "selected_rules.json")["rules"]
+    assert len(selected) == rule_count
+    assert len({r["candidate_id"] for r in selected}) == rule_count
+    assert route._heldout(**kwargs)["metrics"] == result["metrics"]
 
 
 def test_real_selector_then_test_and_main_true_source_cohort(tmp_path, monkeypatch):
