@@ -110,6 +110,43 @@ class T13LazyRecoveryGuard:
                 or now['failcnt']>self.baseline['failcnt']):
             raise ValueError('T13_MEMORY_GATE_PRESSURE_SAFE_STOP_REQUIRED')
 
+    def accept_deterministic_contract_and_claim_full(self, path, sha256):
+        """Adopt existing short evidence, keeping the original single-start ledger."""
+        from src.utils.t13_deterministic_execution import validate_contract
+        contract=validate_contract(path,sha256,self.spec)
+        if (contract['original_authorization_path']!=str(self.path)
+                or contract['original_authorization_sha256']!=self.authorization_sha256
+                or contract['formal_quota_ledger']!=str(self.path.parent/'full_start.json')):
+            raise ValueError('T13_ORIGINAL_FORMAL_QUOTA_BINDING_REQUIRED')
+        if (self.path.parent/'full_start.json').exists():
+            raise ValueError('T13_FULL_START_ALREADY_CONSUMED_CHECKPOINT_RECOVERY_REQUIRED')
+        peak=int(contract['process_peak_bytes'])
+        low=int(contract['min_headroom_bytes'])
+        if peak<=0 or peak>CANARY_RSS_CAP or low<OTHER_MAIN_RESERVE or contract['canary_failcnt_increment']!=0:
+            raise ValueError('T13_EXISTING_CANARY_MEMORY_EVIDENCE_FAILED')
+        now=resources(self.runtime)
+        required=max(START_HEADROOM,OTHER_MAIN_RESERVE+2*peak)
+        if (now['headroom_bytes']<required or now['failcnt']!=self.baseline['failcnt']
+                or now['free_bytes']<100*GIB or now['free_inodes']<8192):
+            raise ValueError('T13_DETERMINISTIC_FORMAL_RESOURCE_ADMISSION_FAILED')
+        receipt=dict(state='T13_MATCHED_DETERMINISTIC_FORMAL_ADMISSION_PASS',
+            entry_mode='MATCHED_DETERMINISTIC_CONTRACT',contract_path=str(path),contract_sha256=sha256,
+            authorization_sha256=self.authorization_sha256,task_spec_sha256=self.spec['task_spec_sha256'],
+            reused_existing_canary=True,canary_rerun=False,process_peak_bytes=peak,
+            required_full_headroom_bytes=required,resources=now,
+            compact_reserved_inodes=4096,free_inode_floor_including_reserve=8192,
+            other_main_peak_reserve_bytes=OTHER_MAIN_RESERVE,
+            full_100_epoch_trajectory_proven=False,diagnostic_checkpoint_promoted=False)
+        atomic_json_no_replace(self.owner/'deterministic_formal_admission.json',receipt)
+        claim=dict(schema_version='t13_one_lazy_full_start_v1',attempt_id=self.spec['attempt_id'],
+            task_id=self.spec['task_id'],output_root=self.spec['output_root'],
+            task_spec_sha256=self.spec['task_spec_sha256'],owner_pid=os.getpid(),
+            authorization_sha256=self.authorization_sha256,max_full_starts=1,
+            entry_mode='MATCHED_DETERMINISTIC_CONTRACT',execution_contract_sha256=sha256,
+            admission_sha256=file_sha(self.owner/'deterministic_formal_admission.json'))
+        atomic_json_no_replace(self.path.parent/'full_start.json',claim)
+        return receipt
+
     def accept_canary_and_claim_full(self):
         if (self.path.parent/'full_start.json').exists():
             raise ValueError('T13_FULL_START_ALREADY_CONSUMED_CHECKPOINT_RECOVERY_REQUIRED')

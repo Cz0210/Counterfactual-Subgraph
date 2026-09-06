@@ -18530,3 +18530,18 @@ engineering retry. Record the temperature driver and the verifier driver separat
 - The owning native canary forwards a resource-stop SIGTERM only to its newly
   created deterministic child and waits for exit before releasing the GPU lease.
   No process-group signals or forced kill are used.
+
+### 2026-09-06: adopt the passed T13 matched-deterministic execution contract
+
+- Under the user's new narrow authorization, the existing T13 owner may adopt
+  the two-target deterministic short-training/reload evidence without rerunning
+  it. Preserve native failure and all diagnostic checkpoints; do not claim a
+  full100-epoch trajectory proof or promote a diagnostic checkpoint.
+- The new formal child sets and reads back the pinned backend before CUDA,
+  including cudnn TF32=true and matmul TF32=false. Science source/config files
+  must remain identical to the passed ae676fbd checkout. Original unrecorded
+  thread counts are disclosed rather than invented.
+- Keep the original max1 formal ledger and T13's own384GiB/100GiB/8192-inode
+  admission (4096 compact reservation included). Mut's100000 guard is unchanged.
+- See `docs/AUTODL_T13_DETERMINISTIC_FORMAL_INTERFACE_20260906.md`; deployment,
+  real optimizer progress and final science acceptance remain separate states.

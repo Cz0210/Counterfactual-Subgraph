@@ -189,6 +189,8 @@ def run_once(
     poll_seconds: int,
     lazy_repair_authorization: Path | None = None,
     lazy_repair_authorization_sha256: str | None = None,
+    deterministic_execution_contract: Path | None = None,
+    deterministic_execution_sha256: str | None = None,
 ) -> dict[str, Any]:
     specs = validate_spec_set(spec_root, check_files=True)
     if not release_path.is_file():
@@ -252,6 +254,9 @@ def run_once(
                 "RUN_GNN_ABLATION": "0",
             }
         )
+        guard = None
+        if deterministic_execution_contract is not None and lazy_repair_authorization is None:
+            raise T13FromHPCOwnerError('T13 deterministic mode requires original lazy repair authorization')
         if lazy_repair_authorization is not None:
             from src.utils.t13_lazy_recovery_guard import T13LazyRecoveryGuard
             guard=T13LazyRecoveryGuard(lazy_repair_authorization,
@@ -259,11 +264,19 @@ def run_once(
             guard.admission()
             if (lazy_repair_authorization.parent/"full_start.json").exists():
                 raise T13FromHPCOwnerError("T13 full start already consumed; checkpoint-specific recovery required")
-            _run_process(guard.command(),cwd=Path(t13["repo_root"]),env=env,
-                stdout_path=owner_root/"lazy_canary.stdout.log",stderr_path=owner_root/"lazy_canary.stderr.log",
-                heartbeat=heartbeat,state="T13_LAZY_CANARY_RUNNING",poll_seconds=min(10,poll_seconds),
-                resource_monitor=guard.sample)
-            guard.accept_canary_and_claim_full()
+            if deterministic_execution_contract is not None:
+                guard.accept_deterministic_contract_and_claim_full(
+                    deterministic_execution_contract, deterministic_execution_sha256)
+                env.update(CUBLAS_WORKSPACE_CONFIG=':4096:8',
+                    T13_DETERMINISTIC_EXECUTION_CONTRACT=str(deterministic_execution_contract),
+                    T13_DETERMINISTIC_EXECUTION_SHA256=str(deterministic_execution_sha256),
+                    T13_RUNTIME_BACKEND_RECEIPT=str(owner_root/'runtime_backend_receipt.json'))
+            else:
+                _run_process(guard.command(),cwd=Path(t13["repo_root"]),env=env,
+                    stdout_path=owner_root/"lazy_canary.stdout.log",stderr_path=owner_root/"lazy_canary.stderr.log",
+                    heartbeat=heartbeat,state="T13_LAZY_CANARY_RUNNING",poll_seconds=min(10,poll_seconds),
+                    resource_monitor=guard.sample)
+                guard.accept_canary_and_claim_full()
         _run_process(
             command,
             cwd=Path(t13["repo_root"]),
@@ -273,6 +286,7 @@ def run_once(
             heartbeat=heartbeat,
             state="T13_AUTODL_SCIENCE_RUNNING",
             poll_seconds=poll_seconds,
+            resource_monitor=guard.sample if guard is not None else None,
         )
         verifier = [
             str(t13["python"]),
@@ -289,10 +303,13 @@ def run_once(
             str(spec_root),
             "--verify-only",
         ]
+        verifier_env = dict(env)
+        if deterministic_execution_contract is not None:
+            verifier_env['T13_RUNTIME_BACKEND_RECEIPT']=str(owner_root/'verifier_runtime_backend_receipt.json')
         _run_process(
             verifier,
             cwd=Path(t13["repo_root"]),
-            env=env,
+            env=verifier_env,
             stdout_path=owner_root / "verifier.stdout.log",
             stderr_path=owner_root / "verifier.stderr.log",
             heartbeat=heartbeat,
@@ -323,6 +340,8 @@ def run(
     once: bool,
     lazy_repair_authorization: Path | None = None,
     lazy_repair_authorization_sha256: str | None = None,
+    deterministic_execution_contract: Path | None = None,
+    deterministic_execution_sha256: str | None = None,
 ) -> dict[str, Any]:
     while True:
         try:
@@ -334,6 +353,8 @@ def run(
                 poll_seconds=poll_seconds,
                 lazy_repair_authorization=lazy_repair_authorization,
                 lazy_repair_authorization_sha256=lazy_repair_authorization_sha256,
+                deterministic_execution_contract=deterministic_execution_contract,
+                deterministic_execution_sha256=deterministic_execution_sha256,
             )
         except Exception as error:
             # This is the fresh launcher's owner directory, never a science
@@ -380,6 +401,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--lazy-repair-authorization", type=_absolute)
     parser.add_argument("--lazy-repair-authorization-sha256")
+    parser.add_argument("--deterministic-execution-contract", type=_absolute)
+    parser.add_argument("--deterministic-execution-sha256")
     args = parser.parse_args(argv)
     if args.config not in (None, "configs/hpc.yaml"):
         raise SystemExit("--config must be configs/hpc.yaml when supplied")
@@ -389,6 +412,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--poll-seconds must be in [5,3600]")
     if bool(args.lazy_repair_authorization)!=bool(args.lazy_repair_authorization_sha256):
         parser.error("lazy repair authorization path and SHA must be supplied together")
+    if bool(args.deterministic_execution_contract)!=bool(args.deterministic_execution_sha256):
+        parser.error("deterministic execution contract path and SHA must be supplied together")
     result = run(
         spec_root=args.spec_root,
         release_path=args.release,
@@ -398,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
         once=args.once,
         lazy_repair_authorization=args.lazy_repair_authorization,
         lazy_repair_authorization_sha256=args.lazy_repair_authorization_sha256,
+        deterministic_execution_contract=args.deterministic_execution_contract,
+        deterministic_execution_sha256=args.deterministic_execution_sha256,
     )
     print(json.dumps(result, sort_keys=True), flush=True)
     return 0

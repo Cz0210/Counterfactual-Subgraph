@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A new AutoDL deterministic worker validates its inherited contract and writes
+# actual backend readback before CUDA; this paired HPC wrapper does not set it.
 # Static refusal: T13 chemistry/GINE/calibration/test is explicitly AutoDL-only.
 #SBATCH --job-name=t13-from-hpc-autodl-only
 #SBATCH --partition=A800

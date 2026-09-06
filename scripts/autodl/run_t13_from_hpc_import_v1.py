@@ -13,6 +13,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Only the newly authorized worker receives this environment. Apply and read
+# back the pinned backend before baseline imports can initialize CUDA.
+from src.utils.t13_deterministic_execution import activate_from_environment
+activate_from_environment(PROJECT_ROOT)
+
 from src.baselines.tastemolnet_globalgce_full import (  # noqa: E402
     PASS_MARKER,
     TasteGlobalGCEFullConfig,

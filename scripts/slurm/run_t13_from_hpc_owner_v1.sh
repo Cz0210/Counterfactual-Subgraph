@@ -23,6 +23,9 @@ python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 # Actual AutoDL science/verifier/canary children require python -I. A lazy
 # repair additionally supplies paired --lazy-repair-authorization and SHA;
 # this HPC help-only wrapper never acquires the AutoDL reservation.
+# MATCHED_DETERMINISTIC_CONTRACT additionally uses paired
+# --deterministic-execution-contract/--deterministic-execution-sha256;
+# it reuses passed evidence without rerunning the canary, on AutoDL only.
 python -I -B scripts/autodl/run_t13_from_hpc_owner_v1.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \

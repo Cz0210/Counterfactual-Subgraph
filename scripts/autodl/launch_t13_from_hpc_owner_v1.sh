@@ -20,6 +20,12 @@ if [[ -n "${T13_LAZY_REPAIR_AUTHORIZATION:-}" ]]; then
   extra+=(--lazy-repair-authorization "$T13_LAZY_REPAIR_AUTHORIZATION"
           --lazy-repair-authorization-sha256 "$T13_LAZY_REPAIR_AUTHORIZATION_SHA256")
 fi
+if [[ -n "${T13_DETERMINISTIC_EXECUTION_CONTRACT:-}" ]]; then
+  : "${T13_DETERMINISTIC_EXECUTION_SHA256:?sealed execution contract SHA required}"
+  : "${T13_LAZY_REPAIR_AUTHORIZATION:?original authorization and quota ledger required}"
+  extra+=(--deterministic-execution-contract "$T13_DETERMINISTIC_EXECUTION_CONTRACT"
+          --deterministic-execution-sha256 "$T13_DETERMINISTIC_EXECUTION_SHA256")
+fi
 
 nohup "$AUTODL_PYTHON" -I -B scripts/autodl/run_t13_from_hpc_owner_v1.py \
   --config configs/hpc.yaml \

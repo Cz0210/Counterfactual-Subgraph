@@ -4299,3 +4299,6 @@ Mutagenicity roadmaps.
   observations, a reused single-LLM slot, non-leaking descendants and immutable
   corrected-GNN acceptance reuse. Keep one-shot execution behind the existing
   outer queue; a live queue/GPU admission remains a deployment requirement.
+- [x] Add a narrow matched-deterministic contract path to the existing T13
+  owner, retaining the original single-formal ledger, explicit worker backend
+  readback and already-passed scientific evidence without a canary rerun.
