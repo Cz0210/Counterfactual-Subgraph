@@ -37,6 +37,26 @@ def test_held_empty_main_coordination_lock_is_a_blocker_not_idle(tmp_path):
         assert locked.read_bytes() == b''
 
 
+def test_declared_other_main_lease_does_not_block_unreserved_gpu(tmp_path):
+    import fcntl
+    config, _ = helper().source_fixture(tmp_path, reserved=True)
+    Path(config['gpu_lock_root']).mkdir()
+    path = Path(config['gpu_lock_root']) / 'gpu-main.coordination.lock'
+    registry_path = Path(config['main_registry_path'])
+    registry = json.loads(registry_path.read_text())
+    registry['gpu_leases'][0]['lease_path'] = str(path)
+    registry = build_owner_registry(registry_id=registry['registry_id'],
+        matrix_authority_root=registry['matrix_authority_root'], tasks=registry['tasks'],
+        publishers=registry['publishers'], gpu_leases=registry['gpu_leases'], check_processes=False)
+    atomic_json(registry_path, registry)
+    gpu = GPUObservation(0, 'GPU-fixture', 'CPU fixture', 1000, 0, 1000, 0)
+    with path.open('w') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sample = owner.ResourceSampler(config, 0, gpu.uuid, inventory=lambda:[gpu]).sample()
+        assert sample['owners_healthy'] and not sample['gpu_main_reservation']
+        assert any(row.get('role') == 'HELD_DECLARED_MAIN_COORDINATION' for row in sample['source_observations'])
+
+
 def helper():
     source = Path(__file__).with_name("test_llm_existing_gpu_owner.py")
     spec = importlib.util.spec_from_file_location("owner_fixtures", source)

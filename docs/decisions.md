@@ -7,6 +7,10 @@ intentionally empty, unlike the JSON-bearing GPU task lock. The existing
 sampler now records missing held-lease metadata as a blocker while continuing
 real resource observation. It never rewrites/unlocks that file or regards an
 unclassified lease as free. A real flock fixture verifies this behavior.
+An exact primary lease already declared by the canonical registry is instead
+classified as main ownership; that owner's fresh process/heartbeat checks and
+reservation still apply. A healthy lease on another GPU is not a global LLM
+ban. Unknown held leases remain blockers, never assumed idle.
 
 ## [2026-09-06] Make native dispatch cohort text match the shared evaluator
 

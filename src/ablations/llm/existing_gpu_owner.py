@@ -268,7 +268,16 @@ class ResourceSampler:
                         # Existing main coordination leases may deliberately
                         # contain no JSON. Never interpret that as an idle GPU
                         # or rewrite the held file; retain it as a blocker.
-                        blockers.append(f"HELD_LEASE_METADATA_UNAVAILABLE:{path}:{type(exc).__name__}")
+                        declared = [row for row in registry['gpu_leases']
+                                    if row['state'] == 'HELD' and Path(row['lease_path']) == path]
+                        if len(declared) == 1:
+                            # This is a known primary main lease, not another
+                            # LLM. Its actual owner/heartbeat is already checked
+                            # above and its target reservation remains intact.
+                            sources.append({'path': str(path), 'role': 'HELD_DECLARED_MAIN_COORDINATION',
+                                            'task_id': declared[0]['task_id'], 'gpu': declared[0]['gpu']})
+                        else:
+                            blockers.append(f"HELD_LEASE_METADATA_UNAVAILABLE:{path}:{type(exc).__name__}")
                         continue
                 else:
                     fcntl.flock(handle, fcntl.LOCK_UN)
