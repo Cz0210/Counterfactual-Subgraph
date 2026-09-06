@@ -23,7 +23,12 @@ echo "route_c_formal_canary_promotes_step500_without_replaying_steps_1_500"
 
 : "${T14_ROUTE_C_TASK_SPEC:?required}"
 : "${T14_ROUTE_C_CONTINUATION_SPEC:?required}"
+extra=()
+if [[ -n "${T14_FAILED_STAGE_REPLACEMENT:-}" ]]; then
+  extra+=(--failed-stage-replacement "$T14_FAILED_STAGE_REPLACEMENT")
+fi
 python scripts/autodl/run_t14_route_c_owner.py \
-  --config configs/hpc.yaml \
+  --config "$PWD/configs/hpc.yaml" \
   --task-spec "$T14_ROUTE_C_TASK_SPEC" \
-  --continuation-spec "$T14_ROUTE_C_CONTINUATION_SPEC"
+  --continuation-spec "$T14_ROUTE_C_CONTINUATION_SPEC" \
+  "${extra[@]}"

@@ -1,5 +1,13 @@
 # Refactor Plan
 
+## 2026-09-06: T14 retry2 failed-stage continuation
+
+- [x] Bind one fresh replacement for the empty failed low-memory canary.
+- [x] Preserve the completed reference500, old plan and retry_index2.
+- [x] Reuse the current owner/resource gates and exact continuous/reload checks.
+- [ ] Run repaired canaries under the existing GPU2 reservation after deployment.
+- [ ] Bind corrected formal execution to the same attempt without rewriting old evidence.
+
 ## 2026-09-06: LLM existing-owner dispatch and real GPU-smoke successor
 
 - [x] Test exact two-call/1+1 checkpoint state comparison using tiny CPU fixtures.
