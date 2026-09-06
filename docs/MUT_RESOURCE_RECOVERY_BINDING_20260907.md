@@ -54,6 +54,19 @@ The available RouteB entrypoint still has a typed
 does not claim a causal producer or full pair-store rebuild exists. Successful
 adoption remains the runnable science path; resource stops cannot selectRouteB.
 
+`activate_mut_recovery_binding_v1.py` is a one-shot command, not another daemon.
+Its default mode only preflights. `--execute` still returns without signals or
+launch when inode/bytes/cgroup admission fails. On actual admission it binds
+the old executor's PID/startticks/argv/cwd, fresh idle heartbeat, empty children
+and no consumed action/stage/publisher claim. It checks oldA/B+postAB are dead,
+GPU0 still has the canonical Mut reservation and no CUDA process, and all new
+roots remain fresh. Under the existing matrix publish lock it rechecks the
+registry CAS and resource/identity, sends only oldidleSIGTERM, waits for exit,
+starts the existing executor/postAB/A/B commands and binds their actual PIDs
+to the existing registry. The same publisher identity is retained with a
+truthful new driver commit. Any partial startup failure leaves explicit PID
+evidence and disallows automatic repetition. No lockfile is deleted.
+
 ## Resource contract
 
 The100000 free-inode guard is unchanged. Add160 for the known new compact
@@ -61,6 +74,20 @@ recovery layout before acquisition of either owner orGPU lease. Already
 existing files are not recharged. Dynamic trace/temp peaks remain explicitly
 UNKNOWN, not zero.50GiB and2%-free guards remain. This preparation does not
 delete files, change quota, start recovery, or claim complete admission.
+
+Activation additionally reopens the existing joint `resource_config.json`:
+its100000+10761 known inode threshold takes precedence over Mut100000+160;
+160 is not charged twice. It keeps the stronger existing byte/headroom
+thresholds. Passing those lower bounds alone is not complete peak admission.
+Missing current task peak evidence yields `RESOURCE_PEAK_PLAN_INCOMPLETE`
+with its first missing field, before inspecting/retiring any executor.
+The optional `--peak-plan` consumes a small engineering plan scoped to
+`MUT_RESOURCE_REPLAY_WITH_CURRENT_MAIN_RESERVATIONS`, bound to the current
+resource-config hash and every current HELD main task. Each row provides
+additional inode and memory headroom upper bounds above the already counted
+reservations plus a small, hash-bound peak-evidence document. No runtime
+config or resource registry is changed. A quota increase alone must not turn
+unknown transient demand into zero or silently enable science.
 
 ## Focused validation
 

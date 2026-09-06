@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.autodl import run_mut_trace_mode_equivalence as runner
+from scripts.autodl import activate_mut_recovery_binding_v1 as activator
 from src.baselines.comrecgc.generation_checkpoint import save_generation_checkpoint, scientific_command_sha256
 from src.utils import autodl_mut_recovery_binding_v1 as binding
 from src.utils import autodl_mut_same_contract_ab_v1 as ab
@@ -142,3 +143,92 @@ def test_rebind_preserves_canonical_publisher_namespace():
     assert rebound["publisher_locator"] == old["publisher_locator"]
     assert rebound["lease"] == old["lease"]
     assert rebound["pipeline"][0]["argv"] == ["/new-driver/run.py", "/fresh-output/result"]
+
+
+def test_inode_failure_prevents_even_identity_or_signal_work(tmp_path, monkeypatch):
+    values = {"binding_sha256": "ignored", "ab_task_spec": "/ab", "executor_task_spec": "/exec"}
+    monkeypatch.setattr(activator, "read_json", lambda p: values if p == tmp_path/"binding.json" else {})
+    monkeypatch.setattr(activator, "sealed", lambda v, key: v)
+    monkeypatch.setattr(activator, "validate_same_contract_ab_spec", lambda *a, **k: {"run_root": str(tmp_path)})
+    monkeypatch.setattr(activator, "validate_successor_spec", lambda *a, **k: {})
+    monkeypatch.setattr(activator, "admission", lambda *a: {"state": "SEALED_WAITING_RESOURCE"})
+    def prohibited(*a, **k):
+        raise AssertionError("resource-blocked activation must not inspect/retire/launch owner")
+    monkeypatch.setattr(activator, "idle_executor", prohibited)
+    monkeypatch.setattr(activator.os, "kill", prohibited)
+    monkeypatch.setattr(activator, "_launch", prohibited)
+    result = activator.activate(tmp_path/"binding.json", tmp_path/"registry.json",
+                               resource_path=tmp_path/"resource.json", execute=True)
+    assert result["state"] == "SEALED_WAITING_RESOURCE"
+    assert result["old_executor_signaled"] is False
+
+
+def test_activation_uses_existing_joint_inode_budget_not_only_mut_minimum(tmp_path, monkeypatch):
+    cfg = {"main_registry_path": str(tmp_path/"registry.json"), "gpu_lock_root": str(tmp_path/"locks"),
+        "persistent_root": str(tmp_path), "minimum_free_inodes": 100000, "reserved_new_inodes": 10761,
+        "minimum_memory_headroom_bytes": 64*1024**3, "minimum_persistent_free_bytes": 100*1024**3,
+        "cgroup_memory_root": str(tmp_path/"cgroup")}
+    monkeypatch.setattr(activator, "read_json", lambda p: cfg)
+    monkeypatch.setattr(activator, "validate_resource_config", lambda c: c)
+    monkeypatch.setattr(activator, "read_cgroup", lambda p: {"headroom_bytes": 400*1024**3})
+    monkeypatch.setattr(activator, "resource_status", lambda p: {"state": "ADMISSION_PASS",
+        "path": str(tmp_path), "fixed_required_free": 100160, "free_inodes": 105000,
+        "free_bytes": 1000*1024**3, "minimum_free_bytes": 50*1024**3})
+    result = activator.admission({"gpu_lock_root": cfg["gpu_lock_root"], "run_root": str(tmp_path)},
+        tmp_path/"registry.json", tmp_path/"resource.json")
+    assert result["state"] == "SEALED_WAITING_RESOURCE"
+    assert result["joint_required_free_inodes"] == 110761
+    assert result["joint_inode_shortfall"] == 5761
+    assert result["unknown_dynamic_peak"] == "UNKNOWN_NOT_ZERO"
+    assert result["complete_peak_admission_claimed"] is False
+
+
+def test_unknown_peak_is_not_zero_or_admission(tmp_path):
+    assert activator.complete_peak_admission({}, {}, None)["state"] == "RESOURCE_PEAK_PLAN_INCOMPLETE"
+
+
+def test_peak_plan_requires_every_current_reserved_task(tmp_path):
+    path=tmp_path/"plan.json"
+    path.write_text(json.dumps({"scope":"MUT_RESOURCE_REPLAY_WITH_CURRENT_MAIN_RESERVATIONS",
+        "resource_config_sha256":"a"*64,"task_peak_reservations":[]}))
+    result=activator.complete_peak_admission({"resource_config_sha256":"a"*64},
+        {"gpu_leases":[{"task_id":"T13","state":"HELD"}]},path)
+    assert result["state"]=="RESOURCE_PEAK_PLAN_INCOMPLETE"
+    assert "coverage" in result["first_missing_field"]
+
+
+def _idle_fixture(tmp_path, monkeypatch, *, children=(), stage=None, active_claim=False):
+    import time
+    from datetime import datetime, timezone
+    specpath = tmp_path/"old-spec.json"
+    runtime = tmp_path/"old-runtime"
+    runtime.mkdir()
+    script = str(tmp_path/"scripts/autodl/run_mut_next_stage_executor_v1.py")
+    spec = {"task_id": "old", "adoption_pipeline": [{"cwd": str(tmp_path)}], "runtime_root": str(runtime),
+            "next_action_path": str(tmp_path/"next_action.json"), "publisher_id": "canonical",
+            "publisher_locator": str(tmp_path/"locator.json")}
+    specpath.write_text(json.dumps(spec))
+    (runtime/"heartbeat.json").write_text(json.dumps({"pid": 123, "written_at": datetime.now(timezone.utc).isoformat(),
+        "state": "WAITING_FOR_NEXT_ACTION", "science_pid": None, "stage": stage, "lane": None}))
+    if active_claim:
+        (runtime/"next_action_consumption.json").write_text("{}")
+    monkeypatch.setattr(activator, "identity", lambda pid: {"pid": pid, "start_ticks": 555,
+        "argv": ["/python", script, "--task-spec", str(specpath)], "cwd": str(tmp_path), "children": list(children)})
+    registry = {"tasks": [{"task_id": "old", "owner_pid": 123, "owner_start_ticks": 555}],
+                "publishers": [{"publisher_id": "canonical", "active_writer_count": 0}]}
+    return {"old_executor_spec": str(specpath)}, registry
+
+
+def test_exact_idle_executor_identity_can_be_bound(tmp_path, monkeypatch):
+    bound, registry = _idle_fixture(tmp_path, monkeypatch)
+    assert activator.idle_executor(bound, registry)["start_ticks"] == 555
+
+
+@pytest.mark.parametrize("case", ["child", "stage", "claim", "pid_reused"])
+def test_executor_with_child_claim_or_changed_identity_cannot_be_retired(tmp_path, monkeypatch, case):
+    bound, registry = _idle_fixture(tmp_path, monkeypatch, children=[124] if case == "child" else [],
+        stage="ADOPTION" if case == "stage" else None, active_claim=case == "claim")
+    if case == "pid_reused":
+        registry["tasks"][0]["owner_start_ticks"] = 999
+    with pytest.raises(RuntimeError):
+        activator.idle_executor(bound, registry)
