@@ -4051,6 +4051,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 raise ValueError("T13 indexed materialization requires the isolated, adopted Taste route")
             from src.baselines.t13_indexed_augmentation import install_t13_indexed_expansion
             install_t13_indexed_expansion(globalgce_model.fsg, output_root=output_dir / "indexed_dataset")
+            globalgce_model.fsg.t13_diagnostic_profile = indexed_options.get("diagnostic_profile", "native")
         if can_resume_trained_model:
             random.seed(int(seed))
             frozen_rules = torch.load(

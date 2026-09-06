@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import json
 from itertools import product,combinations
 import os
 from pathlib import Path
@@ -20,7 +21,8 @@ from torch.utils.data import DataLoader,Subset,default_collate
 
 from src.baselines.t13_indexed_augmentation import (build_indexed_dataset,_eager_without_split,
     OFFICIAL_FSG_SHA,restore_mask)
-from src.baselines.t13_indexed_canary import state_digest,rng_state,restore_rng,run_training_parity
+from src.baselines.t13_indexed_canary import state_digest,rng_state,restore_rng,run_training_parity,T13CanaryParityError
+from src.baselines.t13_component_diagnostics import exact_difference,numeric_runtime,strict_diagnostic_runtime
 
 
 def _defs(path,names,namespace):
@@ -150,3 +152,79 @@ def test_short_real_torch_forward_optimizer_scheduler_rng_and_reload_parity(offi
         learning_rate=0.1,output_root=tmp_path/'canary',resume_identity={'seed':7})
     assert report['checkpoint_reload_exact'] and report['model_optimizer_scheduler_rng_exact']
     assert report['optimizer_updates_per_arm']==2 and report['full_science_started'] is False
+    diagnostic=json.loads((tmp_path/'canary/component_diagnostics.json').read_text())
+    assert diagnostic['eager_repetitions_completed']==3 and diagnostic['eager_self_repeatable'] is True
+    assert len(diagnostic['initial_state_bindings'])==4
+    assert len({row['state_sha256'] for row in diagnostic['initial_state_bindings']})==1
+    raw=torch.load(tmp_path/'canary/component_evidence.pt',weights_only=False)
+    assert len(raw['records'])==6
+    assert all('gradients' in row and 'after_update' in row for row in raw['records'])
+
+
+class ChangedGradientFixture(TinyModel):
+    """Injected non-state backward mutation, not a claim about production GINE."""
+    def __init__(self):
+        super().__init__();self.calls=0
+    def get_rules(self,fss):
+        self.calls+=1
+        return super().get_rules(fss)
+    def run_one_batch(self,rules,data):
+        value=(self.weight+rules['noise']+data['feature'].mean()).square()
+        loss=value.detach()+(value-value.detach())*self.calls
+        return loss,loss*0,loss*0,loss
+
+
+def test_component_gradient_failure_keeps_three_eager_controls_and_raw_evidence(official,tmp_path):
+    fsg,parents,graphs=setup(official);random.seed(7)
+    indexed=lazy(official,fsg,parents,graphs)
+    destination=tmp_path/'injected-gradient-diagnostic'
+    with pytest.raises(T13CanaryParityError) as captured:
+        run_training_parity(model=ChangedGradientFixture(),fss={},
+            train_loader=DataLoader(Subset(indexed,indexed.train_idx),batch_size=500,num_workers=0),
+            learning_rate=0.1,output_root=destination,resume_identity={'seed':7})
+    report=captured.value.report
+    assert report['eager_repetitions_completed']==3
+    assert report['eager_self_repeatable'] is False
+    assert report['first_difference']['kind']=='EAGER_SELF_CONTROL'
+    assert report['first_difference']['component']=='gradients'
+    assert report['first_difference']['path']=='/weight'
+    assert report['first_difference']['max_absolute_difference']>0
+    assert report['tolerance_used'] is False
+    assert not (destination/'training_checkpoint.pt').exists()
+    saved=json.loads((destination/'component_diagnostics.json').read_text())
+    assert saved['first_difference']==report['first_difference']
+    raw=torch.load(destination/'component_evidence.pt',weights_only=False)
+    assert {row['arm'] for row in raw['records'] if row['mode']=='eager'}=={'eager_0','eager_1','eager_2'}
+
+
+def test_component_byte_difference_never_uses_tolerance():
+    value=torch.tensor([1.0])
+    changed=torch.nextafter(value,torch.tensor([float('inf')]))
+    result=exact_difference({'model':value},{'model':changed})
+    assert result['exact'] is False and result['tolerance_used'] is False
+    assert result['differences'][0]['path']=='/model'
+    assert result['differences'][0]['max_absolute_difference']>0
+    assert exact_difference(torch.tensor([0.0]),torch.tensor([-0.0]))['exact'] is False
+
+
+def test_matched_deterministic_context_is_strict_and_restores_native_settings():
+    before=numeric_runtime()
+    with strict_diagnostic_runtime('deterministic') as state:
+        assert state['deterministic_algorithms'] is True
+        assert state['deterministic_warn_only'] is False
+        assert state['matmul_allow_tf32']==before['matmul_allow_tf32']
+        assert state['cudnn_allow_tf32']==before['cudnn_allow_tf32']
+    assert numeric_runtime()==before
+
+
+def test_matched_deterministic_cpu_fixture_pass_is_not_formal_approval(official,tmp_path):
+    fsg,parents,graphs=setup(official);random.seed(7)
+    indexed=lazy(official,fsg,parents,graphs)
+    report=run_training_parity(model=TinyModel(),fss={},
+        train_loader=DataLoader(Subset(indexed,indexed.train_idx),batch_size=500,num_workers=0),
+        learning_rate=0.1,output_root=tmp_path/'deterministic',resume_identity={'seed':7},
+        diagnostic_profile='deterministic')
+    assert report['numeric_contract']['deterministic_algorithms'] is True
+    saved=json.loads((tmp_path/'deterministic/component_diagnostics.json').read_text())
+    assert saved['deterministic_diagnostic_not_formal_approval'] is True
+    assert saved['formal_numeric_contract_changed'] is False
