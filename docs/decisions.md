@@ -1,5 +1,21 @@
 # Decisions Log
 
+## [2026-09-06] Correct T14's pre-science GPU-mask bootstrap binding once
+
+The replacement owner failed before CUDA/science because a generic gpu_lock
+producer emitted UUID while the unchanged T14 consumer required numeric index2.
+Restore only the generic main-table path to its original numeric environment;
+the dedicated LLM UUID/FD path is unchanged. A producer-to-consumer test now
+exercises this exact contract without a GPU.
+
+The two already allocated replacement science directories do not exist. Allow
+one explicit bootstrap rebind retaining their exact UUID/output/memory/science
+fields, changing only actual new-driver identities in new sibling specs. Preserve
+old4e specs, original replacement receipt and failed logs. This is not checkpoint
+resume, a second stage replacement, retry3 or permission for automatic retries.
+All original parity and formal execution-rebind holds remain in force. See
+`docs/T14_BOOTSTRAP_GPU_MASK_CORRECTION_20260906.md`.
+
 ## [2026-09-06] Treat held empty coordination leases as resource blockers
 
 The first real sealed LLM dispatch observed a main coordination lock that is

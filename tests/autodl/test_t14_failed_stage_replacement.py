@@ -133,3 +133,60 @@ def test_owner_runs_only_replacement_canaries_then_holds_before_old_master(setup
     assert not result['full_started'] and not result['retry3_created']
     assert not Path(setup['master']['output_root']).exists()
     assert len(list((setup['root']/'terminal_history').glob('*.json')))==1
+
+
+def test_same_uuid_bootstrap_rebind_changes_only_driver_identity(setup,monkeypatch):
+    from src.utils import t14_bootstrap_rebind as bootstrap
+    original_receipt=prepare(setup)
+    original=owner.load_failed_stage_replacement(setup['master'],setup['master_path'],setup['plan'],setup['receipt'])
+    monkeypatch.setattr(bootstrap,'_original',lambda *args:original)
+    monkeypatch.setattr(owner,'_replacement_commit',lambda *args:'c'*40)
+    monkeypatch.setattr(bootstrap,'write_spec',write)
+    log=setup['root']/'logs/lowmemory-continuous-510.err'
+    log.parent.mkdir();log.write_text('require_gpu_runtime\n'+bootstrap.ERROR)
+    auth=setup['root']/'bootstrap-auth.json'
+    write(auth,dict(schema_version='t14_same_stage_bootstrap_user_authorization_v1',authorized_by='user_project_owner',
+        retry_index=2,stage_replacement_count=1,bootstrap_correction_index=1,max_bootstrap_corrections=1,
+        same_stage_uuid_required=True,require_science_output_absent=True,checkpoint_resume=False,
+        retry3_allowed=False,reference_rerun_allowed=False,formal_execution_rebind_required=True,
+        original_replacement=bootstrap._binding(setup['receipt']),driver_commit='c'*40,
+        failed_terminal=bootstrap._binding(setup['root']/'terminal.json')))
+    path=setup['receipt'].parent/'bootstrap_rebind/receipt.json'
+    before={Path(row['spec_path']):Path(row['spec_path']).read_bytes() for row in original_receipt['children'].values()}
+    rebound=bootstrap.prepare_bootstrap_rebind(setup['master'],setup['master_path'],setup['receipt'],auth,path,proc_root=setup['proc'])
+    adopted=bootstrap.load_bootstrap_rebind(setup['master'],setup['master_path'],setup['plan'],setup['receipt'],path)
+    assert rebound['same_uuids_and_outputs'] and not rebound['checkpoint_resume']
+    for role,row in rebound['children'].items():
+        old=json.loads(Path(original_receipt['children'][role]['spec_path']).read_text())
+        new=json.loads(Path(row['spec_path']).read_text())
+        assert {k:v for k,v in old.items() if k not in bootstrap.IDENTITY_FIELDS}=={k:v for k,v in new.items() if k not in bootstrap.IDENTITY_FIELDS}
+        assert adopted['children'][role]['output_root']==original_receipt['children'][role]['output_root']
+    assert all(p.read_bytes()==value for p,value in before.items())
+    with pytest.raises(owner.T14RouteCFreshError,match='already used'):
+        bootstrap.prepare_bootstrap_rebind(setup['master'],setup['master_path'],setup['receipt'],auth,path,proc_root=setup['proc'])
+    changed=Path(rebound['children']['LOW_MEMORY_CONTINUOUS_510']['spec_path'])
+    new=json.loads(changed.read_text());new['output_root']='/another-root';write(changed,new)
+    with pytest.raises(owner.T14RouteCFreshError,match='beyond actual driver'):
+        bootstrap.load_bootstrap_rebind(setup['master'],setup['master_path'],setup['plan'],setup['receipt'],path)
+
+
+def test_bootstrap_rebind_refuses_created_science_root(setup,monkeypatch):
+    from src.utils import t14_bootstrap_rebind as bootstrap
+    prepare(setup)
+    original=owner.load_failed_stage_replacement(setup['master'],setup['master_path'],setup['plan'],setup['receipt'])
+    monkeypatch.setattr(bootstrap,'_original',lambda *args:original)
+    monkeypatch.setattr(owner,'_replacement_commit',lambda *args:'c'*40)
+    log=setup['root']/'logs/lowmemory-continuous-510.err';log.parent.mkdir()
+    log.write_text('require_gpu_runtime\n'+bootstrap.ERROR)
+    auth=setup['root']/'bootstrap-auth.json'
+    write(auth,dict(schema_version='t14_same_stage_bootstrap_user_authorization_v1',authorized_by='user_project_owner',
+        retry_index=2,stage_replacement_count=1,bootstrap_correction_index=1,max_bootstrap_corrections=1,
+        same_stage_uuid_required=True,require_science_output_absent=True,checkpoint_resume=False,
+        retry3_allowed=False,reference_rerun_allowed=False,formal_execution_rebind_required=True,
+        original_replacement=bootstrap._binding(setup['receipt']),driver_commit='c'*40,
+        failed_terminal=bootstrap._binding(setup['root']/'terminal.json')))
+    Path(original['children']['LOW_MEMORY_CONTINUOUS_510']['output_root']).mkdir()
+    path=setup['receipt'].parent/'bootstrap_rebind/receipt.json'
+    with pytest.raises(owner.T14RouteCFreshError,match='existing science root'):
+        bootstrap.prepare_bootstrap_rebind(setup['master'],setup['master_path'],setup['receipt'],auth,path,proc_root=setup['proc'])
+    assert not path.exists()

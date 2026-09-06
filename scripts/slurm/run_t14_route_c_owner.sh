@@ -27,6 +27,9 @@ extra=()
 if [[ -n "${T14_FAILED_STAGE_REPLACEMENT:-}" ]]; then
   extra+=(--failed-stage-replacement "$T14_FAILED_STAGE_REPLACEMENT")
 fi
+if [[ -n "${T14_BOOTSTRAP_REBIND:-}" ]]; then
+  extra+=(--bootstrap-rebind "$T14_BOOTSTRAP_REBIND")
+fi
 python scripts/autodl/run_t14_route_c_owner.py \
   --config "$PWD/configs/hpc.yaml" \
   --task-spec "$T14_ROUTE_C_TASK_SPEC" \

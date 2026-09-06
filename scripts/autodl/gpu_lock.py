@@ -152,7 +152,9 @@ def main() -> int:
             owner=owner,
         ):
             environment = sanitized_environment()
-            environment["CUDA_VISIBLE_DEVICES"] = str(args.gpu_uuid)
+            # Legacy main-table consumers require the physical numeric selector.
+            # LLM dispatch has its own UUID/FD owner branch above and is unchanged.
+            environment["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)
             environment["AUTODL_PHYSICAL_GPU_INDEX"] = str(args.gpu_index)
             environment["AUTODL_PHYSICAL_GPU_UUID"] = str(args.gpu_uuid)
             completed = subprocess.run(command, env=environment, check=False)

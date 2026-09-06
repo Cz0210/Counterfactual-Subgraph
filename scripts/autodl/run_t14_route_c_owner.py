@@ -479,9 +479,10 @@ def _small_sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _replacement_commit() -> str:
-    commit = subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
-    dirty = subprocess.check_output(["git", "-C", str(REPO_ROOT), "status", "--porcelain"], text=True).strip()
+def _replacement_commit(driver_root: Path | None = None) -> str:
+    selected=REPO_ROOT if driver_root is None else driver_root
+    commit = subprocess.check_output(["git", "-C", str(selected), "rev-parse", "HEAD"], text=True).strip()
+    dirty = subprocess.check_output(["git", "-C", str(selected), "status", "--porcelain"], text=True).strip()
     if dirty or len(commit) != 40:
         raise T14RouteCFreshError("T14 replacement requires clean immutable driver")
     return commit
@@ -566,7 +567,10 @@ def prepare_failed_stage_replacement(
     return receipt
 
 
-def load_failed_stage_replacement(master: Mapping[str,Any],master_path: Path,plan: dict[str,Any],path: Path) -> dict[str,Any]:
+def load_failed_stage_replacement(master: Mapping[str,Any],master_path: Path,plan: dict[str,Any],path: Path,
+                                  *, driver_root: Path | None = None) -> dict[str,Any]:
+    selected=REPO_ROOT if driver_root is None else driver_root
+    expected_commit=_replacement_commit() if driver_root is None else _replacement_commit(driver_root)
     receipt=_json_object(path)
     unsigned={k:v for k,v in receipt.items() if k!='receipt_sha256'}
     if receipt.get('receipt_sha256')!=hashlib.sha256(json.dumps(unsigned,sort_keys=True,separators=(',',':')).encode()).hexdigest():
@@ -575,7 +579,7 @@ def load_failed_stage_replacement(master: Mapping[str,Any],master_path: Path,pla
             or receipt.get('schema_version')!='t14_retry2_failed_stage_replacement_v1'
             or receipt.get('retry_index')!=2 or receipt.get('max_stage_replacements')!=1
             or receipt.get('source_science_commit')!=master['execution_commit']
-            or receipt.get('driver_commit')!=_replacement_commit()
+            or receipt.get('driver_commit')!=expected_commit
             or receipt.get('master_spec')!={'path':str(master_path),'sha256':_small_sha(master_path)}
             or receipt.get('preserved_reference')!=plan['children']['REFERENCE_500']
             or receipt.get('failed_child')!=plan['children']['LOW_MEMORY_CONTINUOUS_510']):
@@ -585,7 +589,7 @@ def load_failed_stage_replacement(master: Mapping[str,Any],master_path: Path,pla
         if _small_sha(Path(row['path']))!=row['sha256']:
             raise T14RouteCFreshError('T14 replacement source changed:'+key)
     for name,key in (('run_t14_route_c_owner.py','driver_owner_sha256'),('run_tastemolnet_t14_comrecgc_full.sh','driver_wrapper_sha256')):
-        if _small_sha(REPO_ROOT/'scripts/autodl'/name)!=receipt[key]:
+        if _small_sha(selected/'scripts/autodl'/name)!=receipt[key]:
             raise T14RouteCFreshError('T14 replacement driver bytes changed')
     children=dict(plan['children'])
     for role in ('LOW_MEMORY_CONTINUOUS_510','LOW_MEMORY_RELOAD_510'):
@@ -755,6 +759,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prepare-failed-stage-replacement", type=_absolute)
     parser.add_argument("--replacement-authorization", type=_absolute)
     parser.add_argument("--failed-stage-replacement", type=_absolute)
+    parser.add_argument("--prepare-bootstrap-rebind", type=_absolute)
+    parser.add_argument("--bootstrap-authorization", type=_absolute)
+    parser.add_argument("--bootstrap-rebind", type=_absolute)
     return parser.parse_args(argv)
 
 
@@ -783,6 +790,19 @@ def main(argv: list[str] | None = None) -> int:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise T14RouteCFreshError("T14 Route C already has one owner") from exc
+        if args.prepare_bootstrap_rebind:
+            if (not args.failed_stage_replacement or not args.bootstrap_authorization
+                    or args.prepare_failed_stage_replacement or args.bootstrap_rebind or args.dry_run):
+                raise T14RouteCFreshError('T14 bootstrap preparation flags conflict')
+            from src.utils.t14_bootstrap_rebind import prepare_bootstrap_rebind
+            result=prepare_bootstrap_rebind(master,args.task_spec,args.failed_stage_replacement,
+                args.bootstrap_authorization,args.prepare_bootstrap_rebind)
+            print(json.dumps(result,sort_keys=True),flush=True)
+            return 0
+        if args.bootstrap_authorization:
+            raise T14RouteCFreshError('T14 bootstrap authorization is preparation-only')
+        if args.bootstrap_rebind and not args.failed_stage_replacement:
+            raise T14RouteCFreshError('T14 bootstrap requires the same replacement binding')
         # Preparation only adds one fresh binding/child specs; never archives the
         # failure, launches science or edits the immutable prior owner plan.
         if args.prepare_failed_stage_replacement:
@@ -871,7 +891,11 @@ def main(argv: list[str] | None = None) -> int:
             master, master_path=args.task_spec, owner_root=owner_root
         )
         if args.failed_stage_replacement:
-            plan=load_failed_stage_replacement(master,args.task_spec,plan,args.failed_stage_replacement)
+            if args.bootstrap_rebind:
+                from src.utils.t14_bootstrap_rebind import load_bootstrap_rebind
+                plan=load_bootstrap_rebind(master,args.task_spec,plan,args.failed_stage_replacement,args.bootstrap_rebind)
+            else:
+                plan=load_failed_stage_replacement(master,args.task_spec,plan,args.failed_stage_replacement)
         reference, reference_path = _planned_child(plan, "REFERENCE_500")
         continuous, continuous_path = _planned_child(
             plan, "LOW_MEMORY_CONTINUOUS_510"
@@ -974,7 +998,9 @@ def main(argv: list[str] | None = None) -> int:
                 status='CANARY_PARITY_PASS_FORMAL_EXECUTION_REBIND_REQUIRED',
                 retry_index=2,retry3_created=False,reference_rerun=False,
                 replacement_receipt_sha256=replacement['receipt_sha256'],receipts=receipts,
-                source_science_commit=master['execution_commit'],driver_commit=replacement['driver_commit'],
+                source_science_commit=master['execution_commit'],
+                driver_commit=plan.get('bootstrap_rebind',replacement)['driver_commit'],
+                bootstrap_rebind=plan.get('bootstrap_rebind'),
                 full_started=False,blocked_fields=['master.execution_commit',
                     'fresh_retry.authorization_receipt.corrected_execution_commit',
                     'fresh_retry.formal_cadence_contract.execution_commit'],written_at=_utc_now())
@@ -1095,7 +1121,7 @@ def main(argv: list[str] | None = None) -> int:
         launch_continuation_owner(args.continuation_spec)
         return 0
     except Exception as exc:
-        if args.prepare_failed_stage_replacement:
+        if args.prepare_failed_stage_replacement or args.prepare_bootstrap_rebind:
             # A failed preparation cannot rewrite the prior scientific failure.
             raise
         existing_terminal = (
