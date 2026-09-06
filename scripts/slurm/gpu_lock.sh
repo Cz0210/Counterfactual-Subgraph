@@ -17,4 +17,6 @@ python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 # AutoDL LLM dispatch uses gpu_lock.py run --llm-dispatch-spec <sealed.json>
 # --llm-dispatch-spec-sha256 <SHA> --owner-output-root <fresh> on AutoDL only;
 # a Slurm allocation cannot supply main-priority reservation evidence.
+# --llm-complete-chain is the bounded existing AutoDL L1/L2/L3 continuation;
+# it releases each GPU lease before its CPU evaluator. This wrapper stays read-only.
 python scripts/autodl/gpu_lock.py --config configs/hpc.yaml list

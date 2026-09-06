@@ -300,16 +300,21 @@ def test_real_cli_can_seal_dispatchable_command_without_gpu_lock(tmp_path, monke
         readiness["variants"][variant]={"path":str(path),"sha256":sha256_file(path)}
     ready=tmp_path/"readiness.json";atomic_json(ready,readiness)
     archive=tmp_path/"archive";archive.write_bytes(b"accepted fixture")
+    bundle=tmp_path/"bundle";bundle.mkdir();atomic_json(bundle/"bundle_manifest.json",{"fixture":True})
     monkeypatch.setattr(cli,"require_corrected_gnn_core",lambda *_a,**_kw:{"state":"GNN_CORE_SEED7_CORRECTED_PASS"})
     dispatch=tmp_path/"dispatch.json"
     args=["--readiness",str(ready),"--readiness-sha256",sha256_file(ready),"--output-root",str(tmp_path/"generation"),
           "--gnn-verified-archive",str(archive),"--gnn-verified-archive-sha256",sha256_file(archive),
-          "--resource-config",str(resource_config),"--seal-dispatch-spec",str(dispatch)]
+          "--resource-config",str(resource_config),"--seal-dispatch-spec",str(dispatch),
+          "--gnn-input-bundle",str(bundle),"--ablation-registry-root",str(tmp_path/"llm-registry")]
     assert cli.main(args)==0
     result=json.loads(dispatch.read_text())
     assert result["state"]=="DISPATCHABLE_WAITING_RESOURCE"
     assert result["command"][1:3]==["-I","-B"] and "--gnn-acceptance" in result["command"]
     assert result["variant_order"]==list(cli.ORDER) and result["borrow_enabled"] is False
+    assert set(result["downstream_commands"]) == set(cli.ORDER)
+    assert all("--gnn-acceptance" in row["command"] and row["command"][-1] == "2"
+               for row in result["downstream_commands"].values())
     assert not Path(cfg["gpu_lock_root"]).exists()
     first=tmp_path/"generation"/cli.ORDER[0];first.mkdir(parents=True)
     spec=json.loads(Path(readiness["variants"][cli.ORDER[0]]["path"]).read_text())

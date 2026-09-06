@@ -127,3 +127,26 @@ def test_inode_budget_blocks_without_lowering_guard(tmp_path):
     gpu = GPUObservation(0, "GPU-fixture", "CPU inventory fixture", 1000, 0, 1000, 0)
     result = owner.ResourceSampler(cfg, 0, gpu.uuid, inventory=lambda: [gpu]).sample()
     assert not result["storage_safe"] and result["required_free_inodes"] == 2**60 + 4096
+
+
+def test_evaluation_follows_only_real_completed_pool_and_keeps_registry_separate(tmp_path):
+    variant = runtime.VARIANTS[1]
+    spec = task(); specfile = tmp_path / "task.json"; atomic_json(specfile, spec)
+    row = {"task_spec": {"path": str(specfile), "sha256": sha256_file(specfile)},
+           "candidate_root": str(tmp_path / "generated"), "output_root": str(tmp_path / "evaluation"), "command": ["entry"]}
+    dispatch = {"variant_order": [variant], "downstream_commands": {variant: row}}
+    assert owner.next_completed_evaluation(dispatch) is None
+    candidate = tmp_path / "generated"; candidate.mkdir()
+    receipt = {"status": "PAUSED_AT_CALL_CHECKPOINT", "spec_sha256": canonical_json_sha256(spec),
+               "variant": variant, "next_call": len(spec["calls"])}
+    atomic_json(candidate / "candidate_generation_receipt.json", receipt)
+    assert owner.next_completed_evaluation(dispatch) is None
+    atomic_json(candidate / "candidate_generation_receipt.json", {**receipt, "status": "CANDIDATE_POOL_PASS"})
+    assert owner.next_completed_evaluation(dispatch)["variant"] == variant
+    evaluation = tmp_path / "evaluation"; evaluation.mkdir()
+    atomic_json(evaluation / "final_audit.json", {"state": "PASS", "main_matrix_write": False})
+    atomic_json(evaluation / "run_manifest.json", {"task_spec_sha256": sha256_file(specfile)})
+    assert owner.next_completed_evaluation(dispatch) is None
+    atomic_json(evaluation / "run_manifest.json", {"task_spec_sha256": "wrong"})
+    with pytest.raises(ValueError, match="FINAL_BINDING_CHANGED"):
+        owner.next_completed_evaluation(dispatch)

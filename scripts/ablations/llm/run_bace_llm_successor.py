@@ -81,6 +81,8 @@ def main(argv=None):
     parser.add_argument("--gnn-acceptance-sha256")
     parser.add_argument("--seal-dispatch-spec", help="CPU-only fresh file; does not acquire a GPU")
     parser.add_argument("--resource-config", help="Frozen paths/thresholds for direct live-source sampling")
+    parser.add_argument("--gnn-input-bundle", help="Existing BACE payload for the common CPU evaluator")
+    parser.add_argument("--ablation-registry-root", help="Separate LLM results registry, never main matrix")
     for name in ("adopt-corrective-overlay", "adopt-corrective-overlay-sha256", "adopt-corrective-audit", "adopt-corrective-audit-sha256"):
         parser.add_argument("--" + name)
     args = parser.parse_args(argv)
@@ -120,6 +122,11 @@ def main(argv=None):
         target = Path(args.seal_dispatch_spec).absolute()
         if target.exists() or not args.resource_config:
             raise ValueError("Fresh dispatch destination and real resource config required")
+        if (not args.gnn_input_bundle or not args.ablation_registry_root
+                or not (Path(args.gnn_input_bundle) / "bundle_manifest.json").is_file()):
+            raise ValueError("EXISTING_COMMON_EVALUATION_INPUT_AND_SEPARATE_REGISTRY_REQUIRED")
+        if "fast16_matrix_authority" in Path(args.ablation_registry_root).parts:
+            raise ValueError("ABLATION_REGISTRY_CANNOT_BE_MAIN_MATRIX")
         from src.ablations.llm.existing_gpu_owner import validate_resource_config, read_small
         config, _ = read_small(args.resource_config)
         validate_resource_config(config)
@@ -149,6 +156,25 @@ def main(argv=None):
                    "variant_order": list(ORDER), "max_llm_gpus": 1, "borrow_enabled": False,
                    "state": "DISPATCHABLE_WAITING_RESOURCE", "science_started": False,
                    "main_matrix_count_required": False, "secondary_seeds_required": False}
+        payload["downstream_commands"] = {}
+        for variant in ORDER:
+            output = Path(args.output_root).parent / "evaluation" / variant
+            payload["downstream_commands"][variant] = {
+                "candidate_root": str(Path(args.output_root) / variant),
+                "output_root": str(output),
+                "task_spec": readiness["variants"][variant],
+                "command": [sys.executable, "-I", "-B", str(ROOT / "scripts/ablations/llm/run_bace_common_downstream.py"),
+                    "--config", "configs/hpc.yaml", "--set", "inference.fallback_to_heuristic=false",
+                    "--task-spec", readiness["variants"][variant]["path"],
+                    "--candidate-root", str(Path(args.output_root) / variant),
+                    "--gnn-input-bundle", args.gnn_input_bundle,
+                    "--gnn-verified-archive", args.gnn_verified_archive,
+                    "--gnn-verified-sha256", args.gnn_verified_archive_sha256,
+                    "--gnn-acceptance", acceptance["path"], "--gnn-acceptance-sha256", acceptance["sha256"],
+                    "--registry-root", args.ablation_registry_root, "--output-root", str(output),
+                    "--device", "cpu", "--cpu-threads", "2"]}
+        payload["evaluation_policy"] = {"rule_budget": "AT_MOST_K", "max_rules": 20,
+            "padding": False, "calibration_global_freeze_before_test": True}
         payload["self_sha256"] = canonical_json_sha256(payload)
         atomic_json(target, payload)
         print(json.dumps({"dispatch_spec": str(target), "sha256": sha256_file(target), "state": payload["state"]}))

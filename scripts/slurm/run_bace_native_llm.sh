@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # generate requires inherited UUID and single-LLM-slot FDs from gpu_lock.py;
 # --resource-live-evidence is refreshed from sources, not timestamp replay.
+# New specs also require --gpu-smoke-root in the dedicated LLM scope; no formal
+# pool is generated before actual GPU load/finite-forward/call-resume parity.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --cpus-per-task=2

@@ -77,6 +77,16 @@ same variant/root; it is never mistaken for a completed pool. The outer queue
 must not advance after code 75 (paused/waiting) or a failure. A deployed live
 outer-queue binding is an operational requirement, not claimed by these tests.
 
+The existing `gpu_lock.py run --llm-complete-chain` option now executes that
+bounded three-variant continuation itself (at most seven stage checks, never
+an unbounded retry loop). Sealing also requires `--gnn-input-bundle` and
+`--ablation-registry-root`, and includes exact common CPU-evaluation commands.
+After a completed generation its GPU lease closes before CPU evaluation starts;
+only a real bound final audit allows advancing. Pause/failure exits preserve
+the committed output and require normal resume, never a fresh hidden retry.
+This uses the same owner/sampler and UUID locks. It is not a second controller
+or reservation authority and remains unable to clear a main-table reservation.
+
 Admission requires 1200 seconds of consecutive real idle samples. GPU inventory,
 heartbeats, PID generations, cgroup memory and filesystem headroom are reread
 at most 60 seconds apart. Heartbeat values older than 120 seconds cannot be

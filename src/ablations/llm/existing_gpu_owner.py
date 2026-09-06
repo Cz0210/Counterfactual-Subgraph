@@ -379,6 +379,39 @@ def _bind_child(lock, binding):
     os.fsync(handle.fileno())
 
 
+def next_completed_evaluation(dispatch):
+    """Select only a real complete pool; no future PID or completion inference."""
+    for variant in dispatch["variant_order"]:
+        row = dispatch["downstream_commands"][variant]
+        candidate = Path(row["candidate_root"]) / "candidate_generation_receipt.json"
+        if not candidate.is_file():
+            return None
+        generated, _ = read_small(candidate)
+        if generated.get("status") != "CANDIDATE_POOL_PASS":
+            return None
+        task, _ = read_small(row["task_spec"]["path"])
+        if (sha256_file(row["task_spec"]["path"]) != row["task_spec"]["sha256"]
+                or generated.get("spec_sha256") != canonical_sha(task)
+                or generated.get("variant") != variant or generated.get("next_call") != len(task["calls"])):
+            raise ValueError("DOWNSTREAM_COMPLETED_POOL_BINDING_CHANGED")
+        output = Path(row["output_root"])
+        final = output / "final_audit.json"
+        if final.is_file():
+            audit, _ = read_small(final)
+            manifest, _ = read_small(output / "run_manifest.json")
+            if (audit.get("state") != "PASS" or audit.get("main_matrix_write") is not False
+                    or manifest.get("task_spec_sha256") != row["task_spec"]["sha256"]):
+                raise ValueError("DOWNSTREAM_FINAL_BINDING_CHANGED")
+            continue
+        return {"variant": variant, **row, "resume": output.exists()}
+    return None
+
+
+def canonical_sha(payload):
+    from src.ablations.llm.contracts import canonical_json_sha256
+    return canonical_json_sha256(payload)
+
+
 def run_owned_child(*, command, environment, sampler, output_root, lock_root, run_id,
                     interval=30, max_wait_seconds=0):
     """One owner lifecycle. Never unlock while its launched child is alive."""
