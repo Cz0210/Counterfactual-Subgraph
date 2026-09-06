@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1014,6 +1014,7 @@ def _run_stage(
     environment: Mapping[str, str],
     output_root: Path,
     checkpoint_path: Path | None = None,
+    resource_monitor: Callable[[int], None] | None = None,
 ) -> None:
     argv_sha256 = stable_json_sha256(list(argv))
     generation = _next_stage_startup_generation(
@@ -1140,7 +1141,19 @@ def _run_stage(
                 os.killpg(process.pid, signum)
             except ProcessLookupError:
                 pass
-        return_code = process.wait()
+        if resource_monitor is None:
+            return_code = process.wait()
+        else:
+            # Optional, invocation-local observation. Pressure uses the same
+            # verified child-session SIGTERM/quiescence path below; no new
+            # controller, process lookup, or alternate writer is introduced.
+            while True:
+                resource_monitor(process.pid)
+                try:
+                    return_code = process.wait(timeout=5)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
         _wait_for_process_group_quiescence(
             process.pid, proc_root=_PROC_ROOT, timeout_seconds=None
         )

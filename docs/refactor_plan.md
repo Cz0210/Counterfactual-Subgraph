@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## 2026-09-07: independently adopted Mut CPU chemistry stage boundary
+
+- [x] Stop the existing standardizer after complete train-only chemistry; no WNode/test dispatch.
+- [x] Explicit same-code/input resume skips sealed chemistry under a separately admitted stage policy.
+- [x] Reuse existing Mut invocation lease and child-session SIGTERM ownership with narrow RSS/cgroup observations.
+- [ ] Measure actual normal chemistry peak and bind the later WNode file budget before its independent admission.
+
 ## 2026-09-06: Future-only T12 immutable local history cache
 
 - [x] Reuse original history and first-seen codecs through optional bounded local reads.

@@ -18,6 +18,17 @@
   resource evidence, real GPU smoke and shared-lock checks still govern launch.
 - See `docs/BACE_LLM_STAGE_RESOURCE_BINDING_20260907.md`; the matched paired
   Slurm wrapper requests CPU only under the explicit metadata-task exception.
+## 2026-09-07 — independently adopted Mut chemistry has a sealed CPU boundary
+
+The existing Mut standardizer optionally stops after complete train-only
+chemistry without generation, pair-store or DBSCAN reruns or held-out evaluation.
+A small boundary receipt supports same-code/input resume after independently
+admitting the WNode/evaluation file peak. The existing child-session runner can
+sample process-tree RSS and cgroup/file-domain resources every five seconds,
+using its existing SIGTERM cleanup on pressure. No scheduler, GPU lock, alternate
+matrix or weaker scientific gate is added. Chemistry's conservative code bound
+is128 new inodes including fixed containers, barrier records, temporaries and
+margin. RSS96GiB is a budget, not a measured chemistry peak.
 
 ## [2026-09-06] Correct T14's pre-science GPU-mask bootstrap binding once
 

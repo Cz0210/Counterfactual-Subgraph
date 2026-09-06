@@ -7,6 +7,9 @@ the recovery gate, and freeze.  The legacy route requires true trace-on/off
 parity.  The fast-accurate route instead consumes a strict historical trace-on
 50k adoption receipt plus the separately authorized 500-step semantic-
 equivalence proof; it never describes that evidence as trace-off parity.
+The explicitly authorized v3 independent route instead binds its own complete
+historical scientific audit, without claiming trace parity. Its optional
+chemistry-only boundary defers WNode/test until separate stage admission.
 """
 
 from __future__ import annotations
@@ -726,19 +729,31 @@ def _commands(
     ]
 
 
-def run(
+def _run(
     inputs: ContinuationInputs,
     *,
     common_adoption_path: Path | None,
     parity_path: Path | None = None,
     historical_adoption_path: Path | None = None,
+    through_stage: str = "all",
+    resume_after_chemistry: bool = False,
+    resource_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if inputs.dataset != "mutagenicity" or inputs.device != "cpu":
         raise ValueError("This continuation is Mutagenicity CPU-only")
-    if inputs.output_root.exists() or inputs.output_root.is_symlink():
+    phased = through_stage == "chemistry" or resume_after_chemistry
+    if through_stage not in {"all", "chemistry"} or (resume_after_chemistry and through_stage != "all"):
+        raise ValueError("Invalid chemistry phase selection")
+    if phased and (historical_adoption_path is None or resource_options is None):
+        raise ValueError("Chemistry boundary requires independent adoption and explicit stage resources")
+    if resume_after_chemistry:
+        if inputs.output_root.is_symlink() or not inputs.output_root.is_dir():
+            raise ValueError("Chemistry resume requires its exact physical output root")
+    elif inputs.output_root.exists() or inputs.output_root.is_symlink():
         raise FileExistsError(f"Fresh OUTPUT_ROOT already exists: {inputs.output_root}")
-    inputs.output_root.parent.mkdir(parents=True, exist_ok=True)
-    inputs.output_root.mkdir(mode=0o755)
+    else:
+        inputs.output_root.parent.mkdir(parents=True, exist_ok=True)
+        inputs.output_root.mkdir(mode=0o755)
     try:
         if (parity_path is None) == (historical_adoption_path is None):
             raise ValueError(
@@ -775,6 +790,8 @@ def run(
             )
             expected_common_recourse_count = None
         independent = bool(historical and historical.get("independent_scientific_adoption_authorized"))
+        if phased and not independent:
+            raise ValueError("Chemistry phase entry is restricted to independently audited v3 adoption")
         adoption = (dict(historical["generation_adoption"]) if independent
                     else validate_adopted_generation(inputs))
         if independent:
@@ -786,14 +803,15 @@ def run(
             expected_commit=UPSTREAM_COMMIT,
             validate_imports=True,
         )
-        write_json(inputs.output_root / "generation_adoption_manifest.json", adoption)
-        if historical is not None:
-            write_json(inputs.output_root / "historical_adoption_manifest.json", historical)
-        else:
-            assert common is not None and parity is not None
-            write_json(inputs.output_root / "common_recourse_adoption_manifest.json", common)
-            write_json(inputs.output_root / "trace_parity_adoption_manifest.json", parity)
-        write_json(inputs.output_root / "upstream_checkout_audit.json", checkout)
+        if not resume_after_chemistry:
+            write_json(inputs.output_root / "generation_adoption_manifest.json", adoption)
+            if historical is not None:
+                write_json(inputs.output_root / "historical_adoption_manifest.json", historical)
+            else:
+                assert common is not None and parity is not None
+                write_json(inputs.output_root / "common_recourse_adoption_manifest.json", common)
+                write_json(inputs.output_root / "trace_parity_adoption_manifest.json", parity)
+            write_json(inputs.output_root / "upstream_checkout_audit.json", checkout)
         project_commit = _git_head()
         teacher_sha256 = sha256_file(inputs.teacher_path)
         environment = {
@@ -804,7 +822,7 @@ def run(
             "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD": "1",
             "CUDA_VISIBLE_DEVICES": "",
         }
-        for stage, argv, marker, field in _commands(
+        commands = _commands(
             inputs,
             common_root=common_root,
             trace_evidence_path=trace_evidence_path,
@@ -812,7 +830,27 @@ def run(
             expected_common_recourse_count=expected_common_recourse_count,
             project_commit=project_commit,
             teacher_sha256=teacher_sha256,
-        ):
+        )
+        contract = None
+        monitor = None
+        if phased:
+            from src.utils.mut_chemistry_stage_boundary import (
+                CHEMISTRY_STAGE, EVALUATION_STAGE, ChemistryResourceMonitor,
+                chemistry_contract, seal_boundary, validate_boundary,
+            )
+            contract = chemistry_contract(inputs, commands, historical_adoption_path, project_commit)
+            if resume_after_chemistry:
+                validate_boundary(inputs.output_root, contract)
+            stage_id = EVALUATION_STAGE if resume_after_chemistry else CHEMISTRY_STAGE
+            monitor = ChemistryResourceMonitor(inputs.output_root, stage_id=stage_id, **dict(resource_options))
+            monitor.admission()
+        for stage, argv, marker, field in commands:
+            if resume_after_chemistry and stage == "chemistry":
+                continue
+            kwargs = {}
+            if monitor is not None:
+                monitor.root_identity = None
+                kwargs["resource_monitor"] = monitor.sample
             _run_stage(
                 stage=stage,
                 argv=argv,
@@ -820,7 +858,11 @@ def run(
                 required_field=field,
                 environment=environment,
                 output_root=inputs.output_root,
+                **kwargs,
             )
+            if stage == "chemistry" and through_stage == "chemistry":
+                assert contract is not None
+                return seal_boundary(inputs.output_root, contract)
         standardized = inputs.output_root / "standardized"
         standardized_manifest = _object(
             standardized / "run_manifest.json", label="standardized manifest"
@@ -983,6 +1025,19 @@ def run(
         raise
 
 
+def run(inputs: ContinuationInputs, **kwargs: Any) -> dict[str, Any]:
+    # Reuse the existing Mut nonblocking invocation lease implementation.
+    # A resumed stage must not race another invocation at the sealed boundary.
+    if kwargs.get("through_stage") == "chemistry" or kwargs.get("resume_after_chemistry"):
+        from src.utils.autodl_mut_next_stage_executor_v1 import acquire_lease
+        lease = acquire_lease(inputs.output_root.with_name(inputs.output_root.name + ".owner.lease"))
+        try:
+            return _run(inputs, **kwargs)
+        finally:
+            lease.close()
+    return _run(inputs, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
@@ -1002,11 +1057,30 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--historical-adoption", type=_absolute)
     parser.add_argument("--output-root", type=_absolute, required=True)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--through-stage", choices=("all", "chemistry"), default="all")
+    parser.add_argument("--resume-after-chemistry", action="store_true")
+    parser.add_argument("--stage-resource-config", type=_absolute,
+                        help="Existing resource-config containing stage_file_policy descriptor")
+    parser.add_argument("--persistent-root", type=_absolute)
+    parser.add_argument("--max-rss-gib", type=int, default=96)
+    parser.add_argument("--other-main-reserve-gib", type=int, default=192)
+    parser.add_argument("--transient-reserve-gib", type=int, default=32)
+    parser.add_argument("--min-free-gib", type=int, default=100)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    resource_options = None
+    if args.through_stage == "chemistry" or args.resume_after_chemistry:
+        if args.stage_resource_config is None or args.persistent_root is None:
+            raise SystemExit("Phased continuation requires --stage-resource-config and --persistent-root")
+        resource_options = dict(config_path=_require_file(args.stage_resource_config),
+                                persistent_root=_require_directory(args.persistent_root),
+                                max_rss_gib=args.max_rss_gib,
+                                other_main_reserve_gib=args.other_main_reserve_gib,
+                                transient_reserve_gib=args.transient_reserve_gib,
+                                min_free_gib=args.min_free_gib)
     inputs = ContinuationInputs(
         dataset="mutagenicity",
         source_generation_root=_require_directory(args.source_generation_root),
@@ -1024,7 +1098,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         theta_star=None,
         cost_cap=None,
     )
-    run(
+    result = run(
         inputs,
         common_adoption_path=(
             _require_file(args.common_adoption) if args.common_adoption is not None else None
@@ -1037,7 +1111,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.historical_adoption is not None
             else None
         ),
+        through_stage=args.through_stage,
+        resume_after_chemistry=args.resume_after_chemistry,
+        resource_options=resource_options,
     )
+    if args.through_stage == "chemistry":
+        print(json.dumps({"state": result["state"], "output_root": str(inputs.output_root),
+                          "next_stage": result["next_stage"], "final_cell_pass": False}, sort_keys=True), flush=True)
     return 0
 
 

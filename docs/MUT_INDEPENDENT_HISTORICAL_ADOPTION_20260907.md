@@ -1,5 +1,36 @@
 # Mut independent historical adoption — 2026-09-07
 
+## Chemistry-only CPU boundary
+
+The existing standardizer accepts `--through-stage chemistry`, with an explicit
+`--stage-resource-config` and `--persistent-root`. It uses its normal startup
+barrier and child session, plus the existing Mut nonblocking invocation lease.
+The optional five-second observer reuses the existing process-tree reader;
+pressure exits through the runner's existing SIGTERM/quiescence cleanup, never
+SIGKILL. Budget caps are not measured chemistry peaks: RSS96GiB, other-main
+reserve192GiB, transient32GiB, start headroom320GiB, persistent free100GiB.
+Only more conservative reserve/cap settings are accepted.
+
+Stage `mut_chemistry` has a conservative128-new-inode code bound. The chemistry
+implementation writes at most32 fixed containers/manifests (all100235 candidate
+and action rows are consolidated), no per-candidate files. Allow16 wrapper,
+preregistration, startup-barrier, resource/phase records;16 directory/lock/log
+entries;32 transient/error-publication entries;32 unused safety entries.
+Existing inputs are not counted again. New WNode per-graph NPZ caches belong to
+the separate, not-yet-admitted `mut_unified_evaluation` stage.
+
+Successful chemistry publishes `chemistry_stage_boundary.json` in state
+`SEALED_CHEMISTRY_WAITING_EVALUATION_ADMISSION`, **not** final cell PASS.
+Use the identical immutable execution tree and arguments, replace
+`--through-stage chemistry` with `--resume-after-chemistry`, and bind a new
+resource config whose `mut_unified_evaluation` stage is admitted. This checks
+the saved command/input identities and small closure manifests before skipping
+chemistry; it refuses to duplicate an already-created evaluation directory.
+No source payload/model is rehashed at this boundary. The remainder uses the
+unchanged RF/WNode evaluator, project-full gate, freeze and canonical publisher.
+An interrupted chemistry with no completion marker is not promoted or resumed
+as complete; retain its failure and diagnose the exact stage.
+
 Only `mutagenicity_comrecgc_lineage_v3_20260822T025620Z` is eligible for this
 new explicitly authorized route. No search over runs or performance-dependent
 selection is allowed. The old A/B and resource-stop evidence remains unchanged.

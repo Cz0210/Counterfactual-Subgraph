@@ -17,6 +17,8 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "AutoDL-only continuation; do not submit this Slurm wrapper."
+echo "CPU phase API: --through-stage chemistry; then --resume-after-chemistry."
+echo "Both require --stage-resource-config and --persistent-root; no GPU is requested by the Python runner."
 exit 2
 
 python scripts/autodl/run_mut_comrecgc_parity_standardization.py \
