@@ -7,6 +7,7 @@ import gc
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import threading
@@ -15,6 +16,27 @@ from types import SimpleNamespace
 
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
+
+
+def run_diagnostic_child(command):
+    """Keep the owning canary alive until its exact child releases resources."""
+    child=None
+    stopped=[]
+    def stop(signum,frame):
+        stopped.append(signum)
+        if child is not None and child.poll() is None:
+            child.terminate()
+    previous=signal.signal(signal.SIGTERM,stop)
+    try:
+        child=subprocess.Popen(command)
+        if stopped and child.poll() is None:
+            child.terminate()
+        returncode=child.wait()
+        if stopped:
+            raise SystemExit(128+stopped[0])
+        return subprocess.CompletedProcess(command,returncode)
+    finally:
+        signal.signal(signal.SIGTERM,previous)
 
 
 def main(argv=None):
@@ -135,7 +157,7 @@ def main(argv=None):
                 '--official-root',str(args.official_root),'--train-csv',str(args.train_csv),
                 '--gnn-checkpoint',str(args.gnn_checkpoint),'--gspan-adoption-proof',str(args.gspan_adoption_proof),
                 '--device',args.device,'--targets','0,2','--diagnostic-profile','deterministic']
-            completed=subprocess.run(command,check=False)
+            completed=run_diagnostic_child(command)
             diagnostic_path=child/f"target_{failure['target']}"/'training_canary/component_diagnostics.json'
             matched=None
             if diagnostic_path.is_file() and (child/'train_cohort_manifest.json').is_file():

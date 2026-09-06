@@ -18487,3 +18487,6 @@ engineering retry. Record the temperature driver and the verifier driver separat
   consumed by these diagnostics; no mining, split, decoder, budget, model weight,
   original result, or main-table policy is changed. See
   `docs/AUTODL_T13_COMPONENT_DIAGNOSTIC_20260906.md`.
+- The owning native canary forwards a resource-stop SIGTERM only to its newly
+  created deterministic child and waits for exit before releasing the GPU lease.
+  No process-group signals or forced kill are used.

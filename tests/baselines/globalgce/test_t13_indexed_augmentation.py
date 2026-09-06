@@ -25,6 +25,28 @@ from src.baselines.t13_indexed_canary import state_digest,rng_state,restore_rng,
 from src.baselines.t13_component_diagnostics import exact_difference,numeric_runtime,strict_diagnostic_runtime
 
 
+def test_diagnostic_parent_waits_for_exact_child_on_resource_stop(monkeypatch):
+    from scripts.autodl import canary_t13_indexed_dataset as cli
+    handlers={};events=[]
+    def install(signum,handler):
+        old=handlers.get(signum,'original')
+        handlers[signum]=handler
+        return old
+    class Child:
+        def poll(self):return None
+        def terminate(self):events.append('term_exact_child')
+        def wait(self):
+            handlers[cli.signal.SIGTERM](cli.signal.SIGTERM,None)
+            events.append('child_wait_complete')
+            return -15
+    monkeypatch.setattr(cli.signal,'signal',install)
+    monkeypatch.setattr(cli.subprocess,'Popen',lambda command:Child())
+    with pytest.raises(SystemExit) as error:cli.run_diagnostic_child(['fresh-diagnostic'])
+    assert error.value.code==143
+    assert events==['term_exact_child','child_wait_complete']
+    assert handlers[cli.signal.SIGTERM]=='original'
+
+
 def _defs(path,names,namespace):
     tree=ast.parse(path.read_text())
     body=[node for node in tree.body if isinstance(node,(ast.ClassDef,ast.FunctionDef)) and node.name in names]
