@@ -18606,3 +18606,15 @@ writer checks. Device-only remount drift is disclosed. The new audit does not
 claim to reconstruct the payload universe again, run 500-step equivalence, or
 recover the absent historical algorithm RNG. See
 `docs/MUT_INDEPENDENT_HISTORICAL_ADOPTION_20260907.md`.
+
+### 2026-09-07 — Next-checkpoint resource policy, not platform quota mutation
+
+The explicit user policy authorizes fresh Mut/LLM resource overlays using
+20000 + twice the source-derived next-boundary new-file peak. Retain old sealed
+configs and all active main-task guards. Apply the overlay at queue, owner,
+child and watchdog; re-read live phase scope so a waiting owner cannot reuse a
+stale main-task peak. Unknown future stages remain blocked independently.
+Future LLM common evaluation may use lossless node embeddings inside its own
+existing distance DB, validated against the original NPZ path and exact OT
+caller. This is storage-only, not a new encoder/distance or a conversion of
+completed GNN/L0 caches. See `docs/STAGE_RESOURCE_POLICY_20260907.md`.

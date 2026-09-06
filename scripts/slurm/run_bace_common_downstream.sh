@@ -29,6 +29,10 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 TOKENIZERS_PAR
 echo "Python: $(command -v python)"
 python -c 'import sys,torch; print(sys.version); print("CUDA available:",torch.cuda.is_available())'
 extra=()
+if [[ -n "${LLM_STAGE_FILE_POLICY:-}" ]]; then
+  : "${LLM_STAGE_FILE_POLICY_SHA256:?stage resource overlay SHA required}"
+  extra+=(--stage-file-policy "$LLM_STAGE_FILE_POLICY" --stage-file-policy-sha256 "$LLM_STAGE_FILE_POLICY_SHA256" --compact-node-cache)
+fi
 if [[ "${LLM_RESUME:-0}" == 1 ]]; then extra+=(--resume); fi
 [[ -n "${L0_PORTABLE_INPUT_BUNDLE:-}" ]] && extra+=(--portable-input-bundle "$L0_PORTABLE_INPUT_BUNDLE")
 if [[ -n "${GNN_ACCEPTANCE:-}" ]]; then

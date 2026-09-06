@@ -21,4 +21,6 @@ python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 # it releases each GPU lease before its CPU evaluator. This wrapper stays read-only.
 # Ordinary main-table `run -- command` retains numeric CUDA_VISIBLE_DEVICES;
 # the LLM-specific UUID/FD dispatch contract is separate and unchanged.
+# New AutoDL-only stage-file overlays are consumed by this same owner; no
+# Slurm quota mutation or GPU lease borrowing is performed by this wrapper.
 python scripts/autodl/gpu_lock.py --config configs/hpc.yaml list

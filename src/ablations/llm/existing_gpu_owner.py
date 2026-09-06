@@ -23,6 +23,7 @@ from src.ablations.gnn.early_policy import gpu_allowed
 from src.eval.bace_frozen_gnn_contracts import atomic_json, sha256_file
 from src.utils.autodl_runtime import GPUFileLock, ProjectGPUSlotLock, query_gpu_inventory
 from src.utils.final16_owner_registry_v1 import process_start_ticks, validate_owner_registry
+from src.utils.stage_file_policy import config_file_admission, load_stage_policy
 
 RESOURCE_SCHEMA = "bace_llm_gpu_owner_resource_v1"
 DISPATCH_SCHEMA = "bace_llm_existing_owner_dispatch_v1"
@@ -34,7 +35,7 @@ def validate_resource_config(config):
     required = {"main_registry_path", "main_ready_sources", "proc_root", "cgroup_memory_root",
                 "persistent_root", "gpu_lock_root", "minimum_gpu_free_mb", "maximum_idle_utilization_percent",
                 "minimum_memory_headroom_bytes", "minimum_persistent_free_bytes", "checkpoint_resume_pass"}
-    optional = {"minimum_free_inodes", "reserved_new_inodes"}
+    optional = {"minimum_free_inodes", "reserved_new_inodes", "stage_file_policy"}
     if not required <= set(config) or set(config) - required - optional:
         raise ValueError("LLM_RESOURCE_SOURCE_CONFIG_FIELDS_CHANGED")
     for field in ("main_registry_path", "proc_root", "cgroup_memory_root", "persistent_root", "gpu_lock_root"):
@@ -49,9 +50,14 @@ def validate_resource_config(config):
         raise ValueError("INVALID_IDLE_UTILIZATION_THRESHOLD")
     if config["checkpoint_resume_pass"] is not True:
         raise ValueError("REAL_CHECKPOINT_RESUME_REQUIRED")
-    for field in optional:
+    for field in optional - {"stage_file_policy"}:
         if field in config and (type(config[field]) is not int or config[field] < 0):
             raise ValueError("INVALID_INODE_BUDGET:" + field)
+    if "stage_file_policy" in config:
+        descriptor = config["stage_file_policy"]
+        if (not isinstance(descriptor, dict) or set(descriptor) != {"path", "sha256"}
+                or not Path(descriptor["path"]).is_absolute() or len(descriptor["sha256"]) != 64):
+            raise ValueError("INVALID_STAGE_FILE_POLICY_DESCRIPTOR")
     return config
 
 
@@ -131,6 +137,9 @@ class ResourceSampler:
         self.idle_since = None
         self.last_sample = None
         self.admitted_idle_seconds = None
+        self.file_policy = (load_stage_policy(config["stage_file_policy"], config["persistent_root"])
+                            if "stage_file_policy" in config else None)
+        self.initial_free_slots = None
 
     def sample(self, *, child_pid=None, child_start_ticks=None):
         now, tick = self.clock(), self.monotonic()
@@ -234,7 +243,11 @@ class ResourceSampler:
         headroom = memory_headroom(proc, Path(cfg["cgroup_memory_root"]))
         disk = os.statvfs(cfg["persistent_root"])
         free_bytes = disk.f_frsize * disk.f_bavail
-        required_inodes = cfg.get("minimum_free_inodes", 1) + cfg.get("reserved_new_inodes", 0)
+        if self.initial_free_slots is None:
+            self.initial_free_slots = disk.f_favail
+        file_admission = config_file_admission(cfg, disk.f_favail, stage_id="llm_gpu_generation",
+            policy=self.file_policy, baseline_available=self.initial_free_slots)
+        required_inodes = file_admission["required_free_inodes"]
         clean_idle = (not gpu.processes and not reserved and not pending and not blockers
                       and gpu.memory_free_mb >= cfg["minimum_gpu_free_mb"]
                       and gpu.utilization_gpu_percent <= cfg["maximum_idle_utilization_percent"])
@@ -297,7 +310,10 @@ class ResourceSampler:
                 "memory_headroom_bytes": headroom, "persistent_free_bytes": free_bytes,
                 "memory_safe": headroom >= cfg["minimum_memory_headroom_bytes"],
                 "free_inodes": disk.f_favail, "required_free_inodes": required_inodes,
-                "storage_safe": free_bytes >= cfg["minimum_persistent_free_bytes"] and disk.f_favail >= required_inodes,
+                "stage_file_admission": file_admission,
+                "stage_file_policy": cfg.get("stage_file_policy"),
+                "pause_requested": file_admission["pause_requested"],
+                "storage_safe": free_bytes >= cfg["minimum_persistent_free_bytes"] and file_admission["admitted"],
                 "checkpoint_resume_pass": cfg["checkpoint_resume_pass"] is True,
                 "active_early_ablation_gpus": other_llm,
                 "active_gpu_count_semantics": "OTHER_OWNERS_EXCLUDING_VERIFIED_CURRENT_LEASE",
@@ -512,7 +528,7 @@ def run_owned_child(*, command, environment, sampler, output_root, lock_root, ru
                 while child.poll() is None:
                     try:
                         evidence = sampler.sample(child_pid=child.pid, child_start_ticks=binding["gpu_child_start_ticks"])
-                        evidence.update(binding, pause_requested=pause)
+                        evidence.update(binding, pause_requested=pause or evidence.get("pause_requested", False))
                     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
                         # Explicit error, not a fabricated refresh of old values.
                         evidence = {"schema_version": RESOURCE_SCHEMA, "pause_requested": True,

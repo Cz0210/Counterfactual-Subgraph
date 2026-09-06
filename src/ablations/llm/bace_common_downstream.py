@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import fcntl
 import math
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -309,7 +310,9 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                    output_root: str | Path, resume: bool = False, device: str = "cpu", batch_size: int = 64,
                    cpu_threads: int = 2, portable_input_bundle: str | Path | None = None,
                    train_adoption_overlay: str | Path | None = None,
-                   gnn_acceptance: str | Path | None = None, gnn_acceptance_sha256: str | None = None) -> dict[str, Any]:
+                   gnn_acceptance: str | Path | None = None, gnn_acceptance_sha256: str | None = None,
+                   compact_node_cache: bool = False,
+                   stage_file_policy: dict[str, Any] | None = None) -> dict[str, Any]:
     from src.ablations.llm.corrected_core_gate import require_corrected_gnn_core
     from src.ablations.llm.bace_readiness import generation_calls
     from src.eval.bace_frozen_gnn_pool import _score_generated_candidates
@@ -369,7 +372,16 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
     stopped = [False]
     previous_handler = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGTERM, lambda *_: stopped.__setitem__(0, True))
-    pause = lambda: stopped[0] or (output / "pause.request").is_file()
+    def pause():
+        if stopped[0] or (output / "pause.request").is_file():
+            return True
+        if stage_file_policy is not None:
+            from src.utils.stage_file_policy import stage_file_admission
+            decision = stage_file_admission(stage_file_policy,
+                os.statvfs(stage_file_policy["persistent_root"]).f_favail,
+                stage_id="llm_cpu_evaluation")
+            return not decision["admitted"]
+        return False
     try:
         with (output / "writer.lock").open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -382,6 +394,9 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                     _equal(old[key], value, "train_adoption_" + key)
             sources = [Path(__file__), Path(evaluation.__file__), Path(__import__("src.eval.bace_frozen_gnn_pool", fromlist=["_"]).__file__),
                        Path(__import__("src.eval.bace_frozen_gnn_verification", fromlist=["_"]).__file__)]
+            if compact_node_cache:
+                from src.ablations.llm import compact_node_cache as compact_cache
+                sources.append(Path(compact_cache.__file__))
             driver_commit = subprocess.check_output(["git", "rev-parse", "HEAD"],
                 cwd=Path(__file__).resolve().parents[3], text=True).strip()
             contract = {"schema_version": SCHEMA, "variant": spec["variant"], "dataset": "bace", "method": "ours",
@@ -396,6 +411,8 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                 "cohort_definition": COHORT, "bootstrap_scope": "within_seed7_parent_only_not_across_seed_std",
                 "selection_policy": POLICY,
                 "train_adoption": adoption["overlay_identity"] if adoption else None}
+            if compact_node_cache:
+                contract["node_cache_storage"] = "LOSSLESS_NPZ_BLOBS_IN_OWN_EXISTING_WNODE_SQLITE"
             binding = stable_sha256(contract)
             _sealed_json(output / "run_manifest.json", {**contract, "binding_sha256": binding})
             if (output / "final_audit.json").is_file():
@@ -444,6 +461,8 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                 "calibration_loaded": False, "candidate_universe_sha256": sha256_file(output / "candidate_universe.jsonl"),
                 "binding_sha256": binding, "attempt_count": len(attempts), "universe_count": len(universe)})
             distance = evaluation._distance(bundle, manifest, output)
+            if compact_node_cache:
+                compact_cache.install_compact_node_cache(distance)
             try:
                 result = _heldout(bundle=bundle, manifest=manifest, output=output, universe=universe,
                     selector=selector, oracle=oracle, featurizer=featurizer, distance=distance,
