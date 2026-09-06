@@ -1179,7 +1179,16 @@ def _validate_mut_parity_source_integrity(
     final_integrity: Mapping[str, Any],
     *,
     source_root: Path,
+    allow_receipt_reuse: bool = False,
 ) -> dict[str, Any]:
+    if allow_receipt_reuse:
+        inventory = _json(_physical_file(generation.get("payload_hash_receipt_path", ""),
+                          label="Mut prior payload inventory"), label="Mut prior payload inventory")
+        if (inventory.get("status") != "PASS" or inventory.get("source", {}).get("source_payload_hashed") is not True
+                or inventory["source"].get("source_payload_actual_sha256") != MUT_SOURCE_PAYLOAD_SHA256
+                or _sha(Path(generation["payload_hash_receipt_path"])) != generation.get("payload_hash_receipt_sha256")
+                or generation.get("payload_hash_receipt_reused") is not True):
+            raise NonTasteMatrixAppendError("Mut reused payload inventory invalid")
     _require_fields(
         generation,
         {
@@ -1193,7 +1202,7 @@ def _validate_mut_parity_source_integrity(
             "counterfactuals_sha256_claimed": MUT_SOURCE_PAYLOAD_SHA256,
             "counterfactuals_sha256_actual": MUT_SOURCE_PAYLOAD_SHA256,
             "counterfactuals_sha256_verified": True,
-            "counterfactuals_sha256_computation_count": 1,
+            "counterfactuals_sha256_computation_count": 0 if allow_receipt_reuse else 1,
             "counterfactual_candidate_count": MUT_SOURCE_CANDIDATE_COUNT,
             "source_project_commit": SOURCE_PROJECT_COMMIT,
             "upstream_commit": COMRECGC_UPSTREAM_COMMIT,
@@ -1479,6 +1488,7 @@ def _validate_mut_fast_accurate_terminal(
         raise NonTasteMatrixAppendError(
             "Mut fast-accurate outer terminal manifests diverged"
         )
+    independent = run.get("independent_scientific_adoption_authorized") is True
     truthful_contract = {
         "schema_version": MUT_FAST_ACCURATE_RUN_SCHEMA,
         "status": "PASS",
@@ -1496,7 +1506,7 @@ def _validate_mut_fast_accurate_terminal(
         "full_50k_rerun_performed": False,
         "traceoff_reference_rerun": False,
         "trace_parity_passed": False,
-        "500_step_semantic_equivalence_passed": True,
+        "500_step_semantic_equivalence_passed": not independent,
         "adoption_without_full_50k_parity_rerun_authorized": True,
         "trace_fields_stripped": False,
         "common_recourse_adopted": True,
@@ -1591,7 +1601,7 @@ def _validate_mut_fast_accurate_terminal(
         raise NonTasteMatrixAppendError(
             "Mut fast-accurate common-recourse root binding changed"
         )
-    for run_path_field, run_sha_field, adoption_path_field, adoption_sha_field in (
+    evidence_fields = [
         (
             "source_pair_store_manifest_path",
             "source_pair_store_manifest_sha256",
@@ -1604,13 +1614,16 @@ def _validate_mut_fast_accurate_terminal(
             "source_dbscan_manifest_path",
             "source_dbscan_manifest_sha256",
         ),
-        (
-            "500_step_semantic_equivalence_receipt_path",
-            "500_step_semantic_equivalence_receipt_sha256",
-            "500_step_semantic_equivalence_receipt_path",
-            "500_step_semantic_equivalence_receipt_sha256",
-        ),
-    ):
+    ]
+    if independent:
+        if reopened_historical.get("schema_version") != "mut_independent_historical50k_adoption_v3":
+            raise NonTasteMatrixAppendError("Independent route requires its own authorization/audit")
+        evidence_fields.append(("independent_adoption_audit_path", "independent_adoption_audit_sha256",
+                                "independent_adoption_audit_path", "independent_adoption_audit_sha256"))
+    else:
+        evidence_fields.append(("500_step_semantic_equivalence_receipt_path", "500_step_semantic_equivalence_receipt_sha256",
+                                "500_step_semantic_equivalence_receipt_path", "500_step_semantic_equivalence_receipt_sha256"))
+    for run_path_field, run_sha_field, adoption_path_field, adoption_sha_field in evidence_fields:
         evidence_path = _physical_file(
             reopened_historical.get(adoption_path_field, ""),
             label=f"Mut {adoption_path_field}",
@@ -1687,6 +1700,7 @@ def _validate_mut_fast_accurate_terminal(
         generation,
         source_integrity_final,
         source_root=source_root,
+        allow_receipt_reuse=independent,
     )
     source_integrity["final_integrity_sha256"] = _sha(
         root / "source_integrity_final.json"

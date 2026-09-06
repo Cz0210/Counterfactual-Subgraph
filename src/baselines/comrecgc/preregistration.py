@@ -92,6 +92,23 @@ def validate_chemistry_trace_evidence(
 
     source = Path(path).expanduser().resolve()
     payload = _load(source)
+    if payload.get("schema_version") == "mut_independent_historical50k_adoption_v3":
+        if dataset != "mutagenicity":
+            raise ValueError("Independent historical adoption is Mut-only")
+        from src.utils.autodl_mut_independent_adoption import validate_receipt
+        receipt = validate_receipt(source, source_root=Path(payload["source_generation_root"]))
+        return {
+            "trace_evidence_kind": "independently_adopted_historical_trace_on_50k",
+            "trace_parity_required": False, "trace_parity_passed": False,
+            "trace_integrity_passed": True, "historical_source_trace_enabled": True,
+            "traceoff_reference_rerun": False, "500_step_semantic_equivalence_passed": False,
+            "adoption_without_full_50k_parity_rerun_authorized": True,
+            "candidate_count": receipt["candidate_count"],
+            "source_lineage_path": receipt["source_lineage_path"],
+            "source_lineage_sha256": receipt["source_lineage_sha256"],
+            "source_payload_path": receipt["source_payload_path"],
+            "source_payload_sha256": receipt["source_payload_sha256"],
+        }
     if payload.get("schema_version") == "mut_comrecgc_historical50k_adoption_v2":
         if dataset != "mutagenicity":
             raise ValueError(
@@ -389,6 +406,9 @@ def write_mutagenicity_chem_repair_preregistration(
         trace_parity_path,
         dataset=dataset,
     )
+    reused_payload_sha = trace_evidence.get("source_payload_sha256")
+    if reused_payload_sha and Path(trace_evidence["source_payload_path"]).resolve() != Path(source_counterfactuals_path).resolve():
+        raise ValueError("Independent adoption payload path mismatch")
     return _write_new(
         output_path,
         {
@@ -398,7 +418,7 @@ def write_mutagenicity_chem_repair_preregistration(
             "upstream_commit": UPSTREAM_COMMIT,
             "project_commit": project_commit,
             "source_counterfactuals_path": str(Path(source_counterfactuals_path).resolve()),
-            "source_counterfactuals_sha256": sha256_file(source_counterfactuals_path),
+            "source_counterfactuals_sha256": reused_payload_sha or sha256_file(source_counterfactuals_path),
             "trace_evidence_path": str(Path(trace_parity_path).resolve()),
             "trace_evidence_sha256": sha256_file(trace_parity_path),
             "trace_evidence_kind": trace_evidence["trace_evidence_kind"],

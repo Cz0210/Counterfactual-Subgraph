@@ -18590,3 +18590,19 @@ engineering retry. Record the temperature driver and the verifier driver separat
   resource gate. The original unstarted promotable branch must generate and
   independently reload its own0–500 before any full continuation. See
   `docs/T14_FORMAL_VERSION_BINDING_20260907.md`.
+
+## 2026-09-07 — Independently adopt only the nominated Mut historical 50k
+
+The new explicit authorization removes trace-on/off trajectory parity as a
+prerequisite for the one nominated completed lineage-v3 artifact. A separate
+v3 receipt audits its native selected-action lineage, frozen payload closure,
+original source-bound pair producer, exact DBSCAN vector linkage and train-only
+common recourse. It never changes or relabels the old v2/parity failure receipts.
+The generation GNN/NeuroSED and final RF/MolCLR roles remain the historical
+COMRECGC recovery contract, not an oracle substitution made for adoption.
+
+Large immutable payloads reuse complete prior hash receipts plus metadata and
+writer checks. Device-only remount drift is disclosed. The new audit does not
+claim to reconstruct the payload universe again, run 500-step equivalence, or
+recover the absent historical algorithm RNG. See
+`docs/MUT_INDEPENDENT_HISTORICAL_ADOPTION_20260907.md`.

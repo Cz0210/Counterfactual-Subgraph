@@ -231,6 +231,9 @@ def _validate_historical_adoption(
     receipt_path = _physical_bound_file(path, label="historical adoption receipt")
     value = _object(receipt_path, label="historical adoption")
     source = source_root.expanduser().resolve(strict=True)
+    from src.utils.autodl_mut_independent_adoption import SCHEMA as INDEPENDENT_SCHEMA, validate_receipt
+    if value.get("schema_version") == INDEPENDENT_SCHEMA:
+        return validate_receipt(receipt_path, source_root=source)
     failures: list[str] = []
     expected = {
         "schema_version": HISTORICAL_ADOPTION_SCHEMA,
@@ -771,7 +774,11 @@ def run(
                 inputs.source_generation_root / "trace/candidate_action_lineage.json"
             )
             expected_common_recourse_count = None
-        adoption = validate_adopted_generation(inputs)
+        independent = bool(historical and historical.get("independent_scientific_adoption_authorized"))
+        adoption = (dict(historical["generation_adoption"]) if independent
+                    else validate_adopted_generation(inputs))
+        if independent:
+            _verify_adopted_generation_integrity(adoption)
         if int(adoption["counterfactual_candidate_count"]) != SOURCE_CANDIDATE_COUNT:
             raise ValueError("Frozen generation candidate count changed")
         checkout = verify_checkout(
@@ -889,7 +896,9 @@ def run(
                     "full_50k_rerun_performed": False,
                     "traceoff_reference_rerun": False,
                     "trace_parity_passed": False,
-                    "500_step_semantic_equivalence_passed": True,
+                    "500_step_semantic_equivalence_passed": not independent,
+                    "independent_scientific_adoption_authorized": independent,
+                    "trace_on_off_parity_required": not independent,
                     "adoption_without_full_50k_parity_rerun_authorized": True,
                     "generation_steps": SOURCE_STEPS,
                     "M_MAX": SOURCE_STEPS,
@@ -939,6 +948,10 @@ def run(
                     ],
                 }
             )
+            if independent:
+                final.update({name: historical[name] for name in (
+                    "independent_adoption_audit_path", "independent_adoption_audit_sha256",
+                    "source_generation_oracle", "final_oracle")})
         write_json(inputs.output_root / "run_manifest.json", final)
         write_json(inputs.output_root / "final_gate.json", final)
         write_json(inputs.output_root / "_RUN_COMPLETE.json", {**final, "run_complete": True})

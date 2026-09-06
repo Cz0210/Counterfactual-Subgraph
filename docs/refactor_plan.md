@@ -4314,3 +4314,6 @@ Mutagenicity roadmaps.
 - [x] Add strict CPU-only LLM resource-dispatch seal/runtime validation that
   preserves existing3b2605d6 science specs and commands, separates owner-driver
   identity, and allows only the explicit future storage/resource option tail.
+- [x] Add a separate authorized Mut historical-50k independent-adoption route;
+  retain old parity gates, reuse immutable source/pair receipts, and preserve
+  the existing chemistry/unified-evaluation/matrix publisher interfaces.
