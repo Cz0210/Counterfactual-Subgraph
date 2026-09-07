@@ -65,6 +65,17 @@ def pattern_from_match(mol: Any, indices: Sequence[int]) -> dict[str, Any]:
         raise ValueError("ATTRIBUTED_PATTERN_ROUNDTRIP_FAILED")
     pattern.UpdatePropertyCache(strict=False)
     Chem.FastFindRings(pattern)
+    return _serialized_pattern(text, pattern)
+
+
+def _serialized_pattern(text: str, pattern: Any) -> dict[str, Any]:
+    """Bind the stored attributed graph, without standalone recanonicalization.
+
+    A parent chiral center can lose distinguishing neighbours after a fragment
+    cut. MolFragmentToSmiles on that isolated pattern can remove its original
+    chiral tag and explicit-H annotation; that is not an identity verification.
+    The original text, atom/bond attributes and all-match deletion stay bound.
+    """
     atoms = [{"atomic_number": a.GetAtomicNum(), "formal_charge": a.GetFormalCharge(),
               "aromatic": a.GetIsAromatic(), "isotope": a.GetIsotope(),
               "chiral_tag": int(a.GetChiralTag()), "explicit_hydrogens": a.GetNumExplicitHs()}
@@ -89,7 +100,9 @@ def validate_attributed_candidate(candidate: Mapping[str, Any]):
         raise ValueError("ATTRIBUTED_GRAPH_UNREADABLE")
     mol.UpdatePropertyCache(strict=False)
     Chem.FastFindRings(mol)
-    expected = pattern_from_match(mol, range(mol.GetNumAtoms()))
+    if not connected(mol, range(mol.GetNumAtoms())):
+        raise ValueError("ATTRIBUTED_PATTERN_NOT_CONNECTED")
+    expected = _serialized_pattern(text, mol)
     for key in ("candidate_id", "canonical_fragment", "graph_smiles", "atoms", "bonds", "atom_count"):
         if candidate.get(key) != expected[key]:
             raise ValueError("ATTRIBUTED_PATTERN_BINDING_CONFLICT:" + key)

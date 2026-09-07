@@ -18633,3 +18633,22 @@ engineering retry. Record the temperature driver and the verifier driver separat
   raw-distance reuse receipts. Deployment/spec binding and final v2 evaluation
   remain separate from passing these unit tests. No old scientific audit is
   renamed as a v2 result.
+
+## 2026-09-07: Retained-witness gate and recoverable graph representation fix
+
+- The post-search gate counts only witnesses whose rule survived the final
+  pool cap. A >=90% verified lower bound can rule out the conditional PPO trigger;
+  a smaller bound does not prove proposal insufficiency and blocks that claim
+  until cross-parent retained-pool reach is measured. No extra OT is needed for
+  this gate. The predeclared three-control descriptive test has one immutable
+  output binding, parent checkpoints and an exclusive result writer. It reuses
+  the old test pair provenance, evaluates WNode only for the selected-rule union,
+  and computes full-pool reach via existential frozen-GINE witnesses without OT.
+  This successor is independent of the already running search execution commit.
+- The first real search retained 47 committed train parents, then rejected a
+  saved seed `C[C@H](C)C`: isolated recanonicalization removed its parent-derived
+  stereo/H annotation before comparing the identity. Validation now reconstructs
+  and checks the exact originally serialized attributed graph, without this
+  semantic rewrite. Candidate IDs, masks, residual chemistry, oracle, budgets,
+  parent checkpoints and previous failure evidence remain unchanged. Resume
+  adopts committed parents; it does not rerun the successful prefix or canary.

@@ -15,7 +15,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--set", action="append", default=[])
-    p.add_argument("--action", required=True, choices=["plan", "canary", "train-search", "calibrate", "status", "owner", "resource-overlay"])
+    p.add_argument("--action", required=True, choices=["plan", "canary", "train-search", "calibrate", "status", "owner", "resource-overlay", "train-gate", "freeze-final", "final-test"])
     p.add_argument("--output-root", required=True, type=Path)
     p.add_argument("--reference", type=Path)
     p.add_argument("--proposal-source", choices=["OURS_MAIN_PPO_66", "L0", "L1", "L2", "L3"], default="OURS_MAIN_PPO_66")
@@ -27,6 +27,8 @@ def main():
     p.add_argument("--gpu-index", type=int, default=0)
     p.add_argument("--gpu-uuid")
     p.add_argument("--wait-seconds", type=int, default=86400)
+    p.add_argument("--test-output-root", type=Path)
+    p.add_argument("--old-test-pair-descriptor", type=Path)
     args = p.parse_args()
     if not args.config.is_file():
         raise ValueError("EXPLICIT_EXISTING_CONFIG_REQUIRED")
@@ -37,6 +39,26 @@ def main():
         if not args.reference:
             raise ValueError("REFERENCE_REQUIRED")
         result = plan(args.reference, args.output_root, proposal_source=args.proposal_source, proposal_path=args.proposal_path)
+    elif args.action in ("train-gate", "freeze-final", "final-test"):
+        from src.eval.bace_reach_closeout import train_gate, freeze_final, run_final_test
+        if args.device != "cpu":
+            raise ValueError("CLOSEOUT_ENTRY_IS_CPU_ONLY_NO_GPU_LEASE")
+        if args.action == "train-gate":
+            result = train_gate(args.output_root)
+        else:
+            if not args.test_output_root:
+                raise ValueError("EXPLICIT_ONE_FINAL_TEST_ROOT_REQUIRED")
+            if args.action == "freeze-final":
+                descriptor = json.loads(args.old_test_pair_descriptor.read_text()) if args.old_test_pair_descriptor else None
+                result = freeze_final(args.output_root, args.test_output_root, old_test_pair_source=descriptor)
+            else:
+                if not args.resource_config:
+                    raise ValueError("REAL_CPU_RESOURCE_ADMISSION_REQUIRED")
+                from src.eval.bace_reach_resources import cpu_boundary
+                config = json.loads(args.resource_config.read_text())
+                boundary = lambda: cpu_boundary(config)
+                boundary()
+                result = run_final_test(args.output_root, args.test_output_root, boundary_check=boundary)
     elif args.action == "status":
         result = {f: json.loads((args.output_root / f).read_text()) for f in ("progress.json", "candidate_freeze.json", "selector_freeze.json") if (args.output_root / f).is_file()}
     elif args.action == "resource-overlay":

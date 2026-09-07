@@ -66,6 +66,23 @@ except ImportError:
 
 @unittest.skipUnless(Chem is not None, "RDKit is tested on the existing AutoDL environment")
 class SearchTests(unittest.TestCase):
+    def test_parent_stereo_annotation_not_recanonicalized_during_verification(self):
+        from src.chem.bace_reach_search import _serialized_pattern
+        text = "C[C@H](C)C"
+        mol = Chem.MolFromSmiles(text, sanitize=False)
+        mol.UpdatePropertyCache(strict=False)
+        Chem.FastFindRings(mol)
+        row = _serialized_pattern(text, mol)
+        checked = validate_attributed_candidate(row)
+        self.assertEqual(checked.GetAtomWithIdx(1).GetNumExplicitHs(), 1)
+        self.assertNotEqual(Chem.MolFragmentToSmiles(checked, atomsToUse=list(range(4)), canonical=True), text)
+        before = copy.deepcopy(row)
+        all_matches(Chem.MolFromSmiles("CC(C)C"), row)
+        self.assertEqual(row, before)
+        row["atoms"][1]["explicit_hydrogens"] = 0
+        with self.assertRaisesRegex(ValueError, "BINDING_CONFLICT:atoms"):
+            validate_attributed_candidate(row)
+
     def test_own_saved_parser_train_binding_no_oracle_or_new_generation(self):
         from src.eval.bace_reach_v2 import reparse_own_saved_train_outputs
         with tempfile.TemporaryDirectory() as temp:
