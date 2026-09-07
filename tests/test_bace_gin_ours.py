@@ -137,3 +137,35 @@ def test_native_graph_pair_reuses_raw_cost_without_fake_delete_key(monkeypatch, 
     assert provider.fresh == 1
     provider.distance("CC", "CN")
     assert provider.fresh == 1
+
+
+def test_four_variant_replay_matches_original_b12_per_variant(tmp_path):
+    import numpy as np
+    from src.ablations.gnn.cpu_evaluation import matrix_from_pairs
+    from src.eval.mutagenicity_wnode_selector import (
+        derive_thresholds, preregistered_variant_configs, build_candidate_chemistry,
+        build_coverage_redundancy_matrix, _run_one_variant, choose_variant,
+    )
+    rules = [{"candidate_id": f"c{i:02}", "canonical_fragment": "C"*(i%3+1)} for i in range(22)]
+    pairs = [dict(parent_id=p, candidate_id=c["candidate_id"], applicable=True,
+        pair_strict_flip=True, wnode_distance=.1+(i%9)*.03+(j%2)*.07, cf_drop=.4)
+        for j,p in enumerate(["p0","p1"]) for i,c in enumerate(rules)]
+    matrix = matrix_from_pairs(["p0","p1"], rules, pairs, root=tmp_path, split="calibration")
+    thresholds = derive_thresholds(np.array([p["wnode_distance"] for p in pairs]))
+    variants = preregistered_variant_configs()
+    selector = dict(variants={v.name:v for v in variants}, thresholds=thresholds,
+        prefix_weights=tuple([1.]*10+[.5]*10), local_swap_passes=2, input_sha256="original-config")
+    sequence, receipt = module.select_calibration(matrix, selector)
+    chemistry = build_candidate_chemistry(rules, size_normalization_rows=rules)
+    redundancy = build_coverage_redundancy_matrix(matrix.distances, thresholds.levels)
+    expected_rows = []
+    for variant in variants:
+        comparison, expected = _run_one_variant(variant, matrix=matrix, chemistry=chemistry,
+            thresholds=thresholds, prefix_weights=selector["prefix_weights"], top_k=20,
+            table_k=10, local_swap_passes=2, coverage_redundancy_matrix=redundancy,
+            output_dir=tmp_path / "original")
+        assert receipt["variant_sequences"][variant.name] == expected
+        expected_rows.append(comparison)
+    assert receipt["variant_comparison"] == expected_rows
+    assert receipt["selected_metrics"] == choose_variant(expected_rows)
+    assert sequence == receipt["variant_sequences"][receipt["selected_variant"]]
