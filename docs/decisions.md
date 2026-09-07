@@ -1,5 +1,18 @@
 # Decisions Log
 
+## [2026-09-07] Optimize future T13 graph materialization without live patching
+
+Read-only profiling of the existing formal T13 process localized validation
+time to dense soft-edge materialization and scalar hard-decode synchronization.
+A narrow future execution patch keeps directed edge order and autograd but
+gathers soft edge/adjacency tensors in bulk, and transfers hard-only labels and
+adjacency to CPU once. No chemistry cache is added without reuse evidence.
+The old c0eb892d source remains the differential reference. Exact fixture
+loss/gradient/update/RNG/reload comparisons and synchronized timing are required;
+synthetic fixture PASS is explicitly not full official-generator or active
+resume acceptance. See `docs/T13_EXACT_GRAPH_MATERIALIZATION.md`.
+No active science, original weight, checkpoint, cadence or formal ledger changes.
+
 ## [2026-09-06] Correct T14's pre-science GPU-mask bootstrap binding once
 
 The replacement owner failed before CUDA/science because a generic gpu_lock

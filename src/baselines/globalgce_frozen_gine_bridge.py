@@ -208,11 +208,17 @@ def _hard_graph(
 
     torch = _torch()
     Chem = _rdkit()
-    node_labels = features.argmax(dim=-1)
+    # This branch is hard chemistry only.  Compute argmax on the original
+    # device (including its tie/NaN semantics), then transfer bounded arrays
+    # once instead of synchronizing the CUDA stream for every scalar/edge.
+    # The original tensors are still used below by the differentiable path.
+    node_labels = features.detach().argmax(dim=-1).cpu().tolist()
+    adjacency_values = adjacency.detach().cpu().tolist()
+    edge_labels = edge_attributes.detach().argmax(dim=-1).cpu().tolist()
     active_native = tuple(
         index
         for index in range(int(features.shape[0]))
-        if int(node_labels[index].item()) > 0
+        if int(node_labels[index]) > 0
     )
     if not active_native:
         raise FrozenGINEBridgeError("GlobalGCE hard graph contains no active atom")
@@ -223,16 +229,15 @@ def _hard_graph(
     hard_bonds: dict[tuple[int, int], str] = {}
     for position, left in enumerate(active_native):
         for right in active_native[position + 1 :]:
-            forward = float(adjacency[left, right].detach().item()) > 0.5
-            reverse = float(adjacency[right, left].detach().item()) > 0.5
+            forward = float(adjacency_values[left][right]) > 0.5
+            reverse = float(adjacency_values[right][left]) > 0.5
             if forward != reverse:
                 raise FrozenGINEBridgeError(
                     f"GlobalGCE hard adjacency is asymmetric at ({left},{right})"
                 )
             if not forward:
                 continue
-            edge_row = edge_attributes[_edge_position(left, right)]
-            label = int(edge_row.argmax(dim=-1).detach().item())
+            label = int(edge_labels[_edge_position(left, right)])
             if label <= 0:
                 # A soft decoder can transiently disagree between its dense
                 # adjacency gate and explicit no-edge bond class.  The exact
@@ -250,7 +255,7 @@ def _hard_graph(
 
     editable = Chem.RWMol()
     for native in active_native:
-        label = int(node_labels[native].detach().item())
+        label = int(node_labels[native])
         if label <= 0 or label > len(atom_symbols):
             raise FrozenGINEBridgeError(
                 f"GlobalGCE hard graph has invalid atom label={label}"
@@ -302,7 +307,7 @@ def _hard_graph(
                 schema,
                 atomic_number=int(
                     periodic.GetAtomicNumber(
-                        str(atom_symbols[int(node_labels[native].item()) - 1])
+                        str(atom_symbols[int(node_labels[native]) - 1])
                     )
                 ),
                 degree=int(graph.degree(native)),
@@ -548,9 +553,10 @@ class FrozenGINEDifferentiableBridge:
         sources: list[int] = []
         destinations: list[int] = []
         hard_gates: list[float] = []
-        soft_gates: list[Any] = []
         hard_edge_rows: list[tuple[int, ...]] = []
-        soft_edge_rows: list[Any] = []
+        native_sources: list[int] = []
+        native_destinations: list[int] = []
+        native_edge_positions: list[int] = []
         default_edge = tuple(
             field.encode(
                 {
@@ -570,17 +576,10 @@ class FrozenGINEDifferentiableBridge:
                 sources.append(source_active)
                 destinations.append(target_active)
                 hard_gates.append(1.0 if pair in graph.hard_edges else 0.0)
-                soft_gates.append(
-                    0.5
-                    * (
-                        adjacency[source_native, target_native]
-                        + adjacency[target_native, source_native]
-                    )
-                )
+                native_sources.append(source_native)
+                native_destinations.append(target_native)
                 hard_edge_rows.append(graph.edge_features.get(pair, default_edge))
-                soft_edge_rows.append(
-                    edge_attributes[_edge_position(source_native, target_native)]
-                )
+                native_edge_positions.append(_edge_position(source_native, target_native))
         if not sources:
             edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
             edge_hidden = node_hidden.new_empty((0, int(node_hidden.shape[-1])))
@@ -592,7 +591,13 @@ class FrozenGINEDifferentiableBridge:
             hard_edge = torch.tensor(
                 hard_edge_rows, dtype=torch.long, device=self.device
             )
-            soft_edge = torch.stack(soft_edge_rows).to(self.device)
+            # Row-major directed-edge order is identical to the loops above.
+            # Do not detach: all directed uses of a shared native edge must
+            # contribute to the same original decoder tensor gradient.
+            positions = torch.tensor(
+                native_edge_positions, dtype=torch.long, device=edge_attributes.device
+            )
+            soft_edge = edge_attributes.index_select(0, positions).to(self.device)
             edge_distribution, bond_presence = self._mapped_edge_distribution(
                 soft_edge
             )
@@ -603,7 +608,16 @@ class FrozenGINEDifferentiableBridge:
                     soft_value = edge_distribution @ embedding.weight
                     hard_value = _straight_through(hard_value, soft_value)
                 edge_hidden = hard_value if edge_hidden is None else edge_hidden + hard_value
-            adjacency_gate = torch.stack(soft_gates).to(self.device)
+            native_source = torch.tensor(
+                native_sources, dtype=torch.long, device=adjacency.device
+            )
+            native_target = torch.tensor(
+                native_destinations, dtype=torch.long, device=adjacency.device
+            )
+            adjacency_gate = (
+                0.5 * (adjacency[native_source, native_target]
+                       + adjacency[native_target, native_source])
+            ).to(self.device)
             edge_gate = _straight_through(
                 torch.tensor(hard_gates, dtype=features.dtype, device=self.device),
                 adjacency_gate * bond_presence,
