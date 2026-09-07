@@ -106,3 +106,19 @@ def test_global_at_most_budget_preserves_real_prefix(tmp_path,monkeypatch):
         'thresholds':{},'threshold_provenance':{}})
     assert result['effective_top_k']==15 and len(result['ordered_rule_ids'])==15
     assert calls[0]['top_k']==15 and calls[0]['prefix_weights']==[1.]*10+[.5]*5
+
+def test_deferred_test_raw_binding_waits_and_rejects_later_change(tmp_path,monkeypatch):
+    p=tmp_path/'old_test.json';p.write_text(json.dumps({'split':'test'}))
+    (tmp_path/'selection_freeze.json').write_text('frozen')
+    spec={'output_root':str(tmp_path),'raw_cost_indexes':{'test':{'path':str(p),
+        'binding_policy':'FIRST_READ_AND_SEAL_AFTER_OWN_SELECTOR_FREEZE'}}}
+    monkeypatch.setattr(e,'verified_freeze',lambda _: (_ for _ in ()).throw(ValueError('OWN_FREEZE')))
+    with pytest.raises(ValueError,match='OWN_FREEZE'):e.raw_index(spec,'test')
+    monkeypatch.setattr(e,'verified_freeze',lambda _: {'state':'FROZEN'})
+    index,receipt=e.raw_index(spec,'test')
+    assert receipt['source_file_hash_previously_bound'] is False
+    assert not (tmp_path/'test_raw_adoption.json').exists() # only runtime after kernel validation seals
+    e.atomic_json(tmp_path/'test_raw_adoption.json',receipt)
+    assert e.raw_index(spec,'test')[1]==receipt
+    p.write_text(json.dumps({'split':'test','changed':True}))
+    with pytest.raises(ValueError,match='SEALED_TEST_RAW_ADOPTION_CHANGED'):e.raw_index(spec,'test')

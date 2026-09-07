@@ -4,7 +4,7 @@ The leaf reuses the original GlobalGCE calibration selector and common fixed141
 reducer. Its test runtime is constructed only after this pool's own freeze.
 """
 from __future__ import annotations
-import collections,fcntl,json,math,os,time
+import collections,fcntl,hashlib,json,math,os,time
 from pathlib import Path
 import torch
 from src.baselines.bace_globalgce_aplus import SCHEMA,CONTRACT,build_parent,materialize
@@ -169,18 +169,38 @@ def runtime(spec,split):
     install_compact_node_cache(distance)
     # The test descriptor is not opened before verified_freeze above. All
     # borrowed values are graph-content raw costs, never teacher masks/minima.
-    index=bound(spec['raw_cost_indexes'][split])
-    if index['split']!=split:raise ValueError('RAW_SPLIT_CHANGED')
-    if split=='test':
-        atomic_json(Path(spec['output_root'])/'test_raw_adoption.json',{
-            'state':'HASH_BOUND_RAW_GRAPH_COSTS_ADOPTED_AFTER_OWN_FREEZE',
-            'source':spec['raw_cost_indexes']['test'],'source_prior_freeze_sha256':index.get('new_test_freeze_sha256'),
-            'new_selector_freeze_sha256':sha256_file(Path(spec['output_root'])/'selection_freeze.json'),
-            'source_flip_masks_adopted':False,'source_minima_adopted':False,
-            'created_at':utc_now()})
-    distance=with_native_graph_distance(distance,index=index,current_raw_contract=raw_contract_from_bundle(manifest),
-        repo=Path(spec['raw_kernel_source_root']))
+    try:
+        index,adoption=raw_index(spec,split)
+        distance=with_native_graph_distance(distance,index=index,current_raw_contract=raw_contract_from_bundle(manifest),
+            repo=Path(spec['raw_kernel_source_root']))
+        if adoption is not None:
+            path=Path(spec['output_root'])/'test_raw_adoption.json'
+            if not path.exists():atomic_json(path,{**adoption,'created_at':utc_now()})
+    except BaseException:
+        distance.close();raise
     return oracle,_featurizer(root,manifest),distance
+
+def raw_index(spec,split):
+    if split=='calibration':
+        index=bound(spec['raw_cost_indexes'][split]);adoption=None
+    else:
+        verified_freeze(spec)
+        descriptor=spec['raw_cost_indexes']['test'];path=Path(descriptor['path'])
+        if (descriptor.get('binding_policy')!='FIRST_READ_AND_SEAL_AFTER_OWN_SELECTOR_FREEZE'
+            or not path.is_absolute() or not path.is_file() or path.stat().st_size>2*1024**2):
+            raise ValueError('DEFERRED_TEST_RAW_SOURCE_DESCRIPTOR_REQUIRED')
+        data=path.read_bytes();digest=hashlib.sha256(data).hexdigest();index=json.loads(data)
+        adoption={'state':'HASH_BOUND_RAW_GRAPH_COSTS_ADOPTED_AFTER_OWN_FREEZE',
+            'spec_sha256':stable_sha256(spec),'source':{'path':str(path),'sha256':digest},
+            'source_prior_freeze_sha256':index.get('new_test_freeze_sha256'),
+            'new_selector_freeze_sha256':sha256_file(Path(spec['output_root'])/'selection_freeze.json'),
+            'source_file_hash_previously_bound':False,'first_binding_created_after_own_freeze':True,
+            'source_flip_masks_adopted':False,'source_minima_adopted':False}
+        existing=Path(spec['output_root'])/'test_raw_adoption.json'
+        if existing.exists() and {k:v for k,v in read_json(existing).items() if k!='created_at'}!=adoption:
+            raise ValueError('SEALED_TEST_RAW_ADOPTION_CHANGED')
+    if index['split']!=split:raise ValueError('RAW_SPLIT_CHANGED')
+    return index,adoption
 
 def evaluate(spec,split):
     config=validate(spec);manifest,candidates=pool(spec);frozen=verified_freeze(spec) if split=='test' else None

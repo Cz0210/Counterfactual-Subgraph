@@ -63,3 +63,10 @@ owner module. It waits for the exact original owner terminal and bound pool,
 then calls calibration, freeze, test and aggregate in order. It never edits the
 live training owner/spec or acquires a GPU lease. Resource pauses resume only
 sealed parent checkpoints; engineering errors stop with their evidence retained.
+
+The existing AutoDL raw-test index has no available previously sealed file-SHA
+descriptor. Its fixed path is therefore not opened during planning: the Global
+leaf first reads/hashes it after its own selector freeze, validates its internal
+source/numerical/kernel bindings, and only then atomically writes a fresh adoption
+receipt. That receipt explicitly states the file hash was not previously bound.
+Later resume rejects changed bytes; old teacher flip masks/minima are not adopted.
