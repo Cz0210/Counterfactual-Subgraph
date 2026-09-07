@@ -98,6 +98,24 @@ def test_failed_primary_reservation_and_missing_ready_sources_block(tmp_path):
     assert "MAIN_READY_SOURCE_COVERAGE_UNAVAILABLE" in result["source_blockers"]
 
 
+def test_reach_contract_family_keeps_real_capacity_and_reservation_guards(tmp_path):
+    from src.eval.bace_reach_v2 import seal
+    cfg, _ = source_fixture(tmp_path)
+    contract = tmp_path / "reach_contract.json"
+    seal(contract, {"schema": "bace_ours_reach_v2_20260907", "proposal_source": "OURS_MAIN_PPO_66", "test_opened": False})
+    descriptor = {"path": str(contract), "sha256": sha256_file(contract)}
+    gpu = GPUObservation(0, "GPU-fixture", "CPU fake", 1000, 950, 50, 0)
+    sampler = owner.ResourceSampler(cfg, 0, gpu.uuid, inventory=lambda: [gpu],
+                                    task_family="ours_reach", reach_contract=descriptor)
+    actual = sampler.sample()
+    assert actual["ours_reach_contract_verified"]
+    assert "OURS_REACH_GPU_CAPACITY_NOT_ADMITTED" in actual["source_blockers"]
+    assert not actual["owners_healthy"]
+    with pytest.raises(ValueError, match="EXACT_TRAIN_SCOPE"):
+        owner.ResourceSampler(cfg, 1, gpu.uuid, inventory=lambda: [gpu],
+                              task_family="ours_reach", reach_contract=descriptor)
+
+
 def test_busy_inventory_resets_idle_even_with_fresh_json(tmp_path):
     cfg, _ = source_fixture(tmp_path)
     gpu = GPUObservation(0, "GPU-fixture", "CPU fake", 1000, 300, 700, 10,

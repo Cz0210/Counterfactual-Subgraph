@@ -1,4 +1,5 @@
 import copy
+import json
 import math
 import random
 import tempfile
@@ -65,6 +66,33 @@ except ImportError:
 
 @unittest.skipUnless(Chem is not None, "RDKit is tested on the existing AutoDL environment")
 class SearchTests(unittest.TestCase):
+    def test_own_saved_parser_train_binding_no_oracle_or_new_generation(self):
+        from src.eval.bace_reach_v2 import reparse_own_saved_train_outputs
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            train = root / "train.csv"
+            train.write_text("parent_id,smiles,label\np,CCCC,1\n")
+            rows = root / "candidate_pool.jsonl"
+            row = {"parent_id": "p", "parent_smiles": "CCCC", "stage": "B8_POOL_BASE", "candidate_index": 0,
+                "test_loaded": False, "calibration_loaded": False, "raw_fragment": "2]",
+                "raw_output": "FRAGMENT_SMILES: [CH3:1][CH2:2]"}
+            rows.write_text(json.dumps(row) + "\n")
+            merge = root / "merge_manifest.json"
+            merge.write_text(json.dumps({"train_only": True, "test_loaded": False, "input_row_count": 1,
+                "input_shards": [{"stage": "B8_POOL_BASE", "candidate_pool": {"path": str(rows)}}]}))
+            reference = {"candidate_generation": {"merge_manifest": {"path": str(merge)}},
+                "frozen_downstream": {"dataset_split_paths": {"train": str(train)}}}
+            result = reparse_own_saved_train_outputs(reference, root / "out")
+            self.assertEqual(result["counts"]["changed_extractions"], 1)
+            self.assertGreater(result["seed_graph_count_with_parent_support"], 0)
+            self.assertEqual(result["new_oracle_calls"], 0)
+            self.assertFalse(result["generation_rerun"])
+            self.assertFalse(result["test_opened"])
+            row["test_loaded"] = True
+            rows.write_text(json.dumps(row) + "\n")
+            with self.assertRaisesRegex(ValueError, "BINDING_CONFLICT"):
+                reparse_own_saved_train_outputs(reference, root / "bad")
+
     def predict(self, smiles):
         return [{"predicted_label": 0 if Chem.MolFromSmiles(s).GetNumAtoms() <= 2 else 1,
                  "probabilities": [.8, .2] if Chem.MolFromSmiles(s).GetNumAtoms() <= 2 else [.2, .8]} for s in smiles]

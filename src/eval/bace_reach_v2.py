@@ -42,6 +42,66 @@ def unseal(path: Path) -> dict[str, Any]:
     return {**value, "self_sha256": digest}
 
 
+def reparse_own_saved_train_outputs(reference, output):
+    """No new sampling/oracle: repair only the main method's saved raw text."""
+    from collections import Counter
+    from rdkit import Chem
+    from src.models.llm_generator import clean_generated_smiles, SMILES_EXTRACTION_CONTRACT
+    from src.chem.bace_reach_search import pattern_from_match
+    manifest_path = Path(reference["candidate_generation"]["merge_manifest"]["path"])
+    merge = read_json(manifest_path)
+    if merge.get("train_only") is not True or merge.get("test_loaded") is not False:
+        raise ValueError("OWN_RAW_PROPOSALS_NOT_TRAIN_ONLY")
+    parents = {p.parent_id: p for p in load_bace_parents(reference["frozen_downstream"]["dataset_split_paths"]["train"], source_label=1)}
+    seeds, changes, counts, seen = {}, [], Counter(), set()
+    for shard in merge["input_shards"]:
+        if shard["stage"] not in {"B8_POOL_BASE", "B9_POOL_HIGHTEMP"}:
+            raise ValueError("FOREIGN_PROPOSER_SOURCE_FORBIDDEN")
+        for row in read_jsonl(shard["candidate_pool"]["path"]):
+            key = (row["parent_id"], row["stage"], row["candidate_index"])
+            if key in seen or row["parent_id"] not in parents or row["test_loaded"] is not False or row["calibration_loaded"] is not False:
+                raise ValueError("OWN_TRAIN_ATTEMPT_BINDING_CONFLICT")
+            seen.add(key)
+            counts["attempts"] += 1
+            text = clean_generated_smiles(row["raw_output"])
+            if text != row["raw_fragment"]:
+                counts["changed_extractions"] += 1
+                changes.append({"parent_id": row["parent_id"], "stage": row["stage"], "candidate_index": row["candidate_index"],
+                                "old_fragment": row["raw_fragment"], "corrected_fragment": text})
+            query = Chem.MolFromSmiles(text, sanitize=False) if text else None
+            if query is None or len(Chem.GetMolFrags(query)) != 1:
+                continue
+            query.UpdatePropertyCache(strict=False)
+            Chem.FastFindRings(query)
+            for atom in query.GetAtoms():
+                atom.SetAtomMapNum(0)
+            parent = parents[row["parent_id"]]
+            mol = Chem.MolFromSmiles(parent.smiles)
+            recorded = Chem.MolFromSmiles(row["parent_smiles"])
+            if recorded is None or Chem.MolToSmiles(recorded) != Chem.MolToSmiles(mol):
+                raise ValueError("SAVED_RAW_PARENT_GRAPH_CHANGED")
+            matches = mol.GetSubstructMatches(query, uniquify=True, useChirality=False, maxMatches=0)
+            counts["attempts_with_parent_match"] += bool(matches)
+            for match in matches:
+                if len(match) >= mol.GetNumAtoms():
+                    continue
+                pattern = pattern_from_match(mol, match)
+                pattern["source_method"] = "Ours-main-PPO-saved-raw-parser-correction"
+                by_id = seeds.setdefault(parent.parent_id, {})
+                by_id[pattern["candidate_id"]] = pattern
+    if len(seen) != merge["input_row_count"]:
+        raise ValueError("OWN_RAW_ATTEMPT_COUNT_CHANGED")
+    pool = {pid: [rows[k] for k in sorted(rows)] for pid, rows in sorted(seeds.items())}
+    atomic_json(output / "own_saved_raw_train_seeds.json", pool)
+    return seal(output / "own_saved_raw_parser_audit.json", {"schema": "ours_saved_train_parser_repair_v2",
+        "parser_contract": SMILES_EXTRACTION_CONTRACT, "counts": dict(counts), "changes": changes,
+        "seed_parent_count": len(pool), "seed_graph_count_with_parent_support": sum(len(x) for x in pool.values()),
+        "train_seed_sha256": sha256_file(output / "own_saved_raw_train_seeds.json"),
+        "source_merge": reference["candidate_generation"]["merge_manifest"],
+        "source_shards": merge["input_shards"], "generation_rerun": False, "new_oracle_calls": 0,
+        "foreign_variant_candidates_used": False, "calibration_opened": False, "test_opened": False})
+
+
 def plan(reference_path: Path, output: Path, *, proposal_source: str,
          proposal_path: Path | None = None) -> dict[str, Any]:
     """Freeze inputs before scientific execution; do not open test payloads."""
@@ -90,12 +150,16 @@ def plan(reference_path: Path, output: Path, *, proposal_source: str,
     if not (Path(paths["molclr_source"]) / "models" / "ginet_molclr.py").is_file():
         raise ValueError("MOLCLR_SOURCE_LAYOUT_UNRESOLVED:" + paths["molclr_source"])
     output.mkdir(parents=True, exist_ok=True)
+    parser_audit = reparse_own_saved_train_outputs(ref, output)
     budget = asdict(SearchBudget())
     return seal(output / "search_contract.json", {
         "schema": SCHEMA, "method_version": "Ours-Reach-v2", "proposal_source": proposal_source,
         "paths": paths, "reference_sha256": sha256_file(reference_path),
         "proposal_sha256": sha256_file(proposal_path), "old_candidate_ids": ids,
         "search_budget": budget, "search_budget_sha256": stable_sha256(budget),
+        "own_saved_raw_parser_audit_sha256": parser_audit["self_sha256"],
+        "own_saved_raw_train_seeds_sha256": parser_audit["train_seed_sha256"],
+        "saved_raw_seeds_count_within_same_search_oracle_budget": True,
         "source_label": ref["source_label"], "oracle_weight_sha256": down["gine_checkpoint_sha"],
         "temperature_sha256": down["temperature_sha"], "temperature": down["temperature"],
         "molclr_sha256": down["molclr_sha"], "wnode_config": down["wnode_config"],
@@ -179,6 +243,10 @@ def run_train(output: Path, *, device: str, boundary_check=lambda: None, canary_
     work = output / ("canary" if canary_parents else "train")
     work.mkdir(parents=True, exist_ok=True)
     old = read_jsonl(contract["paths"]["proposal"])
+    seed_path = output / "own_saved_raw_train_seeds.json"
+    if sha256_file(seed_path) != contract["own_saved_raw_train_seeds_sha256"]:
+        raise ValueError("OWN_RAW_TRAIN_SEED_BINDING_CHANGED")
+    own_seeds = read_json(seed_path)
     if sha256_file(contract["paths"]["proposal"]) != contract["proposal_sha256"]:
         raise ValueError("PROPOSAL_SOURCE_CHANGED")
     parents = load_bace_parents(contract["paths"]["train"], source_label=contract["source_label"])
@@ -203,16 +271,21 @@ def run_train(output: Path, *, device: str, boundary_check=lambda: None, canary_
         else:
             before = predict_smiles(oracle, features, [parent.smiles], "train")[0]
             pairs, matches = evaluate_pairs([parent], old, oracle=oracle, featurizer=features,
-                distance_provider=distance, split="train", oracle_checkpoint_id=contract["oracle_binding"])
+                distance_provider=distance, split="train", oracle_checkpoint_id=contract["oracle_binding"],
+                parent_prediction_cache={parent.parent_id: {"parent_smiles": parent.smiles,
+                    "p_before": before["probabilities"], "pred_before": before["predicted_label"]}})
             covered = any(r["pair_strict_flip"] for r in pairs)
             state = None
             if int(before["predicted_label"]) == contract["source_label"] and not covered:
                 state = search_parent(parent_id=parent.parent_id, parent_smiles=parent.smiles,
                     before=before, predict=lambda ss: predict_smiles(oracle, features, ss, "train_reach_search"),
-                    old_candidates=old, oracle_binding=contract["oracle_binding"], budget=budget,
+                    old_candidates=[*old, *own_seeds.get(parent.parent_id, [])], oracle_binding=contract["oracle_binding"], budget=budget,
                     maximum_new_queries=budget.initial_queries_per_parent)
             saved = seal(file, {"search_contract_sha256": contract["self_sha256"], "parent_id": parent.parent_id,
                 "before": before, "old_pool_pairs": pairs, "old_pool_matches": matches,
+                "old_pool_classifier_graph_evaluations": 1 + sum(m["delete_valid"] for m in matches),
+                "old_pool_ot_requests": sum(m["teacher_strict_flip"] for m in matches),
+                "old_pool_ot_cache_hits": sum(m.get("distance_cache_hit", False) for m in matches),
                 "old_pool_covered": covered, "search": state, "test_opened": False, "calibration_opened": False})
         all_pairs.extend(saved["old_pool_pairs"])
         if saved["search"]:
@@ -241,7 +314,7 @@ def run_train(output: Path, *, device: str, boundary_check=lambda: None, canary_
         else:
             expanded = search_parent(parent_id=state["parent_id"], parent_smiles=state["parent_smiles"],
                 before=state["before"], predict=lambda ss: predict_smiles(oracle, features, ss, "train_reach_search"),
-                old_candidates=old, oracle_binding=contract["oracle_binding"], budget=budget,
+                old_candidates=[*old, *own_seeds.get(state["parent_id"], [])], oracle_binding=contract["oracle_binding"], budget=budget,
                 maximum_new_queries=budget.extra_queries_per_parent, previous=state)
             seal(path, {"search_contract_sha256": contract["self_sha256"], "initial_binding": stable_sha256(state), "search": expanded})
             states[j] = expanded
@@ -252,6 +325,9 @@ def run_train(output: Path, *, device: str, boundary_check=lambda: None, canary_
         "search_contract_sha256": contract["self_sha256"], "proposal_source": contract["proposal_source"],
         "candidate_universe_sha256": sha256_file(output / "candidate_universe.jsonl"), "candidate_count": len(pool),
         "old_candidate_count": len(old), "train_parent_count": len(parents), "extra_parent_ids": extra_ids,
+        "old_pool_diagnostic_classifier_graph_evaluations": len(parents) + sum(p["num_valid_residuals"] for p in all_pairs),
+        "old_pool_diagnostic_ot_requests": sum(p["num_strict_flip_matches"] for p in all_pairs),
+        "old_pool_diagnostic_calls_are_separate_from_new_search_budget": True,
         "new_graph_oracle_queries": sum(s["new_graph_oracle_queries"] for s in states),
         "actual_query_budget_exceeded": any(s["new_graph_oracle_queries"] > (512 if s["parent_id"] in extra_ids else 128) for s in states),
         "calibration_opened_during_search": False, "test_opened": False,

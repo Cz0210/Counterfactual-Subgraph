@@ -17,7 +17,7 @@ def hpc_cpu_allowed(*, main_cells: int, bace_reference_pass: bool, active_jobs: 
 
 
 def gpu_allowed(evidence, *, family):
-    if family not in ("gnn", "llm"):
+    if family not in ("gnn", "llm", "ours_reach"):
         raise ValueError("unknown ablation family")
     blockers = []
     if family == "gnn" and evidence.get("main_cells", 0) < 12:
@@ -29,8 +29,15 @@ def gpu_allowed(evidence, *, family):
         blockers.append("MAIN_READY_WAITING_GPU")
     if evidence.get("gpu_main_reservation") is not False:
         blockers.append("MAIN_GPU_RESERVATION")
-    if evidence.get("gpu_idle_seconds", 0) < 1200:
+    if family != "ours_reach" and evidence.get("gpu_idle_seconds", 0) < 1200:
         blockers.append("GPU_IDLE_BELOW_1200_SECONDS")
+    if family == "ours_reach":
+        if evidence.get("ours_reach_contract_verified") is not True:
+            blockers.append("OURS_REACH_TRAIN_CONTRACT_UNVERIFIED")
+        if (evidence.get("gpu_index") != 0
+            or (evidence.get("actual_gpu_observation", {}).get("process_count") != 0
+                and not evidence.get("gpu_child_pid"))):
+            blockers.append("OURS_REACH_REQUIRES_EXCLUSIVE_GPU0")
     if evidence.get("active_early_ablation_gpus") != 0:
         blockers.append("MAX_ONE_EARLY_ABLATION_GPU")
     if family == "llm" and evidence.get("gnn_core_seed7_audit") != "PASS":
