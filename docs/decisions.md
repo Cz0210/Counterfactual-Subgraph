@@ -18567,6 +18567,17 @@ existing external-memory exact DBSCAN and original greedy medoid selection.
 Pair storage is admitted from the actual RF0 universe and 64D GREED outputs;
 insufficient disk remains a stage blocker, not permission to truncate pairs.
 
+The first recourse job completed resource planning only: its full Cartesian
+upper bound exceeded disk admission, but no pair-store was created. A fresh
+successor first counts exact theta-close pairs in bounded 128-candidate batches,
+sealing unchanged GREED embeddings and lossless packed eligibility masks. The
+actual close-pair count, not the Cartesian upper bound, admits materialization.
+Materialization reuses those same embeddings and masks without model inference
+or distance reevaluation. Deserialization and graph/model stages have separate
+RAM bounds before allocation. Existing exact cluster-proof paths and streamed
+native medoid reduction remain unchanged. New Slurm scratch/cache writes stay
+inside the user-authorized /share/home/u20526/czx campaign root.
+
 The explicit reach-repair task authorizes an AIDS-only, GNN-proposed/RF-validated
 adaptation. The existing 1283 AIDS/HIV source rows remain the denominator and are
 not relabelled as unseen held-out data. Existing selected actions, predecessor

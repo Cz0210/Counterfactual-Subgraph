@@ -49,6 +49,12 @@ class TestAidsPool(unittest.TestCase):
         self.assertEqual(plan["state"], "BLOCKED_STORAGE")
         self.assertFalse(plan["pair_universe_truncated"])
         self.assertEqual(storage_plan(parent_count=1097, candidate_count=10, vector_dim=64, free_bytes=28 * 1024**3)["state"], "PASS")
+        actual = storage_plan(parent_count=1097, candidate_count=100000, vector_dim=64, free_bytes=28 * 1024**3, exact_pair_count=1000)
+        self.assertEqual(actual["state"], "PASS")
+        self.assertEqual(actual["exact_pair_count"], 1000)
+        self.assertEqual(actual["pair_rows_upper_bound"], 109700000)
+        with self.assertRaises(ValueError):
+            storage_plan(parent_count=2, candidate_count=3, vector_dim=64, free_bytes=999, exact_pair_count=7)
 
 
 class TestNativeReplayTensor(unittest.TestCase):
@@ -84,6 +90,24 @@ class TestNativeReplayTensor(unittest.TestCase):
         row["stable_graph_sha256"] = "wrong"
         with self.assertRaisesRegex(ValueError, "candidate differs"):
             replay_candidate(row, {"target": transition}, {"P": self.graph})
+
+    def test_packed_count_mask_and_vector_reuse(self):
+        import numpy as np
+        from src.baselines.comrecgc.rf_aligned_count import decode_mask
+        torch = self.torch
+        candidates = torch.tensor([[0., 0.], [2., 3.], [5., 4.]])
+        parents = torch.tensor([[0., 0.], [1., 2.]])
+        scale = torch.tensor([[10., 12.], [13., 15.], [16., 18.]])
+        distances = torch.cdist(candidates, parents, p=2) / scale
+        mask = (distances <= .1).numpy()
+        restored = decode_mask(np.packbits(mask.ravel(), bitorder="little"), mask.shape)
+        self.assertTrue(np.array_equal(mask, restored))
+        direct = torch.nonzero(distances <= .1, as_tuple=False)
+        cached = torch.from_numpy(np.argwhere(restored))
+        self.assertTrue(torch.equal(direct, cached))
+        first = (candidates[direct[:, 0]] - parents[direct[:, 1]]) / scale[direct[:, 0], direct[:, 1], None]
+        second = (candidates[cached[:, 0]] - parents[cached[:, 1]]) / scale[cached[:, 0], cached[:, 1], None]
+        self.assertTrue(torch.equal(first, second))
 
 
 if __name__ == "__main__":

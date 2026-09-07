@@ -18,7 +18,9 @@ def main():
     if args.action == "status":
         path = root / "terminal.json"
         if not path.exists():
-            path = root / "progress.json"
+            candidates = [root / name for name in ["progress.json", "exact_count/progress.json", "resource_admission.json", "input_ram_admission.json", "graph_ram_admission.json"]]
+            candidates = [p for p in candidates if p.exists()]
+            path = max(candidates, key=lambda p: p.stat().st_mtime) if candidates else path
         print(path.read_text() if path.exists() else json.dumps({"state": "NOT_STARTED"}))
     elif args.action == "repair-gaps":
         from src.baselines.comrecgc.rf_aligned_pool import repair_screen_gaps

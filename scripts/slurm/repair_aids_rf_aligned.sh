@@ -22,10 +22,14 @@ export PYTHONPATH="$PWD"
 export CUDA_VISIBLE_DEVICES=""
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
 export TOKENIZERS_PARALLELISM=false
+export TMPDIR="$(dirname "$AIDS_OUTPUT_ROOT")/scratch/slurm-${SLURM_JOB_ID:?}"
+export XDG_CACHE_HOME="$TMPDIR/cache"
+export MPLCONFIGDIR="$TMPDIR/matplotlib"
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$MPLCONFIGDIR"
 echo "python=$(command -v python)"
 python --version
 echo "cpu_only=true job=${SLURM_JOB_ID:-local}"
-if [ "${AIDS_ACTION:-screen-pool}" = "repair-gaps" ]; then
+if [ "${AIDS_ACTION:-screen-pool}" = "repair-gaps" ] || [ "${AIDS_ACTION:-screen-pool}" = "recourse" ]; then
   python -B -m unittest tests.test_aids_rf_aligned_pool -v
 fi
 if [ "${AIDS_ACTION:-screen-pool}" = "recourse" ] || [ "${AIDS_ACTION:-screen-pool}" = "repair-gaps" ]; then

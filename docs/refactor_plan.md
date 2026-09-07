@@ -4315,3 +4315,6 @@ Mutagenicity roadmaps.
 - Screening segments freeze full candidate accounting and RF predictions before
   any new common-recourse universe is admitted. The following recourse adapter
   remains a separate stage; screening alone is not a complete repaired result.
+- Added a count-only exact GREED stage and hash-bound embedding/mask reuse before
+  pair allocation. Count, pair-store, exact DBSCAN, native summary and common
+  evaluation remain distinct scientific stages; none is reported as another.
