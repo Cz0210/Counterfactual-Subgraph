@@ -253,17 +253,27 @@ def adoption_manifest(summary, recovery, binding, terminal, catalog, *, referenc
     all_invalid = all(v['valid_complete_products'] == 0 and v['mapping_count'] > 0 for v in funnels.values())
     vocab = summary['codec_metadata']
     out = {'schema_version': 'bace_gin_original_globalgce_pool_v1', 'method': 'GlobalGCE',
+        'method_id': 'globalgce', 'input_count': 80,
         'method_variant': 'OriginalPoolJointHardMaterializer', 'rule_count': 80,
         'state': 'BLOCKED_MATERIALIZATION' if all_invalid else 'READY_FOR_FROZEN_GIN_CALIBRATION',
+        'reason': ('All complete products were disconnected in the bound original train/validation mappings; '
+                   'no GIN calibration/test metrics are fabricated.' if all_invalid else
+                   'Complete-product chemistry exists; fresh fixed-GIN calibration is still required.'),
         'original_model_checkpoint': model, 'original_rules_checkpoint': rules,
+        'source_host': 'autodl-a800',
         'original_catalog': recovery['candidate_universe'],
         'mining_identity': summary['gspan_exact_top_k_proof']['selected_identity_sha256'],
         'atom_symbols': [vocab['node_label_mapping'][str(i)] for i in range(1, len(vocab['node_label_mapping']))],
         'bond_names': [vocab['edge_label_mapping'][str(i)] for i in range(len(vocab['edge_label_mapping']))],
         'rules': [{'candidate_id': row['candidate_id'], 'native_rule_index': i,
-                   'original_rule_content_hash': row['rule_content_hash']} for row, i in zip(catalog, indexes)],
+                   'original_rule_content_hash': row['rule_content_hash'],
+                   'source_graph_sha256': row['rule_content_hash'],
+                   'source_graph_sha_scope': 'native_LHS_RHS_rule_tensors_not_standalone_product',
+                   'native_operation': 'attachment_aware_LHS_RHS_complete_parent_replacement'}
+                  for row, i in zip(catalog, indexes)],
         'materializer_source_commit': MATERIALIZER_SOURCE_COMMIT, 'joint_contract': JOINT_CONTRACT,
         'new_repair_weights_used': False, 'generation_rerun': False, 'generator_refitted': False,
+        'candidate_generation_repeated': False, 'reach_v2_candidates_used': False,
         'new_oracle_inference_performed': False, 'test_read': False, 'evaluation_rows_fabricated': False,
         'zero_coverage_claimed': False, 'scientific_metrics': None, 'train_validation_funnels': funnels,
         'evidence_scope': 'original360_train_and98_validation_labels1_all_LHS_mappings_independent_of_oracle_prediction',
