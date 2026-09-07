@@ -18555,3 +18555,26 @@ engineering retry. Record the temperature driver and the verifier driver separat
 - The owning native canary forwards a resource-stop SIGTERM only to its newly
   created deterministic child and waits for exit before releasing the GPU lease.
   No process-group signals or forced kill are used.
+
+## 2026-09-07: BACE Ours-Reach-v2 train-only candidate repair
+
+- This is a newly authorized method version, not a claim that prior scientific
+  outputs were implementation errors. Preserve the old 66 pool and old results.
+- Expand only connected attributed deletion patterns on train parents. Count
+  actual new residual-graph GINE queries (128 first pass; at most 128 uncovered
+  parents receive 384 more), beam 16 and pool cap 4096. Standalone fragment
+  sanitization is not a prerequisite; connected sanitized nonempty residuals are.
+- Freeze the pool before calibration. Reach-first S10/S20 are nested and retain
+  the old S10 low-threshold coverage floor; lexicographic reach, high-cap coverage,
+  then original weighted multithreshold utility (counts differ only by fixed
+  denominator constants). Solver optimality/gaps are reported, not presumed.
+- A new explicit graph enumerator is injectable into the original evaluator;
+  absent this argument the original main behavior is unchanged. Attributed
+  graph fingerprints use frozen attributes, not a fabricated sanitized molecule.
+- CLI: `scripts/run_bace_reach_v2.py --config configs/hpc.yaml --action plan`
+  requires actual reference/output paths. Search/canary GPU execution reuses the
+  existing owner, UUID locks, inherited FD and real resource evidence. No test
+  payload is read by plan/search/calibration. Conditional PPO is not yet a
+  deployed training successor; its exact remaining interface is reported.
+- LLM variant reuse is fail-closed until its own proposal, calibration and old
+  selector binding is supplied; the Ours 66 pool is never silently injected.

@@ -4308,3 +4308,12 @@ Mutagenicity roadmaps.
   observations, a reused single-LLM slot, non-leaking descendants and immutable
   corrected-GNN acceptance reuse. Keep one-shot execution behind the existing
   outer queue; a live queue/GPU admission remains a deployment requirement.
+
+### 2026-09-07: BACE Reach-v2 scoped implementation
+
+- [x] Attributed connected deletion search and exact evaluator adapter.
+- [x] Fixed nested reach-first selector and deterministic focused fixtures.
+- [x] Explicit train-search/calibration stages with parent-bound checkpoints.
+- [ ] Real resource-gated train canary and full search deployment.
+- [ ] Conditional <=300-update PPO successor if the train-only gate actually fires.
+- [ ] Per-LLM own-pool binding and post-freeze version-aware descriptive evaluation.

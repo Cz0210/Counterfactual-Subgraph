@@ -1063,15 +1063,23 @@ def build_candidate_chemistry(
     )
     fingerprints: list[Any] = []
     heavy_atoms: list[int] = []
+    def fragment_molecule(row):
+        fragment = str(row.get("canonical_fragment") or "").strip()
+        attributed = row.get("representation") == "attributed_graph_pattern_v1"
+        if attributed:
+            from src.chem.bace_reach_search import validate_attributed_candidate
+            return validate_attributed_candidate(row)
+        return Chem.MolFromSmiles(fragment)
     for row in candidate_rows:
         fragment = str(row.get("canonical_fragment") or "").strip()
-        molecule = Chem.MolFromSmiles(fragment)
+        molecule = fragment_molecule(row)
         if molecule is None:
             raise ValueError(
                 f"Invalid candidate fragment cannot be fingerprinted: {fragment!r}"
             )
         try:
-            Chem.SanitizeMol(molecule)
+            if row.get("representation") != "attributed_graph_pattern_v1":
+                Chem.SanitizeMol(molecule)
         except Exception as exc:
             raise ValueError(
                 f"Candidate fragment failed RDKit sanitization: {fragment!r}"
@@ -1086,7 +1094,7 @@ def build_candidate_chemistry(
     normalization_heavy_atoms: list[int] = []
     for row in normalization_rows:
         fragment = str(row.get("canonical_fragment") or "").strip()
-        molecule = Chem.MolFromSmiles(fragment)
+        molecule = fragment_molecule(row)
         if molecule is None:
             raise ValueError(
                 f"Invalid size-normalization fragment: {fragment!r}"
