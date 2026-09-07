@@ -25,4 +25,11 @@ export TOKENIZERS_PARALLELISM=false
 echo "python=$(command -v python)"
 python --version
 echo "cpu_only=true job=${SLURM_JOB_ID:-local}"
+if [ "${AIDS_ACTION:-screen-pool}" = "repair-gaps" ]; then
+  python -B -m unittest tests.test_aids_rf_aligned_pool -v
+fi
+if [ "${AIDS_ACTION:-screen-pool}" = "recourse" ] || [ "${AIDS_ACTION:-screen-pool}" = "repair-gaps" ]; then
+  : "${AIDS_POOL_ROOT:?completed pool root required}"
+  exec nice -n 10 python -B scripts/repair_aids_rf_aligned.py --config configs/hpc.yaml --run-manifest "$AIDS_RUN_MANIFEST" --output-root "$AIDS_OUTPUT_ROOT" --pool-root "$AIDS_POOL_ROOT" --action "$AIDS_ACTION"
+fi
 exec nice -n 10 python -B scripts/repair_aids_rf_aligned.py --config configs/hpc.yaml --run-manifest "$AIDS_RUN_MANIFEST" --output-root "$AIDS_OUTPUT_ROOT" --action screen-pool

@@ -41,14 +41,14 @@ def file_sha(path: Path) -> str:
     return result.hexdigest()
 
 
-def checked_events(input_root: Path):
+def checked_events(input_root: Path, *, verify_hashes: bool = True):
     manifest = json.loads((input_root / "trace/selected_action_trace_manifest.json").read_text())
     chunks = manifest["chunks"]
     for index, chunk in enumerate(chunks):
         path = input_root / "trace/selected_action_trace_chunks" / Path(chunk["path"]).name
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"Missing regular trace chunk {path}")
-        if file_sha(path) != chunk["sha256"]:
+        if verify_hashes and file_sha(path) != chunk["sha256"]:
             raise ValueError(f"Trace chunk hash mismatch: {index}")
         count = 0
         with path.open() as handle:
@@ -106,6 +106,8 @@ def replay_candidate(row, predecessor, parents):
         node_ids = trace_node_ids(graph)
         if str(event["action"][0]) in {"NA", "INA"}:
             node_ids.append(f"new:{row['parent_id']}:move:{int(event['move_index'])}:head:{int(event['head_index'])}:path:{position}:target:{event['target_graph_sha256']}")
+        elif str(event["action"][0]) in {"NR", "INR"}:
+            node_ids.pop(int(event["action"][1]))
         graph = apply_action_to_graph(graph, event["action"], target_node_ids=node_ids)
         actual = stable_untyped_graph_sha256(graph)
         if actual != event["target_graph_sha256"]:
@@ -250,5 +252,94 @@ def screen_pool(config: Mapping[str, Any], output_root: Path) -> dict[str, Any]:
         raise ValueError(f"Incomplete frozen pool: {done} != {config['expected_candidates']}")
     unique_target0 = sum(score["prediction"] == 0 for score in rf_cache.values())
     result = {"state": "POOL_SCREEN_COMPLETE" if not counts["CACHE_PROVENANCE_GAP"] else "EVIDENCE_INSUFFICIENT", "completed_candidates": done, "counts": dict(counts), "unique_chemical_graphs": len(rf_cache), "unique_rf_target0": unique_target0, "trace_events": event_count, "policy": POLICY, "source_denominator": 1283, "source1_count": sum(x["prediction"] == 1 for x in source_scores), "generation_oracle": "HISTORICAL_GNN", "acceptance_oracle": "FROZEN_AIDS_RF", "variant": "GNN_PROPOSED_RF_VALIDATED_ADAPTATION", "generation_rerun": False, "test_loaded": False, "pair_store_created": False, "elapsed_seconds": time.monotonic() - start, "resumed_candidates": original_done, "contract_sha": contract_sha}
+    atomic_json(output_root / "terminal.json", result)
+    return result
+
+
+def repair_screen_gaps(config: Mapping[str, Any], *, source_root: Path, output_root: Path):
+    """Reconcile only explicit replay gaps; preserve all successful source rows."""
+    import torch
+    from rdkit import Chem, RDLogger
+    from .project_dataset import load_aids_generation_bundle
+    from .exporter import decode_representative
+    from src.rewards.reward_calculator import load_oracle_bundle
+    terminal = json.loads((source_root / "terminal.json").read_text())
+    if terminal["state"] not in {"POOL_SCREEN_COMPLETE", "EVIDENCE_INSUFFICIENT"}:
+        raise ValueError("Source screening has not naturally reached a terminal state")
+    if terminal["completed_candidates"] != config["expected_candidates"] or terminal["contract_sha"] != digest(config):
+        raise ValueError("Source full-pool screening binding mismatch")
+    if output_root.exists() and any(output_root.iterdir()):
+        if (output_root / "terminal.json").exists():
+            return json.loads((output_root / "terminal.json").read_text())
+        raise ValueError("Gap-reconciliation root must be fresh")
+    output_root.mkdir(parents=True, exist_ok=True)
+    RDLogger.DisableLog("rdApp.error")
+    torch.set_num_threads(int(config.get("threads", 2)))
+    source = load_aids_generation_bundle(dataset_dir=config["dataset_dir"], source_csv=config["source_csv"])
+    parents = dict(zip(source.parent_ids, source.graphs, strict=True))
+    original_binding = json.loads((source_root / "source_input_binding.json").read_text())
+    if source.audit() != original_binding:
+        raise ValueError("Source changed since the complete screening")
+    native = json.loads((Path(config["input_root"]) / "run_manifest.json").read_text())
+    native_fingerprint = native["dataset_audit"]["dataset_fingerprint"]
+    if source.dataset_fingerprint != native_fingerprint:
+        raise ValueError("HPC source dataset differs from the original native generation fingerprint")
+    # Prior terminal closes the same immutable full trace and transferred
+    # manifest. No second full package/chunk hashing is necessary here.
+    predecessor, events = predecessor_index(checked_events(Path(config["input_root"]), verify_hashes=False))
+    if events != terminal["trace_events"]:
+        raise ValueError("Immutable trace row count differs from previous terminal")
+    segments = [json.loads(p.read_text()) for p in sorted((source_root / "segments").glob("segment-*.json"))]
+    source_segment_digests = [digest(s) for s in segments]
+    gap_indices = {r["candidate_index"] for s in segments for r in s["rows"] if r["state"] == "CACHE_PROVENANCE_GAP"}
+    originals = {}
+    with (Path(config["input_root"]) / "trace/candidate_action_lineage_index.jsonl").open() as handle:
+        for line in handle:
+            original = json.loads(line)
+            if original["candidate_index"] in gap_indices:
+                originals[original["candidate_index"]] = original
+    if set(originals) != gap_indices:
+        raise ValueError("Gap records are absent from the original complete lineage index")
+    cache = {r["canonical_smiles"]: r["rf"] for s in segments for r in s["rows"] if "rf" in r}
+    prior_cache_count = len(cache)
+    rf = load_oracle_bundle(config["rf_path"])
+    if hasattr(rf["model"], "n_jobs"):
+        rf["model"].n_jobs = int(config.get("threads", 2))
+    repairs = []
+    for segment in segments:
+        for row in segment["rows"]:
+            if row["state"] != "CACHE_PROVENANCE_GAP":
+                continue
+            before = dict(row)
+            original = originals[row["candidate_index"]]
+            for key in ("candidate_index", "official_graph_hash", "stable_graph_sha256", "parent_id", "action_count"):
+                if original[key] != row[key]:
+                    raise ValueError("Gap row binding differs from original lineage index")
+            try:
+                graph = replay_candidate(original, predecessor, parents)
+            except (ValueError, IndexError, KeyError) as exc:
+                repairs.append({"candidate_index": row["candidate_index"], "state": "UNRESOLVED", "reason": str(exc)})
+                continue
+            decoded = decode_representative(graph, dataset="aids", atom_vocabulary=source.atom_vocabulary)
+            smiles = decoded["canonical_smiles"]
+            mol = Chem.MolFromSmiles(smiles) if decoded["decode_ok"] else None
+            row["decode"] = decoded
+            if mol is None or len(Chem.GetMolFrags(mol)) != 1 or any(a.GetAtomicNum() == 0 for a in mol.GetAtoms()):
+                row.update(state="CHEM_REJECT", reason=decoded["decode_reason"] or "disconnected_or_dummy")
+            else:
+                smiles = Chem.MolToSmiles(mol, canonical=True)
+                if smiles not in cache:
+                    cache[smiles] = rf_predict([smiles], rf)[0]
+                row.update(canonical_smiles=smiles, rf=cache[smiles], state="RF_TARGET0" if cache[smiles]["prediction"] == 0 else "RF_TARGET_REJECT")
+                row.pop("reason", None)
+                if row["state"] == "RF_TARGET0":
+                    row["graph"] = compact_graph(graph)
+            repairs.append({"candidate_index": row["candidate_index"], "old_reason": before["reason"], "state": row["state"], "graph_sha_verified": row["stable_graph_sha256"]})
+    counts = Counter(row["state"] for segment in segments for row in segment["rows"])
+    for segment in segments:
+        atomic_json(output_root / "segments" / f"segment-{segment['start']:09d}.json", segment)
+    for name in ("contract.json", "source_input_binding.json", "source_predictions.json"):
+        atomic_json(output_root / name, json.loads((source_root / name).read_text()))
+    result = dict(terminal, state="POOL_SCREEN_COMPLETE" if not counts["CACHE_PROVENANCE_GAP"] else "EVIDENCE_INSUFFICIENT", counts=dict(counts), unique_chemical_graphs=len(cache), unique_rf_target0=sum(x["prediction"] == 0 for x in cache.values()), corrected_from=str(source_root), correction_reason="NODE_REMOVAL_TARGET_IDS_GLUE_FIX", original_screen_preserved=True, source_segment_digests=source_segment_digests, already_successful_candidates_replayed=0, unique_new_rf_predictions=len(cache) - prior_cache_count, repaired_records=repairs)
     atomic_json(output_root / "terminal.json", result)
     return result

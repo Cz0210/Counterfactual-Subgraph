@@ -18557,6 +18557,16 @@ engineering retry. Record the temperature driver and the verifier driver separat
   No process-group signals or forced kill are used.
 # 2026-09-07: AIDS native-pool RF alignment (reach-repair-v2)
 
+The first full screening exposed a glue-only NR/INR target-node-ID update
+omission. Preserve that first scan and reconcile only its explicitly rejected
+rows after natural completion; successful graphs and cached RF predictions are
+not regenerated. The new exact recourse stage filters source predictions while
+retaining the original 1283 evaluation denominator, reconstructs the original
+native graphs losslessly, and uses theta=.1, eps=.02, min_samples=3 with the
+existing external-memory exact DBSCAN and original greedy medoid selection.
+Pair storage is admitted from the actual RF0 universe and 64D GREED outputs;
+insufficient disk remains a stage blocker, not permission to truncate pairs.
+
 The explicit reach-repair task authorizes an AIDS-only, GNN-proposed/RF-validated
 adaptation. The existing 1283 AIDS/HIV source rows remain the denominator and are
 not relabelled as unseen held-out data. Existing selected actions, predecessor
