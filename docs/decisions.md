@@ -18555,3 +18555,28 @@ engineering retry. Record the temperature driver and the verifier driver separat
 - The owning native canary forwards a resource-stop SIGTERM only to its newly
   created deterministic child and waits for exit before releasing the GPU lease.
   No process-group signals or forced kill are used.
+
+## 2026-09-07: Keep exact numerical sources separate from bounded ECDF display
+
+- Reach-v2 is a new candidate/selector version, not a relabeling of the old
+  66-candidate main or backbone ablation. Existing tables remain versioned v1;
+  new scientific rows stay PENDING until their own evaluation and audit.
+- Figure4 derives from saved uncapped strict-flip distances. The display-only
+  polyline has a uniform <=0.5 percentage-point vertical-error bound, preserves
+  keys, endpoints, large jumps and plateaus, and never supplies metrics or ranks.
+  BACE displays at least 80% coverage; dataset axes are independent.
+- The accepted L1/L2/L3 common-parser correction supersedes their old numerical
+  display only. K10 auxiliary costs come from the K10 table, not unscoped K20
+  heldout fields; L3's real decline is not optimized away. L0 is retained.
+- These CPU-only rendering CLIs accept `--config configs/hpc.yaml`; their paired
+  Slurm wrappers use the explicitly authorized CPU partition, not the generic
+  GPU training template, and perform no inference, training or matrix write.
+- Commands: `scripts/paper/prepare_exact_ecdf_display.py --help` and
+  `scripts/paper/render_reach_repair_snapshot.py --help`.
+- `reach_v2_adapter.py` adds a new-pool parent chunk and global-selector adapter
+  to the existing GNN science functions. Cache identities include the new pool,
+  exact backbone, weight and temperature; all ten native/common calibration
+  selectors must bind this pool before the test entry can load heldout data.
+  The original seed7 results cannot satisfy this new version's gate. The CPU
+  chunk CLI is not a campaign launcher or a declaration of core completion;
+  its real spec can only be sealed after the train-side pool freeze exists.
