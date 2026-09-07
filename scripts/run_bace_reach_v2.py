@@ -49,7 +49,11 @@ def main():
             raise ValueError("EXISTING_OWNER_GPU0_RESOURCE_BINDING_REQUIRED")
         from src.ablations.llm.existing_gpu_owner import ResourceSampler, run_owned_child
         config = json.loads(args.resource_config.read_text())
-        sampler = ResourceSampler(config, args.gpu_index, args.gpu_uuid)
+        from src.eval.bace_frozen_gnn_contracts import sha256_file
+        descriptor = {"path": str((args.output_root / "search_contract.json").resolve()),
+                      "sha256": sha256_file(args.output_root / "search_contract.json")}
+        sampler = ResourceSampler(config, args.gpu_index, args.gpu_uuid,
+                                  task_family="ours_reach", reach_contract=descriptor)
         command = [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--config", str(args.config.resolve()),
             "--action", args.owned_action, "--output-root", str(args.output_root.resolve()), "--device", "cuda:0"]
         # Reuse the existing owner, UUID lock, single-slot FD and live watchdog;

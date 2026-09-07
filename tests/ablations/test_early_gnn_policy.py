@@ -40,3 +40,15 @@ def test_llm_does_not_require_main_cell_count_but_still_requires_resources():
     assert gpu_allowed(e, family='llm')['allowed']
     assert not gpu_allowed({**e, 'gpu_main_reservation': True}, family='llm')['allowed']
     assert not gpu_allowed({**e, 'gnn_core_seed7_audit': 'WAITING'}, family='llm')['allowed']
+
+
+def test_authorized_reach_search_is_not_llm_idle_admission():
+    e = {**evidence(), "gpu_idle_seconds": 0, "gpu_index": 0,
+         "actual_gpu_observation": {"process_count": 0}, "ours_reach_contract_verified": True}
+    assert gpu_allowed(e, family="ours_reach")["allowed"]
+    assert "GPU_IDLE_BELOW_1200_SECONDS" in gpu_allowed(e, family="llm")["blockers"]
+    for key, value in (("ours_reach_contract_verified", False), ("gpu_index", 1),
+                       ("main_ready_waiting_gpu", True), ("gpu_main_reservation", True),
+                       ("storage_safe", False), ("active_early_ablation_gpus", 1)):
+        assert not gpu_allowed({**e, key: value}, family="ours_reach")["allowed"]
+    assert not gpu_allowed({**e, "actual_gpu_observation": {"process_count": 1}}, family="ours_reach")["allowed"]

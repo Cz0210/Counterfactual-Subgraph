@@ -18578,3 +18578,9 @@ engineering retry. Record the temperature driver and the verifier driver separat
   deployed training successor; its exact remaining interface is reported.
 - LLM variant reuse is fail-closed until its own proposal, calibration and old
   selector binding is supplied; the Ours 66 pool is never silently injected.
+- The authorized train-only Ours deletion search is an explicit `ours_reach`
+  task family, not LLM ablation. Its existing owner requires the sealed train
+  search contract, exclusive GPU0, original main reservations/READY priority,
+  real inherited lease descriptors and fresh stage-resource evidence. It does
+  not inherit the LLM-only 1200-second idle gate. LLM admission is unchanged;
+  this entry cannot dispatch LLM generation or conditional PPO training.
