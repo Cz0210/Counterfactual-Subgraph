@@ -126,8 +126,12 @@ def training_arm(call, values, target, reload_after_one=False):
             torch.save({"parameters": parameters, "optimizer": optimizer.state_dict(),
                         "scheduler": scheduler.state_dict(), "rng": _rng()}, buffer)
             buffer.seek(0)
-            saved = torch.load(buffer, map_location=parameters[0].device, weights_only=False)
-            parameters = [torch.nn.Parameter(v.detach().clone()) for v in saved["parameters"]]
+            device = parameters[0].device
+            # Adam's non-capturable step counter remains CPU even when its
+            # parameters are CUDA. Map the container to CPU, then let the
+            # optimizer's loader restore per-state device semantics.
+            saved = torch.load(buffer, map_location="cpu", weights_only=False)
+            parameters = [torch.nn.Parameter(v.detach().clone().to(device)) for v in saved["parameters"]]
             optimizer = torch.optim.Adam(parameters, lr=1e-4)
             optimizer.load_state_dict(saved["optimizer"])
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
