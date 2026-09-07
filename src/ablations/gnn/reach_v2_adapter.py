@@ -12,6 +12,99 @@ from typing import Any, Mapping, Sequence
 from src.eval.bace_frozen_gnn_contracts import atomic_json, read_json, stable_sha256
 
 SCOPE_NAME = 'GINE_GUIDED_PROPOSAL_FIXED_BACKBONE_SENSITIVITY_REACH_V2'
+BACKBONES = ('gine', 'gin', 'gcn', 'gatv2', 'gatedgcn_plus')
+
+
+def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candidates):
+    """Read only completed calibration chunks, never heldout records.
+
+    Each shard declares the same complete native cohort. The union of its
+    committed parent units must equal that cohort exactly before selection.
+    """
+    from src.ablations.gnn.cpu_evaluation import matrix_from_pairs
+    if not isinstance(slots, int) or slots <= 0:
+        raise ValueError('INVALID_CALIBRATION_PARTITION_SIZE')
+    merged = {}
+    for backbone in BACKBONES:
+        native, seen, rows = None, set(), []
+        for index in range(slots):
+            directory = output / backbone / 'calibration' / f'{index:04d}'
+            terminal = read_json(directory / 'terminal.json')
+            expected = dict(scope=SCOPE_NAME, spec_sha256=spec_sha,
+                pool_sha256=pool_sha, backbone=backbone, split='calibration', index=index,
+                state='PARENT_CHUNK_COMPLETE_NOT_CORE_PASS', global_selector_called=False,
+                main_matrix_write=False)
+            if any(terminal.get(key) != value for key, value in expected.items()):
+                raise ValueError('CALIBRATION_SHARD_TERMINAL_CONFLICT')
+            declared = terminal['native_cohort_ids']
+            if declared != sorted(set(declared)) or native is not None and native != declared:
+                raise ValueError('CALIBRATION_NATIVE_COHORT_CONFLICT')
+            native = declared
+            ids = terminal['parent_ids']
+            if len(ids) != len(set(ids)) or seen.intersection(ids) or not set(ids) <= set(native):
+                raise ValueError('CALIBRATION_PARTITION_DUPLICATE_OR_OUTSIDE_COHORT')
+            chunk_rows, checkpoint_parents = [], set()
+            for checkpoint in sorted((directory / 'parents').glob('*.json')):
+                saved = read_json(checkpoint)
+                scientific = saved['science']
+                if (saved.get('scope') != SCOPE_NAME or saved.get('backbone') != backbone
+                        or saved.get('pool_sha256') != pool_sha
+                        or saved.get('science_sha256') != stable_sha256(scientific)):
+                    raise ValueError('CALIBRATION_PARENT_CONTENT_CONFLICT')
+                parent_rows = scientific['pair_rows']
+                actual_ids = {row['parent_id'] for row in parent_rows}
+                if len(actual_ids) != 1 or checkpoint_parents.intersection(actual_ids):
+                    raise ValueError('CALIBRATION_PARENT_CHECKPOINT_DUPLICATE_OR_EMPTY')
+                checkpoint_parents.update(actual_ids)
+                chunk_rows.extend(parent_rows)
+            if checkpoint_parents != set(ids) or len(chunk_rows) != terminal['pair_count']:
+                raise ValueError('CALIBRATION_SHARD_MISSING_OR_EXTRA_PARENT_CHECKPOINT')
+            matrix_from_pairs(ids, candidates, chunk_rows, root=directory, split='calibration')
+            seen.update(ids)
+            rows.extend(chunk_rows)
+        if seen != set(native):
+            raise ValueError('CALIBRATION_PARTITION_OMITS_PARENTS')
+        merged[backbone] = {'parent_ids': native, 'pairs': rows}
+    return merged
+
+
+def merge_and_freeze_calibration(output: Path, *, spec_sha, pool_sha, slots,
+                                 candidates, thresholds, old_orders, solver_seconds=120):
+    """A single complete merge then ten global selectors, not shard top-K."""
+    from src.ablations.gnn.cpu_evaluation import matrix_from_pairs
+    target = output / 'CALIBRATION_FREEZE.json'
+    if target.exists():
+        frozen = read_json(target)
+        require_global_freeze(frozen, pool_sha)
+        if frozen.get('spec_sha256') != spec_sha:
+            raise ValueError('FROZEN_GNN_SPEC_CONFLICT')
+        return frozen
+    complete = collect_calibration_chunks(output, spec_sha=spec_sha, pool_sha=pool_sha,
+                                         slots=slots, candidates=candidates)
+    common = sorted(set.intersection(*(set(complete[name]['parent_ids']) for name in BACKBONES)))
+    if not common or any(not complete[name]['parent_ids'] for name in BACKBONES):
+        raise ValueError('BLOCKED_EMPTY_CALIBRATION_COHORT')
+    expected_roles = {f'{name}/{mode}' for name in BACKBONES for mode in ('native', 'common')}
+    if set(old_orders) != expected_roles:
+        raise ValueError('ALL_TEN_ORIGINAL_CALIBRATION_ORDERS_REQUIRED')
+    selectors = {}
+    for backbone in BACKBONES:
+        for mode in ('native', 'common'):
+            ids = complete[backbone]['parent_ids'] if mode == 'native' else common
+            included = set(ids)
+            rows = [r for r in complete[backbone]['pairs'] if r['parent_id'] in included]
+            matrix = matrix_from_pairs(ids, candidates, rows, root=output, split='calibration')
+            role = f'{backbone}/{mode}'
+            selectors[role] = freeze_backbone_orders(matrix, old_order=old_orders[role],
+                thresholds=thresholds, backbone=backbone, cohort_mode=mode, pool_sha=pool_sha,
+                expected_parent_ids=ids, output=output / backbone / mode / 'reach_selector.json',
+                solver_seconds=solver_seconds)
+    result = dict(scope=SCOPE_NAME, spec_sha256=spec_sha, pool_sha256=pool_sha,
+        test_loaded=False, selectors=selectors, common_calibration_parent_ids=common,
+        scientific_core_complete=False, main_matrix_write=False)
+    require_global_freeze(result, pool_sha)
+    atomic_json(target, result)
+    return result
 
 
 def validate_pool(pool: Sequence[Mapping[str, Any]], freeze: Mapping[str, Any],

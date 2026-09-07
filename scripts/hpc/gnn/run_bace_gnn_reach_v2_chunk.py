@@ -8,7 +8,8 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from src.ablations.gnn.reach_v2_adapter import validate_pool, evaluate_parent_chunk, require_global_freeze, SCOPE_NAME
+from src.ablations.gnn.reach_v2_adapter import (validate_pool, evaluate_parent_chunk,
+    require_global_freeze, merge_and_freeze_calibration, SCOPE_NAME)
 from src.eval.bace_frozen_gnn_contracts import read_json, read_jsonl, sha256_file, atomic_json
 
 
@@ -21,7 +22,11 @@ def main():
     p.add_argument('--index', type=int)
     p.add_argument('--prepare-output-only', action='store_true',
                    help='Seal a fresh result-root binding only; no model inference')
+    p.add_argument('--merge-calibration-only', action='store_true',
+                   help='Merge complete calibration chunks, freeze ten global selectors; no test access')
     args = p.parse_args()
+    if args.merge_calibration_only and (args.prepare_output_only or args.split != 'calibration'):
+        p.error('Calibration merge is a distinct calibration-only compute-node stage')
     if not args.config.is_file() or (not args.prepare_output_only and not os.environ.get('SLURM_JOB_ID')):
         p.error('Existing config and HPC compute-node Slurm job required; no login-node inference')
     if os.environ.get('CUDA_VISIBLE_DEVICES', '') not in ('', '-1'):
@@ -53,6 +58,24 @@ def main():
         return
     if not root_marker.is_file() or read_json(root_marker) != root_binding:
         raise ValueError('V2_EXPLICIT_FRESH_ROOT_PREPARATION_REQUIRED')
+    if args.merge_calibration_only:
+        # These small manifests bind old calibration orders and frozen thresholds;
+        # no checkpoint/model/test payload is opened by the merge entry.
+        old_orders = read_json(spec['old_calibration_orders'])
+        thresholds = read_json(spec['thresholds'])
+        if (sha256_file(spec['old_calibration_orders']) != spec['old_calibration_orders_sha256']
+                or sha256_file(spec['thresholds']) != spec['thresholds_sha256']
+                or old_orders.get('split') != 'calibration' or old_orders.get('test_loaded') is not False):
+            raise ValueError('V2_CALIBRATION_MERGE_INPUT_BINDING_CONFLICT')
+        with (output / 'calibration_merge.lock').open('a+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = merge_and_freeze_calibration(output, spec_sha=root_binding['spec_sha256'],
+                pool_sha=pool_sha, slots=spec['slots']['calibration'], candidates=pool,
+                thresholds=thresholds, old_orders=old_orders['orders'],
+                solver_seconds=spec['solver_seconds_per_k'])
+        print(json.dumps(dict(state='ALL_TEN_V2_SELECTORS_FROZEN_NOT_CORE_PASS',
+            pool_sha256=pool_sha, selector_count=len(result['selectors']), test_loaded=False)))
+        return
     test_freeze = None
     if args.split == 'test':
         test_freeze = read_json(spec['global_selector_freeze'])

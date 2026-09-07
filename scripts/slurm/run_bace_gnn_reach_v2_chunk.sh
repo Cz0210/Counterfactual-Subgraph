@@ -19,4 +19,6 @@ echo "Python: $(command -v python)"
 python --version
 echo "CPU-only new-pool evaluation; no training or temperature fitting"
 # No heuristic inference fallback exists in the frozen scientific evaluator.
+# --merge-calibration-only reuses this CPU entry after all calibration chunks;
+# it freezes ten global orders and does not perform test inference or core audit.
 python -I -B scripts/hpc/gnn/run_bace_gnn_reach_v2_chunk.py --config configs/hpc.yaml "$@"

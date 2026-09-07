@@ -18580,6 +18580,11 @@ engineering retry. Record the temperature driver and the verifier driver separat
   The original seed7 results cannot satisfy this new version's gate. The CPU
   chunk CLI is not a campaign launcher or a declaration of core completion;
   its real spec can only be sealed after the train-side pool freeze exists.
+- A calibration-only merge now checks all expected parent chunks, exact native
+  and common cohort completeness and checkpoint contents before freezing the ten
+  global selectors. `--merge-calibration-only` never reads test payloads. Frozen
+  selection is not a scientific core PASS; heldout evaluation and independent
+  acceptance remain separate stages using the new pool.
 
 ## 2026-09-07: BACE Ours-Reach-v2 train-only candidate repair
 
