@@ -17,6 +17,7 @@ from src.eval.bace_frozen_gnn_contracts import (
 
 SCOPE = "BACE_FIXED_POOL_FROZEN_GIN_V1"
 ORIGINAL_UNIVERSE_SHA = "77fdb9f2243dc05271c7da653c609f39167eaf75aa7cc8c015aaf3d8af8b64ab"
+ORIGINAL_BUNDLE_SHA = "4675937e5b86c1405a6fd14df71d3820847218d311821d86aec939baa92197d8"
 
 
 def with_native_graph_distance(delegate, *, index, current_raw_contract, repo):
@@ -51,7 +52,10 @@ def original_bundle(spec: Mapping[str, Any]):
     """Read the manifest and only subsequently consumed inputs, not all weights."""
     from src.ablations.contracts import canonical_json_sha256
     root = Path(spec["bundle_root"]).resolve(strict=True)
-    manifest = read_json(root / "bundle_manifest.json")
+    expected = spec.get("bundle_manifest_sha256", ORIGINAL_BUNDLE_SHA)
+    if expected != ORIGINAL_BUNDLE_SHA:
+        raise ValueError("ORIGINAL_ACCEPTED_INPUT_BUNDLE_REQUIRED")
+    manifest = _bound_json(root / "bundle_manifest.json", expected)
     if manifest.get("manifest_sha256") != canonical_json_sha256(
             {k: v for k, v in manifest.items() if k != "manifest_sha256"}):
         raise ValueError("ORIGINAL_BUNDLE_SELF_HASH_CHANGED")
@@ -70,6 +74,21 @@ def load_original_pool(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
     if expected != ORIGINAL_UNIVERSE_SHA or entry["sha256"] != expected:
         raise ValueError("OURS_REQUIRES_ORIGINAL66_NOT_REACH_OR_OTHER_PROPOSER")
     return _candidates(root, manifest)
+
+
+def load_original_selector(root, manifest):
+    """Original main B12 chooses among A1-A4; old GNN fixed-winner is not B12."""
+    from src.ablations.gnn.cpu_evaluation import frozen_selector, _input
+    from src.eval.mutagenicity_wnode_selector import VariantConfig, preregistered_variant_configs
+    selector = frozen_selector(root, manifest)
+    config = read_json(_input(root, manifest, "selector_variant_configs_path"))
+    expected = {v.name: asdict(v) for v in preregistered_variant_configs()}
+    if config["variants"] != expected:
+        raise ValueError("ORIGINAL_B12_A1_A4_CONFIG_DRIFT")
+    selector["variants"] = {name: VariantConfig(**values) for name, values in config["variants"].items()}
+    selector["historical_selected_variant_not_adopted"] = selector.pop("variant").name
+    selector["variant_decision_scope"] = "NEW_GIN_FIXED66_CALIBRATION_ONLY"
+    return selector
 
 
 def fixed_source_parents(spec: Mapping[str, Any], split: str, *, test_authorized=False):
@@ -143,7 +162,7 @@ def validate_gin_adoption(spec: Mapping[str, Any]) -> dict[str, Any]:
 def build_runtime(spec: Mapping[str, Any], output: str | Path, *, split="train",
                   test_freeze=None, validate_test_freeze=None):
     """Build one CPU oracle/distance runtime; the caller owns stage/parent commits."""
-    from src.ablations.gnn.cpu_evaluation import _featurizer, _distance, frozen_selector
+    from src.ablations.gnn.cpu_evaluation import _featurizer, _distance
     from src.ablations.gnn.reach_raw_distance_reuse import raw_contract_from_bundle
     from src.ablations.llm.compact_node_cache import install_compact_node_cache
     from src.oracles.gnn_oracle import GNNOracle
@@ -195,7 +214,7 @@ def build_runtime(spec: Mapping[str, Any], output: str | Path, *, split="train",
             split=split, device="cpu", main_matrix_write=False)
         atomic_json(out / "gin_adoption_receipt.json", receipt)
         return dict(oracle=oracle, featurizer=_featurizer(root, manifest), distance=distance,
-            selector=frozen_selector(root, manifest), adoption_receipt=receipt)
+            selector=load_original_selector(root, manifest), adoption_receipt=receipt)
     except BaseException:
         distance.close()
         raise
@@ -211,6 +230,10 @@ def evaluate_parent(parent, candidates, oracle, featurizer, distance, split, *,
         raise ValueError("EXPERIMENT_SPLIT_UNSUPPORTED")
     cache = None
     if parent_prediction is not None:
+        if (parent_prediction.get("checkpoint_id") != oracle.checkpoint_id
+                or parent_prediction.get("backbone") != "gin"
+                or parent_prediction.get("temperature") != oracle.temperature):
+            raise ValueError("PARENT_PREDICTION_CACHE_NOT_BOUND_TO_CURRENT_GIN")
         cache = {parent.parent_id: dict(parent_smiles=parent.smiles,
             pred_before=parent_prediction["predicted_label"], p_before=parent_prediction["probabilities"])}
     pairs, matches = _evaluate_rows([parent], candidates, oracle=oracle, featurizer=featurizer,
@@ -224,9 +247,35 @@ def evaluate_parent(parent, candidates, oracle, featurizer, distance, split, *,
 
 
 def select_calibration(matrix, selector):
-    """Original objective/thresholds and greedy/insertion/swap; no Reach or MIP."""
-    from src.ablations.gnn.cpu_evaluation import select_calibration as original
-    return original(matrix, selector)
+    """Replay the main B12's four variants and its calibration-only decision."""
+    from src.ablations.gnn.cpu_evaluation import select_calibration as original_variant
+    from src.eval.mutagenicity_wnode_selector import (
+        VARIANT_NAMES, build_candidate_chemistry, build_coverage_redundancy_matrix,
+        compute_prefix_metrics, build_variant_comparison_row, choose_variant,
+    )
+    if (matrix.manifest.get("split") != "calibration"
+            or matrix.manifest.get("test_loaded") is not False):
+        raise ValueError("ORIGINAL_B12_VARIANT_DECISION_CALIBRATION_ONLY")
+    if set(selector.get("variants", {})) != set(VARIANT_NAMES):
+        raise ValueError("ORIGINAL_B12_REQUIRES_ALL_FOUR_VARIANTS_NOT_OLD_WINNER")
+    chemistry = build_candidate_chemistry(matrix.candidate_rows, size_normalization_rows=matrix.full_candidate_rows)
+    redundancy = build_coverage_redundancy_matrix(matrix.distances, selector["thresholds"].levels)
+    sequences, traces, comparison = {}, {}, []
+    for name in VARIANT_NAMES:
+        variant = selector["variants"][name]
+        active = dict(selector, variant=variant)
+        sequence, trace = original_variant(matrix, active)
+        metrics, _ = compute_prefix_metrics(sequence, matrix=matrix, thresholds=selector["thresholds"],
+            coverage_redundancy_matrix=redundancy, structural_similarity_matrix=chemistry.structural_similarity)
+        comparison.append(build_variant_comparison_row(variant, metrics, table_k=10, top_k=20,
+            prefix_weights=selector["prefix_weights"], final_objective=trace["objective"]))
+        sequences[name], traces[name] = sequence, trace
+    decision = choose_variant(comparison)
+    return sequences[decision["variant"]], dict(selected_variant=decision["variant"],
+        selected_metrics=decision, variant_comparison=comparison, variant_traces=traces,
+        variant_sequences=sequences, original_b12_a1_a4_replayed=True,
+        historical_selected_variant_adopted=False, test_used=False,
+        original_thresholds_refitted=False, original_selector_input_sha256=selector["input_sha256"])
 
 
 def train_only_timing(spec: Mapping[str, Any], output: str | Path):
