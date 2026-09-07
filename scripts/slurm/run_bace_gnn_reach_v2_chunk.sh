@@ -29,4 +29,8 @@ echo "CPU-only new-pool evaluation; no training or temperature fitting"
 # it freezes ten global orders and does not perform test inference or core audit.
 # --prepare-raw-reuse-only migrates only accepted split-scoped match costs;
 # this is a bounded metadata/chemistry step, not model inference or OT solving.
+# --merge-test-only verifies all own-backbone pair/minimum records and produces
+# the actual v2 tables; --verify-only and --package-only are distinct successors.
+# Test raw-reuse creates the post-freeze dependency receipt without mutating
+# the original execution spec. No GPU or generic campaign controller is added.
 python -I -B scripts/hpc/gnn/run_bace_gnn_reach_v2_chunk.py --config configs/hpc.yaml "$@"

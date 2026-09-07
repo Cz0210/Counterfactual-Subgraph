@@ -4317,3 +4317,7 @@ Mutagenicity roadmaps.
 - [ ] Real resource-gated train canary and full search deployment.
 - [ ] Conditional <=300-update PPO successor if the train-only gate actually fires.
 - [ ] Per-LLM own-pool binding and post-freeze version-aware descriptive evaluation.
+- [x] New-pool GNN complete parent merge, ten calibration freezes, held-out own
+  flip/minimum audit, explicit K10/K20 tables and independent compact packaging.
+- [ ] Real new-pool GNN parent evaluation and accepted result transfer/publication;
+  old corrected seed7 reports remain separately available throughout execution.
