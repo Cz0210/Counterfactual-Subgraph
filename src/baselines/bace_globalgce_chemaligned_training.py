@@ -299,7 +299,9 @@ def run_training(config_path, rematerialization_root, output_root, device, *, re
         atomic_torch(output/'latest.pt', payload)
         # Full semantic payload: optimizer moments, counters, sampler and RNG
         # are as important as the classifier-independent generator weights.
-        reopened = torch.load(output/'latest.pt', map_location=device, weights_only=False)
+        # RNG and sampler byte tensors must remain CPU even for CUDA weights.
+        # load_state_dict transfers parameter/optimizer values appropriately.
+        reopened = torch.load(output/'latest.pt', map_location='cpu', weights_only=False)
         assert_semantic_equal(payload, reopened)
         with (output/'training.jsonl').open('a') as stream:
             stream.write(json.dumps(record)+'\n'); stream.flush(); os.fsync(stream.fileno())
