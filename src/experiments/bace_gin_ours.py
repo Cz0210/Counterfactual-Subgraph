@@ -211,6 +211,7 @@ def build_runtime(spec: Mapping[str, Any], output: str | Path, *, split="train",
             distance = with_native_graph_distance(distance, index=index,
                 current_raw_contract=raw_contract_from_bundle(manifest), repo=Path(__file__).resolve().parents[2])
         receipt = dict(adopted, loaded_model_eval=True, loaded_trainable_parameters=0,
+            total_parameters=sum(p.numel() for p in oracle.model.parameters()),
             split=split, device="cpu", main_matrix_write=False)
         atomic_json(out / "gin_adoption_receipt.json", receipt)
         return dict(oracle=oracle, featurizer=_featurizer(root, manifest), distance=distance,

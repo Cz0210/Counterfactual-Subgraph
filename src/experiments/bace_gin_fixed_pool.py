@@ -101,12 +101,15 @@ def plan(spec: Mapping[str, Any]) -> dict:
     bundle = threshold_bundle_from_dict(thresholds)
     if bundle.theta_star != 0.008413518173529859 or bundle.cost_cap != 0.02956508038627219:
         raise ValueError("ORIGINAL_BACE_THRESHOLD_CONTRACT_CHANGED")
-    from src.experiments.bace_gin_ours import fixed_source_parents
+    from src.experiments.bace_gin_ours import fixed_source_parents, validate_gin_adoption, original_bundle
+    adopted = validate_gin_adoption(spec)
+    _, original = original_bundle(spec)
     parents = fixed_source_parents(spec, "calibration")
     ids = [p.parent_id for p in parents]
     contract = {"experiment_id": EXPERIMENT, "state": "PLANNED", "spec_sha256": stable_sha256(spec),
         "calibration_parent_ids": ids, "calibration_parent_ids_sha256": stable_sha256(ids),
-        "test_manifest_binding": spec.get("base_test_manifest_binding"),
+        "test_manifest_binding": {"relative_path":original["splits"]["test"],
+            **original["files"][original["splits"]["test"]]},
         "test_payload_opened": False, "base_counts": spec["base_counts"],
         "thresholds": thresholds, "pools": manifests,
         "scope": "POST_HOC_FIXED_POOL_CROSS_CLASSIFIER_COMPARISON",
@@ -119,6 +122,7 @@ def plan(spec: Mapping[str, Any]) -> dict:
             raise ValueError("FRESH_ROOT_REQUIRED_FOR_CHANGED_SPEC")
         return old
     atomic_json(path, contract)
+    atomic_json(root / "manifests" / "oracle_contract.json", adopted)
     atomic_json(root / "manifests" / "candidate_pool_manifest.json", manifests)
     atomic_json(root / "manifests" / "cohort_manifest.json", {k: contract[k] for k in (
         "calibration_parent_ids", "calibration_parent_ids_sha256", "base_counts", "test_payload_opened")})
