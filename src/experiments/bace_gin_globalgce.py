@@ -261,7 +261,8 @@ def adoption_manifest(summary, recovery, binding, terminal, catalog, *, referenc
                    'Complete-product chemistry exists; fresh fixed-GIN calibration is still required.'),
         'original_model_checkpoint': model, 'original_rules_checkpoint': rules,
         'source_host': 'autodl-a800',
-        'original_catalog': recovery['candidate_universe'],
+        'original_catalog': recovery['decoded_valid_rules_all'],
+        'historical_selected20_catalog_not_adopted': recovery['candidate_universe'],
         'mining_identity': summary['gspan_exact_top_k_proof']['selected_identity_sha256'],
         'atom_symbols': [vocab['node_label_mapping'][str(i)] for i in range(1, len(vocab['node_label_mapping']))],
         'bond_names': [vocab['edge_label_mapping'][str(i)] for i in range(len(vocab['edge_label_mapping']))],
@@ -299,8 +300,11 @@ def seal_manifest(rematerialization_root: str, output_root: str):
     summary_path = Path(binding['training_summary'])
     summary = read('training_summary', summary_path)
     recovery = read('recovery_receipt', summary_path.parent/'recovery_receipt.json')
-    raw = Path(recovery['candidate_universe']['path']).read_bytes()
-    if len(raw) != recovery['candidate_universe']['size'] or hashlib.sha256(raw).hexdigest() != recovery['candidate_universe']['sha256']:
+    # candidate_universe/native_rule_catalog is the historical selected20 leaf;
+    # decoded_valid_rules_all is the actual immutable 80-output source inventory.
+    catalog_ref = recovery['decoded_valid_rules_all']
+    raw = Path(catalog_ref['path']).read_bytes()
+    if len(raw) != catalog_ref['size'] or hashlib.sha256(raw).hexdigest() != catalog_ref['sha256']:
         raise ValueError('small original catalog hash binding')
     catalog = [json.loads(line) for line in raw.splitlines() if line]
     manifest = adoption_manifest(summary, recovery, binding, terminal, catalog, references=references)

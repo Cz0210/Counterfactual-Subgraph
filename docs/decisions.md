@@ -18878,3 +18878,6 @@ resume uses the original260 immutable pair chunks and starts at chunk260.
   manifest; they do not repeat training, model/OT evaluation, or large-package
   hashing, and do not write the main matrix. Runtime adapter access requires the
   original source identities and remains separate from common GIN evaluation.
+- The recovery receipt's `candidate_universe` is the historical selected20
+  catalog, not all80. Scheme A binds `decoded_valid_rules_all` for the complete
+  original80 identity inventory and explicitly does not adopt the selected20 leaf.

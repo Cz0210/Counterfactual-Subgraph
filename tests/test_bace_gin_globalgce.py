@@ -14,7 +14,8 @@ def evidence():
         'codec_metadata': {'node_label_mapping': {'0': 'padding', '1': 'C'},
                            'edge_label_mapping': {'0': 'no_edge', '1': 'single'}}}
     recovery = {'test_loaded': False, 'source_model_checkpoint': model,
-                'source_rules_checkpoint': rules, 'candidate_universe': {'path': '/original/pool.jsonl'}}
+                'source_rules_checkpoint': rules, 'candidate_universe': {'path': '/original/selected20.jsonl'},
+                'decoded_valid_rules_all': {'path': '/original/all80.jsonl'}}
     binding = {'model_retrained': False, 'mining_reused': True, 'source_model': model['path'],
         'source_rules': rules['path'], 'rule_count': 80,
         'train_ids': ['t'+str(i) for i in range(360)],
@@ -42,6 +43,8 @@ class ManifestTests(unittest.TestCase):
         self.assertFalse(value['zero_coverage_claimed'])
         self.assertEqual(value['train_validation_funnels']['train']['mapping_count'], 120289)
         self.assertFalse(value['train_validation_funnels']['train']['old_oracle_flip_counts_adopted'])
+        self.assertEqual(value['original_catalog']['path'], '/original/all80.jsonl')
+        self.assertEqual(value['historical_selected20_catalog_not_adopted']['path'], '/original/selected20.jsonl')
 
     def test_repair_weight_rejected(self):
         args = evidence(); args[1]['source_model_checkpoint']['sha256'] = 'repair'
