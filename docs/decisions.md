@@ -18555,3 +18555,18 @@ engineering retry. Record the temperature driver and the verifier driver separat
 - The owning native canary forwards a resource-stop SIGTERM only to its newly
   created deterministic child and waits for exit before releasing the GPU lease.
   No process-group signals or forced kill are used.
+# 2026-09-07: AIDS native-pool RF alignment (reach-repair-v2)
+
+The explicit reach-repair task authorizes an AIDS-only, GNN-proposed/RF-validated
+adaptation. The existing 1283 AIDS/HIV source rows remain the denominator and are
+not relabelled as unseen held-out data. Existing selected actions, predecessor
+ordering, candidate graph hashes, and the frozen RF class mapping own identity.
+The new screening entrypoint replays recorded native graph edits, checks every
+transition and candidate identity, rejects invalid/disconnected chemistry, and
+scores each unique chemical graph once with the frozen RF. It does not search,
+fit a model, generate OT distances, or adopt previous DBSCAN labels. Missing
+replay provenance remains EVIDENCE_INSUFFICIENT, never a fabricated action.
+Bounded 500-candidate atomic segments permit CPU-only resumption. A paired intel
+Slurm wrapper intentionally overrides the repository's generic GPU template
+under this task's explicit CPU authorization. New recourse dispatch must inspect
+the resulting RF0 universe before allocating pair-store and exact DBSCAN work.

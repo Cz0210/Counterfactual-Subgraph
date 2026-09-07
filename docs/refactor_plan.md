@@ -4308,3 +4308,10 @@ Mutagenicity roadmaps.
   observations, a reused single-LLM slot, non-leaking descendants and immutable
   corrected-GNN acceptance reuse. Keep one-shot execution behind the existing
   outer queue; a live queue/GPU admission remains a deployment requirement.
+# 2026-09-07 bounded AIDS RF-aligned screening
+
+- Added the dataset-specific `repair_aids_rf_aligned.py` CPU entrypoint and its
+  paired Slurm wrapper. It reuses native graph action replay and chemical decode.
+- Screening segments freeze full candidate accounting and RF predictions before
+  any new common-recourse universe is admitted. The following recourse adapter
+  remains a separate stage; screening alone is not a complete repaired result.
