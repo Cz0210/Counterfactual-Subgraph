@@ -248,3 +248,94 @@ def complete_release(config, *, recourse_root: Path, output_root: Path):
     independent = validate_release(release, require_writer_audit=False)
     atomic_json(release / 'repair_scientific_audit.json', {**independent, 'audit_passed': True, 'independent_external_publisher_reopen_required': True, 'matrix_written': False})
     return receipt
+
+
+def predecessor_state(recourse_root: Path, owner_terminal: Path):
+    """No submitted/running/exit-zero-only state qualifies as native science."""
+    if not owner_terminal.exists():
+        return 'WAITING_NATIVE_OWNER'
+    terminal = json.loads(owner_terminal.read_text())
+    if terminal.get('returncode') != 0:
+        return 'BLOCKED_NATIVE_OWNER_FAILED'
+    native_path = recourse_root / 'terminal.json'
+    if not native_path.exists():
+        return 'BLOCKED_NATIVE_SCIENCE_INCOMPLETE'
+    native = json.loads(native_path.read_text())
+    return ('READY' if native.get('state') == 'RF_ALIGNED_NATIVE_SUMMARY_COMPLETE'
+            and native.get('old_cluster_labels_reused') is False else 'BLOCKED_NATIVE_SCIENCE_INCOMPLETE')
+
+
+def wait_and_release(config, *, recourse_root: Path, output_root: Path):
+    """One AIDS stage successor, using the existing science/resource interfaces."""
+    import fcntl
+    import os
+    import time
+    from .rf_aligned_recourse import runtime_resource_gate
+    output_root.mkdir(parents=True, exist_ok=True)
+    with (output_root / 'release_owner.lock').open('a+') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        while True:
+            state = predecessor_state(recourse_root, Path(config['predecessor_owner_terminal']))
+            atomic_json(output_root / 'release_heartbeat.json', {'state': state, 'pid': os.getpid(), 'sampled_at_unix': time.time(), 'recourse_root': str(recourse_root), 'GPU_requested': False})
+            if state.startswith('BLOCKED_'):
+                atomic_json(output_root / 'release_terminal.json', {'state': state, 'new_clustering_started': False, 'matrix_written': False})
+                return {'state': state}
+            if state == 'READY':
+                # A terminal filename alone is not a released single-writer
+                # boundary. The previous CPU lease must actually be available.
+                with (recourse_root / 'writer.lock').open('a+') as predecessor:
+                    try:
+                        fcntl.flock(predecessor.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        time.sleep(60)
+                        continue
+                    fcntl.flock(predecessor.fileno(), fcntl.LOCK_UN)
+                runtime_resource_gate(config, output_root, 'NATIVE_SUMMARY_SHARED_EVALUATION')
+                break
+            time.sleep(60)
+        import threading
+        stop = threading.Event()
+        def heartbeat():
+            while not stop.is_set():
+                atomic_json(output_root / 'release_heartbeat.json', {'state': 'SHARED_RF_WNODE_EVALUATION', 'pid': os.getpid(), 'sampled_at_unix': time.time(), 'GPU_requested': False})
+                stop.wait(60)
+        monitor = threading.Thread(target=heartbeat, daemon=True)
+        monitor.start()
+        try:
+            result = complete_release(config, recourse_root=recourse_root, output_root=output_root)
+            runtime_resource_gate(config, output_root, 'FINAL_INDEPENDENT_PUBLICATION')
+            published = publish_release(config, output_root=output_root) if config.get('publish_corrective_version') else None
+            atomic_json(output_root / 'release_terminal.json', {'state': 'SHARED_RF_WNODE_RELEASE_PUBLISHED' if published else 'SHARED_RF_WNODE_RELEASE_COMPLETE', 'release_root': str(output_root / 'release'), 'matrix_written': published is not None, 'publication': published, 'audit_path': str(output_root / 'release/repair_scientific_audit.json')})
+            return result
+        except Exception as exc:
+            atomic_json(output_root / 'release_terminal.json', {'state': 'FAILED_RELEASE_STAGE', 'error_type': type(exc).__name__, 'error': str(exc), 'source_artifacts_preserved': True, 'automatic_science_retry': False})
+            raise
+        finally:
+            stop.set()
+            monitor.join(timeout=5)
+
+
+def publish_release(config, *, output_root: Path):
+    """Call the original authority once, with at most one fresh stale-CAS retry."""
+    import subprocess
+    import uuid
+    from src.eval.fast16_matrix_authority_pointer import read_authority_pointer
+    authority = config['matrix_publication']
+    worktree = Path(authority['worktree'])
+    actual = subprocess.check_output(['git', '-C', str(worktree), 'rev-parse', 'HEAD'], text=True).strip()
+    if actual != authority['execution_commit']:
+        raise ValueError('Publisher execution identity changed')
+    for attempt in (1, 2):
+        before = read_authority_pointer(state_path=authority['state_path'], lock_path=authority['lock_path'], initial_authority_root=None)
+        prior = {'root': before['latest_authority_root'], 'matrix_sha256': before['latest_matrix_status_sha256'], 'complete': before['latest_count']}
+        destination = Path(authority['output_parent']) / ('aids-rfaligned-' + str(uuid.uuid4()))
+        command = [sys.executable, '-I', '-B', str(worktree / 'scripts/autodl/append_non_taste_matrix_authority.py'), '--dataset', 'AIDS', '--method', 'ComRecGC', '--cell-terminal-root', str(output_root / 'release'), '--output-root', str(destination), '--supersede-existing', '--expected-prior-authority-root', prior['root'], '--expected-prior-matrix-sha256', prior['matrix_sha256'], '--authority-state-path', authority['state_path'], '--authority-lock-path', authority['lock_path']]
+        atomic_json(output_root / f'publication_dispatch_{attempt}.json', {'argv': command, 'expected_prior_complete': prior['complete'], 'operation': 'SAME_CELL_VERSION_SUPERSESSION'})
+        result = subprocess.run(command, cwd=worktree, text=True, capture_output=True)
+        log = output_root / f'publication_attempt_{attempt}.log'
+        log.write_text(result.stdout + result.stderr)
+        if result.returncode == 0:
+            return {'state': 'PUBLISHED', 'authority_root': str(destination), 'count_before': prior['complete'], 'count_changed': False, 'dispatch': str(output_root / f'publication_dispatch_{attempt}.json')}
+        if 'STALE_SUPERSESSION_CAS' not in result.stderr or attempt == 2:
+            raise RuntimeError(f'Original authority refused corrective publication; see {log}')
+    raise AssertionError('Unreachable publication state')

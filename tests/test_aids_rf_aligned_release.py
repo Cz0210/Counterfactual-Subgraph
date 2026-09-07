@@ -9,6 +9,35 @@ from src.baselines.comrecgc.slot_evaluation import load_official_slots, build_in
 
 
 class TestNativeSummaryRelease(unittest.TestCase):
+    def test_publisher_uses_real_pointer_schema_and_original_cli(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from src.baselines.comrecgc.rf_aligned_release import publish_release
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = {'matrix_publication': {'worktree': str(root), 'execution_commit': 'code', 'state_path': str(root / 'state.json'), 'lock_path': str(root / 'publish.lock'), 'output_parent': str(root / 'versions')}}
+            pointer = {'latest_authority_root': str(root / 'old'), 'latest_matrix_status_sha256': 'sha', 'latest_count': 13}
+            with patch('src.eval.fast16_matrix_authority_pointer.read_authority_pointer', return_value=pointer) as read, patch('subprocess.check_output', return_value='code\n'), patch('subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='', stderr='')) as run:
+                result = publish_release(config, output_root=root)
+            self.assertEqual(result['count_before'], 13)
+            self.assertFalse(result['count_changed'])
+            self.assertIsNone(read.call_args.kwargs['initial_authority_root'])
+            self.assertIn('--supersede-existing', run.call_args.args[0])
+            self.assertIn('sha', run.call_args.args[0])
+
+    def test_predecessor_requires_real_native_terminal_and_owner_exit(self):
+        from src.baselines.comrecgc.rf_aligned_release import predecessor_state
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            owner = root / 'owner.json'
+            self.assertEqual(predecessor_state(root, owner), 'WAITING_NATIVE_OWNER')
+            atomic_json(owner, {'returncode': 0})
+            self.assertEqual(predecessor_state(root, owner), 'BLOCKED_NATIVE_SCIENCE_INCOMPLETE')
+            atomic_json(root / 'terminal.json', {'state': 'RF_ALIGNED_NATIVE_SUMMARY_COMPLETE', 'old_cluster_labels_reused': False})
+            self.assertEqual(predecessor_state(root, owner), 'READY')
+            atomic_json(owner, {'returncode': 1})
+            self.assertEqual(predecessor_state(root, owner), 'BLOCKED_NATIVE_OWNER_FAILED')
+
     def test_actual_action_chain_cannot_omit_or_invent_transition(self):
         import copy
         from src.baselines.comrecgc.rf_aligned_release import validate_lineage_records

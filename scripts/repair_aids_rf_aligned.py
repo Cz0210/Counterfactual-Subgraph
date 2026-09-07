@@ -10,7 +10,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Project config, recorded only; no inference fallback")
     parser.add_argument("--run-manifest", required=True)
-    parser.add_argument("--action", choices=["screen-pool", "repair-gaps", "recourse", "freeze-summary", "evaluate", "release", "status"], required=True)
+    parser.add_argument("--action", choices=["screen-pool", "repair-gaps", "recourse", "freeze-summary", "evaluate", "release", "release-after-recourse", "status"], required=True)
     parser.add_argument("--pool-root")
     parser.add_argument("--output-root", required=True)
     args = parser.parse_args()
@@ -22,6 +22,11 @@ def main():
             candidates = [p for p in candidates if p.exists()]
             path = max(candidates, key=lambda p: p.stat().st_mtime) if candidates else path
         print(path.read_text() if path.exists() else json.dumps({"state": "NOT_STARTED"}))
+    elif args.action == 'release-after-recourse':
+        from src.baselines.comrecgc.rf_aligned_release import wait_and_release
+        if not args.pool_root:
+            parser.error('--pool-root must identify the existing native recourse root')
+        print(json.dumps(wait_and_release(json.loads(Path(args.run_manifest).read_text()), recourse_root=Path(args.pool_root), output_root=root), sort_keys=True))
     elif args.action in ('freeze-summary', 'evaluate', 'release'):
         from src.baselines.comrecgc.rf_aligned_release import freeze_summary, evaluate_frozen_summary, complete_release
         if not args.pool_root:

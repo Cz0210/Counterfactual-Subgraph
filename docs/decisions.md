@@ -18633,3 +18633,13 @@ source/value verification. The original conditional and capped costs remain.
 BACE corrective1..20 availability is allowed only for its explicitly named
 AT_MOST_K ChemAligned version plus existing independent source/audit closure;
 zero is not promoted without a separate complete scientific-zero contract.
+# 2026-09-07 — AIDS native summary's actual corrective successor
+
+The dataset-specific repair CLI now has `release-after-recourse`: it waits for
+the existing CPU owner terminal and released writer boundary, then uses the
+unchanged shared RF/MolCLR-WNode evaluator, native summary freeze, full gate,
+and original-authority same-cell CAS publisher. Actual selected action chains
+are saved after bounded replay of only selected recourses. Missing, inferred,
+or cross-parent transitions block publication. Historical trace and old matrix
+versions remain immutable. BACE's separate frozen-selector grid driver commits
+are integrated only into this future driver, never into active science trees.
