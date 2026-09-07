@@ -271,7 +271,9 @@ def run_train(output: Path, *, device: str, boundary_check=lambda: None, canary_
         else:
             before = predict_smiles(oracle, features, [parent.smiles], "train")[0]
             pairs, matches = evaluate_pairs([parent], old, oracle=oracle, featurizer=features,
-                distance_provider=distance, split="train", oracle_checkpoint_id=contract["oracle_binding"])
+                distance_provider=distance, split="train", oracle_checkpoint_id=contract["oracle_binding"],
+                parent_prediction_cache={parent.parent_id: {"parent_smiles": parent.smiles,
+                    "p_before": before["probabilities"], "pred_before": before["predicted_label"]}})
             covered = any(r["pair_strict_flip"] for r in pairs)
             state = None
             if int(before["predicted_label"]) == contract["source_label"] and not covered:
@@ -281,6 +283,9 @@ def run_train(output: Path, *, device: str, boundary_check=lambda: None, canary_
                     maximum_new_queries=budget.initial_queries_per_parent)
             saved = seal(file, {"search_contract_sha256": contract["self_sha256"], "parent_id": parent.parent_id,
                 "before": before, "old_pool_pairs": pairs, "old_pool_matches": matches,
+                "old_pool_classifier_graph_evaluations": 1 + sum(m["delete_valid"] for m in matches),
+                "old_pool_ot_requests": sum(m["teacher_strict_flip"] for m in matches),
+                "old_pool_ot_cache_hits": sum(m.get("distance_cache_hit", False) for m in matches),
                 "old_pool_covered": covered, "search": state, "test_opened": False, "calibration_opened": False})
         all_pairs.extend(saved["old_pool_pairs"])
         if saved["search"]:
@@ -320,6 +325,9 @@ def run_train(output: Path, *, device: str, boundary_check=lambda: None, canary_
         "search_contract_sha256": contract["self_sha256"], "proposal_source": contract["proposal_source"],
         "candidate_universe_sha256": sha256_file(output / "candidate_universe.jsonl"), "candidate_count": len(pool),
         "old_candidate_count": len(old), "train_parent_count": len(parents), "extra_parent_ids": extra_ids,
+        "old_pool_diagnostic_classifier_graph_evaluations": len(parents) + sum(p["num_valid_residuals"] for p in all_pairs),
+        "old_pool_diagnostic_ot_requests": sum(p["num_strict_flip_matches"] for p in all_pairs),
+        "old_pool_diagnostic_calls_are_separate_from_new_search_budget": True,
         "new_graph_oracle_queries": sum(s["new_graph_oracle_queries"] for s in states),
         "actual_query_budget_exceeded": any(s["new_graph_oracle_queries"] > (512 if s["parent_id"] in extra_ids else 128) for s in states),
         "calibration_opened_during_search": False, "test_opened": False,
