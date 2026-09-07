@@ -105,3 +105,21 @@ def test_slurm_cpu_and_no_gpu():
     assert "export CUDA_VISIBLE_DEVICES=" in script
     assert "--config configs/hpc.yaml" in script
     assert script.index("source ~/.bashrc") < script.index("set -u")
+
+
+def test_native_graph_pair_reuses_raw_cost_without_fake_delete_key(monkeypatch, tmp_path):
+    from src.ablations.gnn import reach_raw_distance_reuse as raw
+    def init(self, delegate, *, index, **kwargs):
+        self.delegate, self.index, self.used, self.fresh, self.local = delegate, index, [], 0, {}
+    monkeypatch.setattr(raw.VerifiedRawGraphDistance, "__init__", init)
+    monkeypatch.setattr(raw, "graph_key", lambda p, c, h: (p + ":" + c, p, c))
+    delegate = SimpleNamespace(distance=lambda p, c: {"ok": True, "distance": .7, "cache_hit": False})
+    index = {"self_sha256": "index", "raw_contract_sha256": "contract",
+        "graph_costs": {"CC:CO": {"distance": .4, "source_records": ["actual-native-or-deletion-pair"]}}}
+    provider = module.with_native_graph_distance(delegate, index=index, current_raw_contract={}, repo=tmp_path)
+    assert provider.distance("CC", "CO")["distance"] == .4
+    assert "current_action_context" not in provider.used[0]
+    assert provider.distance("CC", "CN")["distance"] == .7
+    assert provider.fresh == 1
+    provider.distance("CC", "CN")
+    assert provider.fresh == 1
