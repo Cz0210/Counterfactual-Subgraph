@@ -243,6 +243,8 @@ def evaluate_parent(parent, candidates, oracle, featurizer, distance, split, *,
         raise ValueError("STRICT_FLIP_RAW_DISTANCE_FAILURE_NOT_ZERO_COVERAGE")
     if len(pairs) != len(candidates):
         raise ValueError("ORIGINAL_POOL_PAIR_COVERAGE_INCOMPLETE")
+    for row in (*pairs, *matches):
+        row.update(split=split, oracle_backbone="gin", oracle_temperature=oracle.temperature)
     return pairs, matches
 
 

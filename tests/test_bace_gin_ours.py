@@ -47,6 +47,7 @@ def test_evaluate_parent_does_not_drop_gin_predicted_zero(monkeypatch):
         "calibration", parent_prediction={"predicted_label": 0, "probabilities": [.9, .1],
             "checkpoint_id": "new-gin", "backbone": "gin", "temperature": 1.1})
     assert len(pairs) == 1 and pairs[0]["pred_before"] == 0
+    assert pairs[0]["split"] == "calibration" and pairs[0]["oracle_temperature"] == 1.1
     assert seen["oracle_checkpoint_id"] == "new-gin"
     assert seen["parent_prediction_cache"]["base1"]["pred_before"] == 0
 
