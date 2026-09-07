@@ -235,7 +235,7 @@ def run_cluster_only(config, *, recourse_root: Path, evidence_root: Path):
     atomic_json(evidence_root / "phase_memory_plan.json", plan)
     require_start_admission(config, plan, evidence_root)
     contract = ExternalDBSCANContract(eps=.02, min_samples=3, query_block_size=8,
-        checkpoint_interval_blocks=1, max_rss_bytes=14*GIB-128*1024**2,
+        checkpoint_interval_blocks=64, max_rss_bytes=14*GIB-128*1024**2,
         expected_sklearn_version=config["expected_sklearn_version"],
         shortcut_mode=ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
         shortcut_query_block_size=1024, exact_fallback_max_samples=100000)

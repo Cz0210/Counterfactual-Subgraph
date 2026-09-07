@@ -18,7 +18,7 @@ from .rf_aligned_cluster_phase import sealed_pairs, phase_memory_plan, resource_
 
 
 def child_env(worktree, scratch=None):
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONPATH=str(worktree),
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONPATH=str(worktree), PYTHONDONTWRITEBYTECODE="1",
                 OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
                 NUMEXPR_NUM_THREADS="1", TOKENIZERS_PARALLELISM="false")
     if scratch is not None:

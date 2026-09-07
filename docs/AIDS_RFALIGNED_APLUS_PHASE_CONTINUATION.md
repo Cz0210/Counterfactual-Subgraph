@@ -26,6 +26,8 @@ the historical 91,916,686 GNN pair universe.
 
 One CPU worker, OMP/MKL/OpenBLAS/NumExpr threads1, no CUDA visibility. The
 engine's resource block ceiling is1024 query rows, versus the old65536 default;
+64 blocks are committed together, retaining the old maximum65536-row durable
+boundary instead of introducing36,000 growing-ledger fsyncs per scan;
 scientific values/order are not changed. Existing focused exact tests cover
 resource-block independence, core/border/components and resume.
 
