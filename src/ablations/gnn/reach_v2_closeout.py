@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 import tarfile
 
-from src.ablations.gnn.reach_v2_adapter import BACKBONES, SCOPE_NAME, require_global_freeze
+from src.ablations.gnn.reach_v2_adapter import BACKBONES, SCOPE_NAME, require_global_freeze, split_chunk_size
 from src.eval.bace_frozen_gnn_contracts import atomic_csv, atomic_json, read_json, sha256_file, stable_sha256
 
 AUDIT_NAME = 'gnn_reach_v2_final_audit.json'
@@ -154,7 +154,7 @@ def collect_test_chunks(spec, *, spec_sha, pool_sha, candidates):
             if declared != sorted(set(declared)) or native is not None and native != declared:
                 raise ValueError('V2_TEST_NATIVE_COHORT_CONFLICT')
             native = declared
-            expected_ids = stable_partition(native, chunk_size=spec['chunk_size'], slots=spec['slots']['test'])[index]
+            expected_ids = stable_partition(native, chunk_size=split_chunk_size(spec,'test'), slots=spec['slots']['test'])[index]
             ids = terminal['parent_ids']
             if ids != expected_ids or seen.intersection(ids):
                 raise ValueError('V2_TEST_PARENT_PARTITION_CONFLICT')

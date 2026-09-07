@@ -18666,3 +18666,7 @@ engineering retry. Record the temperature driver and the verifier driver separat
   selectors and resource admission. Unit tests and raw-cost-index preparation
   cannot claim completed new-pool sensitivity. Per-parent resume boundaries and
   measured RSS/bytes/time support safe exact CPU stage sizing.
+- Split-specific bounded parent chunk sizes may be sealed before execution:
+  calibration can use one full new-pool parent for resource measurement while
+  held-out chunks contain up to 16 parents of the frozen native/common rule
+  union. This changes only partition granularity, not parents, rules or order.

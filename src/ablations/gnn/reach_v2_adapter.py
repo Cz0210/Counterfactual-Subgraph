@@ -15,6 +15,13 @@ SCOPE_NAME = 'GINE_GUIDED_PROPOSAL_FIXED_BACKBONE_SENSITIVITY_REACH_V2'
 BACKBONES = ('gine', 'gin', 'gcn', 'gatv2', 'gatedgcn_plus')
 
 
+def split_chunk_size(spec, split):
+    value=spec.get('chunk_size_by_split', {}).get(split, spec['chunk_size'])
+    if type(value) is not int or not 1 <= value <= 32:
+        raise ValueError('INVALID_BOUNDED_PARENT_CHUNK_SIZE')
+    return value
+
+
 def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candidates,
                                model_files=None, chunk_size=None):
     """Read only completed calibration chunks, never heldout records.

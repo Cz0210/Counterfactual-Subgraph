@@ -98,6 +98,13 @@ def fixture(base, *, empty_common=False):
 
 
 class CloseoutTests(unittest.TestCase):
+    def test_full_pool_probe_and_selected_test_chunks_keep_separate_sizes(self):
+        from src.ablations.gnn.reach_v2_adapter import split_chunk_size
+        spec=dict(chunk_size=1,chunk_size_by_split=dict(calibration=1,test=16))
+        self.assertEqual(split_chunk_size(spec,'calibration'),1)
+        self.assertEqual(split_chunk_size(spec,'test'),16)
+        spec['chunk_size_by_split']['test']=33
+        with self.assertRaises(ValueError):split_chunk_size(spec,'test')
     def test_own_match_minimum_and_funnel(self):
         data=science()
         self.assertEqual(close.verify_own_match_minima(data,candidate_ids=[f'r{i}' for i in range(20)],model_sha='gine-weight'),2)

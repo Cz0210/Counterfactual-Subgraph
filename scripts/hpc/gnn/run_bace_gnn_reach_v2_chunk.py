@@ -11,7 +11,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from src.ablations.gnn.reach_v2_adapter import (validate_pool, evaluate_parent_chunk,
-    require_global_freeze, merge_and_freeze_calibration, SCOPE_NAME)
+    require_global_freeze, merge_and_freeze_calibration, split_chunk_size, SCOPE_NAME)
 from src.eval.bace_frozen_gnn_contracts import read_json, read_jsonl, sha256_file, atomic_json
 
 
@@ -57,6 +57,7 @@ def main():
         raise ValueError('New-pool sensitivity cannot train, refit, or publish main cells')
     if not 1 <= int(spec['chunk_size']) <= 32 or not 1 <= int(spec['cpu_threads']) <= 8:
         raise ValueError('CPU parent chunk resource bound')
+    chunk_size=split_chunk_size(spec,args.split)
     if args.prepare_raw_reuse_only:
         from src.ablations.gnn.reach_raw_distance_reuse import build_index
         kwargs = {}
@@ -117,7 +118,7 @@ def main():
                 pool_sha=pool_sha, slots=spec['slots']['calibration'], candidates=pool,
                 thresholds=thresholds, old_orders=old_orders['orders'],
                 solver_seconds=spec['solver_seconds_per_k'],
-                model_files=spec['model_files'], chunk_size=spec['chunk_size'])
+                model_files=spec['model_files'], chunk_size=chunk_size)
         print(json.dumps(dict(state='ALL_TEN_V2_SELECTORS_FROZEN_NOT_CORE_PASS',
             pool_sha256=pool_sha, selector_count=len(result['selectors']), test_loaded=False)))
         return
@@ -163,9 +164,9 @@ def main():
     index = args.index if args.index is not None else int(os.environ['SLURM_ARRAY_TASK_ID'])
     if index < 0 or index >= spec['slots'][args.split]:
         raise ValueError('Chunk index outside sealed array')
-    if spec['slots'][args.split] * spec['chunk_size'] < len(cohort):
+    if spec['slots'][args.split] * chunk_size < len(cohort):
         raise ValueError('Array omits source parents')
-    chosen = cohort[index * spec['chunk_size']:(index + 1) * spec['chunk_size']]
+    chosen = cohort[index * chunk_size:(index + 1) * chunk_size]
     if args.split == 'test':
         chosen_ids = set()
         for mode in ('native', 'common'):

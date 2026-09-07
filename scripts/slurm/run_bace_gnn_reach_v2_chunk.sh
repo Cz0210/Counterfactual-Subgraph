@@ -33,4 +33,5 @@ echo "CPU-only new-pool evaluation; no training or temperature fitting"
 # the actual v2 tables; --verify-only and --package-only are distinct successors.
 # Test raw-reuse creates the post-freeze dependency receipt without mutating
 # the original execution spec. No GPU or generic campaign controller is added.
+# Optional chunk_size_by_split is read only from that sealed execution spec.
 python -I -B scripts/hpc/gnn/run_bace_gnn_reach_v2_chunk.py --config configs/hpc.yaml "$@"
