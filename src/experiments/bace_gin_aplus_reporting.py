@@ -40,7 +40,54 @@ def reach_diagnostics(progress):
     return result
 
 
-def prepare(aplus_root, spec_path, v1_source, v1_spec_path, output, *, progress_path, funnel_root=None):
+def completed_global(results_root, spec_path, ours_spec):
+    """Optional future Global result; only the final bound receipt opens metrics.
+
+    The portable results root must include its existing training_contract.json
+    alongside final_audit.json, selection_freeze.json and metrics.json. These
+    are small copies, not model weights or historical test inputs.
+    """
+    root=Path(results_root);spec_path=Path(spec_path)
+    if not (root/'final_audit.json').is_file():
+        return None,dict(state='PENDING',reason='NO_FINAL_GLOBAL_AUDIT',results_root=str(root))
+    audit=json.loads((root/'final_audit.json').read_text())
+    spec=json.loads(spec_path.read_text())
+    if (audit.get('state')!='APLUS_GLOBALGCE_EVALUATION_COMPLETE'
+        or audit.get('saved_record_result_consistency')!='PASS'
+        or audit.get('spec_sha256')!=stable_sha256(spec)
+        or audit.get('fixed_test_parent_count')!=141
+        or audit.get('main_matrix_write') is not False
+        or audit.get('oracle_reexecuted_by_this_audit') is not False
+        or audit.get('ot_recomputed_by_this_audit') is not False
+        or spec.get('main_matrix_write') is not False
+        or spec.get('base_counts')!={'calibration':66,'test':141}
+        or spec['thresholds']['sha256']!=ours_spec['thresholds']['sha256']):
+        raise ValueError('GLOBAL_FINAL_AUDIT_OR_COMMON_CONTRACT_CONFLICT')
+    config=json.loads((root/'training_contract.json').read_text())
+    if (sha256_file(root/'training_contract.json')!=spec['training_contract']['sha256']
+        or stable_sha256(config)!=audit['training_contract_sha256']
+        or config.get('gin_model_sha256')!=ours_spec['gin_files']['model.pt']
+        or config.get('gin_temperature_sha256')!=ours_spec['gin_files']['temperature_scaling.json']):
+        raise ValueError('GLOBAL_NOT_SAME_FROZEN_GIN')
+    freeze=sealed(root/'selection_freeze.json');order=freeze['ordered_rule_ids']
+    if (freeze.get('state')!='FROZEN' or freeze.get('test_loaded') is not False
+        or freeze.get('spec_sha256')!=stable_sha256(spec)
+        or not 1<=len(order)<=20 or len(order)!=len(set(order))
+        or freeze['ordered_rules_sha256']!=stable_sha256(order)
+        or sha256_file(root/'selection_freeze.json')!=audit['selector_freeze_sha256']
+        or audit['selected_rules']!=len(order)
+        or sha256_file(root/'metrics.json')!=audit['metrics_sha256']):
+        raise ValueError('GLOBAL_OWN_FROZEN_RESULT_CONFLICT')
+    # The common reducer below additionally requires identical 141 IDs,
+    # source predictions, theta/cap, exact minima, nested prefixes and ECDFs.
+    metrics=json.loads((root/'metrics.json').read_text())
+    return metrics,dict(state=audit['state'],spec_file_sha256=sha256_file(spec_path),
+        audit_file_sha256=sha256_file(root/'final_audit.json'),metrics_file_sha256=audit['metrics_sha256'],
+        audit_scope='SAVED_RECORD_CONSISTENCY_NOT_MODEL_REEXECUTION',results_root=str(root))
+
+
+def prepare(aplus_root, spec_path, v1_source, v1_spec_path, output, *, progress_path, funnel_root=None,
+            globalgce_results=None, globalgce_spec=None):
     aplus_root,spec_path,v1_source,v1_spec_path,output=map(Path,(aplus_root,spec_path,v1_source,v1_spec_path,output))
     spec=json.loads(spec_path.read_text()); prior=json.loads(v1_spec_path.read_text())
     if (sha256_file(v1_spec_path)!=spec['v1_spec']['sha256'] or prior['gin_files']!=spec['gin_files']
@@ -80,7 +127,20 @@ def prepare(aplus_root, spec_path, v1_source, v1_spec_path, output, *, progress_
         collected[0].append(dict(method='Ours',state='PENDING',scientific_variant='OURS_REACH_V2_GIN_APLUS_2659'))
         comparison=[dict(method='Ours',variant=v,predeclared_primary=v==selected,state='PENDING',coverage='PENDING')
                     for v in frozen['controls']]
-    collected[0].append(dict(method='GlobalGCE',state='PENDING',scientific_variant='GLOBALGCE_CHEMALIGNED_GIN_APLUS'))
+    if bool(globalgce_results)!=bool(globalgce_spec):
+        raise ValueError('GLOBAL_RESULTS_AND_SPEC_REQUIRED_TOGETHER')
+    global_metrics=None;global_binding=dict(state='PENDING')
+    if globalgce_results:
+        global_metrics,global_binding=completed_global(globalgce_results,globalgce_spec,spec)
+    if global_metrics is None:
+        collected[0].append(dict(method='GlobalGCE',state='PENDING',scientific_variant='GLOBALGCE_CHEMALIGNED_GIN_APLUS'))
+    else:
+        add=lambda rows:[dict(method='GlobalGCE',scientific_variant='GLOBALGCE_CHEMALIGNED_GIN_APLUS',**r) for r in rows]
+        fixed=[r for r in global_metrics['prefix_rows'] if r['cohort']=='fixed141']
+        collected[0]+=add([dict(r,state='EVALUATED') for r in fixed if r['K_requested']==10])
+        collected[1]+=add(fixed)
+        collected[2]+=add([r for r in global_metrics['exact_ecdf'] if r['cohort']=='fixed141'])
+        collected[3]+=add(global_metrics['parent_distances'])
     output.mkdir(parents=True,exist_ok=True)
     for name,rows in zip(INPUTS,collected):write_csv(output/name,rows)
     checked=derive(output)
@@ -116,19 +176,21 @@ def prepare(aplus_root, spec_path, v1_source, v1_spec_path, output, *, progress_
         funnel_binding=dict(path=str(funnel_root),manifest_file_sha256=sha256_file(funnel_root/'funnel_manifest.json'),
                             csv_file_sha256=sha256_file(funnel_root/'method_funnel.csv'))
     write_csv(output/'method_failure_funnel.csv',funnel)
-    manifest=dict(state='PARTIAL_A_PLUS_DISPLAY_SOURCES_PREPARED',selected_control=selected,
-        ours_state=state,ours_audit_state=audit_state,global_state='PENDING',
+    manifest=dict(state='FOUR_METHOD_A_PLUS_DISPLAY_SOURCES_PREPARED' if len(checked['ready'])==4 else 'PARTIAL_A_PLUS_DISPLAY_SOURCES_PREPARED',selected_control=selected,
+        ours_state=state,ours_audit_state=audit_state,global_state=global_binding['state'],
         source_spec_file_sha256=sha256_file(spec_path),freeze_file_sha256=sha256_file(aplus_root/'selection_freeze.json'),
         baseline_source_root=str(v1_source),baseline_spec_file_sha256=sha256_file(v1_spec_path),
         progress_source_file_sha256=sha256_file(progress_path),main_matrix_write=False,
         different_method_versions_explicit=LABELS,selection_uses_test=False,
-        saved_funnel_source=funnel_binding)
+        saved_funnel_source=funnel_binding,global_result_source=global_binding)
     (output/'source_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     return manifest
 
 
-def prepare_and_render(aplus_root,spec_path,v1_source,v1_spec_path,output,*,progress_path,funnel_root=None):
+def prepare_and_render(aplus_root,spec_path,v1_source,v1_spec_path,output,*,progress_path,funnel_root=None,
+                       globalgce_results=None,globalgce_spec=None):
     output=Path(output)
-    result=prepare(aplus_root,spec_path,v1_source,v1_spec_path,output/'source_csv',progress_path=progress_path,funnel_root=funnel_root)
+    result=prepare(aplus_root,spec_path,v1_source,v1_spec_path,output/'source_csv',progress_path=progress_path,
+        funnel_root=funnel_root,globalgce_results=globalgce_results,globalgce_spec=globalgce_spec)
     render(output/'source_csv',output/'figures',version_label='A+ Ours + unchanged V1 native baselines',display_labels=LABELS)
     return result

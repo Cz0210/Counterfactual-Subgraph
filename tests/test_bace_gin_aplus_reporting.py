@@ -104,3 +104,54 @@ def test_actual_saved_funnel_is_preserved_not_overwritten_by_placeholder(tmp_pat
     assert ours['applicable_pairs']=='75' and ours['missing_raw_distance']=='N/A'
     assert not any(r['method']=='Ours' for r in rows)
     assert manifest['saved_funnel_source']['csv_file_sha256']==sha256_file(funnel/'method_funnel.csv')
+
+
+def global_result(args,tmp_path):
+    root=tmp_path/'global';root.mkdir()
+    ours=json.loads(args['spec_path'].read_text())
+    config={'gin_model_sha256':ours['gin_files']['model.pt'],
+            'gin_temperature_sha256':ours['gin_files']['temperature_scaling.json']}
+    write(root/'training_contract.json',config)
+    spec={'training_contract':{'sha256':sha256_file(root/'training_contract.json')},
+        'base_counts':{'calibration':66,'test':141},'main_matrix_write':False,'thresholds':ours['thresholds']}
+    write(tmp_path/'global-spec.json',spec)
+    order=[f'r{i}' for i in range(20)]
+    write(root/'selection_freeze.json',dict(state='FROZEN',test_loaded=False,
+        ordered_rule_ids=order,ordered_rules_sha256=stable_sha256(order),spec_sha256=stable_sha256(spec)),True)
+    metric=json.loads((args['aplus_root']/'metrics.json').read_text())['results']['old66_old_selector']
+    write(root/'metrics.json',metric)
+    audit=dict(state='APLUS_GLOBALGCE_EVALUATION_COMPLETE',saved_record_result_consistency='PASS',
+        spec_sha256=stable_sha256(spec),fixed_test_parent_count=141,main_matrix_write=False,
+        oracle_reexecuted_by_this_audit=False,ot_recomputed_by_this_audit=False,
+        training_contract_sha256=stable_sha256(config),selector_freeze_sha256=sha256_file(root/'selection_freeze.json'),
+        selected_rules=20,metrics_sha256=sha256_file(root/'metrics.json'))
+    write(root/'final_audit.json',audit)
+    return dict(globalgce_results=root,globalgce_spec=tmp_path/'global-spec.json')
+
+
+def test_future_global_requires_final_bound_same_gin_and_reducer(tmp_path):
+    args=case(tmp_path,True);optional=global_result(args,tmp_path)
+    manifest=prepare(**args,**optional)
+    assert manifest['state']=='FOUR_METHOD_A_PLUS_DISPLAY_SOURCES_PREPARED'
+    assert manifest['global_state']=='APLUS_GLOBALGCE_EVALUATION_COMPLETE'
+    assert next(r for r in read_csv(args['output']/INPUTS[0]) if r['method']=='GlobalGCE')['state']=='EVALUATED'
+
+
+def test_incomplete_global_does_not_open_its_metrics(tmp_path):
+    args=case(tmp_path,True);global_root=tmp_path/'waiting';global_root.mkdir()
+    (global_root/'metrics.json').write_text('DO NOT READ: INCOMPLETE SCIENCE')
+    manifest=prepare(**args,globalgce_results=global_root,globalgce_spec=tmp_path/'future-spec-not-present.json')
+    assert manifest['global_state']=='PENDING'
+
+
+def test_future_global_wrong_gin_refused(tmp_path):
+    args=case(tmp_path,True);optional=global_result(args,tmp_path)
+    config=optional['globalgce_results']/'training_contract.json'
+    value=json.loads(config.read_text());value['gin_model_sha256']='different';write(config,value)
+    with pytest.raises(ValueError,match='SAME_FROZEN_GIN'):prepare(**args,**optional)
+
+
+def test_future_global_metrics_file_binding_refused(tmp_path):
+    args=case(tmp_path,True);optional=global_result(args,tmp_path)
+    (optional['globalgce_results']/'metrics.json').write_text('{}')
+    with pytest.raises(ValueError,match='OWN_FROZEN_RESULT_CONFLICT'):prepare(**args,**optional)

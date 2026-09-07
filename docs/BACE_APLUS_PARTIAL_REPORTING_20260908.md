@@ -12,6 +12,16 @@ is reduced from those same parent minima. Conditional median remains a separate
 diagnostic; it does not replace capped cost. The observed benchmark and BACE-only
 method upgrade are disclosed. No main matrix or experiment registry is changed.
 
+Future GlobalGCE is not permanently hardcoded missing. The optional pair
+`--globalgce-results /absolute/copied/results --globalgce-spec /absolute/copied/spec.json`
+requires the actual `final_audit.json`, `selection_freeze.json`, `metrics.json`
+and a copied `training_contract.json` in that results directory. It validates
+the final audit's exact existing state, own freeze/file bindings, unchanged
+GIN weights and temperature, common threshold identity and full141 parent
+IDs/predictions through the same reducer. Until its final audit exists, no
+Global metrics are opened and the method remains PENDING. This option does not
+start a task or transport files, and it is not enabled for the current partial.
+
 `replot_bace_gin_aplus.py` produces the source tables from completed metrics and
 the actual new freeze. Its optional `--funnel-root` consumes the independent
 saved-record funnel, preserving unknown fields rather than inventing zeroes.

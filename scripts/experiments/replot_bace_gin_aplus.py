@@ -10,6 +10,9 @@ if __name__=='__main__':
     for name in ('aplus-root','spec','v1-source','v1-spec','output','progress'):
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--funnel-root',type=Path)
+    p.add_argument('--globalgce-results',type=Path)
+    p.add_argument('--globalgce-spec',type=Path)
     a=p.parse_args()
     if not Path(a.config).is_file():p.error('config absent')
-    print(json.dumps(prepare_and_render(a.aplus_root,a.spec,a.v1_source,a.v1_spec,a.output,progress_path=a.progress,funnel_root=a.funnel_root),sort_keys=True))
+    print(json.dumps(prepare_and_render(a.aplus_root,a.spec,a.v1_source,a.v1_spec,a.output,progress_path=a.progress,
+        funnel_root=a.funnel_root,globalgce_results=a.globalgce_results,globalgce_spec=a.globalgce_spec),sort_keys=True))
