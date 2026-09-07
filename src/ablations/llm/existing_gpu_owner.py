@@ -288,6 +288,10 @@ class ResourceSampler:
             idle = self.admitted_idle_seconds or 0
         if foreign:
             blockers.append("FOREIGN_CUDA_PROCESS_ON_TARGET_GPU")
+        if (self.task_family == "ours_reach" and child_pid is None
+            and (gpu.memory_free_mb < cfg["minimum_gpu_free_mb"]
+                 or gpu.utilization_gpu_percent > cfg["maximum_idle_utilization_percent"])):
+            blockers.append("OURS_REACH_GPU_CAPACITY_NOT_ADMITTED")
         other_llm = 0
         lock_root = Path(cfg["gpu_lock_root"])
         for path in lock_root.glob("gpu-*.lock"):
