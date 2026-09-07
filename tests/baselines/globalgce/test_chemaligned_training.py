@@ -115,3 +115,29 @@ def test_identity_canary_is_not_claimed_as_generated_recourse_and_restores_rng()
     assert result['state']=='PASS' and result['target_flip_claimed'] is False
     assert result['generator_gradient_l1']>0 and result['fixture_kind'].startswith('synthetic_train_identity')
     assert_semantic_equal(rng,snapshot_rng()); assert_semantic_equal(weights,model.state_dict())
+
+def test_cpu_canary_cannot_open_formal_gate(tmp_path):
+    import json
+    from src.baselines.bace_globalgce_chemaligned_training import require_gpu_canary
+    receipts={'terminal.json':{'state':'CANARY_COMPLETE','optimizer_updates':2},
+        'execution_receipt.json':{'config_sha256':'bound','device':'cpu'},
+        'reload_receipt.json':{'state':'PASS','fresh_generator_loaded':True,'engineering_next_optimizer_update':3},
+        'identity_oracle_canary.json':{'state':'PASS','frozen_GINE_gradient':False,'target_flip_claimed':False}}
+    for path,payload in receipts.items(): (tmp_path/path).write_text(json.dumps(payload))
+    with pytest.raises(ValueError,match='real GPU'):require_gpu_canary({'gpu_canary_root':str(tmp_path)},'bound')
+    receipts['execution_receipt.json']['device']='cuda:0'
+    (tmp_path/'execution_receipt.json').write_text(json.dumps(receipts['execution_receipt.json']))
+    require_gpu_canary({'gpu_canary_root':str(tmp_path)},'bound')
+
+def test_canary_checkpoint_cannot_promote_to_formal_resume(tmp_path):
+    import json
+    from src.baselines.bace_globalgce_chemaligned_training import run_training
+    from src.eval.bace_frozen_gnn_contracts import stable_sha256
+    cfg={'training_contract':TRAINING_CONTRACT,'joint_contract':{}}
+    (tmp_path/'config.json').write_text(json.dumps(cfg)); evidence=tmp_path/'remat'; evidence.mkdir()
+    (evidence/'terminal.json').write_text(json.dumps({'state':'REMATERIALIZATION_COMPLETE','repair_training_required':True}))
+    (evidence/'repair_contract.json').write_text(json.dumps({'joint_contract':{}}))
+    output=tmp_path/'canary'; output.mkdir()
+    torch.save({'config_sha256':stable_sha256(cfg),'run_kind':'ENGINEERING_CANARY','output_root':str(output)},output/'latest.pt')
+    with pytest.raises(ValueError,match='canary promotion'):
+        run_training(tmp_path/'config.json',evidence,output,'cuda:0',resume=True,canary=False)

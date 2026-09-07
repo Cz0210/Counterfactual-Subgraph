@@ -263,20 +263,41 @@ def real_oracle_identity_canary(model, fss, bridge, item):
     return result
 
 
+def require_gpu_canary(config, config_sha):
+    root=Path(config['gpu_canary_root'])
+    terminal=read_json(root/'terminal.json'); execution=read_json(root/'execution_receipt.json')
+    reload_receipt=read_json(root/'reload_receipt.json'); identity=read_json(root/'identity_oracle_canary.json')
+    if (terminal.get('state')!='CANARY_COMPLETE' or terminal.get('optimizer_updates')!=2
+            or execution.get('config_sha256')!=config_sha or execution.get('device')!='cuda:0'
+            or reload_receipt.get('state')!='PASS' or reload_receipt.get('fresh_generator_loaded') is not True
+            or reload_receipt.get('engineering_next_optimizer_update')!=3 or identity.get('state')!='PASS'
+            or identity.get('frozen_GINE_gradient') is not False or identity.get('target_flip_claimed') is not False):
+        raise ValueError('formal requires the bound real GPU/update/reload/identity canary')
+
+
 def run_training(config_path, rematerialization_root, output_root, device, *, resume=False, canary=False):
     config = read_json(config_path)
     if config.get('training_contract') != TRAINING_CONTRACT:
         raise ValueError('actual training objective not sealed')
     config_sha = stable_sha256(config); evidence = Path(rematerialization_root)
+    if not canary and not resume:
+        require_gpu_canary(config,config_sha)
     terminal = read_json(evidence/'terminal.json')
     if terminal.get('state') != 'REMATERIALIZATION_COMPLETE' or not terminal['repair_training_required']:
         raise ValueError('train feasibility must require the one repair campaign')
     if read_json(evidence/'repair_contract.json')['joint_contract'] != config['joint_contract']:
         raise ValueError('rematerialization/materializer contract drift')
     output = Path(output_root)
+    run_kind = 'ENGINEERING_CANARY' if canary else 'FORMAL_REPAIR_FINETUNE'
     if resume:
         checkpoint = torch.load(output/'latest.pt', map_location='cpu', weights_only=False)
         if checkpoint['config_sha256'] != config_sha: raise ValueError('checkpoint contract changed')
+        if checkpoint.get('run_kind') != run_kind or checkpoint.get('output_root') != str(output.resolve()):
+            raise ValueError('canary promotion or cross-root checkpoint resume is forbidden')
+        if not canary:
+            ledger = read_json(config['formal_campaign_ledger'])
+            if ledger.get('fresh_campaigns_used') != 1 or ledger.get('output_root') != str(output) or ledger.get('config_sha256') != config_sha:
+                raise ValueError('formal resume requires the original one-shot ledger')
     else:
         output.mkdir(parents=True, exist_ok=False); checkpoint = None
     random.seed(7); np.random.seed(7); torch.manual_seed(7)
@@ -334,6 +355,7 @@ def run_training(config_path, rematerialization_root, output_root, device, *, re
         payload = {'epoch_completed': epoch+1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
                    'scheduler': scheduler.state_dict(), 'rng': snapshot_rng(), 'schedule_rng': schedule.get_state(),
                    'config_sha256': config_sha, 'best_validation_score': best,
+                   'run_kind':run_kind,'output_root':str(output.resolve()),
                    'train_index_binding': str(evidence/'train_index.jsonl'), 'joint_contract': config['joint_contract']}
         atomic_torch(output/'latest.pt', payload)
         # Full semantic payload: optimizer moments, counters, sampler and RNG
