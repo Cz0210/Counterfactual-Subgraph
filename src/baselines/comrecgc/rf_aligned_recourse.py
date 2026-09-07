@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 import time
 from typing import Any, Mapping
@@ -67,12 +68,18 @@ def run_recourse(config: Mapping[str, Any], *, pool_root: Path, output_root: Pat
     pool_config = json.loads((pool_root / "contract.json").read_text())
     if terminal["contract_sha"] != digest(pool_config) or any(config.get(key) != value for key, value in pool_config.items()):
         raise ValueError("Pool screening contract binding differs")
+    original_config = dict(config)
+    runtime_paths = dict(config.get("runtime_paths", {}))
+    allowed_paths = {"dataset_dir", "source_csv", "rf_path", "greed_path", "upstream_root"}
+    if set(runtime_paths) - allowed_paths or any(not Path(value).is_absolute() for value in runtime_paths.values()):
+        raise ValueError('Unsupported runtime path remapping')
+    config = dict(config, **runtime_paths)
     if not terminal["unique_rf_target0"]:
         atomic_json(output_root / "terminal.json", {"state": "POOL_NO_RF0_COUNTERFACTUALS", "next_required_stage": "ONE_RF_GUIDED_NATIVE_VRRW", "new_search_started": False})
         return
     output_root.mkdir(parents=True, exist_ok=True)
     start_time = time.monotonic()
-    max_rss = 28 * 1024**3
+    max_rss = int(config.get('max_rss_bytes', 28 * 1024**3))
     # Bound deserialization before creating a full graph list. This reserves
     # model/runtime overhead and expansion of PyG and JSON inputs, not host RAM.
     input_bytes = Path(config["dataset_dir"], "graphs.pt").stat().st_size + sum(p.stat().st_size for p in (pool_root / "segments").glob("segment-*.json"))
@@ -82,6 +89,10 @@ def run_recourse(config: Mapping[str, Any], *, pool_root: Path, output_root: Pat
     if initial_ram["state"] != "PASS":
         return initial_ram
     source = load_aids_generation_bundle(dataset_dir=config["dataset_dir"], source_csv=config["source_csv"])
+    prior_source = json.loads((pool_root / 'source_input_binding.json').read_text())
+    if source.dataset_fingerprint != prior_source['dataset_fingerprint']:
+        raise ValueError('Remapped source dataset is not the frozen native source')
+    atomic_json(output_root / 'runtime_path_binding.json', {'original_paths': {k: original_config[k] for k in runtime_paths}, 'effective_paths': runtime_paths, 'dataset_fingerprint': source.dataset_fingerprint, 'pool_contract_sha': terminal['contract_sha'], 'original_contract_changed': False})
     parents = dict(zip(source.parent_ids, source.graphs, strict=True))
     predictions = json.loads((pool_root / "source_predictions.json").read_text())
     if [x["parent_id"] for x in predictions["rows"]] != source.parent_ids:
@@ -111,6 +122,14 @@ def run_recourse(config: Mapping[str, Any], *, pool_root: Path, output_root: Pat
     if identity_path.exists() and json.loads(identity_path.read_text()) != identity:
         raise ValueError("Resumed RF recourse universe differs")
     atomic_json(identity_path, identity)
+    reuse_root = config.get('count_reuse_root')
+    if reuse_root and not (output_root / 'exact_count').exists():
+        previous_count = Path(reuse_root)
+        previous_manifest = json.loads((previous_count / 'manifest.json').read_text())
+        if previous_manifest.get('identity_sha') != digest(identity):
+            raise ValueError('Transferred count is from a different scientific universe')
+        shutil.copytree(previous_count, output_root / 'exact_count')
+        atomic_json(output_root / 'count_adoption.json', {'source': str(previous_count), 'destination': str(output_root / 'exact_count'), 'source_manifest_sha': file_sha(previous_count / 'manifest.json'), 'identity_sha': digest(identity), 'original_preserved': True, 'model_inference_required': False})
     with imported_upstream(config["upstream_root"]) as modules:
         count, source_embeddings, source_counts = count_exact_pairs(graphs=graphs, all_sources=source.graphs, source_positions=source_positions, model=model, element_counts=modules["util"].graph_element_counts, identity=identity, root=output_root / "exact_count", max_rss_bytes=max_rss, batch_size=batch_size)
         first_chunk = next((x for x in count["chunks"] if x["first_close_pair"] is not None), None)
@@ -149,6 +168,9 @@ def run_recourse(config: Mapping[str, Any], *, pool_root: Path, output_root: Pat
                 atomic_json(output_root / "first_valid_native_pair.json", {"stage": "RF_VALID_NATIVE_PAIR_NOT_YET_CLUSTER_MEDOID", "parent_id": source.parent_ids[parent_position], "candidate_index": records[cf_index]["candidate_index"], "candidate_smiles": records[cf_index]["canonical_smiles"], "pred_before": 1, "pred_after": 0, "rf": records[cf_index]["rf"], "normalized_greed_distance": counted_chunk["first_close_pair"]["normalized_greed_distance"], "candidate_graph_sha": records[cf_index]["stable_graph_sha256"]})
             atomic_json(output_root / "progress.json", {"stage": "PAIR_STORE", "candidates_completed": stop, "candidate_count": len(graphs), "elapsed_seconds": time.monotonic() - start_time})
         pair_result = store.finalize()
+        if config.get('stop_after_pair_store', False):
+            atomic_json(output_root / 'pair_stage_terminal.json', {'state': 'PAIR_STORE_COMPLETE_WAITING_DBSCAN_RESOURCE', 'pair_rows': pair_result.row_count, 'pair_manifest': str(pair_result.manifest_path), 'pair_manifest_sha': pair_result.manifest_sha256, 'max_rss_bytes': max_rss, 'dbscan_started': False})
+            return
         if pair_result.row_count == 0:
             atomic_json(output_root / "terminal.json", {"state": "POOL_NO_THETA_CLOSE_RF_RECOURSE", "next_required_stage": "ONE_RF_GUIDED_NATIVE_VRRW"})
             return

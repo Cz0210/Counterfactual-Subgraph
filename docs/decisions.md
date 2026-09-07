@@ -18591,3 +18591,24 @@ Bounded 500-candidate atomic segments permit CPU-only resumption. A paired intel
 Slurm wrapper intentionally overrides the repository's generic GPU template
 under this task's explicit CPU authorization. New recourse dispatch must inspect
 the resulting RF0 universe before allocating pair-store and exact DBSCAN work.
+# 2026-09-07: AIDS RFAligned CPU cache handoff and native-summary evaluation
+
+The completed full native candidate pool (100262 records) and exact GREED
+count stage are immutable inputs. The HPC count stage completed 37342977
+theta-close pairs but correctly declined persistent pair-store admission.
+The authorized scoped AutoDL CPU continuation may remap physical input paths
+only after dataset fingerprint and transferred cache identity validation.
+It does not regenerate candidates, infer embeddings again, reuse old DBSCAN
+labels, or change theta=.1/eps=.02/min_samples=3. Native candidate/parent
+pair order is preserved. A phase memory limit covers consolidation mmap RSS,
+not only the small generation batches; the existing certified external
+DBSCAN route still forbids >100000-row brute-force fallback.
+
+The existing slot evaluator now accepts an explicit ComRecGC-RFAligned
+variant and evaluates every available native selected cluster representative
+in frozen order, rather than the legacy one-medoid input assumption.
+The shared RF/MolCLR-WNode kernels remain unchanged. The original AIDS/HIV
+1283 denominator and 1097 RF-source1 scope remain explicit, including the
+already-seen generation/evaluation overlap. No new held-out/calibration split
+is invented. Legacy slot evaluation defaults and sealed results are unchanged.
+The paired CPU Slurm wrappers remain synchronized with the new CLI actions.

@@ -134,6 +134,9 @@ def _run_shared_evaluator(
     resume: bool,
     action_semantics_version: str = "hard_delete_all_matches_v1",
     match_selection_policy: str = "min_wnode_then_cfdrop_then_match_index_v1",
+    method_name: str = METHOD,
+    selection_method: str = SELECTION_METHOD,
+    require_exact_preselected: bool = False,
 ) -> list[dict[str, str]]:
     argv = [
         sys.executable,
@@ -183,17 +186,17 @@ def _run_shared_evaluator(
         "--fullgraph-candidates-path",
         str(candidates_csv),
         "--fullgraph-method-name",
-        METHOD,
+        method_name,
         "--selection-method",
-        SELECTION_METHOD,
+        selection_method,
         "--action-semantics-version",
         action_semantics_version,
         "--match-selection-policy",
         match_selection_policy,
         "--preselected-topk",
-        "1",
+        str(len(read_csv(candidates_csv))) if require_exact_preselected else "1",
         "--require-preselected-topk",
-        "0",
+        "1" if require_exact_preselected else "0",
         "--skip-redundancy",
         "1",
         "--resume",
@@ -353,6 +356,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-k", type=int, default=20)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--method-variant", choices=("legacy", "ComRecGC-RFAligned"), default="legacy")
     return parser
 
 
@@ -375,12 +379,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     chemistry_payload = json.loads(chemistry_manifest.read_text(encoding="utf-8"))
     if not isinstance(chemistry_payload, dict) or chemistry_payload.get("run_complete") is not True:
         raise ValueError("Chemistry audit manifest is incomplete.")
+    rf_aligned = getattr(args, 'method_variant', 'legacy') == 'ComRecGC-RFAligned'
+    if rf_aligned and (args.dataset != 'aids' or chemistry_payload.get('method_variant') != 'ComRecGC-RFAligned' or chemistry_payload.get('rf_pool_provenance_closed') is not True or chemistry_payload.get('summary_frozen_before_evaluation') is not True):
+        raise ValueError('RFAligned requires the completed AIDS native summary freeze')
+    method_name = 'ComRecGC-RFAligned' if rf_aligned else METHOD
+    adaptation = 'gnn_proposed_rf_validated_native_common_recourse' if rf_aligned else ADAPTATION_MODE
+    selection_method = 'rf0_universe_official_common_recourse_greedy_rank' if rf_aligned else SELECTION_METHOD
     all_slots = load_official_slots(chemistry / "medoid_validity.csv")
     connected_gate: dict[str, int | bool] | None = None
     if args.dataset == "bace":
         connected_gate = _apply_bace_connected_candidate_gate(all_slots)
     slots = all_slots[: int(args.max_k)]
-    valid_candidates = build_internal_valid_candidates(slots)
+    valid_candidates = build_internal_valid_candidates(slots, selection_method=selection_method, adaptation_mode=adaptation)
+    if rf_aligned and not valid_candidates:
+        raise ValueError('No RFAligned native summary; RF-guided search trigger must be assessed before evaluation')
     write_csv(root / "selected_rank_slots.csv", all_slots)
     write_csv(root / "evaluated_rank_slots.csv", slots)
     write_jsonl(root / "selected_sequence.jsonl", all_slots)
@@ -409,6 +421,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             max_parents=args.expected_parent_count,
             device=args.device,
             resume=args.resume,
+            method_name=method_name,
+            selection_method=selection_method,
+            require_exact_preselected=rf_aligned,
             action_semantics_version=(
                 CONNECTED_ACTION_SEMANTICS
                 if args.dataset == "bace"
@@ -472,6 +487,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         theta_star=theta_star,
         cost_cap=cost_cap,
         max_k=args.max_k,
+        method_name=method_name,
+        selection_method=selection_method,
+        adaptation_mode=adaptation,
     )
     figure4 = [row for row in threshold_metrics if int(row["k"]) == int(args.max_k)]
     write_csv(root / "prefix_metrics.csv", prefixes)
@@ -496,6 +514,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 by_k[k],
                 theta_star=theta_star,
                 dataset="AIDS" if args.dataset == "aids" else "Mutagenicity",
+                method_name=method_name,
+                adaptation_mode=adaptation,
             )
         )
         write_csv(
@@ -511,6 +531,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         thresholds=thresholds,
         evaluator_invoked=evaluator_invoked,
         interface_probe_invoked=interface_probe_invoked,
+        method_name=method_name,
+        adaptation_mode=adaptation,
     )
     summary = {
         **audit,
@@ -623,6 +645,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "test_loaded_for_selection": False,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
+    if rf_aligned:
+        run_manifest.update(method_variant=method_name, source_scope='AIDS_HIV_EXISTING_1283_GENERATION_OVERLAP_NOT_UNSEEN_TEST', benchmark_test_previously_seen=True, repair_selected_using_test=False, source_eligible_count=1097, original_1283_denominator_preserved=True, rf_pool_provenance_closed=True, native_summary_freeze_manifest_sha256=sha256_file(chemistry_manifest))
     write_json(root / "run_manifest.json", run_manifest)
     marker = "_SMOKE_AUDIT_COMPLETE.json" if args.mode == "smoke" else "_RUN_COMPLETE.json"
     write_json(root / marker, {"run_complete": True, "audit_passed": True})
