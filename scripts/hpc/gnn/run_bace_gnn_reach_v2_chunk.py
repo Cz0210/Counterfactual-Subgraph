@@ -24,8 +24,12 @@ def main():
                    help='Seal a fresh result-root binding only; no model inference')
     p.add_argument('--merge-calibration-only', action='store_true',
                    help='Merge complete calibration chunks, freeze ten global selectors; no test access')
+    p.add_argument('--prepare-raw-reuse-only', action='store_true',
+                   help='Once per split: index accepted old match costs without model/OT inference')
     args = p.parse_args()
-    if args.merge_calibration_only and (args.prepare_output_only or args.split != 'calibration'):
+    if sum((args.prepare_output_only, args.merge_calibration_only, args.prepare_raw_reuse_only)) > 1:
+        p.error('Preparation, raw-cost adoption and selection are distinct stages')
+    if args.merge_calibration_only and args.split != 'calibration':
         p.error('Calibration merge is a distinct calibration-only compute-node stage')
     if not args.config.is_file() or (not args.prepare_output_only and not os.environ.get('SLURM_JOB_ID')):
         p.error('Existing config and HPC compute-node Slurm job required; no login-node inference')
@@ -38,6 +42,21 @@ def main():
         raise ValueError('New-pool sensitivity cannot train, refit, or publish main cells')
     if not 1 <= int(spec['chunk_size']) <= 32 or not 1 <= int(spec['cpu_threads']) <= 8:
         raise ValueError('CPU parent chunk resource bound')
+    if args.prepare_raw_reuse_only:
+        from src.ablations.gnn.reach_raw_distance_reuse import build_index
+        kwargs = {}
+        if args.split == 'test':
+            pool_sha = sha256_file(spec['candidate_universe'])
+            kwargs = dict(test_freeze_path=spec['global_selector_freeze'],
+                test_freeze_sha=spec['global_selector_freeze_sha256'],
+                validate_test_freeze=lambda frozen: require_global_freeze(frozen, pool_sha))
+        path = Path(spec['raw_cost_indexes'][args.split]['path']).resolve()
+        path.relative_to('/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/gnn')
+        index = build_index(spec['raw_distance_source'], split=args.split, output=path,
+                            repo=Path(__file__).resolve().parents[3], **kwargs)
+        print(json.dumps({k: index[k] for k in ('state', 'split', 'source_parent_units',
+            'source_finite_match_records', 'raw_cost_count', 'ot_recomputed')}))
+        return
     output = Path(spec['output_root']).resolve()
     scope = Path('/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/gnn')
     output.relative_to(scope)
@@ -131,12 +150,26 @@ def main():
         # Same encoder/solver; compact raw-node cache. Never adopt backbone masks.
         distance = old._distance(root, manifest, directory)
         install_compact_node_cache(distance)
+        from src.ablations.gnn.reach_raw_distance_reuse import VerifiedRawGraphDistance, raw_contract_from_bundle
+        source_index = spec['raw_cost_indexes'][args.split]
+        if sha256_file(source_index['path']) != source_index['sha256']:
+            raise ValueError('V2_RAW_COST_INDEX_NOT_BOUND')
+        index = read_json(source_index['path'])
+        if index['split'] != args.split:
+            raise ValueError('V2_RAW_COST_WRONG_SPLIT')
+        distance = VerifiedRawGraphDistance(distance, index=index,
+            current_raw_contract=raw_contract_from_bundle(manifest),
+            repo=Path(__file__).resolve().parents[3])
         try:
             rows = evaluate_parent_chunk(chosen, pool, oracle=oracle, featurizer=features,
                 distance_provider=distance, output=directory / 'parents', split=args.split,
                 pool_sha=pool_sha, temperature_sha=spec['model_files'][args.backbone]['temperature_scaling.json'],
                 batch_size=spec['batch_size'], predictions=all_records, test_freeze=test_freeze,
                 execution_spec_sha=root_binding['spec_sha256'])
+            atomic_json(directory / 'raw_distance_reuse_receipt.json', dict(
+                source_index_sha256=index['self_sha256'], adopted_actions=distance.used,
+                source_flip_masks_reused=False, source_match_minima_reused=False,
+                stats=distance.stats_dict()))
         finally:
             distance.close()
         receipt = dict(state='PARENT_CHUNK_COMPLETE_NOT_CORE_PASS', scope=SCOPE_NAME,

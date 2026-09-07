@@ -18614,3 +18614,22 @@ engineering retry. Record the temperature driver and the verifier driver separat
   real inherited lease descriptors and fresh stage-resource evidence. It does
   not inherit the LLM-only 1200-second idle gate. LLM admission is unchanged;
   this entry cannot dispatch LLM generation or conditional PPO training.
+
+## 2026-09-07: Reuse raw graph costs across Reach-v2 pools without old flip masks
+
+- A split-scoped migration of accepted corrected-GNN parent records produces an
+  explicit canonical graph-pair/MolCLR/schema/exact-solver index, retaining every
+  contributing original action context and source member binding. Original
+  teacher/pool/action cache keys are never edited. Kernel identity is checked
+  against the original exact driver; mismatches fail closed.
+- New oracle predictions, strict flips and per-backbone match minima remain
+  independent. A new candidate can reuse an identical raw graph-pair cost, but
+  cannot inherit its source classifier's successful flip or chosen match.
+- The existing CPU chunk CLI gains `--prepare-raw-reuse-only`; it performs no
+  model or OT inference. Old parent files are migrated once per split, not
+  re-hashed by every worker. Test migration requires the actual new global
+  freeze validator and bound receipt before reading source test records.
+- The new-pool GNN runner requires the compact adopted index and saves explicit
+  raw-distance reuse receipts. Deployment/spec binding and final v2 evaluation
+  remain separate from passing these unit tests. No old scientific audit is
+  renamed as a v2 result.
