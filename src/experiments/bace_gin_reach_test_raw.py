@@ -188,7 +188,8 @@ def export_test_raw(source, output, *, repo, new_freeze_path, new_freeze_sha, va
         ("search_contract", "candidate_freeze", "final_binding", "execution_audit", "raw_reuse"))
     portable = bound_json(binding["raw_distance_source"]["portable_manifest"])
     raw = current_raw_contract(contract, portable)
-    proof = kernel_identity_proof(Path(repo), source["science_commit"])
+    # This pins four numerical-kernel blobs, not the historical whole worker.
+    proof = kernel_identity_proof(Path(repo), source["kernel_source_commit"])
     raw_sha = stable_sha256(raw)
     descriptor = raw_reuse["input_binding"]["source_descriptor"]
     old_index = bound_json(descriptor["index"])

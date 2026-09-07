@@ -54,7 +54,7 @@ strict flips and minimum over its own legal matches.
 ## Explicit bindings
 
 Export binding schema: `completed_ours2607_test_raw_source_v1`.
-It contains `campaign`, `science_commit`, `independent_audit: {path,sha256}` and
+It contains `campaign`, `kernel_source_commit`, `independent_audit: {path,sha256}` and
 `documents: {role: {path,sha256}}`. Required roles are exactly the leaf's
 `SOURCE_FILES`: search contract, candidate freeze, selector freeze, train gate,
 final binding, execution audit, raw reuse receipt and terminal. Their real file
@@ -65,6 +65,11 @@ The final binding already pins the original test CSV, portable raw contract and
 old selected20 source. Parent records are read once and newly inventoried with
 file/self SHA. Original model weights and full packages are not rehashed.
 Union binding has `original_index` and `ours_index`, each `{path,sha256}`.
+
+`kernel_source_commit` identifies only the four unchanged numerical-kernel
+source blobs, compared with the existing raw-index proof. It is not the
+historical search or closeout worker execution commit. Those identities remain
+in their own receipts; an absent worker commit stays unknown.
 
 Thin CLI:
 `scripts/experiments/migrate_bace_gin_reach_test_raw.py --help`.

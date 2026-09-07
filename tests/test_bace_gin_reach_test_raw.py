@@ -89,7 +89,7 @@ def fixture(tmp_path, monkeypatch):
             new_selected_pairs=[dict(parent_id=p.parent_id, candidate_id=ids[-1])],
             new_selected_match_witnesses=[row] if i==0 else [], raw_distance_adoptions=[], fresh_raw_graph_requests=int(i==0)))
     docs = dict(zip(m.SOURCE_FILES, (contract_item,pool_item,selector_item,gate_item,binding_item,final_item,raw_item,terminal_item)))
-    source = dict(schema=m.SOURCE_SCHEMA, campaign=str(root), science_commit="a"*40, documents=docs, independent_audit=audit_item)
+    source = dict(schema=m.SOURCE_SCHEMA, campaign=str(root), kernel_source_commit="a"*40, documents=docs, independent_audit=audit_item)
     freeze_item, freeze = write(tmp_path/"new-freeze.json", {"state": "actually frozen"})
     callback = lambda f: dict(state="ACTUAL_A_PLUS_FREEZE_VERIFIED", freeze_self_sha256=f["self_sha256"])
     kwargs = dict(repo=repo, new_freeze_path=freeze_item["path"], new_freeze_sha=freeze_item["sha256"], validate_new_freeze=callback)
