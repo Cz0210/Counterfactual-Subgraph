@@ -5,6 +5,10 @@ MolCLR weights or source. Small current files are checked; a prior immutable
 reference receipt supplies the weights digest, avoiding repeated model hashing.
 """
 from pathlib import Path
+import copy
+import hashlib
+import json
+import math
 
 from src.eval.bace_frozen_gnn_contracts import read_json, sha256_file, stable_sha256
 
@@ -83,3 +87,92 @@ def wrap_raw_distance(delegate, *, contract, descriptor, split, repo, final_free
         "weights_rehashed": False, "small_current_sources_verified": True,
         "source_descriptor": descriptor, "source_flip_masks_reused": False}
     return result
+
+
+def export_calibration_raw_union(campaign, output, *, descriptor, repo, science_commit):
+    """Migrate sealed Ours raw costs once; preserve both source provenances.
+
+    No model is loaded, no distance is calculated, and no test record is read.
+    The same existing raw-index consumer can then reuse this union for each
+    newly frozen backbone's independently recomputed strict flips/match minima.
+    """
+    from src.eval.bace_reach_v2 import unseal, seal
+    from src.ablations.gnn.reach_raw_distance_reuse import SCHEMA, graph_key, kernel_identity_proof
+    from src.eval.bace_frozen_gnn_contracts import load_bace_parents
+    contract = unseal(campaign / "search_contract.json")
+    pool = unseal(campaign / "candidate_freeze.json")
+    selector = unseal(campaign / "selector_freeze.json")
+    if (selector["test_opened"] is not False or selector["candidate_freeze_sha256"] != pool["self_sha256"]
+        or pool["search_contract_sha256"] != contract["self_sha256"]):
+        raise ValueError("OURS_CALIBRATION_NOT_FROZEN_TO_SEARCH")
+    old = bound_json(descriptor["index"])
+    raw = current_raw_contract(contract, bound_json(descriptor["portable_manifest"]))
+    proof = kernel_identity_proof(Path(repo), science_commit)
+    if (old.get("schema") != SCHEMA or old.get("split") != "calibration"
+        or old.get("self_sha256") != stable_sha256({k: v for k, v in old.items() if k != "self_sha256"})
+        or old["raw_contract"] != raw or old["kernel_identity"] != proof
+        or old["source_spec"] != bound_json(descriptor["source_spec"])["raw_distance_source"]):
+        raise ValueError("OLD_CALIBRATION_RAW_INDEX_NOT_SAME_BOUND_KERNEL")
+    binding = stable_sha256({"old_index": old["self_sha256"], "search": contract["self_sha256"],
+        "pool": pool["self_sha256"], "selector": selector["self_sha256"], "science_commit": science_commit})
+    if output.exists():
+        existing = unseal(output)
+        if existing["binding_sha256"] != binding:
+            raise ValueError("RAW_CALIBRATION_UNION_ALREADY_EXISTS_DIFFERENT_BINDING")
+        return existing
+    parents = load_bace_parents(contract["paths"]["calibration"], source_label=contract["source_label"])
+    costs, members, finite, overlaps = copy.deepcopy(old["graph_costs"]), [], 0, 0
+    contract_sha = stable_sha256(raw)
+    for parent in parents:
+        path = campaign / "calibration" / (stable_sha256(parent.parent_id)[:24] + ".json")
+        data = path.read_bytes()
+        record = json.loads(data)
+        if (record.get("self_sha256") != stable_sha256({k: v for k, v in record.items() if k != "self_sha256"})
+            or record["pool_sha256"] != pool["candidate_universe_sha256"]
+            or any(p["parent_id"] != parent.parent_id for p in record["pairs"])):
+            raise ValueError("SEALED_OURS_CALIBRATION_PARENT_CONFLICT")
+        member = {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(),
+                  "self_sha256": record["self_sha256"], "parent_id": parent.parent_id}
+        members.append(member)
+        for row in record["matches"]:
+            if row.get("distance_ok") is not True:
+                continue
+            value = row.get("wnode_distance")
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0 or row.get("delete_valid") is not True
+                or row.get("sanitize_ok") is not True or row.get("residual_connected") is not True
+                or row["parent_id"] != parent.parent_id
+                or row["oracle_checkpoint_hash"] != contract["oracle_binding"]):
+                raise ValueError("OURS_FINITE_RAW_COST_SOURCE_RECORD_INVALID")
+            key, parent_graph, residual_graph = graph_key(row["parent_smiles"], row["residual_smiles"], contract_sha)
+            if key != graph_key(parent.smiles, row["residual_smiles"], contract_sha)[0]:
+                raise ValueError("OURS_RAW_COST_PARENT_GRAPH_NOT_SOURCE_BOUND")
+            provenance = {"source_parent_member": str(path), "source_parent_sha256": member["sha256"],
+                "source_match_sha256": stable_sha256(row), "original_action_context": {k: row[k] for k in
+                    ("parent_id", "candidate_id", "match_index", "match_atom_indices",
+                     "oracle_checkpoint_hash", "action_semantics_version")}}
+            if key in costs:
+                if costs[key]["distance"] != value:
+                    raise ValueError("RAW_GRAPH_COST_UNION_NUMERICAL_CONFLICT:" + key)
+                overlaps += key in old["graph_costs"]
+            else:
+                costs[key] = {"parent": parent_graph, "residual": residual_graph, "distance": value, "source_records": []}
+            costs[key]["source_records"].append(provenance)
+            finite += 1
+    return seal(output, {"schema": SCHEMA, "state": "RAW_COST_ADOPTION_INDEX_SEALED_NOT_SCIENCE_PASS",
+        "binding_sha256": binding, "split": "calibration", "raw_contract": raw,
+        "raw_contract_sha256": contract_sha, "kernel_identity": proof, "graph_costs": costs,
+        "raw_cost_count": len(costs), "source_parent_units": old["source_parent_units"] + len(members),
+        "source_finite_match_records": old["source_finite_match_records"] + finite,
+        "new_test_freeze_sha256": None,
+        "source_spec": {"kind": "ACCEPTED_GNN_PLUS_SEALED_OURS_CALIBRATION_RAW_UNION",
+            "old_accepted_source": old["source_spec"], "old_index": descriptor["index"],
+            "old_index_self_sha256": old["self_sha256"], "ours_science_commit": science_commit,
+            "ours_search_contract_sha256": contract["self_sha256"],
+            "ours_selector_freeze_sha256": selector["self_sha256"],
+            "ours_calibration_pairs_sha256": selector["calibration_pairs_sha256"],
+            "ours_parent_sources": members},
+        "ours_new_finite_match_records": finite, "ours_unique_graph_costs_added": len(costs) - old["raw_cost_count"],
+        "ours_requests_overlapping_old_index": overlaps, "old_cache_keys_modified": False,
+        "source_flip_masks_reused": False, "source_selected_match_minima_reused": False,
+        "model_inference_performed": False, "ot_recomputed": 0, "test_opened": False})

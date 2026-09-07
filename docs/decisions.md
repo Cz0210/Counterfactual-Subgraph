@@ -18664,3 +18664,10 @@ engineering retry. Record the temperature driver and the verifier driver separat
   binding, then awaits that split-scoped test index. It holds no GPU lease and
   never publishes the main matrix. Its execution-complete receipt still
   requires independent scientific audit and the original publisher.
+- After the Ours calibration owner finished, its 211 finite match-distance
+  records were eligible for one further raw-cost migration. The narrow exporter
+  binds sealed parent records, candidate/selector receipts, actual current
+  schema/encoder and unchanged raw kernels, then unions graph costs with the
+  accepted old calibration index. It preserves original action provenance but
+  never exports another backbone's flip masks/minima as current decisions. A
+  differing cost for the same bound graph pair fails closed; no OT is computed.

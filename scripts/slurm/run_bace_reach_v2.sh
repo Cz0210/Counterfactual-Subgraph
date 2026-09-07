@@ -23,4 +23,6 @@ python -c 'import torch; print("CUDA available:", torch.cuda.is_available())'
 # index descriptor, the same output root and real CPU resource-config.
 # cpu-closeout is the narrow persistent CPU dependency chain for these stages;
 # its raw-test-index-descriptor is published only after the new final freeze.
+# export-calibration-raw is a no-inference/no-OT CPU migration of sealed current
+# parent records plus the accepted old index, for downstream backbone reuse.
 python scripts/run_bace_reach_v2.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false "$@"

@@ -15,7 +15,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--set", action="append", default=[])
-    p.add_argument("--action", required=True, choices=["plan", "canary", "train-search", "calibrate", "status", "owner", "resource-overlay", "train-gate", "freeze-final", "final-test", "cpu-closeout"])
+    p.add_argument("--action", required=True, choices=["plan", "canary", "train-search", "calibrate", "status", "owner", "resource-overlay", "train-gate", "freeze-final", "final-test", "cpu-closeout", "export-calibration-raw"])
     p.add_argument("--output-root", required=True, type=Path)
     p.add_argument("--reference", type=Path)
     p.add_argument("--proposal-source", choices=["OURS_MAIN_PPO_66", "L0", "L1", "L2", "L3"], default="OURS_MAIN_PPO_66")
@@ -31,6 +31,9 @@ def main():
     p.add_argument("--old-test-pair-descriptor", type=Path)
     p.add_argument("--raw-distance-source-descriptor", type=Path)
     p.add_argument("--raw-test-index-descriptor", type=Path)
+    p.add_argument("--raw-calibration-index-descriptor", type=Path)
+    p.add_argument("--export-output", type=Path)
+    p.add_argument("--science-commit")
     args = p.parse_args()
     if not args.config.is_file():
         raise ValueError("EXPLICIT_EXISTING_CONFIG_REQUIRED")
@@ -41,6 +44,16 @@ def main():
         if not args.reference:
             raise ValueError("REFERENCE_REQUIRED")
         result = plan(args.reference, args.output_root, proposal_source=args.proposal_source, proposal_path=args.proposal_path)
+    elif args.action == "export-calibration-raw":
+        if (args.device != "cpu" or not args.raw_distance_source_descriptor
+            or not args.raw_calibration_index_descriptor or not args.export_output or not args.science_commit):
+            raise ValueError("RAW_CALIBRATION_EXPORT_NEEDS_EXPLICIT_CPU_SOURCE_BINDINGS")
+        from src.eval.bace_reach_raw_binding import export_calibration_raw_union
+        result = export_calibration_raw_union(args.output_root, args.export_output,
+            descriptor={**json.loads(args.raw_distance_source_descriptor.read_text()),
+                        "index": json.loads(args.raw_calibration_index_descriptor.read_text())},
+            repo=PROJECT_ROOT, science_commit=args.science_commit)
+        result = {k: v for k, v in result.items() if k not in {"graph_costs", "source_spec"}}
     elif args.action in ("train-gate", "freeze-final", "final-test", "cpu-closeout"):
         from src.eval.bace_reach_closeout import train_gate, freeze_final, run_final_test, run_cpu_closeout
         if args.device != "cpu":
