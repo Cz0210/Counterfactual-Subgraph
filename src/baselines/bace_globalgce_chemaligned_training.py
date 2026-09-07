@@ -275,7 +275,9 @@ def require_gpu_canary(config, config_sha):
         raise ValueError('formal requires the bound real GPU/update/reload/identity canary')
 
 
-def run_training(config_path, rematerialization_root, output_root, device, *, resume=False, canary=False):
+def run_training(config_path, rematerialization_root, output_root, device, *, resume=False, canary=False,
+                 boundary_check=lambda: None):
+    boundary_check()
     config = read_json(config_path)
     if config.get('training_contract') != TRAINING_CONTRACT:
         raise ValueError('actual training objective not sealed')
@@ -337,6 +339,9 @@ def run_training(config_path, rematerialization_root, output_root, device, *, re
         atomic_json(output/'identity_oracle_canary.json',real_oracle_identity_canary(model,fss,bridge,train_index[0]))
     max_epochs = 2 if canary else 100
     for epoch in range(epoch_start, max_epochs):
+        # Existing owner may pause only before a new complete optimizer update.
+        # The prior update's full state and sampler cursor are already durable.
+        boundary_check()
         started = time.monotonic()
         indices = torch.randperm(len(train_index), generator=schedule)[:min(2500, len(train_index))]
         if canary: indices = indices[:8]  # Explicit bounded engineering test, not full science.
@@ -368,6 +373,7 @@ def run_training(config_path, rematerialization_root, output_root, device, *, re
             stream.write(json.dumps(record)+'\n'); stream.flush(); os.fsync(stream.fileno())
         atomic_json(output/'heartbeat.json', {**record, 'pid': os.getpid(), 'stage': 'TRAINING', 'checkpoint': str(output/'latest.pt')})
     if canary:
+        boundary_check()
         # A fresh independent generator and optimizer actually consume the
         # saved state and take a finite next update. This is engineering work,
         # not another full campaign and not a claim of old-trajectory parity.

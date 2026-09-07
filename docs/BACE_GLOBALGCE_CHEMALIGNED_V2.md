@@ -98,3 +98,16 @@ checkpoint. Formal quota is consumed once by an exclusive campaign ledger.
 checkpoint with actual train recourse). Automatic training closeout exports a
 new candidate universe only after real train feasibility. No matrix writer is
 included. CPU/GPU resource and original lease admission remain launcher duties.
+# Existing-owner stage continuation
+
+`scripts/run_bace_globalgce_chemaligned.py --action owner --owner-spec ...`
+uses one canonical owner root bound in the fresh training contract. It waits
+for the exact Ours `TRAIN_ONLY_POOL_FROZEN` receipt and then delegates every
+canary/formal GPU stage to the already tested AutoDL owner and UUID/FD locks.
+No GPU reservation is changed here. At an expired resource receipt it pauses
+before the next optimizer update; formal recovery uses only the original
+same-root checkpoint and the original one-shot ledger. Successful training
+exports a train-witness-gated pool, followed by explicit CPU calibration,
+single selector freeze, test, and final-freeze commands. Matrix supersession
+requires the original publisher's independent corrected-version interface;
+evaluation completion alone is not PASS/publication.

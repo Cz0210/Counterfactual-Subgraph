@@ -941,6 +941,11 @@ def run_fullgraph_verification_shard(
         )
     )
     try:
+        if predecessor_manifest.get('molecular_adapter') == 'bace_globalgce_chemaligned_joint_states_v2':
+            # Reuse the already lossless tested SQLite node-container storage;
+            # no per-molecule cache files and no scientific distance change.
+            from src.ablations.llm.compact_node_cache import install_compact_node_cache
+            install_compact_node_cache(provider)
         evaluation_kwargs = {
             "parents": parents,
             "before_rows": before_rows,

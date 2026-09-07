@@ -18575,3 +18575,16 @@ manifest/row tag; legacy/Taste behavior is unchanged. K is an upper bound, with
 no duplicated rules or altered BACE threshold. Invalid products never receive
 invented GINE predictions. See the detailed fixed objective and epoch/update
 definition in the same design document.
+
+The ChemAligned CLI now dispatches its sealed canary and single repair through
+the existing `run_owned_child` UUID/project-slot lease mechanism. It waits for
+the bound Ours train-only pool freeze and actual prior child/lease release;
+it never acquires a lease while this predecessor is pending. The child checks
+its inherited real FDs and fresh resource evidence before CUDA and each new
+complete optimizer update. Paused work resumes only its same-root checkpoint.
+This adds a dataset-specific stage adapter, not a lock/registry/authority.
+The authorized GPU0 succession does not inherit LLM's unrelated1200s idle
+condition; current capacity, all main reservations and exclusive leases still
+must pass. CPU evaluation uses the previously tested compact node container.
+Original-authority version supersession remains an independent final audit
+interface; completed evaluation is not by itself matrix publication.

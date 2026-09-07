@@ -4,6 +4,8 @@
 # train/train-canary require --rematerialization-root, --device cuda:0 and a
 # separate sealed training contract; AutoDL launches through its existing
 # exclusive lease, never by submitting this static HPC compatibility wrapper.
+# --action owner --owner-spec is the existing AutoDL UUID/FD owner stage
+# binding. It must run on AutoDL with real registry paths, not under this job.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --output=logs/%j.out

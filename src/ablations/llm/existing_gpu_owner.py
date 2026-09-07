@@ -130,8 +130,30 @@ def bounded_gpu_inventory():
 class ResourceSampler:
     """Refresh source values; idle history is accumulated only in this owner."""
     def __init__(self, config, gpu_index, gpu_uuid, *, inventory=bounded_gpu_inventory,
-                 clock=time.time, monotonic=time.monotonic):
+                 clock=time.time, monotonic=time.monotonic, task_family="llm", reach_contract=None):
         validate_resource_config(config)
+        if task_family not in ("llm", "ours_reach", "globalgce_chemaligned"):
+            raise ValueError("EXISTING_OWNER_FAMILY_NOT_SUPPORTED")
+        self.task_family, self.reach_contract = task_family, reach_contract
+        if task_family == "ours_reach":
+            from src.eval.bace_reach_v2 import unseal
+            value = unseal(Path(reach_contract["path"]))
+            if (value.get("schema") != "bace_ours_reach_v2_20260907"
+                or value.get("proposal_source") != "OURS_MAIN_PPO_66"
+                or value.get("test_opened") is not False
+                or sha256_file(reach_contract["path"]) != reach_contract["sha256"]
+                or int(gpu_index) != 0):
+                raise ValueError("OURS_REACH_EXACT_TRAIN_SCOPE_REQUIRED")
+        if task_family == "globalgce_chemaligned":
+            value, _ = read_small(Path(reach_contract["path"]))
+            if (sha256_file(reach_contract["path"]) != reach_contract["sha256"]
+                or value.get("repair_kind") != "REPAIR_FINETUNE_OLD_GENERATOR"
+                or value.get("formal_fresh_campaigns_max") != 1
+                or value.get("training_contract", {}).get("seed") != 7
+                or value.get("training_contract", {}).get("test_used") is not False
+                or value.get("training_contract", {}).get("calibration_used") is not False
+                or value.get("total_epochs_max") != 100 or int(gpu_index) != 0):
+                raise ValueError("CHEMALIGNED_EXACT_TRAIN_SCOPE_REQUIRED")
         self.config, self.index, self.uuid = config, int(gpu_index), gpu_uuid
         self.inventory, self.clock, self.monotonic = inventory, clock, monotonic
         self.idle_since = None
@@ -276,6 +298,10 @@ class ResourceSampler:
             idle = self.admitted_idle_seconds or 0
         if foreign:
             blockers.append("FOREIGN_CUDA_PROCESS_ON_TARGET_GPU")
+        if (self.task_family in ("ours_reach", "globalgce_chemaligned") and child_pid is None
+            and (gpu.memory_free_mb < cfg["minimum_gpu_free_mb"]
+                 or gpu.utilization_gpu_percent > cfg["maximum_idle_utilization_percent"])):
+            blockers.append("OURS_REACH_GPU_CAPACITY_NOT_ADMITTED")
         other_llm = 0
         lock_root = Path(cfg["gpu_lock_root"])
         for path in lock_root.glob("gpu-*.lock"):
@@ -305,10 +331,13 @@ class ResourceSampler:
                 else:
                     fcntl.flock(handle, fcntl.LOCK_UN)
                     continue
-            if (metadata.get("state") == "LOCKED" and metadata.get("ablation_family") == "llm"
+            if (metadata.get("state") == "LOCKED" and metadata.get("ablation_family") in ("llm", "ours_reach", "globalgce_chemaligned")
                     and metadata.get("pid") != os.getpid()):
                 other_llm += 1
         return {"schema_version": RESOURCE_SCHEMA,
+                "task_family": self.task_family, "reach_contract": self.reach_contract,
+                "ours_reach_contract_verified": self.task_family == "ours_reach",
+                "chemaligned_contract_verified": self.task_family == "globalgce_chemaligned",
                 "observed_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
                 "source_observations": sources, "actual_gpu_observation": gpu.as_json(),
                 "gpu_index": self.index, "gpu_uuid": self.uuid, "target_gpu_uuid": self.uuid,
@@ -370,7 +399,12 @@ def validate_inherited_lease(evidence, held_fd, slot_fd=None):
             or evidence.get("target_gpu_uuid") != evidence["gpu_uuid"]
             or evidence.get("logical_device") != "cuda:0"):
         raise ValueError("GPU_UUID_TO_CUDA0_MAPPING_MISMATCH")
-    decision = gpu_allowed({**evidence, "gnn_core_seed7_audit": "PASS"}, family="llm")
+    family = evidence.get("task_family", "llm")
+    if family in ("ours_reach", "globalgce_chemaligned"):
+        descriptor = evidence.get("reach_contract", {})
+        if not descriptor.get("path") or sha256_file(descriptor["path"]) != descriptor.get("sha256"):
+            raise ValueError("OURS_REACH_CHILD_CONTRACT_CHANGED")
+    decision = gpu_allowed({**evidence, "gnn_core_seed7_audit": "PASS"}, family=family)
     if not decision["allowed"]:
         raise ValueError("WAITING_RESOURCE:" + ",".join(decision["blockers"]))
     return True
@@ -480,6 +514,17 @@ def run_owned_child(*, command, environment, sampler, output_root, lock_root, ru
     if not 0 <= max_wait_seconds <= 86400:
         raise ValueError("Owner wait must be bounded to 0..86400 seconds")
     output = Path(output_root)
+    family = getattr(sampler, "task_family", "llm")
+    if family == "ours_reach":
+        if (len(command) < 5 or Path(command[3]).name != "run_bace_reach_v2.py"
+            or command.count("--action") != 1
+            or command[command.index("--action") + 1] not in ("canary", "train-search")):
+            raise ValueError("OURS_REACH_OWNER_CANNOT_DISPATCH_LLM_OR_PPO")
+    if family == "globalgce_chemaligned":
+        if (len(command) < 5 or Path(command[3]).name != "run_bace_globalgce_chemaligned.py"
+            or command.count("--action") != 1
+            or command[command.index("--action") + 1] not in ("train-canary", "train")):
+            raise ValueError("CHEMALIGNED_OWNER_ONLY_BOUND_CANARY_OR_REPAIR")
     output.mkdir(parents=True, exist_ok=False)
     pause = False
     def request_pause(*_):
@@ -493,7 +538,7 @@ def run_owned_child(*, command, environment, sampler, output_root, lock_root, ru
         while True:
             try:
                 evidence = sampler.sample()
-                decision = gpu_allowed({**evidence, "gnn_core_seed7_audit": "PASS"}, family="llm")
+                decision = gpu_allowed({**evidence, "gnn_core_seed7_audit": "PASS"}, family=family)
             except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 sampler.idle_since = None
                 evidence = {"observed_at": datetime.now(timezone.utc).isoformat(), "source_error": str(exc)}
@@ -509,14 +554,14 @@ def run_owned_child(*, command, environment, sampler, output_root, lock_root, ru
             time.sleep(max(0, min(interval, max_wait_seconds - (time.monotonic() - started))))
         sampler.admitted_idle_seconds = evidence["gpu_idle_seconds"]
         nonce = str(uuid.uuid4())
-        owner = {"run_id": run_id, "ablation_family": "llm", "owner_nonce": nonce,
+        owner = {"run_id": run_id, "ablation_family": family, "owner_nonce": nonce,
                  "gpu_uuid": sampler.uuid, "gpu_index": sampler.index, "command": command}
         with ExitStack() as stack:
             slot = stack.enter_context(ProjectGPUSlotLock(Path(lock_root) / "llm-ablation", max_slots=1, owner=owner))
             gpu = stack.enter_context(GPUFileLock(Path(lock_root), gpu_index=sampler.index, gpu_uuid=sampler.uuid, owner=owner))
             # Re-sample after both existing locks; an idle preflight is not a lease.
             evidence = sampler.sample()
-            decision = gpu_allowed({**evidence, "gnn_core_seed7_audit": "PASS"}, family="llm")
+            decision = gpu_allowed({**evidence, "gnn_core_seed7_audit": "PASS"}, family=family)
             if not decision["allowed"] or pause:
                 terminal.update(blockers=decision["blockers"])
                 return 75
