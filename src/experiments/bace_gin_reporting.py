@@ -163,8 +163,9 @@ def derive(source: Path, *, expected_parents=141):
             "theta": common_contract[0], "cap": common_contract[1], "denominator": expected_parents}
 
 
-def render(source: Path, output: Path, *, version_label="BACE-GIN-fixed-pool-v1", expected_parents=141):
+def render(source: Path, output: Path, *, version_label="BACE-GIN-fixed-pool-v1", expected_parents=141, display_labels=None):
     data = derive(source, expected_parents=expected_parents)
+    labels = {m: (display_labels or {}).get(m, m) for m in METHODS}
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -175,7 +176,7 @@ def render(source: Path, output: Path, *, version_label="BACE-GIN-fixed-pool-v1"
     for k in (10, 20):
         write_csv(csv_root/f"figure4_k{k}_exact_ecdf.csv", data["figure4"][k])
     write_csv(csv_root/"table2_k10.csv", data["table2"])
-    missing = "; ".join(f"{r['method']}: {r['state']}" for r in data["table2"] if r["state"] != "EVALUATED")
+    missing = "; ".join(f"{labels[r['method']]}: {r['state']}" for r in data["table2"] if r["state"] != "EVALUATED")
     subtitle = ("PARTIAL · " if missing else "") + f"{version_label} · fixed {expected_parents} parents"
     footer = "Not plotted: " + missing if missing else "All four methods have evaluated saved records."
     footer += "\nPost-hoc development; no unseen-test or end-to-end retraining claim."
@@ -187,7 +188,7 @@ def render(source: Path, output: Path, *, version_label="BACE-GIN-fixed-pool-v1"
         color, marker = STYLES[method]
         for axis, key in zip(axes, ("coverage_percent", "fixed_capped_mean")):
             axis.plot([r["K_requested"] for r in rows], [r[key] for r in rows], color=color,
-                      marker=marker, markersize=4.5, linewidth=1.5, label=method)
+                      marker=marker, markersize=4.5, linewidth=1.5, label=labels[method])
     axes[0].set(ylabel="Coverage (%)", ylim=(0, max(5, max(r["coverage_percent"] for r in data["figure3"])*1.1)))
     axes[1].set(ylabel="Fixed-capped mean WNode cost", xlabel="Rule budget K (at most)",
                 ylim=(0, data["cap"]*1.05), xticks=(1, 5, 10, 15, 20))
@@ -207,7 +208,7 @@ def render(source: Path, output: Path, *, version_label="BACE-GIN-fixed-pool-v1"
             if rows:
                 color, marker = STYLES[method]
                 axis.step([r["threshold"] for r in rows], [r["coverage_percent"] for r in rows],
-                          where="post", color=color, label=method, linewidth=1.5)
+                          where="post", color=color, label=labels[method], linewidth=1.5)
                 theta_row = next(r for r in rows if r["threshold"] == data["theta"])
                 axis.plot([data["theta"]], [theta_row["coverage_percent"]], marker=marker, color=color, markersize=5)
         upper = max(r["threshold"] for r in data["figure4"][k])
@@ -229,7 +230,7 @@ def render(source: Path, output: Path, *, version_label="BACE-GIN-fixed-pool-v1"
             if state != "EVALUATED":
                 return state
             return "N/A" if row.get(key) is None else format(row[key], digits)
-        display.append([row["method"], state, show("K_effective", "d"), show("coverage_percent", ".4f"),
+        display.append([labels[row["method"]], state, show("K_effective", "d"), show("coverage_percent", ".4f"),
                         show("fixed_capped_mean"), show("conditional_median")])
     fig, axis = plt.subplots(figsize=(10.2, 3.3))
     axis.axis("off")
@@ -247,7 +248,7 @@ def render(source: Path, output: Path, *, version_label="BACE-GIN-fixed-pool-v1"
     tex.extend(" & ".join(row) + r" \\" for row in display)
     tex.append(r"\end{tabular}")
     (output/"table2_bace_gin_fixed141.tex").write_text("\n".join(tex)+"\n")
-    manifest = {"state": "DISPLAY_SOURCE_REDUCTION_CONSISTENT", "version_label": version_label,
+    manifest = {"state": "DISPLAY_SOURCE_REDUCTION_CONSISTENT", "version_label": version_label, "display_labels": labels,
         "source_root": str(source), "primary_cohort": "fixed141", "denominator": expected_parents,
         "figure4_primary_k": 10, "figure4_auxiliary_k": 20, "table2_k": 10,
         "theta_star": data["theta"], "cost_cap": data["cap"], "cost_definition_changed": False,
