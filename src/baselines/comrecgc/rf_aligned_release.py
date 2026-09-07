@@ -9,6 +9,85 @@ import sys
 from .rf_aligned_pool import atomic_json, digest, file_sha
 
 
+def validate_lineage_records(lineage, summary):
+    if [r['candidate_index'] for r in lineage.get('records', [])] != [r['original_candidate_index'] for r in summary]:
+        raise ValueError('Selected native lineage candidate sequence changed')
+    for record, selected in zip(lineage['records'], summary, strict=True):
+        events = record['actions']
+        if (record['replayed_compact_graph'] != selected['graph']
+                or record['parent_id'] != selected['original_parent_id']
+                or len(events) != record['action_count']):
+            raise ValueError('Selected native event/graph mapping differs')
+        previous = None
+        for event in events:
+            if (event.get('event') != 'selected_transition' or event.get('action_resolution') != 'exact'
+                    or not event.get('action') or event.get('parent_id') != record['parent_id']
+                    or (previous is not None and event['source_graph_sha256'] != previous)):
+                raise ValueError('Selected native action chain is incomplete or crosses a parent')
+            previous = event['target_graph_sha256']
+        if events and previous != record['stable_graph_sha256']:
+            raise ValueError('Selected native action chain ends at another graph')
+
+
+def selected_lineage(config, *, recourse_root: Path, output_root: Path):
+    """Preserve actual recorded native actions; never infer them from final graphs."""
+    from .rf_aligned_pool import checked_events, predecessor_index, replay_candidate, compact_graph
+    from .project_dataset import load_aids_generation_bundle
+    summary_path = recourse_root / 'selected_native_recourses.json'
+    target = output_root / 'selected_action_lineage.json'
+    summary_sha = file_sha(summary_path)
+    if target.exists():
+        saved = json.loads(target.read_text())
+        if saved.get('native_summary_sha256') != summary_sha or saved.get('state') != 'RECORDED_ACTION_REPLAY_PASS':
+            raise ValueError('Selected native lineage differs from the frozen summary')
+        validate_lineage_records(saved, json.loads(summary_path.read_text()))
+        return target
+    input_root = Path(config['native_lineage_root'])
+    index_path = input_root / 'trace/candidate_action_lineage_index.jsonl'
+    if file_sha(index_path) != config['candidate_lineage_sha256']:
+        raise ValueError('Original selected-action index binding changed')
+    selected = json.loads(summary_path.read_text())
+    needed = {int(row['original_candidate_index']) for row in selected}
+    original = {}
+    with index_path.open() as handle:
+        for line in handle:
+            row = json.loads(line)
+            if int(row['candidate_index']) in needed:
+                original[int(row['candidate_index'])] = row
+    if set(original) != needed:
+        raise ValueError('Selected candidate absent from original action index')
+    # These sealed chunks were already completely replayed by the pool screen.
+    # New selected recourses are independently replayed below, including every
+    # source/target graph identity. No repeated full-package hash is necessary.
+    predecessor, count = predecessor_index(checked_events(input_root, verify_hashes=False))
+    pool = json.loads((Path(config['runtime_pool_root']) / 'terminal.json').read_text())
+    if count != pool['trace_events']:
+        raise ValueError('Original action stream differs from completed pool receipt')
+    source = load_aids_generation_bundle(dataset_dir=config['dataset_dir'], source_csv=config['source_csv'])
+    parents = dict(zip(source.parent_ids, source.graphs, strict=True))
+    from .rf_aligned_pool import recorded_path
+    records = []
+    for selected_row in selected:
+        row = original[int(selected_row['original_candidate_index'])]
+        if row['parent_id'] != selected_row['original_parent_id']:
+            raise ValueError('Selected native source parent changed')
+        replayed = replay_candidate(row, predecessor, parents)
+        if compact_graph(replayed) != selected_row['graph']:
+            raise ValueError('Actual selected-action replay differs from selected medoid graph')
+        records.append({'candidate_index': row['candidate_index'], 'parent_id': row['parent_id'],
+                        'stable_graph_sha256': row['stable_graph_sha256'],
+                        'official_graph_hash': row['official_graph_hash'],
+                        'actions': recorded_path(row, predecessor),
+                        'action_count': row['action_count'], 'replayed_compact_graph': selected_row['graph']})
+    atomic_json(target, {'state': 'RECORDED_ACTION_REPLAY_PASS', 'native_summary_sha256': summary_sha,
+                        'original_candidate_index_sha256': config['candidate_lineage_sha256'],
+                        'original_trace_manifest': str(input_root / 'trace/selected_action_trace_manifest.json'),
+                        'original_trace_manifest_sha256': file_sha(input_root / 'trace/selected_action_trace_manifest.json'),
+                        'pool_contract_sha256': pool['contract_sha'], 'records': records,
+                        'scientific_rng_used': False, 'generated_actions_inferred': False})
+    return target
+
+
 def freeze_summary(config, *, recourse_root: Path, output_root: Path):
     from .slot_evaluation import write_csv
     terminal = json.loads((recourse_root / 'terminal.json').read_text())
@@ -49,3 +128,123 @@ def evaluate_frozen_summary(config, *, recourse_root: Path, output_root: Path):
     command = [sys.executable, 'scripts/baselines/comrecgc/run_slot_unified_eval.py', '--config', 'configs/hpc.yaml', '--set', 'inference.fallback_to_heuristic=false', '--mode', 'full', '--dataset', 'aids', '--chemistry-dir', str(frozen), '--dataset-csv', args.dataset_csv, '--teacher-path', args.teacher_path, '--molclr-root', args.molclr_root, '--molclr-checkpoint', args.molclr_checkpoint, '--thresholds-json', str(threshold_path), '--output-dir', args.output_dir, '--expected-parent-count', '1283', '--max-k', '20', '--device', 'cpu', '--resume', '--method-variant', 'ComRecGC-RFAligned']
     atomic_json(output_root / 'evaluation_dispatch.json', {'argv': command, 'selector_frozen_first': True, 'fullgraph_not_ours_deletion': True, 'same_1283_denominator': True, 'matrix_write_enabled': False})
     return run(args)
+
+
+def validate_release(root_like, *, proc_root='/proc', require_writer_audit=True):
+    """Reopen completed native science, frozen shared evaluation and provenance."""
+    from src.eval.non_taste_matrix_append import _validate_rf_standardized, _writer_audit
+    from .external_memory_dbscan import ExternalDBSCANContract, fit_external_memory_dbscan
+    root = Path(root_like).resolve(strict=True)
+    run = json.loads((root / 'run_manifest.json').read_text())
+    expected = {'schema_version': 'aids_rf_aligned_release_v1', 'status': 'PASS',
+                'method_variant': 'ComRecGC-RFAligned', 'dataset': 'aids',
+                'source_label': 1, 'target_label': 0, 'source_denominator': 1283,
+                'rf_source1_count': 1097, 'old_dbscan_labels_reused': False,
+                'benchmark_test_previously_seen': True, 'repair_selected_using_test': False,
+                'selection_frozen_before_evaluation': True, 'generation_rerun': False}
+    if any(run.get(k) != v for k, v in expected.items()):
+        raise ValueError('RFAligned release does not carry the frozen scientific scope')
+    sources = run.get('bound_sources', {})
+    required = {'native_terminal', 'native_summary', 'universe', 'count_manifest', 'dbscan_manifest', 'summary_freeze', 'source_pool_terminal', 'selected_action_lineage'}
+    if set(sources) != required:
+        raise ValueError('RFAligned scientific source closure is incomplete')
+    payload = {}
+    for name, identity in sources.items():
+        path = Path(identity['path'])
+        if not path.is_absolute() or path.is_symlink() or not path.is_file() or file_sha(path) != identity['sha256']:
+            raise ValueError('RFAligned changed scientific receipt: ' + name)
+        payload[name] = json.loads(path.read_text())
+    native = payload['native_terminal']
+    universe = payload['universe']
+    count = payload['count_manifest']
+    cluster = payload['dbscan_manifest']
+    summary = payload['native_summary']
+    freeze = payload['summary_freeze']
+    pool = payload['source_pool_terminal']
+    if native.get('state') != 'RF_ALIGNED_NATIVE_SUMMARY_COMPLETE' or native.get('old_cluster_labels_reused') is not False:
+        raise ValueError('New-universe native summary has not completed')
+    if pool.get('state') != 'POOL_SCREEN_COMPLETE' or pool.get('counts', {}).get('CACHE_PROVENANCE_GAP', 0):
+        raise ValueError('Full native pool screen is not closed')
+    if universe.get('pool_contract') != pool['contract_sha'] or count.get('identity_sha') != digest(universe):
+        raise ValueError('Native pool/count scientific universe differs')
+    if count.get('state') != 'COUNT_COMPLETE' or native['pair_rows'] != count['pair_count'] or cluster.get('num_samples') != count['pair_count']:
+        raise ValueError('Exact recourse pair count differs between stages')
+    if (universe.get('source_denominator') != 1283 or len(universe.get('source_positions', [])) != 1097
+            or universe.get('theta') != .1 or universe.get('eps') != .02 or universe.get('min_samples') != 3
+            or universe.get('old_dbscan_labels_reused') is not False):
+        raise ValueError('Native GREED/DBSCAN/source contract changed')
+    if not summary or len(summary) != native['selected_count'] or any(r['rf']['prediction'] != 0 or not r.get('graph') for r in summary):
+        raise ValueError('Native selected graph/RF result is incomplete')
+    if freeze.get('native_summary_sha256') != sources['native_summary']['sha256'] or freeze.get('summary_frozen_before_evaluation') is not True:
+        raise ValueError('Native summary was not bound before evaluation')
+    lineage = payload['selected_action_lineage']
+    if (lineage.get('state') != 'RECORDED_ACTION_REPLAY_PASS'
+            or lineage.get('native_summary_sha256') != sources['native_summary']['sha256']
+            or lineage.get('pool_contract_sha256') != pool['contract_sha']
+            or lineage.get('generated_actions_inferred') is not False
+            or [r['candidate_index'] for r in lineage.get('records', [])] != [r['original_candidate_index'] for r in summary]):
+        raise ValueError('Actual selected-action lineage is not closed')
+    validate_lineage_records(lineage, summary)
+    dbscan_root = Path(sources['dbscan_manifest']['path']).parent
+    if not (dbscan_root / 'run_manifest.json').is_file() or cluster.get('run_complete') is not True:
+        raise ValueError('DBSCAN is not terminal; verifier must not run new clustering')
+    contract = ExternalDBSCANContract(**cluster['scientific_identity']['contract'])
+    # This API takes its terminal-only branch. It verifies the existing exact
+    # certificates and immutable source stat/hash binding, never mines or fits.
+    fit_external_memory_dbscan(vectors_path=cluster['scientific_identity']['vectors_path'], work_dir=dbscan_root, contract=contract, expected_vectors_sha256=cluster['scientific_identity']['vectors_sha256'], resume=True)
+    standardized = _validate_rf_standardized(root, dataset='AIDS', dataset_key='aids', method_name='ComRecGC-RFAligned')
+    if run.get('standardized_run_manifest_sha256') != standardized['run_manifest_sha256']:
+        raise ValueError('Standardized evaluation does not bind to this release')
+    evaluation = json.loads((Path(standardized['root']) / 'run_manifest.json').read_text())
+    if (evaluation.get('native_summary_freeze_manifest_sha256') != sources['summary_freeze']['sha256']
+            or evaluation.get('parent_count') != 1283 or evaluation.get('source_eligible_count') != 1097):
+        raise ValueError('Evaluation changed summary order or denominator')
+    verify_reference_threshold_identity(evaluation)
+    return {'terminal_kind': 'AIDS_RFALIGNED_CORRECTIVE_RELEASE', 'root': str(root),
+            'run_manifest_sha256': file_sha(root / 'run_manifest.json'), 'standardized': standardized,
+            'identities': standardized['identities'], 'scientific_output_empty': False,
+            'writer_audit': _writer_audit(root, proc_root=proc_root, required=require_writer_audit),
+            'native_writer_audit': _writer_audit(Path(sources['native_terminal']['path']).parent, proc_root=proc_root, required=require_writer_audit)}
+
+
+def verify_reference_threshold_identity(evaluation):
+    import csv
+    import hashlib
+    reference = evaluation.get('threshold_reference')
+    if not isinstance(reference, dict):
+        raise ValueError('Exact frozen AIDS reference grid identity is required')
+    path = Path(reference['figure4_path'])
+    if file_sha(path) != reference['figure4_sha256']:
+        raise ValueError('Frozen AIDS reference Figure4 changed')
+    with path.open() as handle:
+        rows = list(csv.DictReader(handle))
+    strings = [r['threshold'] for r in rows]
+    sequence_sha = hashlib.sha256(('\n'.join(strings) + '\n').encode()).hexdigest()
+    if (sequence_sha != reference['threshold_raw_string_sha256']
+            or [float(x) for x in strings] != evaluation['threshold_grid']
+            or evaluation['threshold_config_hash'] != reference['threshold_raw_string_sha256']):
+        raise ValueError('Exact threshold sequence or raw-string source binding changed')
+    return reference
+
+
+def complete_release(config, *, recourse_root: Path, output_root: Path):
+    from .recovery_gate import gate_project_full
+    from scripts.baselines.comrecgc.freeze_recovery_result import freeze
+    release = output_root / 'release'
+    if (release / 'run_manifest.json').exists():
+        validate_release(release, require_writer_audit=False)
+        return json.loads((release / 'run_manifest.json').read_text())
+    lineage_path = selected_lineage(config, recourse_root=recourse_root, output_root=output_root)
+    evaluate_frozen_summary(config, recourse_root=recourse_root, output_root=output_root)
+    gate_project_full(output_root / 'unified_eval', output_root / 'gate', dataset='aids', expected_parent_count=1283, expected_teacher_sha256=config['rf_sha256'], expected_project_commit=config['execution_commit'])
+    if not (release / 'standardized').exists():
+        freeze(source_dir=output_root / 'unified_eval', gate_dir=output_root / 'gate', output_dir=release / 'standardized', dataset='aids')
+    else:
+        from src.eval.non_taste_matrix_append import _validate_rf_standardized
+        _validate_rf_standardized(release, dataset='AIDS', dataset_key='aids', method_name='ComRecGC-RFAligned')
+    paths = {'native_terminal': recourse_root / 'terminal.json', 'native_summary': recourse_root / 'selected_native_recourses.json', 'universe': recourse_root / 'universe_manifest.json', 'count_manifest': recourse_root / 'exact_count/manifest.json', 'dbscan_manifest': recourse_root / 'dbscan/run_manifest.json', 'summary_freeze': output_root / 'summary_freeze/run_manifest.json', 'source_pool_terminal': Path(config['runtime_pool_root']) / 'terminal.json', 'selected_action_lineage': lineage_path}
+    receipt = {'schema_version': 'aids_rf_aligned_release_v1', 'status': 'PASS', 'method_variant': 'ComRecGC-RFAligned', 'dataset': 'aids', 'source_label': 1, 'target_label': 0, 'source_denominator': 1283, 'rf_source1_count': 1097, 'old_dbscan_labels_reused': False, 'benchmark_test_previously_seen': True, 'repair_selected_using_test': False, 'selection_frozen_before_evaluation': True, 'generation_rerun': False, 'bound_sources': {k: {'path': str(p), 'sha256': file_sha(p)} for k, p in paths.items()}, 'standardized_run_manifest_sha256': file_sha(release / 'standardized/run_manifest.json')}
+    atomic_json(release / 'run_manifest.json', receipt)
+    independent = validate_release(release, require_writer_audit=False)
+    atomic_json(release / 'repair_scientific_audit.json', {**independent, 'audit_passed': True, 'independent_external_publisher_reopen_required': True, 'matrix_written': False})
+    return receipt

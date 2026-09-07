@@ -248,6 +248,65 @@ def read_authority_pointer(
             os.close(descriptor)
 
 
+def supersede_under_authority_pointer(
+    *, state_path: str | Path, lock_path: str | Path,
+    requested_cell: str, expected_prior_authority_root: str | Path,
+    expected_prior_matrix_sha256: str,
+    supersede: Callable[[Path], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Replace one already-passing cell version under the original lock/CAS.
+
+    The predecessor remains immutable and reachable through the replacement
+    receipt. This transition never creates a pointer or adds a matrix cell.
+    """
+    state, lock = Path(state_path), Path(lock_path)
+    if (not state.is_absolute() or not lock.is_absolute() or state == lock
+            or state.parent != lock.parent):
+        raise MatrixAuthorityPointerError('Invalid original authority state/lock paths')
+    valid = {f'{d}/{m}' for d in DATASETS for m in METHODS}
+    if requested_cell not in valid:
+        raise MatrixAuthorityPointerError('Invalid replacement cell')
+    descriptor = _open_lock(lock)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        before_state = _read_state(state)
+        prior = _validate_state(state, before_state)
+        if (Path(prior['root']).resolve() != Path(expected_prior_authority_root).resolve()
+                or prior['matrix_sha256'] != expected_prior_matrix_sha256):
+            raise MatrixAuthorityPointerError('STALE_SUPERSESSION_CAS: predecessor changed')
+        if requested_cell not in _passing_cells(prior):
+            raise MatrixAuthorityPointerError('Supersession requires an already passing cell')
+        result = dict(supersede(Path(prior['root'])))
+        if not result.get('output_root'):
+            raise MatrixAuthorityPointerError('Supersession omitted fresh authority root')
+        current = _verify_authority(result['output_root'], expected_complete=int(prior['complete']))
+        if Path(current['root']).resolve() == Path(prior['root']).resolve():
+            raise MatrixAuthorityPointerError('Supersession overwrote predecessor root')
+        if set(_passing_cells(current)) != set(_passing_cells(prior)):
+            raise MatrixAuthorityPointerError('Supersession changed matrix count/cell set')
+        target = tuple(requested_cell.split('/'))
+        for key, old_row in prior['rows'].items():
+            if key != target and current['rows'].get(key) != old_row:
+                raise MatrixAuthorityPointerError('Supersession changed a non-target row')
+        if current['rows'][target] == prior['rows'][target]:
+            raise MatrixAuthorityPointerError('Supersession did not create a new cell version')
+        # Reopen predecessor before publishing; a callback must not mutate it.
+        untouched = _verify_authority(prior['root'])
+        if untouched['matrix_sha256'] != prior['matrix_sha256'] or untouched['rows'] != prior['rows']:
+            raise MatrixAuthorityPointerError('Supersession modified predecessor history')
+        after_state = _state_for(current)
+        _atomic_state(state, after_state)
+        _validate_state(state, _read_state(state))
+        return {**result, 'authority_state_path': str(state), 'authority_lock_path': str(lock),
+                'authority_pointer_before': before_state, 'authority_pointer_after': after_state,
+                'matrix_count_changed': False, 'prior_authority_preserved': True}
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
 __all__ = [
     "DEFAULT_LOCK_PATH",
     "DEFAULT_STATE_PATH",
@@ -255,4 +314,5 @@ __all__ = [
     "POINTER_SCHEMA",
     "append_under_authority_pointer",
     "read_authority_pointer",
+    "supersede_under_authority_pointer",
 ]

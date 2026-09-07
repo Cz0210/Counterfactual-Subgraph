@@ -18612,3 +18612,24 @@ The shared RF/MolCLR-WNode kernels remain unchanged. The original AIDS/HIV
 already-seen generation/evaluation overlap. No new held-out/calibration split
 is invented. Legacy slot evaluation defaults and sealed results are unchanged.
 The paired CPU Slurm wrappers remain synchronized with the new CLI actions.
+# 2026-09-07: Corrective same-cell publication, not matrix growth
+
+User-authorized AIDS/ComRecGC-RFAligned and BACE/GlobalGCE-ChemAligned releases
+may supersede the corresponding already-passing cell only through the original
+`fast16_matrix_authority` lock and compare-and-swap pointer. The caller binds
+the expected prior authority root and matrix SHA. A fresh authority root keeps
+the same passing-cell count/set and byte-equivalent non-target rows; the prior
+root/audit are retained and referenced. No missing cell is added by this path.
+The original append path and legacy strict validators remain the default.
+
+AIDS RFAligned publication requires full native-pool/count/DBSCAN and selected
+summary provenance plus the existing shared RF/WNode full gate and frozen
+artifacts. Its source denominator is still1283 with1097 RF-source1; overlap with
+generation is disclosed, not relabeled as unseen test. New nonzero results
+cannot use the old zero-coverage-only threshold compatibility waiver. Instead,
+the exact reference Figure4 threshold sequence retains its original raw-string
+identity separately from the generated configuration-file SHA, with explicit
+source/value verification. The original conditional and capped costs remain.
+BACE corrective1..20 availability is allowed only for its explicitly named
+AT_MOST_K ChemAligned version plus existing independent source/audit closure;
+zero is not promoted without a separate complete scientific-zero contract.

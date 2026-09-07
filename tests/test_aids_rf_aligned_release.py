@@ -9,6 +9,40 @@ from src.baselines.comrecgc.slot_evaluation import load_official_slots, build_in
 
 
 class TestNativeSummaryRelease(unittest.TestCase):
+    def test_actual_action_chain_cannot_omit_or_invent_transition(self):
+        import copy
+        from src.baselines.comrecgc.rf_aligned_release import validate_lineage_records
+        selected = [{'original_candidate_index': 3, 'original_parent_id': 'P', 'graph': {'labels': [1, 2]}}]
+        event = {'event': 'selected_transition', 'action_resolution': 'exact', 'action': ['NA', 0, 2], 'parent_id': 'P', 'source_graph_sha256': 'parent', 'target_graph_sha256': 'child'}
+        record = {'candidate_index': 3, 'parent_id': 'P', 'action_count': 1, 'stable_graph_sha256': 'child', 'actions': [event], 'replayed_compact_graph': selected[0]['graph']}
+        validate_lineage_records({'records': [record]}, selected)
+        for mutation in ('missing', 'inferred', 'wrong_parent', 'wrong_target'):
+            bad = copy.deepcopy(record)
+            if mutation == 'missing':
+                bad['actions'] = []
+            elif mutation == 'inferred':
+                bad['actions'][0]['action_resolution'] = 'guessed_from_final_graph'
+            elif mutation == 'wrong_parent':
+                bad['actions'][0]['parent_id'] = 'Q'
+            else:
+                bad['actions'][0]['target_graph_sha256'] = 'other'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                validate_lineage_records({'records': [bad]}, selected)
+
+    def test_frozen_threshold_values_and_serialization_identity(self):
+        import hashlib
+        from src.baselines.comrecgc.rf_aligned_release import verify_reference_threshold_identity
+        from src.baselines.comrecgc.rf_aligned_pool import file_sha
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'figure4.csv'
+            path.write_text('threshold,coverage\n0.000,0.0\n0.0500,0.2\n')
+            reference = {'figure4_path': str(path), 'figure4_sha256': file_sha(path), 'threshold_raw_string_sha256': hashlib.sha256(b'0.000\n0.0500\n').hexdigest()}
+            evaluation = {'threshold_reference': reference, 'threshold_grid': [0., .05], 'threshold_config_hash': reference['threshold_raw_string_sha256']}
+            self.assertEqual(verify_reference_threshold_identity(evaluation), reference)
+            evaluation['threshold_grid'] = [0., .1]
+            with self.assertRaisesRegex(ValueError, 'threshold'):
+                verify_reference_threshold_identity(evaluation)
+
     def fixture(self, root):
         source = root / 'source'
         atomic_json(source / 'terminal.json', {'state': 'RF_ALIGNED_NATIVE_SUMMARY_COMPLETE', 'old_cluster_labels_reused': False, 'selected_count': 2, 'source1_count': 1097})

@@ -2,6 +2,9 @@
 # CPU-only publication; A800 directives preserve repository Slurm CLI parity.
 # Mut accepts either the legacy exact-postprocess terminal or the independent
 # parity-v2 standardization terminal; both are reopened fail-closed by the CLI.
+# Corrective versions use --supersede-existing plus expected prior root/matrix
+# SHA CAS, keeping the same pointer/lock and matrix count. HPC has no authority
+# write permission; the actual publication command is executed on AutoDL only.
 #SBATCH --job-name=append_non_taste_matrix
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1

@@ -18,6 +18,7 @@ from src.eval.fast16_matrix_authority_pointer import (  # noqa: E402
     DEFAULT_LOCK_PATH,
     DEFAULT_STATE_PATH,
     append_under_authority_pointer,
+    supersede_under_authority_pointer,
 )
 from src.eval.non_taste_matrix_append import (  # noqa: E402
     append_non_taste_matrix_cell,
@@ -39,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--method", choices=("GlobalGCE", "ComRecGC"), required=True)
     parser.add_argument("--cell-terminal-root", type=_absolute, required=True)
     parser.add_argument("--aids-controller-manifest", type=_absolute)
+    parser.add_argument('--supersede-existing', action='store_true')
+    parser.add_argument('--expected-prior-authority-root', type=_absolute)
+    parser.add_argument('--expected-prior-matrix-sha256')
     parser.add_argument(
         "--prior-authority-root",
         type=_absolute,
@@ -73,15 +77,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             aids_controller_manifest=args.aids_controller_manifest,
             output_root=args.output_root,
             proc_root=args.proc_root,
+            supersede_existing=args.supersede_existing,
         )
 
-    result = append_under_authority_pointer(
-        state_path=args.authority_state_path,
-        lock_path=args.authority_lock_path,
-        initial_authority_root=args.prior_authority_root,
-        requested_cells=(f"{args.dataset}/{args.method}",),
-        append=_append,
-    )
+    if args.supersede_existing:
+        if args.prior_authority_root is not None or args.expected_prior_authority_root is None or args.expected_prior_matrix_sha256 is None:
+            raise SystemExit('Supersession requires expected existing root/SHA; it cannot initialize an authority')
+        result = supersede_under_authority_pointer(state_path=args.authority_state_path, lock_path=args.authority_lock_path, requested_cell=f'{args.dataset}/{args.method}', expected_prior_authority_root=args.expected_prior_authority_root, expected_prior_matrix_sha256=args.expected_prior_matrix_sha256, supersede=_append)
+    else:
+        if args.expected_prior_authority_root is not None or args.expected_prior_matrix_sha256 is not None:
+            raise SystemExit('Expected predecessor CAS fields require --supersede-existing')
+        result = append_under_authority_pointer(state_path=args.authority_state_path, lock_path=args.authority_lock_path, initial_authority_root=args.prior_authority_root, requested_cells=(f"{args.dataset}/{args.method}",), append=_append)
     print(json.dumps(result, indent=2, sort_keys=True), flush=True)
     print(result["marker"], flush=True)
     return 0

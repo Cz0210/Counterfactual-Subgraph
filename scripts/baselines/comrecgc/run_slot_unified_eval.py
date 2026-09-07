@@ -404,6 +404,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         theta_star_override=args.theta_star,
         cost_cap_override=args.cost_cap,
     )
+    if rf_aligned:
+        from src.baselines.comrecgc.rf_aligned_release import verify_reference_threshold_identity
+        reference = threshold_payload.get('threshold_reference', {})
+        verify_reference_threshold_identity({'threshold_reference': reference, 'threshold_grid': thresholds, 'threshold_config_hash': reference.get('threshold_raw_string_sha256')})
     evaluator_invoked = False
     interface_probe_invoked = False
     evaluated_rows: list[dict[str, str]] = []
@@ -647,6 +651,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     }
     if rf_aligned:
         run_manifest.update(method_variant=method_name, source_scope='AIDS_HIV_EXISTING_1283_GENERATION_OVERLAP_NOT_UNSEEN_TEST', benchmark_test_previously_seen=True, repair_selected_using_test=False, source_eligible_count=1097, original_1283_denominator_preserved=True, rf_pool_provenance_closed=True, native_summary_freeze_manifest_sha256=sha256_file(chemistry_manifest))
+        run_manifest.update(threshold_reference=reference, threshold_config_hash=reference['threshold_raw_string_sha256'], threshold_identity_basis='exact ordered raw strings from frozen Figure 4 CSV; separate actual thresholds_sha256')
     write_json(root / "run_manifest.json", run_manifest)
     marker = "_SMOKE_AUDIT_COMPLETE.json" if args.mode == "smoke" else "_RUN_COMPLETE.json"
     write_json(root / marker, {"run_complete": True, "audit_passed": True})
