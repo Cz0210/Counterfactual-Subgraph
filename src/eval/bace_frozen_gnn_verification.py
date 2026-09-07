@@ -140,6 +140,7 @@ def _evaluate_rows(
     split: str,
     oracle_checkpoint_id: str,
     parent_prediction_cache: Mapping[str, Mapping[str, Any]] | None = None,
+    outcome_enumerator: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if parent_prediction_cache is None:
         parent_graphs = [
@@ -179,12 +180,13 @@ def _evaluate_rows(
         outcomes_by_candidate: dict[str, list[Any]] = {}
         for candidate in candidates:
             candidate_id = str(candidate["candidate_id"])
-            outcomes = enumerate_connected_hard_deletions(
+            outcomes = (outcome_enumerator(parent.smiles, candidate, parent.parent_id)
+                if outcome_enumerator is not None else enumerate_connected_hard_deletions(
                 parent.smiles,
                 str(candidate["canonical_fragment"]),
                 parent_id=parent.parent_id,
                 candidate_id=candidate_id,
-            )
+            ))
             outcomes_by_candidate[candidate_id] = outcomes
             for outcome in outcomes:
                 if not outcome.valid or not outcome.residual_smiles:
