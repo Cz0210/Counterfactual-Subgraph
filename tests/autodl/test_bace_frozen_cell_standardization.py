@@ -595,6 +595,30 @@ def test_chemaligned_five_rules_preserve_version_and_at_most_k(tmp_path: Path) -
     assert len(prefix)==20 and prefix[4]['CCRCov']==prefix[19]['CCRCov']
 
 
+def test_bace_grid_binding_rejects_tamper_and_does_not_relax_other_datasets(tmp_path: Path) -> None:
+    from src.eval.four_by_four_main_results import _bace_frozen_figure4_grid, MainResultsError
+    checkpoint, checkpoint_id, test_hash = _checkpoint(tmp_path)
+    source=_source(tmp_path,method='GlobalGCE',checkpoint_id=checkpoint_id,test_hash=test_hash)
+    out=tmp_path/'std'
+    standardize_bace_frozen_cell(method='GlobalGCE',source_final_root=source,gnn_checkpoint=checkpoint,output_dir=out)
+    evaluation=json.loads((out/'evaluation_manifest.json').read_text())
+    assert _bace_frozen_figure4_grid('BACE','GlobalGCE',evaluation)==evaluation['threshold_values']
+    assert _bace_frozen_figure4_grid('AIDS','GlobalGCE',evaluation) is None
+    assert _bace_frozen_figure4_grid('BACE','GlobalGCE',{'schema_version':'legacy'}) is None
+    changed={**evaluation,'threshold_values':[0.01,0.02]}
+    with pytest.raises(MainResultsError,match='grid/hash mismatch'):
+        _bace_frozen_figure4_grid('BACE','GlobalGCE',changed)
+    changed={**evaluation,'source_selection_manifest':{**evaluation['source_selection_manifest'],'sha256':'0'*64}}
+    with pytest.raises(MainResultsError,match='identity missing or changed'):
+        _bace_frozen_figure4_grid('BACE','GlobalGCE',changed)
+    selection_path=source/'frozen_selection_manifest.json'
+    selection=json.loads(selection_path.read_text());selection['test_loaded']=True
+    _write_json(selection_path,selection)
+    changed={**evaluation,'source_selection_manifest':_identity(selection_path)}
+    with pytest.raises(MainResultsError,match='same frozen calibration selector'):
+        _bace_frozen_figure4_grid('BACE','GlobalGCE',changed)
+
+
 def test_standardization_rejects_pair_matrix_tamper(tmp_path: Path) -> None:
     checkpoint, checkpoint_id, test_hash = _checkpoint(tmp_path)
     source = _source(tmp_path, method="Ours", checkpoint_id=checkpoint_id, test_hash=test_hash)
