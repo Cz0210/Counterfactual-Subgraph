@@ -20,11 +20,35 @@ def prepare_resources(prior_path, fresh_root, campaign):
             "source_references": [{"path": str(Path(__file__).parent / "bace_reach_v2.py"),
                                    "sha256": sha256_file(Path(__file__).parent / "bace_reach_v2.py")}],
             "derivation": "At next committed parent: <=12 directory/control entries, one parent JSON plus atomic temp, progress plus temp, <=4 SQLite/compact-node-cache files, <=8 owner heartbeat/evidence/terminal entries, and <=10 freeze/control transition files; 64 conservatively bounds these. Prior committed parent files already exist and are not counted again. No per-match files."}}}
+    policy = {k: copy.deepcopy(v) for k, v in old.items() if k != "self_sha256"}
+    # The existing T12 owner advanced naturally from reference500 to its
+    # already-bound 501..510 reload tail. Same compact writer, still diagnostic.
+    # Update only that specific phase, never accept an arbitrary new stage.
+    for entry in policy["concurrent_components"]:
+        if entry["component_id"] != "t12_next_checkpoint":
+            continue
+        guard = entry["scope_guards"][0]
+        live = read_json(guard["path"])
+        if live.get("phase") == "REFERENCE_RESUME_TO_510":
+            if (live.get("owner_pid") != 162844 or live.get("owner_start_ticks") != 18577652
+                or live.get("reload_tail") != "501-510" or live.get("completed_step") != 500
+                or live.get("test_loaded") is not False):
+                raise ValueError("T12_RELOAD_TAIL_IDENTITY_NOT_BOUND")
+            previous = read_json(entry["evidence"]["path"])["components"]["t12_next_checkpoint"]
+            updated = {**previous, "safe_boundary": "reference_reload_tail501_510_next_checkpoint",
+                "derivation": previous["derivation"] + " Same 1ad12b56 compact writer now executes existing reload tail501..510, without another reference/full generation; owner identity unchanged."}
+            proof["components"]["t12_next_checkpoint"] = updated
+            entry["safe_boundary"] = updated["safe_boundary"]
+            guard["allowed_values"]["phase"] = ["REFERENCE_RESUME_TO_510"]
+            guard["allowed_values"].update(owner_pid=[162844], owner_start_ticks=[18577652], reload_tail=["501-510"])
+            guard["maximum_values"] = {"completed_step": 500}
     atomic_json(fresh_root / "file_peak.json", proof)
     evidence = {"path": str(fresh_root / "file_peak.json"), "sha256": sha256_file(fresh_root / "file_peak.json")}
     row = {"component_id": component, "peak_new_files": 64, "safe_boundary": boundary,
            "already_existing_files_counted": False, "bound_kind": "SOURCE_DERIVED_NEXT_BOUNDARY", "evidence": evidence}
-    policy = {k: copy.deepcopy(v) for k, v in old.items() if k != "self_sha256"}
+    for entry in policy["concurrent_components"]:
+        if entry["component_id"] == "t12_next_checkpoint" and "t12_next_checkpoint" in proof["components"]:
+            entry["evidence"] = evidence
     # Preserve each still-active main task's code-bound reserve and phase guard.
     # Existing owner method names are protocol slots, not a claim of LLM science.
     policy["stages"] = {name: {"state": "BOUNDED", "safe_boundary": boundary, "components": [row]}
