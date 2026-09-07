@@ -62,6 +62,49 @@ def graph_key(parent, residual, contract_sha):
     return stable_sha256(dict(parent=p, residual=r, raw_contract_sha256=contract_sha)), p, r
 
 
+def validate_ours_final_freeze(freeze, evidence_root: Path):
+    """Validate the actual three-control Ours freeze, not a pretend GNN freeze.
+
+    These small sealed receipts were copied after calibration selection closed.
+    No source test records or test metrics are consulted by this validator.
+    """
+    from src.eval.bace_reach_v2 import unseal
+    def valid_seal(value):
+        return value.get('self_sha256') == stable_sha256(
+            {k: v for k, v in value.items() if k != 'self_sha256'})
+    if (not valid_seal(freeze)
+            or freeze.get('state') != 'REACH_V2_FINAL_CONFIGURATION_FROZEN'
+            or freeze.get('selected_control') != 'new_pool_reach_first'
+            or freeze.get('selected_using_test') is not False
+            or freeze.get('test_opened') is not False
+            or freeze.get('test_campaigns_max') != 1
+            or freeze.get('main_matrix_write') is not False
+            or freeze.get('claim_new_untouched_test') is not False):
+        raise ValueError('OURS_ACTUAL_FINAL_FREEZE_REQUIRED')
+    docs = {}
+    for name, filename in (
+            ('search_contract', 'search_contract.json'),
+            ('candidate_freeze', 'candidate_freeze.json'),
+            ('selector_freeze', 'selector_freeze.json'),
+            ('train_gate', 'train_reach_gate.json')):
+        docs[name] = unseal(evidence_root / filename)
+        if docs[name]['self_sha256'] != freeze[name + '_sha256']:
+            raise ValueError('OURS_FINAL_FREEZE_DEPENDENCY_CHANGED:' + name)
+    selector, gate, pool = (docs[k] for k in ('selector_freeze', 'train_gate', 'candidate_freeze'))
+    if (selector.get('test_opened') is not False
+            or gate.get('state') != 'NO_ADDITIONAL_PPO_REQUIRED_BY_TRAIN_GATE'
+            or selector.get('candidate_freeze_sha256') != pool['self_sha256']
+            or gate.get('candidate_freeze_sha256') != pool['self_sha256']
+            or pool.get('search_contract_sha256') != docs['search_contract']['self_sha256']):
+        raise ValueError('OURS_FINAL_FREEZE_STAGE_ORDER_CONFLICT')
+    expected = dict(old_pool_old_selector=selector['controls']['old_pool_old_selector'],
+        new_pool_old_selector=selector['controls']['new_pool_old_selector'],
+        new_pool_reach_first=selector['reach_first']['ordered_rule_ids'])
+    if freeze.get('controls') != expected or any(
+            len(ids) != 20 or len(set(ids)) != 20 for ids in expected.values()):
+        raise ValueError('OURS_FINAL_THREE_CONTROL_BINDING_CONFLICT')
+
+
 def build_index(source_spec, *, split, output: Path, repo: Path,
                 test_freeze_path=None, test_freeze_sha=None, validate_test_freeze=None):
     """No model/OT inference. Read source parent members once, then seal a map.

@@ -145,3 +145,45 @@ def test_delegate_runtime_cost_change_is_not_hidden_by_manifest(tmp_path, monkey
     delegate.config.size_penalty_beta = .25
     with pytest.raises(ValueError, match='DELEGATE_NUMERICAL'):
         raw.VerifiedRawGraphDistance(delegate, index=index, current_raw_contract=contract, repo=tmp_path)
+
+
+def ours_freeze_fixture(tmp_path):
+    from src.eval.bace_reach_v2 import seal
+    search = seal(tmp_path/'search_contract.json', {'science': 'unchanged'})
+    pool = seal(tmp_path/'candidate_freeze.json', {'search_contract_sha256': search['self_sha256']})
+    ids = [str(i) for i in range(20)]
+    controls = dict(old_pool_old_selector=ids, new_pool_old_selector=ids)
+    selector = seal(tmp_path/'selector_freeze.json', dict(test_opened=False,
+        candidate_freeze_sha256=pool['self_sha256'], controls=controls,
+        reach_first={'ordered_rule_ids': list(reversed(ids))}))
+    gate = seal(tmp_path/'train_reach_gate.json', dict(
+        state='NO_ADDITIONAL_PPO_REQUIRED_BY_TRAIN_GATE', candidate_freeze_sha256=pool['self_sha256']))
+    value = dict(state='REACH_V2_FINAL_CONFIGURATION_FROZEN',
+        selected_control='new_pool_reach_first', selected_using_test=False, test_opened=False,
+        test_campaigns_max=1, main_matrix_write=False, claim_new_untouched_test=False,
+        search_contract_sha256=search['self_sha256'], candidate_freeze_sha256=pool['self_sha256'],
+        selector_freeze_sha256=selector['self_sha256'], train_gate_sha256=gate['self_sha256'],
+        controls={**controls, 'new_pool_reach_first': list(reversed(ids))})
+    return seal(tmp_path/'final_test_binding.json', value)
+
+
+def test_ours_actual_three_control_freeze_permits_only_raw_adoption(tmp_path):
+    freeze = ours_freeze_fixture(tmp_path)
+    raw.validate_ours_final_freeze(freeze, tmp_path)
+
+
+def test_ours_test_adoption_rejects_config_only_or_changed_selector(tmp_path):
+    freeze = ours_freeze_fixture(tmp_path)
+    with pytest.raises(ValueError, match='ACTUAL_FINAL_FREEZE'):
+        raw.validate_ours_final_freeze({'state': 'PASS'}, tmp_path)
+    # A fully re-sealed but different calibration choice is still not the bound one.
+    from src.eval.bace_reach_v2 import seal
+    path = tmp_path/'selector_freeze.json'
+    prior = read_json(path)
+    replacement = {k: v for k,v in prior.items() if k not in ('self_sha256', 'created_at')}
+    replacement['reach_first']['ordered_rule_ids'] = list(reversed(replacement['reach_first']['ordered_rule_ids']))
+    fresh = tmp_path/'changed-selector.json'
+    seal(fresh, replacement)
+    path.write_bytes(fresh.read_bytes())
+    with pytest.raises(ValueError, match='DEPENDENCY_CHANGED'):
+        raw.validate_ours_final_freeze(freeze, tmp_path)

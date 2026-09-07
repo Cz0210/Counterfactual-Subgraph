@@ -18652,3 +18652,15 @@ engineering retry. Record the temperature driver and the verifier driver separat
   semantic rewrite. Candidate IDs, masks, residual chemistry, oracle, budgets,
   parent checkpoints and previous failure evidence remain unchanged. Resume
   adopts committed parents; it does not rerun the successful prefix or canary.
+
+## 2026-09-07: Post-freeze Ours raw-test adoption is separate from GNN selection
+
+- A narrow CPU metadata wrapper validates the actual Ours three-control final
+  freeze and its sealed search/pool/train-gate/calibration-selector dependencies
+  before indexing any old test match costs. It does not fabricate the different
+  ten-selector GNN freeze, run inference/OT, or publish science results.
+- The copied index remains bound to that actual Ours freeze file SHA. The GNN
+  new-pool test still needs its own ten global selectors frozen. Old distances
+  may be shared by graph-content contract, never old flips or chosen minima.
+- Paired Slurm entry uses two CPU cores and no GPU, an explicit task-specific
+  exception to the default training Slurm template.
