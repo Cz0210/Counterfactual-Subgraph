@@ -110,3 +110,42 @@ def test_train_gate_refuses_probe(tmp_path, monkeypatch):
     seal(tmp_path / "adopted2607/train/terminal.json", dict(parent_count=2, spec_sha256=stable_sha256(spec)))
     with pytest.raises(ValueError, match="FULL_386"):
         driver.train_gate(spec)
+
+
+def test_same_source_supplement_retains_pool_and_rejects_test_guidance(tmp_path):
+    from src.experiments import bace_gin_reach_v2 as driver
+    from src.eval.bace_frozen_gnn_contracts import atomic_json, atomic_jsonl, sha256_file, stable_sha256
+    old = [dict(candidate_id="a"), dict(candidate_id="b")]
+    source = dict(gin_files={"model.pt":"frozen"})
+    source_path = tmp_path / "source.json"
+    atomic_json(source_path, source)
+    pool = tmp_path / "pool.jsonl"
+    atomic_jsonl(pool, old)
+    data = dict(state="NO_SUPPLEMENT_REQUIRED", source_spec_sha256=stable_sha256(source),
+        old2607_content_unchanged=True, candidate_count=2, candidate_universe_sha256=sha256_file(pool),
+        test_loaded=False, calibration_loaded=False)
+    path = tmp_path / "receipt.json"
+    seal(path, data)
+    spec = dict(gin_files=source["gin_files"],
+        adopted_source_spec=dict(path=str(source_path),sha256=sha256_file(source_path)),
+        supplement=dict(receipt=dict(path=str(path),sha256=sha256_file(path)), candidate_file=str(pool)))
+    assert driver.supplement_binding(spec, old)[0] == old
+    with pytest.raises(ValueError, match="SOURCE_ROWS"):
+        driver.supplement_binding(spec, list(reversed(old)))
+    bad = tmp_path / "bad.json"
+    seal(bad, dict(data, test_loaded=True))
+    spec["supplement"]["receipt"] = dict(path=str(bad),sha256=sha256_file(bad))
+    with pytest.raises(ValueError, match="TRAIN_ONLY"):
+        driver.supplement_binding(spec, old)
+
+
+def test_final_extended_pool_control_not_mislabeled_2607():
+    from src.eval.bace_frozen_gnn_contracts import stable_sha256
+    spec = {"new_control_name":"expanded_pool_new_selector"}
+    freeze = dict(state="CALIBRATION_SELECTOR_FROZEN",test_loaded=False,
+        spec_sha256=stable_sha256(spec),policy=POLICY,
+        controls=dict(old66_old_selector=[],old66_new_selector=[],expanded_pool_new_selector=[]))
+    require_freeze(spec, freeze)
+    freeze["controls"]["adopted2607_new_selector"] = freeze["controls"].pop("expanded_pool_new_selector")
+    with pytest.raises(ValueError):
+        require_freeze(spec, freeze)

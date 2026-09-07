@@ -23,6 +23,40 @@ from src.experiments.bace_gin_reach_selector import POLICY, select
 EXPERIMENT = "BACE_GIN_REACH_ALIGNED_V2"
 
 
+def campaign_group(spec):
+    return spec.get("campaign_group", "adopted2607")
+
+
+def new_control_name(spec):
+    return spec.get("new_control_name", "adopted2607_new_selector")
+
+
+def supplement_binding(spec, retained):
+    """Only a completed train-only supplement can extend the adopted source."""
+    descriptor = spec["supplement"]
+    receipt = bound_json(descriptor["receipt"])
+    if receipt.get("self_sha256") != stable_sha256({k:v for k,v in receipt.items() if k != "self_sha256"}):
+        raise ValueError("SUPPLEMENT_RECEIPT_SELF_HASH")
+    source = bound_json(spec["adopted_source_spec"])
+    if (receipt["source_spec_sha256"] != stable_sha256(source)
+            or receipt["state"] not in ("TRAIN_ONLY_POOL_FROZEN", "NO_SUPPLEMENT_REQUIRED")
+            or receipt.get("old2607_content_unchanged") is not True
+            or receipt.get("test_loaded") is not False or receipt.get("calibration_loaded") is not False
+            or source["gin_files"] != spec["gin_files"]):
+        raise ValueError("SUPPLEMENT_NOT_BOUND_TRAIN_ONLY_SAME_GIN")
+    path = Path(descriptor["candidate_file"])
+    if sha256_file(path) != receipt["candidate_universe_sha256"]:
+        raise ValueError("SUPPLEMENT_POOL_CHANGED")
+    rows = read_jsonl(path)
+    if (rows[:len(retained)] != retained or len(rows) != receipt["candidate_count"]
+            or len(rows) > 4096 or len({r["candidate_id"] for r in rows}) != len(rows)):
+        raise ValueError("SUPPLEMENT_SOURCE_ROWS_OR_BUDGET_CHANGED")
+    from src.chem.bace_reach_search import validate_attributed_candidate
+    for row in rows[len(retained):]:
+        validate_attributed_candidate(row)
+    return rows, receipt
+
+
 def seal(path, data):
     value = dict(data, self_sha256=stable_sha256(data))
     if Path(path).exists():
@@ -71,6 +105,12 @@ def pools(spec):
                 raise ValueError("ORIGINAL66_CONTENT_CHANGED")
     if frozen.get("actual_query_budget_exceeded") is not False or search.get("test_opened") is not False:
         raise ValueError("REACH_SOURCE_NOT_AUTHORIZED_TRAIN_ONLY")
+    if "supplement" in spec:
+        new, added = supplement_binding(spec, new)
+        frozen = dict(frozen, candidate_universe_sha256=added["candidate_universe_sha256"],
+            new_graph_oracle_queries=frozen["new_graph_oracle_queries"]+added["new_graph_oracle_queries"],
+            supplemental_new_candidate_count=added["new_candidate_count"],
+            supplemental_train_receipt_sha256=added["self_sha256"])
     return old, new, frozen
 
 
@@ -97,9 +137,9 @@ def plan(spec):
     root.mkdir(parents=True, exist_ok=True)
     return seal(root / "contract.json", dict(experiment_id=EXPERIMENT,
         spec_sha256=stable_sha256(spec), oracle=adopted, old_candidate_count=len(old),
-        adopted_candidate_count=len(pool), new_candidates_generated_this_campaign=0,
+        adopted_candidate_count=len(pool), new_candidates_generated_this_campaign=freeze.get("supplemental_new_candidate_count",0),
         source_search_queries=freeze["new_graph_oracle_queries"],
-        source_generation_oracle="GINE", new_verification_oracle="GIN", pool_sha256=freeze["candidate_universe_sha256"],
+        source_generation_oracle="GINE2607_PLUS_GIN_TRAIN_SUPPLEMENT" if "supplement" in spec else "GINE", new_verification_oracle="GIN", pool_sha256=freeze["candidate_universe_sha256"],
         post_hoc_development=True, previous_test_seen=True, test_used_to_design_search=False,
         selector_contract=dict(policy=POLICY, reach_weight=.25, grid_weight=.75,
             threshold_weights="ORIGINAL_GRID_NORMALIZED_TO_ONE", swap_passes=2,
@@ -158,7 +198,7 @@ def evaluate(spec, group, split, *, limit=None):
     frozen = verified(root / "selection_freeze.json") if split == "test" else None
     if split == "test" and (frozen["spec_sha256"] != stable_sha256(spec) or frozen["test_loaded"] is not False):
         raise ValueError("TEST_BEFORE_GLOBAL_FREEZE")
-    if group not in ("old66", "adopted2607") or split not in ("train", "calibration", "test"):
+    if group not in ("old66", "adopted2607", "aligned_pool") or split not in ("train", "calibration", "test"):
         raise ValueError("INVALID_STAGE")
     candidates = old if group == "old66" else expanded
     if frozen:
@@ -172,6 +212,20 @@ def evaluate(spec, group, split, *, limit=None):
         build_index(spec["raw_distance_source"], split="test", output=index,
             repo=Path(__file__).resolve().parents[2], test_freeze_path=fp,
             test_freeze_sha=sha256_file(fp), validate_test_freeze=lambda f: require_freeze(spec, f))
+        # The original corrected66 index cannot stand in for the already
+        # computed old Reach2607 test costs. Transfer/adopt that small raw-only
+        # index after this new freeze; missing evidence blocks rather than
+        # silently launching duplicate compliant OT.
+        binding = verified(root / "raw_test_source_binding.json")
+        if binding["spec_sha256"] != stable_sha256(spec) or binding["new_freeze_sha256"] != sha256_file(fp):
+            raise ValueError("OLD_REACH_TEST_RAW_SOURCE_BINDING_CONFLICT")
+        from src.experiments.bace_gin_reach_test_raw import union_test_indexes, validate_aplus_freeze
+        union = root / "raw_test_union.json"
+        union_test_indexes(dict(path=str(index), sha256=sha256_file(index)), binding["ours_index"], union,
+            repo=Path(__file__).resolve().parents[2], new_freeze_path=fp,
+            new_freeze_sha=sha256_file(fp),
+            validate_new_freeze=lambda f: validate_aplus_freeze(f, spec=spec, evidence_root=root))
+        index = union
         runtime_spec["raw_cost_indexes"]["test"] = dict(path=str(index), sha256=sha256_file(index),
             new_test_freeze_path=str(fp), new_test_freeze_sha256=sha256_file(fp))
     parents = adapter.fixed_source_parents(spec, split, test_authorized=frozen is not None)
@@ -198,7 +252,16 @@ def evaluate(spec, group, split, *, limit=None):
                     continue
                 seed_pairs, seed_matches = [], []
                 todo = candidates
-                if split == "calibration":
+                if split == "calibration" and "adopted_source_spec" in spec:
+                    source = bound_json(spec["adopted_source_spec"])
+                    saved = verified(Path(source["output_root"])/"adopted2607/calibration"/f"parent-{i:05d}.json")
+                    if (saved["spec_sha256"] != stable_sha256(source) or saved["parent_id"] != parent.parent_id
+                            or source["gin_files"] != spec["gin_files"]):
+                        raise ValueError("ADOPTED2607_CALIBRATION_SOURCE_CHANGED")
+                    seed_pairs, seed_matches = saved["pair_rows"], saved["match_rows"]
+                    adopted_ids = {r["candidate_id"] for r in seed_pairs}
+                    todo = [r for r in candidates if r["candidate_id"] not in adopted_ids]
+                elif split == "calibration":
                     seed_pairs, seed_matches = _old_calibration(spec, i, parent)
                     todo = [r for r in candidates if r["candidate_id"] not in old_ids]
                 elif split == "test":
@@ -273,14 +336,25 @@ def freeze(spec):
         value = verified(root / "selection_freeze.json")
         require_freeze(spec, value)
         return value
-    gate = verified(root / "train_adoption_gate.json")
-    if gate["spec_sha256"] != stable_sha256(spec) or gate["state"] != "NO_TRAIN_REACH_GAP_REQUIRING_SUPPLEMENT":
-        raise ValueError("TRAIN_ONLY_SUPPLEMENT_MUST_CLOSE_BEFORE_FINAL_SELECTOR")
+    if "supplement" not in spec:
+        gate = verified(root / "train_adoption_gate.json")
+        if gate["spec_sha256"] != stable_sha256(spec):
+            raise ValueError("TRAIN_ONLY_SUPPLEMENT_MUST_CLOSE_BEFORE_FINAL_SELECTOR")
+        if gate["state"] != "NO_TRAIN_REACH_GAP_REQUIRING_SUPPLEMENT":
+            closed = verified(root / "supplement_completion_binding.json")
+            receipt = bound_json(closed["receipt"])
+            if (closed["source_spec_sha256"] != stable_sha256(spec)
+                    or receipt.get("source_spec_sha256") != stable_sha256(spec)
+                    or receipt.get("state") != "TRAIN_ONLY_POOL_FROZEN"
+                    or receipt.get("new_candidate_count") != 0
+                    or receipt.get("old2607_content_unchanged") is not True
+                    or receipt.get("test_loaded") is not False or receipt.get("calibration_loaded") is not False):
+                raise ValueError("BOUNDED_SUPPLEMENT_NOT_CLOSED_OR_NEW_POOL_NOT_ADOPTED")
     old, pool, _ = pools(spec)
     from src.eval.bace_reach_selector import ReachMasks
     from src.ablations.gnn.cpu_evaluation import matrix_from_pairs
     pairs, ids = [], []
-    for record in _iter_units(spec, "adopted2607", "calibration"):
+    for record in _iter_units(spec, campaign_group(spec), "calibration"):
         pairs.extend(record["pair_rows"])
         ids.append(record["parent_id"])
     matrix = matrix_from_pairs(ids, pool, pairs, root=root, split="calibration")
@@ -291,15 +365,15 @@ def freeze(spec):
     control = select(ReachMasks.from_distances([r["candidate_id"] for r in old], oldmatrix.distances, thresholds), contract["old_order"])
     return seal(root / "selection_freeze.json", dict(state="CALIBRATION_SELECTOR_FROZEN", spec_sha256=stable_sha256(spec),
         contract_sha256=contract["self_sha256"], policy=POLICY, test_loaded=False, main_matrix_write=False,
-        controls=dict(old66_old_selector=contract["old_order"], old66_new_selector=control["ordered_rule_ids"],
-            adopted2607_new_selector=new["ordered_rule_ids"]), selection_details=dict(old=control, new=new),
+        controls={"old66_old_selector":contract["old_order"], "old66_new_selector":control["ordered_rule_ids"],
+            new_control_name(spec):new["ordered_rule_ids"]}, selection_details=dict(old=control, new=new),
         calibration_parent_ids=ids, created_at=utc_now()))
 
 
 def require_freeze(spec, frozen):
     if (frozen.get("state") != "CALIBRATION_SELECTOR_FROZEN" or frozen.get("test_loaded") is not False
             or frozen.get("spec_sha256") != stable_sha256(spec) or frozen.get("policy") != POLICY
-            or set(frozen.get("controls", {})) != {"old66_old_selector", "old66_new_selector", "adopted2607_new_selector"}):
+            or set(frozen.get("controls", {})) != {"old66_old_selector", "old66_new_selector", new_control_name(spec)}):
         raise ValueError("A_PLUS_ACTUAL_GLOBAL_FREEZE_REQUIRED")
 
 
@@ -307,7 +381,7 @@ def aggregate(spec):
     root = Path(spec["output_root"])
     frozen = verified(root / "selection_freeze.json")
     require_freeze(spec, frozen)
-    records = list(_iter_units(spec, "adopted2607", "test"))
+    records = list(_iter_units(spec, campaign_group(spec), "test"))
     parents = [r["parent_id"] for r in records]
     from src.eval.mutagenicity_wnode_selector import threshold_bundle_from_dict
     th = threshold_bundle_from_dict(bound_json(spec["thresholds"]))
@@ -321,7 +395,7 @@ def aggregate(spec):
     atomic_csv(root / "source_csv/ours_variant_comparison.csv", rows)
     for filename, key in (("figure3_k1_20.csv", "prefix_rows"), ("figure4_exact_ecdf.csv", "exact_ecdf"),
                           ("parent_best_distances.csv", "parent_distances")):
-        rows = out["adopted2607_new_selector"][key]
+        rows = out[new_control_name(spec)][key]
         atomic_csv(root / "source_csv" / filename, rows)
     return {name: [r for r in result["prefix_rows"] if r["cohort"]=="fixed141" and r["K_requested"] in (10,20)] for name,result in out.items()}
 
@@ -329,8 +403,9 @@ def aggregate(spec):
 def status(spec):
     root = Path(spec["output_root"])
     result = dict(experiment_id=EXPERIMENT, root=str(root), main_matrix_write=False)
-    for group, split in (("old66","train"),("old66","calibration"),("adopted2607","train"),
-                         ("adopted2607","calibration"),("adopted2607","test")):
+    final_group = campaign_group(spec)
+    for group, split in (("old66","train"),("old66","calibration"),(final_group,"train"),
+                         (final_group,"calibration"),(final_group,"test")):
         path = root/group/split
         result[f"{group}/{split}"] = read_json(path/"terminal.json") if (path/"terminal.json").exists() else (
             read_json(path/"progress.json") if (path/"progress.json").exists() else "NOT_STARTED")
@@ -349,7 +424,7 @@ def audit(spec):
     oracle = dict(model_sha256=adopted["model_sha256"], temperature=adopted["temperature"])
     inventories, results = {}, []
     for split in ("calibration", "test"):
-        for unit in _iter_units(spec, "adopted2607", split):
+        for unit in _iter_units(spec, campaign_group(spec), split):
             rows, apps = unit["pair_rows"], unit["match_rows"]
             result = audit_parent_rows(rows, apps, method="ours", split=split,
                 parent_id=unit["parent_id"], parent_smiles=rows[0]["parent_smiles"],
@@ -358,7 +433,7 @@ def audit(spec):
     metrics = verified(root / "metrics.json")
     from src.eval.mutagenicity_wnode_selector import threshold_bundle_from_dict
     th = threshold_bundle_from_dict(bound_json(spec["thresholds"]))
-    test = list(_iter_units(spec, "adopted2607", "test"))
+    test = list(_iter_units(spec, campaign_group(spec), "test"))
     for name, order in frozen["controls"].items():
         pairs = [p for u in test for p in u["pair_rows"] if p["candidate_id"] in order]
         independent = recompute_metrics([u["parent_id"] for u in test], order, pairs,
@@ -409,7 +484,7 @@ def audit_calibration(spec):
     adopted = adapter.validate_gin_adoption(spec)
     oracle = dict(model_sha256=adopted["model_sha256"], temperature=adopted["temperature"])
     counts = []
-    for unit in _iter_units(spec, "adopted2607", "calibration"):
+    for unit in _iter_units(spec, campaign_group(spec), "calibration"):
         rows = unit["pair_rows"]
         counts.append(dict(parent_id=unit["parent_id"], **audit_parent_rows(rows, unit["match_rows"],
             method="ours", split="calibration", parent_id=unit["parent_id"],

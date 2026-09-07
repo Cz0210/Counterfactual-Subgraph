@@ -48,3 +48,18 @@ are excluded from this decision. A new global selector cannot silently bypass
 an unclosed supplemental-search decision. The observed 386-parent old-pool
 result is R158/H141/L87; full calibration old66 is R19/H18/L7. These are measurements,
 not target gates. A separate saved-application consistency audit precedes test.
+
+## Actual full-pool observation and bounded continuation
+
+Saved2607 train: R313/H259/L208 out of386 (GIN-source318); calibration:
+R43/H41/L32 out of66 (GIN-source45). Only the five train-source parents lacking
+a strict flip trigger the seeded128/384 supplemental leaf; calibration does
+not identify search parents. Any added pool is adopted through a fresh derived
+spec and full retention check. New calibration evaluates only missing rules,
+adopting existing same-GIN2607 parent units. Controls explicitly distinguish
+old66/old selector, old66/new selector and the actual final expanded pool/new
+selector. A bounded search finding no new rule may close honestly without
+inventing witnesses or requiring100% reach. Test requires a fresh selector and
+a raw-only index that also covers prior Reach2607 test costs; a missing index
+blocks instead of silently recomputing known costs. This does not adopt the old
+Reach test metrics, flip masks or unresolved full-witness audit conclusions.
