@@ -143,3 +143,70 @@ def run_owner(spec_path):
     except BaseException as error:
         atomic_json(root/'terminal.json', {'state':'FAILED_ENGINEERING','error':repr(error),'created_at':utc_now()})
         raise
+
+
+def cpu_predecessor_state(evaluation_spec):
+    """One-time successor of this exact completed GPU owner, not a new queue."""
+    from src.experiments.bace_globalgce_aplus_evaluation import bound, validate, pool
+    config=validate(evaluation_spec)
+    predecessor=bound(evaluation_spec['predecessor_owner_spec'])
+    if predecessor['owner_root']!=config['owner_root'] or predecessor['training_contract']!=evaluation_spec['training_contract']['path']:
+        raise ValueError('CPU_PREDECESSOR_OWNER_CHANGED')
+    root=Path(predecessor['owner_root']);terminal=root/'terminal.json'
+    if not terminal.exists():return 'WAITING_TRAINING_AND_POOL_FREEZE'
+    state=read_small(terminal)[0].get('state')
+    if state not in ('POOL_FROZEN_EVALUATION_SUCCESSOR_PENDING','APLUS_INDEPENDENT_CPU_EVALUATION_COMPLETE'):
+        raise ValueError('CPU_PREDECESSOR_NOT_SCIENTIFICALLY_COMPLETE:'+str(state))
+    manifest,_=pool(evaluation_spec)
+    if manifest['state']!='TRAIN_POOL_FROZEN':raise ValueError('FROZEN_TRAIN_POOL_REQUIRED')
+    return 'READY'
+
+
+def run_cpu_handoff(evaluation_spec_path):
+    """Fresh immutable four-stage CPU handoff after the existing owner retires.
+
+    Uses the same resource admission and output contracts. No GPU lock is
+    acquired; no live GPU owner's spec/code is edited or dynamically reloaded.
+    """
+    from src.experiments.bace_globalgce_aplus_evaluation import bound,validate
+    spec=read_small(evaluation_spec_path)[0];validate(spec)
+    root=Path(spec['cpu_handoff_root'])
+    if not root.is_absolute() or root.parent!=Path(spec['output_root']).parent:
+        raise ValueError('CANONICAL_CPU_HANDOFF_PATH_REQUIRED')
+    root.mkdir(parents=True,exist_ok=False)
+    identity={'pid':os.getpid(),'start_ticks':process_start_ticks(Path('/proc'),os.getpid()),
+        'spec_path':str(evaluation_spec_path),'spec_sha256':sha256_file(evaluation_spec_path),'created_at':utc_now(),
+        'cpu_only':True,'gpu_lease_acquired':False}
+    atomic_json(root/'owner.json',identity)
+    def heartbeat(state,**extra):atomic_json(root/'heartbeat.json',{**identity,'state':state,'updated_at':utc_now(),**extra})
+    try:
+        while cpu_predecessor_state(spec)!='READY':
+            heartbeat('WAITING_TRAINING_AND_POOL_FREEZE',science_started=False);time.sleep(60)
+        for action in ('calibration','freeze','test','aggregate'):
+            attempt=0
+            while True:
+                resource=bound(spec['cpu_resource_config']);evidence,ready=cpu_admission(resource)
+                if not ready:
+                    heartbeat('WAITING_CPU_RESOURCE',next_stage=action,resource=evidence);time.sleep(60);continue
+                attempt+=1
+                command=[sys.executable,'-I','-B',str(Path(__file__).resolve().parents[2]/'scripts/experiments/run_bace_globalgce_aplus_evaluation.py'),
+                    '--config',spec['runtime_config'],'--spec',str(evaluation_spec_path),'--action',action]
+                with (root/f'{action}-{attempt:04d}.log').open('xb') as log:
+                    child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,close_fds=True,
+                        env=dict(os.environ,CUDA_VISIBLE_DEVICES='',OMP_NUM_THREADS='2',MKL_NUM_THREADS='2',OPENBLAS_NUM_THREADS='2'))
+                    while child.poll() is None:
+                        heartbeat('CPU_SCIENCE_RUNNING',next_stage=action,science_pid=child.pid)
+                        try:child.wait(timeout=60)
+                        except subprocess.TimeoutExpired:pass
+                if child.returncode==75:
+                    heartbeat('PAUSED_AT_PARENT_CHECKPOINT',next_stage=action);time.sleep(60);continue
+                if child.returncode:raise RuntimeError(f'{action} failed code={child.returncode}; saved parents retained; no automatic engineering retry')
+                break
+        final=read_small(Path(spec['output_root'])/'final_audit.json')[0]
+        if final.get('state')!='APLUS_GLOBALGCE_EVALUATION_COMPLETE' or final.get('spec_sha256')!=stable_sha256(spec):
+            raise ValueError('ACTUAL_FINAL_AUDIT_REQUIRED')
+        atomic_json(root/'terminal.json',{'state':'APLUS_GLOBALGCE_EVALUATION_COMPLETE','final_audit':str(Path(spec['output_root'])/'final_audit.json'),
+            'main_matrix_write':False,'created_at':utc_now()});heartbeat('APLUS_GLOBALGCE_EVALUATION_COMPLETE')
+        return 0
+    except BaseException as error:
+        atomic_json(root/'terminal.json',{'state':'BLOCKED','error':repr(error),'created_at':utc_now()});raise

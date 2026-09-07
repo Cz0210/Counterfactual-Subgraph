@@ -51,3 +51,58 @@ def test_global_selector_requires_actual_original_proof(tmp_path):
     from src.experiments.bace_gin_native_baselines import select_order
     with pytest.raises(ValueError,match='CONTEXT_REQUIRED'):
         select_order(tmp_path,{'method':'globalgce','test_loaded':False})
+
+def test_split_bytes_are_bound_not_just_count(tmp_path,monkeypatch):
+    p=tmp_path/'cal.csv';p.write_text('changed')
+    spec={'split_bindings':{'calibration':{'path':str(p),'sha256':'a'*64}}}
+    monkeypatch.setattr(e,'bound',lambda _: {'splits':{'calibration':'data/cal.csv'},'files':{'data/cal.csv':{'sha256':'a'*64}}})
+    spec['bundle_manifest']={}
+    with pytest.raises(ValueError,match='FROZEN_SPLIT_CONTENT_CHANGED'):e.split_parents(spec,'calibration')
+
+def test_test_split_hash_waits_for_own_freeze(monkeypatch):
+    monkeypatch.setattr(e,'verified_freeze',lambda _: (_ for _ in ()).throw(ValueError('OWN_FREEZE')))
+    monkeypatch.setattr(e,'bound',lambda _:pytest.fail('manifest read too early'))
+    with pytest.raises(ValueError,match='OWN_FREEZE'):e.split_parents({},'test')
+
+def test_partial_matrix_resume_checks_existing_contents(tmp_path):
+    p=tmp_path/'rows.jsonl';v=[{'parent_id':'p'}]
+    e.sealed_matrix_file(p,v,jsonl=True);e.sealed_matrix_file(p,v,jsonl=True)
+    with pytest.raises(ValueError,match='SEALED_CALIBRATION_MATRIX_CHANGED'):
+        e.sealed_matrix_file(p,[{'parent_id':'other'}],jsonl=True)
+
+def test_freeze_order_tamper_rejected_before_test_sources(tmp_path,monkeypatch):
+    f={'state':'FROZEN','ordered_rule_ids':['a','b']}
+    f['self_sha256']=e.stable_sha256(f);f['ordered_rule_ids'].reverse()
+    (tmp_path/'selection_freeze.json').write_text(json.dumps(f))
+    monkeypatch.setattr(e,'pool',lambda _:pytest.fail('opened pool after invalid freeze'))
+    with pytest.raises(ValueError,match='FREEZE_SEAL_CHANGED'):e.verified_freeze({'output_root':str(tmp_path)})
+
+def test_cpu_handoff_waits_for_exact_owner_terminal(tmp_path,monkeypatch):
+    from src.baselines.bace_globalgce_aplus_owner import cpu_predecessor_state
+    config={'owner_root':str(tmp_path),'training_summary':'summary'}
+    monkeypatch.setattr(e,'validate',lambda _:config)
+    monkeypatch.setattr(e,'bound',lambda _:{'owner_root':str(tmp_path),'training_contract':'/contract'})
+    monkeypatch.setattr(e,'pool',lambda _:pytest.fail('pool before producer terminal'))
+    spec={'predecessor_owner_spec':{},'training_contract':{'path':'/contract'}}
+    assert cpu_predecessor_state(spec)=='WAITING_TRAINING_AND_POOL_FREEZE'
+    (tmp_path/'terminal.json').write_text(json.dumps({'state':'FAILED_ENGINEERING'}))
+    with pytest.raises(ValueError,match='NOT_SCIENTIFICALLY_COMPLETE'):cpu_predecessor_state(spec)
+
+def test_global_at_most_budget_preserves_real_prefix(tmp_path,monkeypatch):
+    from src.experiments.bace_gin_native_baselines import select_order
+    from src.eval import mutagenicity_wnode_selector as s
+    calls=[]
+    def run(**kw):
+        calls.append(kw);out=kw['output_dir'];out.mkdir()
+        (out/'variants/A1').mkdir(parents=True)
+        (out/'calibration_decision.json').write_text(json.dumps({'selected_variant':'A1','decision_rule':'fixed'}))
+        (out/'variants/A1/selected_top20.json').write_text(json.dumps({'candidates':[{'candidate_id':f'r{i}'} for i in range(kw['top_k'])]}))
+    monkeypatch.setattr(s,'run_mutagenicity_wnode_selector',run)
+    monkeypatch.setattr(s,'threshold_bundle_from_dict',lambda v:v)
+    cfg={'top_k':20,'table_k':10,'seed':13,'local_swap_passes':2,'parent_limit':0,'candidate_limit':0,'forbid_test':True,'prefix_weights':[1.]*10+[.5]*10}
+    result=select_order(tmp_path,{'method':'globalgce','native_attachment_contract':SCHEMA,
+        'original_global_selector_verified':True,'test_loaded':False,'available_rule_count':15,
+        'rule_budget_semantics':'AT_MOST_K','original_selector_config':cfg,'output_root':str(tmp_path/'selector'),
+        'thresholds':{},'threshold_provenance':{}})
+    assert result['effective_top_k']==15 and len(result['ordered_rule_ids'])==15
+    assert calls[0]['top_k']==15 and calls[0]['prefix_weights']==[1.]*10+[.5]*5

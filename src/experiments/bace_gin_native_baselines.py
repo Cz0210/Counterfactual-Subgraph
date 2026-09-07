@@ -200,8 +200,17 @@ def select_order(matrix: str | Path, selector_context: Mapping[str, Any]) -> dic
     if any(config.get(k) != v for k, v in frozen.items()) or config.get("prefix_weights") != [1.0] * 10 + [0.5] * 10:
         raise ValueError("ORIGINAL_NATIVE_SELECTOR_CONFIG_CHANGED")
     out = Path(selector_context["output_root"])
+    effective = dict(frozen)
+    weights = config["prefix_weights"]
+    if global_native:
+        available = selector_context["available_rule_count"]
+        if selector_context.get("rule_budget_semantics") != "AT_MOST_K" or not 1 <= available <= 80:
+            raise ValueError("GLOBAL_AVAILABLE_RULE_BUDGET_REQUIRED")
+        effective["top_k"] = min(20, available)
+        effective["table_k"] = min(10, available)
+        weights = weights[:effective["top_k"]]
     run_mutagenicity_wnode_selector(matrix_run_dir=matrix, output_dir=out,
-            **frozen, prefix_weights=config["prefix_weights"],
+            **effective, prefix_weights=weights,
             frozen_thresholds=threshold_bundle_from_dict(selector_context["thresholds"]),
             frozen_threshold_provenance=selector_context["threshold_provenance"])
     decision = json.loads((out / "calibration_decision.json").read_text())
@@ -209,5 +218,6 @@ def select_order(matrix: str | Path, selector_context: Mapping[str, Any]) -> dic
     rows = selected["candidates"]
     return {"ordered_rule_ids": [r["candidate_id"] for r in rows], "candidates": rows,
             "selected_variant": decision["selected_variant"], "decision_rule": decision["decision_rule"],
+            "requested_top_k":20,"effective_top_k":effective["top_k"],
             "selector_implementation": "src.eval.mutagenicity_wnode_selector.run_mutagenicity_wnode_selector",
             "classifier_family": "gin", "test_loaded": False, "original_selector_reused": True}

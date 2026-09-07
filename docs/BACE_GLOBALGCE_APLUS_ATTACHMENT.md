@@ -48,3 +48,18 @@ The new leaf verifies these source files before selection; it never adopts the
 old GINE winner or flips. Its saved-record audit explicitly does not claim a
 second model, chemistry, or OT execution. Output is an independent A+ registry,
 not the original main-matrix authority.
+# CPU stage-boundary handoff and split binding (2026-09-08)
+
+The future CPU leaf hashes each split CSV against the original portable bundle's
+frozen manifest at that split's entry. Test bytes are first opened only after this
+GlobalGCE pool's own selector freeze. Calibration matrix files are adopted on
+resume only when their complete saved content matches the already completed
+parent checkpoints. GlobalGCE retains its original four-variant selector and
+threshold source; the authorized at-most-K cap affects only a short available
+pool, never pads or regenerates candidates.
+
+`cpu-handoff` is a single dataset-specific stage handoff in the existing GlobalGCE
+owner module. It waits for the exact original owner terminal and bound pool,
+then calls calibration, freeze, test and aggregate in order. It never edits the
+live training owner/spec or acquires a GPU lease. Resource pauses resume only
+sealed parent checkpoints; engineering errors stop with their evidence retained.

@@ -27,7 +27,24 @@ def validate(spec):
     for key in ('output_root','pool_root','bundle_root','calibration_csv','test_csv'):
         if not Path(spec[key]).is_absolute():raise ValueError('ABSOLUTE_PATH_REQUIRED:'+key)
     if spec['base_counts']!={'calibration':66,'test':141}:raise ValueError('FIXED_COHORT_CHANGED')
+    for split in ('calibration','test'):
+        item=spec['split_bindings'][split]
+        if item['path']!=spec[split+'_csv'] or len(item['sha256'])!=64:
+            raise ValueError('FROZEN_SPLIT_DESCRIPTOR_REQUIRED:'+split)
     return config
+
+def split_parents(spec,split):
+    # Even reading/hash-checking the test CSV is deferred until our own freeze.
+    if split=='test':verified_freeze(spec)
+    manifest=bound(spec['bundle_manifest']);item=spec['split_bindings'][split]
+    rel=manifest['splits'][split]
+    if (item['sha256']!=manifest['files'][rel]['sha256']
+        or sha256_file(item['path'])!=item['sha256']):
+        raise ValueError('FROZEN_SPLIT_CONTENT_CHANGED:'+split)
+    parents=load_bace_parents(item['path'],source_label=1)
+    if len(parents)!=spec['base_counts'][split] or len({p.parent_id for p in parents})!=len(parents):
+        raise ValueError('FIXED_COHORT_CHANGED')
+    return parents
 
 def pool(spec):
     config=validate(spec);root=Path(spec['pool_root']);m=read_json(root/'run_manifest.json')
@@ -40,8 +57,14 @@ def pool(spec):
     candidates=read_jsonl(p)
     if not 1<=len(candidates)<=80 or len({c['candidate_id'] for c in candidates})!=len(candidates):
         raise ValueError('UNIQUE_NATIVE_POOL_REQUIRED')
+    source=bound(spec['native_codec_source'])
+    if spec['native_codec_source']['path']!=config['training_summary']:raise ValueError('NATIVE_CODEC_SOURCE_CHANGED')
+    codec=source['codec_metadata']
+    atoms=tuple(codec['node_label_mapping'][str(i)] for i in range(1,len(codec['node_label_mapping'])))
+    bonds=tuple(codec['edge_label_mapping'][str(i)] for i in range(len(codec['edge_label_mapping'])))
     for c in candidates:
         rule=GlobalGCENativeRule.from_payload(c['rule']);rule.validate()
+        if rule.atom_symbols!=atoms or rule.bond_names!=bonds:raise ValueError('MIXED_NATIVE_ATOM_BOND_AXIS')
         if c['molecular_adapter']!=SCHEMA:raise ValueError('NATIVE_MATERIALIZER_CHANGED')
         c['selector_chemistry']=rule.selector_chemistry()
         c['canonical_fragment']='N/A'
@@ -49,12 +72,19 @@ def pool(spec):
 
 def verified_freeze(spec):
     p=Path(spec['output_root'])/'selection_freeze.json';f=read_json(p)
+    if f.get('self_sha256')!=stable_sha256({k:v for k,v in f.items() if k!='self_sha256'}):
+        raise ValueError('SELECTOR_FREEZE_SEAL_CHANGED')
     manifest,candidates=pool(spec)
     ids=f.get('ordered_rule_ids',[])
     if (f.get('state')!='FROZEN' or f.get('spec_sha256')!=stable_sha256(spec)
         or f.get('pool_manifest_sha256')!=stable_sha256(manifest) or f.get('test_loaded') is not False
         or not 1<=len(ids)<=20 or len(ids)!=len(set(ids))
-        or not set(ids)<={c['candidate_id'] for c in candidates}):raise ValueError('OWN_GLOBAL_SELECTOR_FREEZE_REQUIRED')
+        or not set(ids)<={c['candidate_id'] for c in candidates}
+        or f.get('ordered_rules_sha256')!=stable_sha256(ids)):raise ValueError('OWN_GLOBAL_SELECTOR_FREEZE_REQUIRED')
+    for item in f['selector_artifacts'].values():
+        if sha256_file(item['path'])!=item['sha256']:raise ValueError('ORIGINAL_SELECTOR_OUTPUT_CHANGED')
+    selected=read_json(f['selector_artifacts']['selected']['path'])
+    if [r['candidate_id'] for r in selected['candidates']]!=ids:raise ValueError('SELECTOR_ORDERED_OUTPUT_CONFLICT')
     return f
 
 def prediction(oracle,featurizer,smiles,pid,split):
@@ -157,8 +187,7 @@ def evaluate(spec,split):
     if split not in ('calibration','test'):raise ValueError('EXPLICIT_SCIENCE_SPLIT')
     if frozen:
         lookup={c['candidate_id']:c for c in candidates};candidates=[lookup[k] for k in frozen['ordered_rule_ids']]
-    parents=load_bace_parents(spec[split+'_csv'],source_label=1)
-    if len(parents)!=spec['base_counts'][split] or len({p.parent_id for p in parents})!=len(parents):raise ValueError('FIXED_COHORT_CHANGED')
+    parents=split_parents(spec,split)
     root=Path(spec['output_root'])/split;root.mkdir(parents=True,exist_ok=True)
     terminal=root/'terminal.json'
     if terminal.exists():
@@ -195,20 +224,28 @@ def evaluate(spec,split):
 def rows(spec,split):
     root=Path(spec['output_root'])/split;terminal=read_json(root/'terminal.json')
     if terminal.get('state')!='EVALUATION_COMPLETE' or terminal['spec_sha256']!=stable_sha256(spec):raise ValueError('INCOMPLETE_STAGE')
-    for i in range(spec['base_counts'][split]):
+    for i,parent in enumerate(split_parents(spec,split)):
         p=read_json(root/f'parent-{i:05d}.json')
-        if p['parent_index']!=i or p['spec_sha256']!=stable_sha256(spec) or p['applications_sha256']!=stable_sha256(p['application_rows']) or p['pairs_sha256']!=stable_sha256(p['pair_rows']):raise ValueError('PARENT_UNIT_CHANGED')
+        if p['parent_index']!=i or p['parent_id']!=parent.parent_id or p['spec_sha256']!=stable_sha256(spec) or p['applications_sha256']!=stable_sha256(p['application_rows']) or p['pairs_sha256']!=stable_sha256(p['pair_rows']):raise ValueError('PARENT_UNIT_CHANGED')
+        if any(r['parent_id']!=parent.parent_id or r['split']!=split for r in p['pair_rows']+p['application_rows']):raise ValueError('PARENT_ROW_IDENTITY_CHANGED')
         yield from p['pair_rows']
+
+def sealed_matrix_file(path,value,*,jsonl=False):
+    if path.exists():
+        old=read_jsonl(path) if jsonl else read_json(path)
+        if old!=value:raise ValueError('SEALED_CALIBRATION_MATRIX_CHANGED:'+str(path))
+    elif jsonl:atomic_jsonl(path,value)
+    else:atomic_json(path,value)
 
 def freeze(spec):
     validate(spec);manifest,candidates=pool(spec);root=Path(spec['output_root']);fp=root/'selection_freeze.json'
     if fp.exists():return verified_freeze(spec)
-    matrix=root/'calibration_matrix';matrix.mkdir(exist_ok=False)
+    matrix=root/'calibration_matrix';matrix.mkdir(exist_ok=True)
     pairs=list(rows(spec,'calibration'))
     if len(pairs)!=66*len(candidates) or any(p['split']!='calibration' for p in pairs):raise ValueError('CALIBRATION_MATRIX_INCOMPLETE')
-    atomic_jsonl(matrix/'pair_matrix.jsonl',pairs);atomic_jsonl(matrix/'selected_candidate_universe.jsonl',candidates)
-    atomic_json(matrix/'summary.json',{'parent_count':66,'selected_candidate_count':len(candidates),'test_loaded':False})
-    atomic_json(matrix/'run_manifest.json',{'inputs':{'cohort_name':'calibration'},'split':'calibration','test_loaded':False,'classifier_family':'gin'})
+    sealed_matrix_file(matrix/'pair_matrix.jsonl',pairs,jsonl=True);sealed_matrix_file(matrix/'selected_candidate_universe.jsonl',candidates,jsonl=True)
+    sealed_matrix_file(matrix/'summary.json',{'parent_count':66,'selected_candidate_count':len(candidates),'test_loaded':False})
+    sealed_matrix_file(matrix/'run_manifest.json',{'inputs':{'cohort_name':'calibration'},'split':'calibration','test_loaded':False,'classifier_family':'gin'})
     original=bound(spec['original_global_selector_manifest']);v=bound(spec['original_global_variant_config'])
     from src.eval.mutagenicity_wnode_selector import preregistered_variant_configs
     from dataclasses import asdict
@@ -222,12 +259,19 @@ def freeze(spec):
     config.update(seed=13,parent_limit=0,candidate_limit=0,forbid_test=True)
     details=select_order(matrix,{'method':'globalgce','test_loaded':False,
         'native_attachment_contract':SCHEMA,'original_global_selector_verified':True,
+        'available_rule_count':len(candidates),'rule_budget_semantics':'AT_MOST_K',
         'original_selector_config':config,'thresholds':t,'threshold_provenance':original['threshold_provenance'],
         'output_root':str(root/'selector')})
     result={'state':'FROZEN','spec_sha256':stable_sha256(spec),'pool_manifest_sha256':stable_sha256(manifest),
         'ordered_rule_ids':details['ordered_rule_ids'],'test_loaded':False,'selector_details':details,
         'original_selector_manifest':spec['original_global_selector_manifest'],'original_variants':spec['original_global_variant_config'],
         'created_at':utc_now()}
+    sources={'decision':root/'selector/calibration_decision.json',
+        'selected':root/'selector/variants'/details['selected_variant']/'selected_top20.json',
+        'matrix':matrix/'pair_matrix.jsonl','candidate_universe':matrix/'selected_candidate_universe.jsonl'}
+    result['selector_artifacts']={k:{'path':str(p),'sha256':sha256_file(p)} for k,p in sources.items()}
+    result['ordered_rules_sha256']=stable_sha256(result['ordered_rule_ids'])
+    result['self_sha256']=stable_sha256(result)
     atomic_json(fp,result);return verified_freeze(spec)
 
 def aggregate(spec):
