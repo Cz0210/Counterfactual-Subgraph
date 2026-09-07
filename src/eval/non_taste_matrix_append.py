@@ -2199,7 +2199,7 @@ def append_non_taste_matrix_cell(
     cell_root = Path(str(terminal["root"])).resolve(strict=True)
     registry_cell_root = (
         Path(str(terminal["standardized"]["root"])).resolve(strict=True)
-        if dataset == "Mutagenicity"
+        if dataset == "Mutagenicity" or (supersede_existing and dataset == "AIDS")
         else cell_root
     )
     protected = {
