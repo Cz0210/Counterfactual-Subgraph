@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 try:
-    from src.eval.bace_reach_closeout import retained_support_gate, reach_parent, freeze_final
+    from src.eval.bace_reach_closeout import retained_support_gate, reach_parent, freeze_final, verify_witness_application
     from src.eval.bace_reach_v2 import seal
     from src.chem.bace_reach_search import pattern_from_match
     from rdkit import Chem
@@ -54,6 +54,14 @@ class CloseoutTests(unittest.TestCase):
         cached = reach_parent(parent=parent, candidates=[pattern], before={"predicted_label": 1},
                               predict=lambda _: self.fail("cached graph re-inferred"), oracle_binding="oracle", known_rows=known)
         self.assertEqual(cached["new_graph_oracle_queries"], 0)
+
+    def test_mask_witness_must_reapply_as_retained_rule(self):
+        pattern = pattern_from_match(Chem.MolFromSmiles("CCC"), [0])
+        witness = {"match_atom_indices": [0], "residual_smiles": "CC", "strict_flip": True,
+                   "valid": True, "before": {"predicted_label": 1}, "after": {"predicted_label": 0}}
+        self.assertTrue(verify_witness_application("CCC", witness, pattern))
+        with self.assertRaisesRegex(ValueError, "NOT_REPLAYABLE"):
+            verify_witness_application("CCC", {**witness, "residual_smiles": "C"}, pattern)
 
     def test_single_final_root_freeze_without_opening_test(self):
         with tempfile.TemporaryDirectory() as temp:

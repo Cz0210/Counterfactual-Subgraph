@@ -18,6 +18,21 @@ from src.eval.bace_frozen_gnn_contracts import (
 from src.eval.bace_reach_v2 import seal, unseal
 
 
+def verify_witness_application(parent_smiles, witness, candidate):
+    """A stored mask is not enough: the retained rule must reproduce it."""
+    from src.chem.bace_reach_search import deletion_outcomes
+    wanted = tuple(sorted(witness["match_atom_indices"]))
+    matching = [outcome for outcome in deletion_outcomes(parent_smiles, candidate, "train_binding_check")
+                if tuple(sorted(outcome.match_atom_indices)) == wanted]
+    if (len(matching) != 1 or not matching[0].valid
+        or matching[0].residual_smiles != witness["residual_smiles"]
+        or not witness.get("strict_flip") or not witness.get("valid")
+        or witness.get("before", {}).get("predicted_label") != 1
+        or witness.get("after", {}).get("predicted_label") != 0):
+        raise ValueError("RETAINED_RULE_OWN_WITNESS_NOT_REPLAYABLE")
+    return True
+
+
 def retained_support_gate(rows, pool, source_label=1):
     """A retained-pool witness is a lower bound, never an impossibility claim."""
     retained = {r["candidate_id"] for r in pool}
@@ -58,6 +73,8 @@ def train_gate(campaign: Path):
     if sha256_file(campaign / "candidate_universe.jsonl") != frozen["candidate_universe_sha256"]:
         raise ValueError("FROZEN_RETAINED_POOL_CHANGED")
     parents = load_bace_parents(contract["paths"]["train"], source_label=contract["source_label"])
+    by_id = {r["candidate_id"]: r for r in pool}
+    application_checks = 0
     rows = []
     extra_ids = set(frozen["extra_parent_ids"])
     for parent in parents:
@@ -70,6 +87,11 @@ def train_gate(campaign: Path):
             if extra["search_contract_sha256"] != contract["self_sha256"] or extra["initial_binding"] != stable_sha256(row["search"]):
                 raise ValueError("TRAIN_EXTRA_PASS_BINDING_CHANGED")
             row = {**row, "search": extra["search"]}
+        for witness in (row.get("search") or {}).get("witnesses", []):
+            candidate = by_id.get(witness["pattern"]["candidate_id"])
+            if candidate is not None:
+                verify_witness_application(parent.smiles, witness, candidate)
+                application_checks += 1
         rows.append(row)
     result = retained_support_gate(rows, pool, contract["source_label"])
     selected = read_json(contract["paths"]["old_selector"])["ordered_rule_ids"]
@@ -91,6 +113,7 @@ def train_gate(campaign: Path):
     return seal(campaign / "train_reach_gate.json", {**result,
         "train_parent_count": len(rows), "candidate_freeze_sha256": frozen["self_sha256"],
         "old_pool_train_funnel": funnel, "all_matches_enumerated_in_old_diagnostic": True,
+        "retained_own_rule_application_checks": application_checks,
         "candidate_universe_sha256": frozen["candidate_universe_sha256"],
         "search_contract_sha256": contract["self_sha256"],
         "new_oracle_calls": 0, "ot_recomputed": 0,

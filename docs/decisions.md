@@ -18600,3 +18600,7 @@ engineering retry. Record the temperature driver and the verifier driver separat
   semantic rewrite. Candidate IDs, masks, residual chemistry, oracle, budgets,
   parent checkpoints and previous failure evidence remain unchanged. Resume
   adopts committed parents; it does not rerun the successful prefix or canary.
+- The retained-pool train gate now also reapplies each stored own witness using
+  the retained attributed rule, requiring the same atom mask and valid residual.
+  This is a chemistry/input consistency check only: it performs no new oracle
+  calls or OT and does not treat an unwitnessed parent as unreachable.
