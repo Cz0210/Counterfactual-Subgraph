@@ -35,7 +35,7 @@ def test_original_pool_rejects_reach_or_other_source(monkeypatch, tmp_path):
 
 def test_evaluate_parent_does_not_drop_gin_predicted_zero(monkeypatch):
     from src.eval import bace_frozen_gnn_verification as original
-    oracle = SimpleNamespace(backbone="gin", source_label=1, checkpoint_id="new-gin")
+    oracle = SimpleNamespace(backbone="gin", source_label=1, checkpoint_id="new-gin", temperature=1.1)
     parent = SimpleNamespace(parent_id="base1", label=1, smiles="CC")
     seen = {}
     def evaluate(parents, candidates, **kwargs):
@@ -44,10 +44,18 @@ def test_evaluate_parent_does_not_drop_gin_predicted_zero(monkeypatch):
         return [{"pred_before": 0, "pair_strict_flip": False}], []
     monkeypatch.setattr(original, "_evaluate_rows", evaluate)
     pairs, _ = module.evaluate_parent(parent, [{"candidate_id": "c"}], oracle, None, None,
-        "calibration", parent_prediction={"predicted_label": 0, "probabilities": [.9, .1]})
+        "calibration", parent_prediction={"predicted_label": 0, "probabilities": [.9, .1],
+            "checkpoint_id": "new-gin", "backbone": "gin", "temperature": 1.1})
     assert len(pairs) == 1 and pairs[0]["pred_before"] == 0
     assert seen["oracle_checkpoint_id"] == "new-gin"
     assert seen["parent_prediction_cache"]["base1"]["pred_before"] == 0
+
+
+def test_rejects_gine_parent_prediction_cache_before_evaluation():
+    with pytest.raises(ValueError, match="NOT_BOUND_TO_CURRENT_GIN"):
+        module.evaluate_parent(SimpleNamespace(parent_id="p", label=1, smiles="CC"), [],
+            SimpleNamespace(backbone="gin", source_label=1, checkpoint_id="gin", temperature=1.1),
+            None, None, "calibration", parent_prediction={"checkpoint_id": "gine", "backbone": "gine"})
 
 
 def test_distance_failure_cannot_be_zero_result(monkeypatch):
@@ -58,10 +66,16 @@ def test_distance_failure_cannot_be_zero_result(monkeypatch):
             SimpleNamespace(backbone="gin", source_label=1, checkpoint_id="gin"), None, None, "train")
 
 
-def test_original_selector_delegate_not_reach(monkeypatch):
-    from src.ablations.gnn import cpu_evaluation
-    monkeypatch.setattr(cpu_evaluation, "select_calibration", lambda m, s: ([2, 0], {"original": True}))
-    assert module.select_calibration("matrix", "selector") == ([2, 0], {"original": True})
+def test_original_selector_rejects_fixed_old_winner():
+    matrix = SimpleNamespace(manifest={"split": "calibration", "test_loaded": False})
+    with pytest.raises(ValueError, match="ALL_FOUR_VARIANTS_NOT_OLD_WINNER"):
+        module.select_calibration(matrix, {"variant": "A4"})
+
+
+def test_original_selector_rejects_test_matrix():
+    matrix = SimpleNamespace(manifest={"split": "test", "test_loaded": True})
+    with pytest.raises(ValueError, match="CALIBRATION_ONLY"):
+        module.select_calibration(matrix, {})
 
 
 def test_adoption_actual_fit_contract(monkeypatch, tmp_path):

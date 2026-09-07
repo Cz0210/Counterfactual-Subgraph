@@ -18866,7 +18866,11 @@ The new independent fixed-pool experiment adopts the accepted corrected GIN
 weights and its actual validation187 temperature fit. It neither trains nor
 fits, and never changes the existing GINE main cell. The narrow Ours adapter
 uses exactly the original66 candidate identities and the original frozen
-greedy/insertion/local-swap objective. All66 ground-truth-source calibration
+greedy/insertion/local-swap objective. The original main B12 runs all four
+preregistered A1-A4 variants and chooses using its original calibration decision
+key, so the new GIN matrix does the same. The old GNN sensitivity's fixed A4
+winner is specifically not adopted. Numeric thresholds remain frozen rather
+than refitting quantiles. All66 ground-truth-source calibration
 parents remain the denominator, including GIN-predicted0 parents; GIN-native
 is auxiliary only. Old GIN/native/common selections and Reach/MIP are not used.
 
