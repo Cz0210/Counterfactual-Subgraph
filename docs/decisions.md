@@ -1,5 +1,18 @@
 # Decisions Log
 
+## [2026-09-08] BACE GIN A+ adopts saved Reach candidates as a new method version
+
+The explicit A+ authorization supersedes fixed-pool-only limits, but not the
+original matrix or frozen GIN/temperature. The saved 2607 train-only candidates
+are reverified under GIN, with original66 train/calibration ceilings first.
+V1's actual A1 winner follows the original B12 calibration A1-A4 decision, not
+the old GNN sensitivity's fixed A4 contract. A+ separately predeclares 0.25
+reach + 0.75 normalized original-grid coverage, the legal old S10 floor and
+nested S10/S20. No new PPO or test-guided search is dispatched. CPU stages
+reuse same-GIN original units and separately bound raw costs. See
+`BACE_GIN_APLUS_20260908.md` for exact boundaries; results remain post-hoc and
+cannot be used to claim a new untouched test or guaranteed 70% coverage.
+
 ## [2026-09-07] Correct saved native-response extraction without LLM regeneration
 
 The executed common parser split arbitrary colons, corrupting atom maps such

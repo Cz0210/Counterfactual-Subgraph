@@ -11,7 +11,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True)
     p.add_argument("--spec", required=True)
-    p.add_argument("--action", required=True, choices=("plan", "evaluate", "ceiling", "freeze", "aggregate", "status"))
+    p.add_argument("--action", required=True, choices=("plan", "evaluate", "ceiling", "freeze", "aggregate", "audit", "status"))
     p.add_argument("--group", choices=("old66", "adopted2607"), default="old66")
     p.add_argument("--split", choices=("train", "calibration", "test"), default="train")
     p.add_argument("--limit", type=int)

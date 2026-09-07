@@ -1,5 +1,15 @@
 # Refactor Plan
 
+## 2026-09-08: BACE GIN A+ narrow execution
+
+- [x] Implement declared reach-aware nested selector and focused regressions.
+- [x] Add saved2607 adoption with original66 preservation and train-only proof.
+- [x] Reuse existing GIN/raw-cost/parent-checkpoint and independent metric code.
+- [ ] Finish full66 train and calibration ceilings, then expanded pool evidence.
+- [ ] Branch to bounded train-only search only if complete train evidence requires it.
+- [ ] Freeze calibration controls, evaluate heldout once and publish versioned figures.
+- [ ] Preserve V1 GCF and Taste owners; GlobalGCE/AIDs use separate approved repairs.
+
 ## 2026-09-07: Saved LLM response parser correction
 
 - [x] Preserve bracket/aromatic colons and reject prose iodine extraction.

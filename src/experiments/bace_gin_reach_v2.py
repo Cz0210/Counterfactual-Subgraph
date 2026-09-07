@@ -128,9 +128,9 @@ def _parent_saved(path, binding):
     return item
 
 
-def _old_calibration(spec, index, parent):
+def _old_calibration(spec, index, parent, split="calibration"):
     old_spec = bound_json(spec["v1_spec"])
-    root = Path(old_spec["output_root"]) / "ours/calibration" / f"parent-{index:05d}"
+    root = Path(old_spec["output_root"]) / "ours" / split / f"parent-{index:05d}"
     receipt = read_json(root / "complete.json")
     pairs = root / "pairs.jsonl"
     if (receipt["spec_sha256"] != stable_sha256(old_spec) or receipt["parent_id"] != parent.parent_id
@@ -201,6 +201,15 @@ def evaluate(spec, group, split, *, limit=None):
                 if split == "calibration":
                     seed_pairs, seed_matches = _old_calibration(spec, i, parent)
                     todo = [r for r in candidates if r["candidate_id"] not in old_ids]
+                elif split == "test":
+                    # This code is reached only after this campaign's freeze.
+                    # Same GIN and same original operations: reuse sealed V1
+                    # selected-parent units, not old GINE masks or minima.
+                    seed_pairs, seed_matches = _old_calibration(spec, i, parent, "test")
+                    reused = {r["candidate_id"] for r in seed_pairs}
+                    if not reused <= {r["candidate_id"] for r in candidates}:
+                        raise ValueError("OLD_CONTROL_TEST_UNION_NOT_RETAINED")
+                    todo = [r for r in candidates if r["candidate_id"] not in reused]
                 elif group == "adopted2607" and split == "train":
                     saved = verified(root / "old66/train" / f"parent-{i:05d}.json")
                     if saved["spec_sha256"] != stable_sha256(spec) or saved["parent_id"] != parent.parent_id:
@@ -213,6 +222,9 @@ def evaluate(spec, group, split, *, limit=None):
                         featurizer=runtime["featurizer"], distance_provider=runtime["distance"], split=split,
                         oracle_checkpoint_id=runtime["oracle"].checkpoint_id,
                         oracle_batch_size=spec["batch_size"])
+                    for row in (*pairs, *matches):
+                        row.update(split=split, oracle_backbone=runtime["oracle"].backbone,
+                                   oracle_temperature=runtime["oracle"].temperature)
                 all_pairs = seed_pairs + pairs
                 expected = {r["candidate_id"] for r in candidates}
                 if len(all_pairs) != len(expected) or {r["candidate_id"] for r in all_pairs} != expected:
@@ -322,3 +334,42 @@ def status(spec):
     result["selector_frozen"]=(root/"selection_freeze.json").exists()
     result["metrics_available"]=(root/"metrics.json").exists()
     return result
+
+
+def audit(spec):
+    """Stream saved parent records; independently reduce masks and final metrics."""
+    from src.experiments.bace_gin_audit import audit_parent_rows, recompute_metrics, equal
+    root = Path(spec["output_root"])
+    frozen = verified(root / "selection_freeze.json")
+    require_freeze(spec, frozen)
+    adopted = adapter.validate_gin_adoption(spec)
+    oracle = dict(model_sha256=adopted["model_sha256"], temperature=adopted["temperature"])
+    inventories, results = {}, []
+    for split in ("calibration", "test"):
+        for unit in _iter_units(spec, "adopted2607", split):
+            rows, apps = unit["pair_rows"], unit["match_rows"]
+            result = audit_parent_rows(rows, apps, method="ours", split=split,
+                parent_id=unit["parent_id"], parent_smiles=rows[0]["parent_smiles"],
+                candidate_ids=[r["candidate_id"] for r in rows], oracle=oracle)
+            results.append(dict(split=split, parent_id=unit["parent_id"], **result))
+    metrics = verified(root / "metrics.json")
+    from src.eval.mutagenicity_wnode_selector import threshold_bundle_from_dict
+    th = threshold_bundle_from_dict(bound_json(spec["thresholds"]))
+    test = list(_iter_units(spec, "adopted2607", "test"))
+    for name, order in frozen["controls"].items():
+        pairs = [p for u in test for p in u["pair_rows"] if p["candidate_id"] in order]
+        independent = recompute_metrics([u["parent_id"] for u in test], order, pairs,
+            theta=th.theta_star, cap=th.cost_cap, endpoints=th.raw_thresholds)
+        actual = metrics["results"][name]
+        for key in ("prefix_rows", "exact_ecdf", "parent_distances"):
+            if len(actual[key]) != len(independent[key]):
+                raise ValueError("METRIC_ROW_COUNT_CONFLICT")
+            for a, b in zip(actual[key], independent[key]):
+                for field, value in b.items():
+                    equal(a[field], value, f"{name}/{key}/{field}")
+    receipt = dict(state="SAVED_RECORD_AND_METRIC_CONSISTENCY_PASS", spec_sha256=stable_sha256(spec),
+        freeze_sha256=frozen["self_sha256"], metrics_sha256=metrics["self_sha256"],
+        parent_units=results, model_inference_rerun=False, ot_recomputed=0,
+        audit_scope="SAVED_APPLICATIONS_AND_INDEPENDENT_METRIC_REDUCER_NOT_MODEL_REEXECUTION",
+        main_matrix_write=False, new_method_final_science_claim="POST_HOC_FROZEN_GIN_REACH_AWARE")
+    return seal(root / "audit/final_audit.json", receipt)
