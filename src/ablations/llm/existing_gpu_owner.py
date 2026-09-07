@@ -132,7 +132,7 @@ class ResourceSampler:
     def __init__(self, config, gpu_index, gpu_uuid, *, inventory=bounded_gpu_inventory,
                  clock=time.time, monotonic=time.monotonic, task_family="llm", reach_contract=None):
         validate_resource_config(config)
-        if task_family not in ("llm", "ours_reach"):
+        if task_family not in ("llm", "ours_reach", "globalgce_aplus"):
             raise ValueError("EXISTING_OWNER_FAMILY_NOT_SUPPORTED")
         self.task_family, self.reach_contract = task_family, reach_contract
         if task_family == "ours_reach":
@@ -144,6 +144,16 @@ class ResourceSampler:
                 or sha256_file(reach_contract["path"]) != reach_contract["sha256"]
                 or int(gpu_index) != 0):
                 raise ValueError("OURS_REACH_EXACT_TRAIN_SCOPE_REQUIRED")
+        if task_family == "globalgce_aplus":
+            value, _ = read_small(Path(reach_contract["path"]))
+            if (sha256_file(reach_contract["path"]) != reach_contract["sha256"]
+                or value.get("repair_kind") != "GIN_ALIGNED_EPOCH35_WARMSTART"
+                or value.get("formal_fresh_campaigns_max") != 1
+                or value.get("training_contract", {}).get("seed") != 7
+                or value.get("training_contract", {}).get("test_used") is not False
+                or value.get("training_contract", {}).get("calibration_used") is not False
+                or value.get("total_epochs_max") != 100 or int(gpu_index) != 0):
+                raise ValueError("GLOBALGCE_APLUS_EXACT_TRAIN_SCOPE_REQUIRED")
         self.config, self.index, self.uuid = config, int(gpu_index), gpu_uuid
         self.inventory, self.clock, self.monotonic = inventory, clock, monotonic
         self.idle_since = None
@@ -288,7 +298,7 @@ class ResourceSampler:
             idle = self.admitted_idle_seconds or 0
         if foreign:
             blockers.append("FOREIGN_CUDA_PROCESS_ON_TARGET_GPU")
-        if (self.task_family == "ours_reach" and child_pid is None
+        if (self.task_family in ("ours_reach", "globalgce_aplus") and child_pid is None
             and (gpu.memory_free_mb < cfg["minimum_gpu_free_mb"]
                  or gpu.utilization_gpu_percent > cfg["maximum_idle_utilization_percent"])):
             blockers.append("OURS_REACH_GPU_CAPACITY_NOT_ADMITTED")
@@ -321,12 +331,13 @@ class ResourceSampler:
                 else:
                     fcntl.flock(handle, fcntl.LOCK_UN)
                     continue
-            if (metadata.get("state") == "LOCKED" and metadata.get("ablation_family") in ("llm", "ours_reach")
+            if (metadata.get("state") == "LOCKED" and metadata.get("ablation_family") in ("llm", "ours_reach", "globalgce_aplus")
                     and metadata.get("pid") != os.getpid()):
                 other_llm += 1
         return {"schema_version": RESOURCE_SCHEMA,
                 "task_family": self.task_family, "reach_contract": self.reach_contract,
                 "ours_reach_contract_verified": self.task_family == "ours_reach",
+                "globalgce_aplus_contract_verified": self.task_family == "globalgce_aplus",
                 "observed_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
                 "source_observations": sources, "actual_gpu_observation": gpu.as_json(),
                 "gpu_index": self.index, "gpu_uuid": self.uuid, "target_gpu_uuid": self.uuid,
@@ -389,7 +400,7 @@ def validate_inherited_lease(evidence, held_fd, slot_fd=None):
             or evidence.get("logical_device") != "cuda:0"):
         raise ValueError("GPU_UUID_TO_CUDA0_MAPPING_MISMATCH")
     family = evidence.get("task_family", "llm")
-    if family == "ours_reach":
+    if family in ("ours_reach", "globalgce_aplus"):
         descriptor = evidence.get("reach_contract", {})
         if not descriptor.get("path") or sha256_file(descriptor["path"]) != descriptor.get("sha256"):
             raise ValueError("OURS_REACH_CHILD_CONTRACT_CHANGED")
@@ -509,6 +520,11 @@ def run_owned_child(*, command, environment, sampler, output_root, lock_root, ru
             or command.count("--action") != 1
             or command[command.index("--action") + 1] not in ("canary", "train-search")):
             raise ValueError("OURS_REACH_OWNER_CANNOT_DISPATCH_LLM_OR_PPO")
+    if family == "globalgce_aplus":
+        if (len(command) < 5 or Path(command[3]).name != "run_bace_globalgce_aplus.py"
+            or command.count("--action") != 1
+            or command[command.index("--action") + 1] not in ("train-canary", "train")):
+            raise ValueError("GLOBALGCE_APLUS_OWNER_ONLY_BOUND_CANARY_OR_WARMSTART")
     output.mkdir(parents=True, exist_ok=False)
     pause = False
     def request_pause(*_):
