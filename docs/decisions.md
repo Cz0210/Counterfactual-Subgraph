@@ -18614,6 +18614,26 @@ engineering retry. Record the temperature driver and the verifier driver separat
   real inherited lease descriptors and fresh stage-resource evidence. It does
   not inherit the LLM-only 1200-second idle gate. LLM admission is unchanged;
   this entry cannot dispatch LLM generation or conditional PPO training.
+- The post-search gate counts only witnesses whose rule survived the final
+  pool cap. A >=90% verified lower bound can rule out the conditional PPO trigger;
+  a smaller bound does not prove proposal insufficiency and blocks that claim
+  until cross-parent retained-pool reach is measured. No extra OT is needed for
+  this gate. The predeclared three-control descriptive test has one immutable
+  output binding, parent checkpoints and an exclusive result writer. It reuses
+  the old test pair provenance, evaluates WNode only for the selected-rule union,
+  and computes full-pool reach via existential frozen-GINE witnesses without OT.
+  This successor is independent of the already running search execution commit.
+- The first real search retained 47 committed train parents, then rejected a
+  saved seed `C[C@H](C)C`: isolated recanonicalization removed its parent-derived
+  stereo/H annotation before comparing the identity. Validation now reconstructs
+  and checks the exact originally serialized attributed graph, without this
+  semantic rewrite. Candidate IDs, masks, residual chemistry, oracle, budgets,
+  parent checkpoints and previous failure evidence remain unchanged. Resume
+  adopts committed parents; it does not rerun the successful prefix or canary.
+- The retained-pool train gate now also reapplies each stored own witness using
+  the retained attributed rule, requiring the same atom mask and valid residual.
+  This is a chemistry/input consistency check only: it performs no new oracle
+  calls or OT and does not treat an unwitnessed parent as unreachable.
 
 ## 2026-09-07: Reuse raw graph costs across Reach-v2 pools without old flip masks
 
@@ -18634,25 +18654,6 @@ engineering retry. Record the temperature driver and the verifier driver separat
   remain separate from passing these unit tests. No old scientific audit is
   renamed as a v2 result.
 
-## 2026-09-07: Retained-witness gate and recoverable graph representation fix
-
-- The post-search gate counts only witnesses whose rule survived the final
-  pool cap. A >=90% verified lower bound can rule out the conditional PPO trigger;
-  a smaller bound does not prove proposal insufficiency and blocks that claim
-  until cross-parent retained-pool reach is measured. No extra OT is needed for
-  this gate. The predeclared three-control descriptive test has one immutable
-  output binding, parent checkpoints and an exclusive result writer. It reuses
-  the old test pair provenance, evaluates WNode only for the selected-rule union,
-  and computes full-pool reach via existential frozen-GINE witnesses without OT.
-  This successor is independent of the already running search execution commit.
-- The first real search retained 47 committed train parents, then rejected a
-  saved seed `C[C@H](C)C`: isolated recanonicalization removed its parent-derived
-  stereo/H annotation before comparing the identity. Validation now reconstructs
-  and checks the exact originally serialized attributed graph, without this
-  semantic rewrite. Candidate IDs, masks, residual chemistry, oracle, budgets,
-  parent checkpoints and previous failure evidence remain unchanged. Resume
-  adopts committed parents; it does not rerun the successful prefix or canary.
-
 ## 2026-09-07: Post-freeze Ours raw-test adoption is separate from GNN selection
 
 - A narrow CPU metadata wrapper validates the actual Ours three-control final
@@ -18664,3 +18665,14 @@ engineering retry. Record the temperature driver and the verifier driver separat
   may be shared by graph-content contract, never old flips or chosen minima.
 - Paired Slurm entry uses two CPU cores and no GPU, an explicit task-specific
   exception to the default training Slurm template.
+- The Ours future closeout derives its raw-distance descriptor from the actual
+  frozen GINE schema and MolCLR source files plus the existing weight receipt;
+  it does not copy the source index's values as proof of current identity.
+  Same-GINE old selected20 pairs can be reused directly. Old unselected rules
+  and new rules recompute their current flips/minima while adopting only raw
+  graph costs. A post-freeze test index is bound to the actual final-freeze SHA.
+- The existing Reach CLI has a narrow CPU successor that waits for the active
+  owner's real calibration freeze, seals the train gate and one final test
+  binding, then awaits that split-scoped test index. It holds no GPU lease and
+  never publishes the main matrix. Its execution-complete receipt still
+  requires independent scientific audit and the original publisher.

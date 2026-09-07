@@ -8,6 +8,7 @@ from __future__ import annotations
 import fcntl
 import math
 import os
+import time
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -16,6 +17,74 @@ from src.eval.bace_frozen_gnn_contracts import (
     read_json, read_jsonl, sha256_file, stable_sha256, utc_now,
 )
 from src.eval.bace_reach_v2 import seal, unseal
+
+
+def run_cpu_closeout(campaign, output, *, old_test_pair_source, raw_distance_source,
+                     raw_test_index_descriptor, boundary_check, max_wait_seconds=86400):
+    """Narrow existing-CLI successor; no GPU, generation, selection from test.
+
+    The running immutable search owner keeps its CPU calibration. This process
+    can only consume its sealed selector and waits for the independently built,
+    post-freeze old-test raw-cost index. It owns this one result root, not a new
+    resource, GPU, registry or matrix controller.
+    """
+    output.mkdir(parents=True, exist_ok=True)
+    binding = seal(output / "cpu_successor_binding.json", {
+        "campaign": str(campaign.resolve()), "output": str(output.resolve()),
+        "old_test_pair_source": old_test_pair_source, "raw_distance_source": raw_distance_source,
+        "raw_test_index_descriptor": str(raw_test_index_descriptor.resolve()),
+        "max_wait_seconds": max_wait_seconds, "gpu_requested": False, "main_matrix_write": False})
+    with (output / "cpu_owner.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        def waiting(state):
+            boundary_check()
+            atomic_json(output / "cpu_owner_status.json", {"state": state, "pid": os.getpid(),
+                "binding_sha256": binding["self_sha256"], "gpu_requested": False, "updated_at": utc_now()})
+            if time.monotonic() - started >= max_wait_seconds:
+                raise TimeoutError("CPU_CLOSEOUT_DEPENDENCY_STILL_INCOMPLETE:" + state)
+            time.sleep(30)
+        try:
+            while not (campaign / "selector_freeze.json").is_file():
+                waiting("WAITING_EXISTING_CALIBRATION_SELECTOR")
+            boundary_check()
+            gate = train_gate(campaign)
+            if gate["state"] != "NO_ADDITIONAL_PPO_REQUIRED_BY_TRAIN_GATE":
+                raise ValueError("RETAINED_TRAIN_POOL_GATE_REQUIRES_CROSS_PARENT_CHECK_NOT_AUTO_PPO")
+            frozen = freeze_final(campaign, output, old_test_pair_source=old_test_pair_source,
+                                  raw_distance_source=raw_distance_source)
+            atomic_json(output / "final_freeze_locator.json", {
+                "path": str(campaign / "final_test_binding.json"),
+                "sha256": sha256_file(campaign / "final_test_binding.json"),
+                "self_sha256": frozen["self_sha256"], "test_opened": False})
+            while not raw_test_index_descriptor.is_file():
+                waiting("WAITING_POST_FREEZE_RAW_TEST_INDEX")
+            result = run_final_test(campaign, output, raw_test_index=read_json(raw_test_index_descriptor),
+                                    boundary_check=boundary_check)
+            atomic_json(output / "cpu_owner_terminal.json", {"state": "DESCRIPTIVE_EVALUATION_EXECUTION_COMPLETE",
+                "final_audit_sha256": result["self_sha256"], "independent_audit_still_required": True,
+                "pid": os.getpid(), "gpu_requested": False, "written_at": utc_now()})
+            return result
+        except BaseException as error:
+            atomic_json(output / "cpu_owner_terminal.json", {"state": "BLOCKED_OR_FAILED_WITH_RECOVERY_PRESERVED",
+                "error_type": type(error).__name__, "error": str(error), "pid": os.getpid(),
+                "gpu_requested": False, "written_at": utc_now()})
+            raise
+
+
+def verify_witness_application(parent_smiles, witness, candidate):
+    """A stored mask is not enough: the retained rule must reproduce it."""
+    from src.chem.bace_reach_search import deletion_outcomes
+    wanted = tuple(sorted(witness["match_atom_indices"]))
+    matching = [outcome for outcome in deletion_outcomes(parent_smiles, candidate, "train_binding_check")
+                if tuple(sorted(outcome.match_atom_indices)) == wanted]
+    if (len(matching) != 1 or not matching[0].valid
+        or matching[0].residual_smiles != witness["residual_smiles"]
+        or not witness.get("strict_flip") or not witness.get("valid")
+        or witness.get("before", {}).get("predicted_label") != 1
+        or witness.get("after", {}).get("predicted_label") != 0):
+        raise ValueError("RETAINED_RULE_OWN_WITNESS_NOT_REPLAYABLE")
+    return True
 
 
 def retained_support_gate(rows, pool, source_label=1):
@@ -58,6 +127,8 @@ def train_gate(campaign: Path):
     if sha256_file(campaign / "candidate_universe.jsonl") != frozen["candidate_universe_sha256"]:
         raise ValueError("FROZEN_RETAINED_POOL_CHANGED")
     parents = load_bace_parents(contract["paths"]["train"], source_label=contract["source_label"])
+    by_id = {r["candidate_id"]: r for r in pool}
+    application_checks = 0
     rows = []
     extra_ids = set(frozen["extra_parent_ids"])
     for parent in parents:
@@ -70,6 +141,11 @@ def train_gate(campaign: Path):
             if extra["search_contract_sha256"] != contract["self_sha256"] or extra["initial_binding"] != stable_sha256(row["search"]):
                 raise ValueError("TRAIN_EXTRA_PASS_BINDING_CHANGED")
             row = {**row, "search": extra["search"]}
+        for witness in (row.get("search") or {}).get("witnesses", []):
+            candidate = by_id.get(witness["pattern"]["candidate_id"])
+            if candidate is not None:
+                verify_witness_application(parent.smiles, witness, candidate)
+                application_checks += 1
         rows.append(row)
     result = retained_support_gate(rows, pool, contract["source_label"])
     selected = read_json(contract["paths"]["old_selector"])["ordered_rule_ids"]
@@ -91,6 +167,7 @@ def train_gate(campaign: Path):
     return seal(campaign / "train_reach_gate.json", {**result,
         "train_parent_count": len(rows), "candidate_freeze_sha256": frozen["self_sha256"],
         "old_pool_train_funnel": funnel, "all_matches_enumerated_in_old_diagnostic": True,
+        "retained_own_rule_application_checks": application_checks,
         "candidate_universe_sha256": frozen["candidate_universe_sha256"],
         "search_contract_sha256": contract["self_sha256"],
         "new_oracle_calls": 0, "ot_recomputed": 0,
@@ -144,7 +221,7 @@ def reach_parent(*, parent, candidates: Sequence[Mapping], before: Mapping,
             "full_action_space_impossibility_claimed": False}
 
 
-def freeze_final(campaign: Path, output: Path, *, old_test_pair_source=None):
+def freeze_final(campaign: Path, output: Path, *, old_test_pair_source=None, raw_distance_source=None):
     """Seal the one test location and all three controls before opening test."""
     contract = unseal(campaign / "search_contract.json")
     pool = unseal(campaign / "candidate_freeze.json")
@@ -168,6 +245,8 @@ def freeze_final(campaign: Path, output: Path, *, old_test_pair_source=None):
         raise ValueError("OLD_COMPLIANT_TEST_OT_SOURCE_BINDING_REQUIRED_NO_BLIND_RECOMPUTATION")
     if set(old_test_pair_source) != {"path", "sha256", "receipt_path", "receipt_sha256"}:
         raise ValueError("OLD_TEST_PAIR_SOURCE_DESCRIPTOR_INCOMPLETE")
+    if not raw_distance_source or set(raw_distance_source) != {"portable_manifest", "source_spec"}:
+        raise ValueError("COMPLETE_OLD_RAW_DISTANCE_SOURCE_REQUIRED_BEFORE_FREEZE")
     value = {"state": "REACH_V2_FINAL_CONFIGURATION_FROZEN", "campaign": str(campaign.resolve()),
              "test_output_root": str(output.resolve()), "controls": controls,
              "selected_control": "new_pool_reach_first", "selected_using_test": False,
@@ -180,6 +259,7 @@ def freeze_final(campaign: Path, output: Path, *, old_test_pair_source=None):
              "test_path": down["dataset_split_paths"]["test"],
              "test_sha256": down["dataset_split_hashes"]["test"],
              "old_test_pair_source": old_test_pair_source,
+             "raw_distance_source": raw_distance_source,
              "thresholds_sha256": sha256_file(contract["paths"]["thresholds"]),
              "main_matrix_write": False, "new_model_training": False}
     # A second output/version with the same campaign is rejected, not chosen
@@ -199,7 +279,7 @@ def _curve_report(matrix, sequence, thresholds):
     return result
 
 
-def run_final_test(campaign: Path, output: Path, *, boundary_check=lambda: None):
+def run_final_test(campaign: Path, output: Path, *, raw_test_index, boundary_check=lambda: None):
     """Resume one descriptive evaluation; never select or dispatch a variant."""
     binding = unseal(campaign / "final_test_binding.json")
     if str(output.resolve()) != binding["test_output_root"]:
@@ -216,10 +296,10 @@ def run_final_test(campaign: Path, output: Path, *, boundary_check=lambda: None)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if (output / "final_audit.json").exists():
             return unseal(output / "final_audit.json")
-        return _run_final_test_locked(campaign, output, binding, contract, boundary_check)
+        return _run_final_test_locked(campaign, output, binding, contract, boundary_check, raw_test_index)
 
 
-def _run_final_test_locked(campaign, output, binding, contract, boundary_check):
+def _run_final_test_locked(campaign, output, binding, contract, boundary_check, raw_test_index):
     from src.eval.bace_reach_v2 import evaluate_pairs, load_runtime, predict_smiles
     from src.ablations.gnn.cpu_evaluation import matrix_from_pairs
     source = binding["old_test_pair_source"]
@@ -241,9 +321,6 @@ def _run_final_test_locked(campaign, output, binding, contract, boundary_check):
     old_ids = set(contract["old_candidate_ids"])
     reusable_ids = set(receipt["ordered_rule_ids"])
     chosen = set().union(*map(set, binding["controls"].values()))
-    missing_old_cache = chosen.intersection(old_ids).difference(reusable_ids)
-    if missing_old_cache:
-        raise ValueError("OLD_UNSELECTED_CANDIDATE_RAW_OT_REUSE_BINDING_REQUIRED:" + ",".join(sorted(missing_old_cache)))
     if sha256_file(binding["test_path"]) != binding["test_sha256"]:
         raise ValueError("FROZEN_TEST_SPLIT_CHANGED")
     pool = read_jsonl(campaign / "candidate_universe.jsonl")
@@ -262,10 +339,19 @@ def _run_final_test_locked(campaign, output, binding, contract, boundary_check):
         old_by_parent[row["parent_id"]].append(row)
     matrix_from_pairs([p.parent_id for p in parents], [r for r in pool if r["candidate_id"] in reusable_ids], old, root=output, split="test")
     selected = [r for r in pool if r["candidate_id"] in chosen]
-    new_selected = [r for r in selected if r["candidate_id"] not in old_ids]
+    # Old selected20 pairs retain their same-GINE/full-matrix binding. Other
+    # selected rules, including old unselected46, get their own current flips
+    # and match minima while adopting only independently bound raw graph costs.
+    new_selected = [r for r in selected if r["candidate_id"] not in reusable_ids]
     boundary_check()
     oracle, features, distance = load_runtime(contract, output, "cpu")
-    pairs, reach = [], []
+    from src.eval.bace_reach_raw_binding import wrap_raw_distance
+    distance = wrap_raw_distance(distance, contract=contract,
+        descriptor={**binding["raw_distance_source"], "index": raw_test_index},
+        split="test", repo=Path(__file__).resolve().parents[2],
+        final_freeze=campaign / "final_test_binding.json")
+    pairs, reach, adopted_raw_records = [], [], []
+    fresh_raw_requests = 0
     for i, parent in enumerate(parents):
         boundary_check()
         path = output / "parents" / (stable_sha256(parent.parent_id)[:24] + ".json")
@@ -280,6 +366,7 @@ def _run_final_test_locked(campaign, output, binding, contract, boundary_check):
                 raise ValueError("OLD_TEST_PARENT_PREDICTION_RECORDS_DISAGREE")
             pred, p1 = next(iter(old_before))
             before = {"predicted_label": pred, "probabilities": [1.0-p1, p1]}
+            reuse_start, fresh_start = len(distance.used), distance.fresh
             rows, matches = evaluate_pairs([parent], new_selected, oracle=oracle, featurizer=features,
                 distance_provider=distance, split="test", oracle_checkpoint_id=contract["oracle_binding"],
                 parent_prediction_cache={parent.parent_id: {"parent_smiles": parent.smiles,
@@ -289,7 +376,14 @@ def _run_final_test_locked(campaign, output, binding, contract, boundary_check):
                 oracle_binding=contract["oracle_binding"], known_rows=matches)
             saved = seal(path, {"final_binding_sha256": binding["self_sha256"], "parent_id": parent.parent_id,
                 "new_selected_pairs": rows, "new_selected_match_witnesses": matches, "full_pool_reach": full,
+                "raw_distance_adoptions": distance.used[reuse_start:],
+                "fresh_raw_graph_requests": distance.fresh - fresh_start,
+                "raw_source_index_sha256": distance.index["self_sha256"],
                 "old_pair_source_reused": source, "test_used_for_selection": False})
+        if saved["raw_source_index_sha256"] != distance.index["self_sha256"]:
+            raise ValueError("RESUMED_RAW_SOURCE_INDEX_CHANGED")
+        adopted_raw_records.extend(saved["raw_distance_adoptions"])
+        fresh_raw_requests += saved["fresh_raw_graph_requests"]
         pairs.extend(r for r in old_by_parent[parent.parent_id] if r["candidate_id"] in chosen)
         pairs.extend(saved["new_selected_pairs"])
         reach.append(saved["full_pool_reach"])
@@ -309,9 +403,16 @@ def _run_final_test_locked(campaign, output, binding, contract, boundary_check):
         atomic_json(output / control / "explanation_metrics.json", report)
     atomic_jsonl(output / "selected_pairs.jsonl", pairs)
     atomic_jsonl(output / "full_pool_reach.jsonl", reach)
+    raw_reuse = seal(output / "raw_distance_reuse.json", {
+        "state": "EXPLICIT_RAW_DISTANCE_REUSE_NOT_FLIP_ADOPTION",
+        "input_binding": distance.current_input_binding, "reuse_records": adopted_raw_records,
+        "committed_parent_new_raw_graph_requests": fresh_raw_requests,
+        "current_process_stats": distance.stats_dict(), "old_cache_keys_modified": False})
+    distance.close()
     return seal(output / "final_audit.json", {"state": "EXECUTION_VALID", "final_binding_sha256": binding["self_sha256"],
         "test_campaigns": 1, "test_parent_count": len(parents), "source_eligible_count": sum(r["source_eligible"] for r in reach),
         "full_pool_reach_count": sum(r["reachable"] for r in reach), "selected_control": binding["selected_control"],
         "three_controls_evaluated": list(reports), "test_selected_variant": False, "new_untouched_test_claimed": False,
         "old_compliant_ot_recomputed": 0, "source_receipt": source, "main_matrix_write": False,
+        "raw_distance_reuse_sha256": raw_reuse["self_sha256"],
         "reports": {k: str(output / k / "explanation_metrics.json") for k in reports}})
