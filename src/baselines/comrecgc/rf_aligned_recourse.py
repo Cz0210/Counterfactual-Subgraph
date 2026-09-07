@@ -49,6 +49,39 @@ def storage_plan(*, parent_count: int, candidate_count: int, vector_dim: int,
             "pair_universe_truncated": False}
 
 
+def incremental_private_anon_reserve(peak_bytes, *, anonymous_bytes, shared_clean_bytes, shared_dirty_bytes):
+    """Only a lower bound of current private anonymous memory is discounted."""
+    values = (peak_bytes, anonymous_bytes, shared_clean_bytes, shared_dirty_bytes)
+    if any(type(value) is not int or value < 0 for value in values):
+        raise ValueError('Invalid measured anonymous/shared memory accounting')
+    # Anonymous contains potentially shared anon pages. Subtract *all* shared
+    # pages conservatively, including shared file pages, to avoid discounting
+    # anything that may also belong to another process. No RSS-file/cache or
+    # high-water RSS is ever discounted.
+    private_lower_bound = max(0, anonymous_bytes - shared_clean_bytes - shared_dirty_bytes)
+    return max(0, peak_bytes - private_lower_bound), private_lower_bound
+
+
+def current_private_anon_evidence():
+    status = {}
+    for line in Path('/proc/self/smaps_rollup').read_text().splitlines():
+        if ':' in line:
+            key, value = line.split(':', 1)
+            if value.strip().endswith('kB'):
+                status[key] = int(value.split()[0]) * 1024
+    children = set()
+    for task in Path('/proc/self/task').iterdir():
+        children.update((task / 'children').read_text().split())
+    if children:
+        raise RuntimeError('Current CPU boundary has unexpected child processes; no memory discount')
+    return {'source': '/proc/self/smaps_rollup', 'pid': os.getpid(),
+            'start_ticks': Path('/proc/self/stat').read_text().split(') ', 1)[1].split()[19],
+            'cgroup_membership': Path('/proc/self/cgroup').read_text(),
+            'anonymous_bytes': status['Anonymous'], 'shared_clean_bytes': status['Shared_Clean'],
+            'shared_dirty_bytes': status['Shared_Dirty'], 'current_rss_bytes': status['Rss'],
+            'children': [], 'shared_pages_discounted': False, 'file_cache_discounted': False}
+
+
 def runtime_resource_gate(config, output_root: Path, phase: str):
     """Use the existing file-policy contract and actual cgroup, CPU-only."""
     if not config.get('autodl_cpu_resource_config'):
@@ -62,6 +95,10 @@ def runtime_resource_gate(config, output_root: Path, phase: str):
     limit = int((cgroup / 'memory.limit_in_bytes').read_text())
     usage = int((cgroup / 'memory.usage_in_bytes').read_text())
     own_peak = int(config['max_rss_bytes'])
+    ownership = current_private_anon_evidence()
+    remaining_peak, owned_anon = incremental_private_anon_reserve(own_peak,
+        anonymous_bytes=ownership['anonymous_bytes'], shared_clean_bytes=ownership['shared_clean_bytes'],
+        shared_dirty_bytes=ownership['shared_dirty_bytes'])
     # Preserve the bound in the immutable task resource config; no host-memory
     # substitute and no interpretation of another task's current idle state.
     other_peak = int(resource['other_tasks_headroom_reserve_bytes'])
@@ -69,10 +106,13 @@ def runtime_resource_gate(config, output_root: Path, phase: str):
                'cgroup_limit_bytes': limit, 'cgroup_usage_bytes': usage,
                'cgroup_headroom_bytes': limit - usage,
                'task_max_rss_bytes': own_peak,
+               'current_private_owned_anon_lower_bound_bytes': owned_anon,
+               'next_stage_incremental_peak_bytes': remaining_peak,
+               'private_memory_evidence': ownership,
                'other_tasks_headroom_reserve_bytes': other_peak,
                'persistent_available_bytes': fs.f_bavail * fs.f_frsize,
                'file_admission': files, 'gpu_requested': False}
-    receipt['state'] = 'PASS' if files['admitted'] and limit - usage >= own_peak + other_peak and fs.f_bavail * fs.f_frsize >= int(resource['minimum_persistent_free_bytes']) else 'WAITING_RESOURCE'
+    receipt['state'] = 'PASS' if files['admitted'] and ownership['current_rss_bytes'] <= own_peak and limit - usage >= remaining_peak + other_peak and fs.f_bavail * fs.f_frsize >= int(resource['minimum_persistent_free_bytes']) else 'WAITING_RESOURCE'
     atomic_json(output_root / 'runtime_resource_latest.json', receipt)
     if receipt['state'] != 'PASS':
         raise RuntimeError('CPU stage resource admission failed: ' + phase)

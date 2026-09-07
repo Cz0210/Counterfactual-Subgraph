@@ -1,4 +1,6 @@
 #!/bin/bash
+# AutoDL same-root resource-stop resume uses current private anonymous RSS,
+# never high-water/file-cache RSS; this CPU wrapper keeps the scientific CLI.
 #SBATCH --partition=intel
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

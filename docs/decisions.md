@@ -18671,3 +18671,14 @@ oracle, test boundary, threshold payload/grid hashes and exact values, then
 validates Figure4 against that grid. Unknown/legacy schemas and other datasets
 retain the old gate. This changes validation of representation, not thresholds,
 coverage, test cohorts, ranking or scientific execution.
+# 2026-09-07 — AIDS pair-boundary resource pause and exact resume
+
+The first AutoDL CPU recourse stopped after260 committed chunks because the
+gate added the entire14GiB task peak to a cgroup usage already containing its
+private resident state. Original failure receipt/chunks are retained. At new
+safe boundaries, the unchanged14GiB bound is reduced only by a conservative
+lower bound of *current private anonymous* bytes from smaps_rollup; all shared
+pages, file cache, and high-water RSS are excluded from that subtraction.
+Unexpected child processes or missing memory evidence fail closed.384GiB of
+other-task headroom remains required. No numeric or candidate science changes;
+resume uses the original260 immutable pair chunks and starts at chunk260.
