@@ -135,7 +135,8 @@ def main():
             rows = evaluate_parent_chunk(chosen, pool, oracle=oracle, featurizer=features,
                 distance_provider=distance, output=directory / 'parents', split=args.split,
                 pool_sha=pool_sha, temperature_sha=spec['model_files'][args.backbone]['temperature_scaling.json'],
-                batch_size=spec['batch_size'], predictions=all_records, test_freeze=test_freeze)
+                batch_size=spec['batch_size'], predictions=all_records, test_freeze=test_freeze,
+                execution_spec_sha=root_binding['spec_sha256'])
         finally:
             distance.close()
         receipt = dict(state='PARENT_CHUNK_COMPLETE_NOT_CORE_PASS', scope=SCOPE_NAME,

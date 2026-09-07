@@ -65,7 +65,8 @@ def calibration_fixture(root):
                          pair_strict_flip=True, wnode_distance=.05, cf_drop=.2) for c in candidates]
             science = dict(pair_rows=rows, match_rows=[])
             atomic_json(directory / 'parents' / f'{pid}.json', dict(scope=SCOPE_NAME,
-                backbone=name, pool_sha256='v2', science= science, science_sha256=stable_sha256(science)))
+                backbone=name, pool_sha256='v2', spec_sha256='spec',
+                science=science, science_sha256=stable_sha256(science)))
             atomic_json(directory / 'terminal.json', dict(scope=SCOPE_NAME, backbone=name,
                 spec_sha256='spec', pool_sha256='v2', split='calibration', index=index,
                 state='PARENT_CHUNK_COMPLETE_NOT_CORE_PASS', global_selector_called=False,

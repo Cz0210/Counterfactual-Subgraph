@@ -49,6 +49,7 @@ def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candi
                 scientific = saved['science']
                 if (saved.get('scope') != SCOPE_NAME or saved.get('backbone') != backbone
                         or saved.get('pool_sha256') != pool_sha
+                        or saved.get('spec_sha256') != spec_sha
                         or saved.get('science_sha256') != stable_sha256(scientific)):
                     raise ValueError('CALIBRATION_PARENT_CONTENT_CONFLICT')
                 parent_rows = scientific['pair_rows']
@@ -137,7 +138,8 @@ def parent_binding(parent, candidates, *, backbone, checkpoint_id, temperature_s
 
 def evaluate_parent_chunk(parents, candidates, *, oracle, featurizer, distance_provider,
                           output: Path, split, pool_sha, temperature_sha, batch_size=64,
-                          predictions=None, test_freeze=None, boundary_check=lambda: None):
+                          predictions=None, test_freeze=None, execution_spec_sha,
+                          boundary_check=lambda: None):
     """Reuse one raw-distance provider, but never another backbone's flip/min.
 
     Called inside the existing CPU owner/Slurm partition. Each full parent is
@@ -145,6 +147,8 @@ def evaluate_parent_chunk(parents, candidates, *, oracle, featurizer, distance_p
     """
     from src.eval.bace_reach_v2 import evaluate_pairs
     from src.ablations.gnn.cpu_evaluation import matrix_from_pairs
+    if not execution_spec_sha:
+        raise ValueError('FROZEN_EXECUTION_SPEC_BINDING_REQUIRED')
     if split == 'test':
         require_global_freeze(test_freeze, pool_sha)
     elif test_freeze is not None:
@@ -159,7 +163,8 @@ def evaluate_parent_chunk(parents, candidates, *, oracle, featurizer, distance_p
         path = output / f'{key}.json'
         if path.exists():
             saved = read_json(path)
-            if saved.get('binding') != key or saved.get('science_sha256') != stable_sha256(saved['science']):
+            if (saved.get('binding') != key or saved.get('spec_sha256') != execution_spec_sha
+                    or saved.get('science_sha256') != stable_sha256(saved['science'])):
                 raise ValueError('V2_PARENT_CHECKPOINT_CONFLICT')
             pairs = saved['science']['pair_rows']
         else:
@@ -174,7 +179,8 @@ def evaluate_parent_chunk(parents, candidates, *, oracle, featurizer, distance_p
             scientific = {'pair_rows': pairs, 'match_rows': matches}
             atomic_json(path, {'binding': key, 'science': scientific,
                 'science_sha256': stable_sha256(scientific), 'scope': SCOPE_NAME,
-                'backbone': oracle.backbone, 'pool_sha256': pool_sha})
+                'backbone': oracle.backbone, 'pool_sha256': pool_sha,
+                'spec_sha256': execution_spec_sha})
         # Reject missing/duplicate Cartesian rows even for existing checkpoints.
         matrix_from_pairs([parent.parent_id], candidates, pairs, root=output, split=split)
         combined.extend(pairs)
