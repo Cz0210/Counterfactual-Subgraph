@@ -18923,3 +18923,12 @@ files are checked against pair counts/minima and read under the existing lock,
 with before/after identity checks, then newly sealed by this independent audit.
 That fact is disclosed; it is not retroactively represented as an original
 writer binding. Missing or inconsistent applications block acceptance.
+# 2026-09-07: bounded native raw-distance index serialization
+
+The fixed-pool GIN comparison now streams canonical JSON hashing and atomic index
+serialization instead of materializing an additional full JSON string. The digest
+and numeric raw-distance contract are unchanged and covered by round-trip tests.
+An implementation-derived next-stage memory estimate charges all finite rows,
+bitmap, candidate copies, sorting/map overhead, allocator slack and a separate
+1 GiB process allowance. Admission must still read actual joint cgroup headroom;
+the estimate does not waive active task reservations or replace measured RSS.

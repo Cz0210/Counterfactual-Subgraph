@@ -9,11 +9,14 @@ from __future__ import annotations
 import ast
 from functools import lru_cache
 import hashlib
+import importlib.util
 import json
 import math
 import os
 from pathlib import Path
 import subprocess
+import sys
+import tempfile
 import time
 
 from src.eval.bace_frozen_gnn_contracts import (
@@ -30,6 +33,62 @@ OPERATIONS = {
 }
 NUMERIC = ("distance_line", "distance_type", "feature_cost", "node_mass", "size_penalty_beta", "solver")
 NATIVE_SOURCE = "src/eval/bace_native_baseline_gnn.py"
+
+
+def stream_sha256(value):
+    """Exactly stable_sha256's JSON bytes, without a full serialized copy."""
+    digest = hashlib.sha256()
+    for token in json.JSONEncoder(sort_keys=True, separators=(',', ':'), ensure_ascii=True).iterencode(value):
+        digest.update(token.encode('utf-8'))
+    return digest.hexdigest()
+
+
+def _stream_atomic_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            for token in json.JSONEncoder(sort_keys=True, separators=(',', ':'), ensure_ascii=True).iterencode(value):
+                handle.write(token)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        # Preserve an interrupted fresh output for diagnosis, never old input.
+        raise
+
+
+def index_memory_bound(finite_rows, pair_rows, candidate_bytes):
+    """Conservative next-stage bound for this concrete compact Python layout.
+
+    Every finite source row is charged as a distinct graph key/map slot/value,
+    even duplicates. Shared literal strings are charged per row too. There is
+    no full JSON string after stream_sha256/_stream_atomic_json. Sort workspace
+    and allocator slack are charged per row; a separate 1GiB fixed reserve
+    covers imports, chemistry memoization, candidates and process overhead.
+    """
+    provenance = {'source_member': 'original_pair_matrix', 'line': 2**40}
+    value = {'distance': 1., 'source_records': []}
+    value['source_records'].append(provenance)  # Match the real append allocation.
+    # A conservative map slot and sort tuple allowance, including pointer arrays.
+    per_row = (sys.getsizeof('0' * 64) + sys.getsizeof(value) + sys.getsizeof(1.)
+        + sys.getsizeof(value['source_records']) + sys.getsizeof(provenance)
+        + sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in provenance.items())
+        + sum(sys.getsizeof(k) for k in value) + 128)
+    accounted = finite_rows * per_row + pair_rows + 4 * candidate_bytes
+    bound = (accounted * 5 + 3) // 4 + 1024**3
+    return dict(layout='raw_graph_key -> distance + one compact source-line provenance',
+        per_finite_row_conservative_bytes=per_row, finite_rows=finite_rows,
+        pair_seen_bitmap_bytes=pair_rows, candidate_input_copy_bound_bytes=4*candidate_bytes,
+        allocator_safety_factor=1.25, fixed_import_chemistry_process_reserve_bytes=1024**3,
+        serialized_full_copy_count=0, estimated_peak_rss_bound_bytes=bound)
 
 
 def _bound(path, sha256):
@@ -106,7 +165,13 @@ def _canonical(text):
 
 
 def _source_docs(binding, split, repo):
-    from src.ablations.gnn.reach_raw_distance_reuse import kernel_identity_proof
+    # Load this small existing utility directly: importing the GNN package's
+    # broad public __init__ is unnecessary for a no-inference migration worker.
+    location = repo / 'src/ablations/gnn/reach_raw_distance_reuse.py'
+    module_spec = importlib.util.spec_from_file_location('_bace_native_raw_kernel', location)
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    kernel_identity_proof = module.kernel_identity_proof
     if binding.get('schema') != BINDING_SCHEMA or binding.get('method_id') not in OPERATIONS:
         raise ValueError('NATIVE_RAW_SOURCE_SCHEMA_REQUIRED')
     item = binding['splits'][split]
@@ -191,7 +256,7 @@ def build_native_index(binding, *, split, output, repo, test_freeze_path=None,
     binding_sha = stable_sha256(dict(source=binding, split=split, new_test_freeze_sha256=freeze_sha))
     if output.exists():
         old = read_json(output)
-        if old.get('binding_sha256') != binding_sha or old.get('self_sha256') != stable_sha256(
+        if old.get('binding_sha256') != binding_sha or old.get('self_sha256') != stream_sha256(
                 {k: v for k, v in old.items() if k != 'self_sha256'}):
             raise ValueError('NATIVE_RAW_SEALED_INDEX_CONFLICT')
         return old
@@ -269,8 +334,9 @@ def build_native_index(binding, *, split, output, repo, test_freeze_path=None,
         source_selected_match_minima_reused=False, source_selection_caps_reused=False,
         model_inference_performed=False, ot_recomputed=0,
         source_file_reads=1, elapsed_seconds=time.monotonic()-started)
-    result['self_sha256'] = stable_sha256(result)
-    atomic_json(output, result)
+    result['index_memory_bound'] = index_memory_bound(finite, count, Path(item['candidate_file']['path']).stat().st_size)
+    result['self_sha256'] = stream_sha256(result)
+    _stream_atomic_json(output, result)
     atomic_json(output.parent / (output.stem + '.progress.json'), dict(state='COMPLETED',
         split=split, processed_rows=count, finite_raw_rows=finite, no_raw_distance_rows=missing,
         raw_cost_count=len(values), index=str(output), self_sha256=result['self_sha256']))

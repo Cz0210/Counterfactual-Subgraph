@@ -42,6 +42,7 @@ class NativeRawTests(unittest.TestCase):
         self.source.write_bytes(data)
         item = dict(pair_file=dict(path=str(self.source), sha256=hashlib.sha256(data).hexdigest(), size=len(data)),
                     merge_manifest={'path': 'sealed/manifest', 'sha256': 'manifest'},
+                    candidate_file={'path': str(self.source)},
                     pair_count=len(rows), finite_count=finite)
         self.binding['splits']['calibration'] = item
         self.binding['splits']['test'] = item
@@ -149,6 +150,18 @@ class NativeRawTests(unittest.TestCase):
         proof = raw._native_call_proof(repo, 'b8f978cbf90d124e4f317a8b925282b784ff36a7')
         self.assertFalse(proof['source_execution_commit_claimed'])
         self.assertEqual(proof['source_distance_namespace'], raw.NATIVE_NAMESPACE)
+
+    def test_stream_sha_exact_existing_contract_and_atomic_roundtrip(self):
+        for value in ({'a': [0., -0., 1e-250, '\u6e29\u5ea6'], 'z': None}, [True, False, {}, 'x'],
+                      {str(i): {'distance': i / 9., 'source_records': [{'line': i}]} for i in range(3000)}):
+            self.assertEqual(raw.stream_sha256(value), stable_sha256(value))
+            raw._stream_atomic_json(self.out, value)
+            self.assertEqual(json.loads(self.out.read_text()), value)
+
+    def test_actual_full_gcf_layout_bound_below_four_gib(self):
+        bound = raw.index_memory_bound(1361396, 1449228, 32220295)
+        self.assertLess(bound['estimated_peak_rss_bound_bytes'], 4 * 1024**3)
+        self.assertEqual(bound['serialized_full_copy_count'], 0)
 
 
 if __name__ == '__main__':
