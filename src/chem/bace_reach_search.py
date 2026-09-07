@@ -144,7 +144,8 @@ def search_parent(*, parent_id: str, parent_smiles: str, before: Mapping[str, An
                   old_candidates: Sequence[Mapping[str, Any]], oracle_binding: str,
                   budget: SearchBudget, maximum_new_queries: int,
                   previous: Mapping[str, Any] | None = None,
-                  source_label: int = 1) -> dict[str, Any]:
+                  source_label: int = 1,
+                  initial_oracle_cache: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
     """One deterministic parent stage; a saved first pass can receive +384.
 
     Invalid graphs and cache hits do not spend oracle queries. They still count
@@ -159,8 +160,11 @@ def search_parent(*, parent_id: str, parent_smiles: str, before: Mapping[str, An
                            "oracle": oracle_binding, "budget": asdict(budget)})
     if previous and previous["binding"] != binding:
         raise ValueError("PARENT_RESUME_BINDING_CHANGED")
+    if previous is not None and initial_oracle_cache is not None:
+        raise ValueError("INITIAL_CACHE_ONLY_ON_FIRST_PARENT_PASS")
     records = list(previous.get("records", [])) if previous else []
-    cache = dict(previous.get("oracle_cache", {})) if previous else {}
+    cache = dict(previous.get("oracle_cache", {})) if previous else {
+        key: dict(value) for key, value in (initial_oracle_cache or {}).items()}
     examined = {tuple(r["match_atom_indices"]) for r in records}
     total_old = int(previous.get("new_graph_oracle_queries", 0)) if previous else 0
     queries, hits = 0, 0
