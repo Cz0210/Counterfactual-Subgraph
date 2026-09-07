@@ -18852,3 +18852,10 @@ resume uses the original260 immutable pair chunks and starts at chunk260.
   calibration can use one full new-pool parent for resource measurement while
   held-out chunks contain up to 16 parents of the frozen native/common rule
   union. This changes only partition granularity, not parents, rules or order.
+- After the Ours calibration owner finished, its 211 finite match-distance
+  records were eligible for one further raw-cost migration. The narrow exporter
+  binds sealed parent records, candidate/selector receipts, actual current
+  schema/encoder and unchanged raw kernels, then unions graph costs with the
+  accepted old calibration index. It preserves original action provenance but
+  never exports another backbone's flip masks/minima as current decisions. A
+  differing cost for the same bound graph pair fails closed; no OT is computed.
