@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# BACE Figure4 grid comes from its SHA-bound frozen calibration selector;
+# legacy and non-BACE grid contracts remain unchanged.
 # Static CLI-parity wrapper only. The active campaign runs on AutoDL and this
 # presentation-only exporter performs no model inference, so the inference
 # fallback override is not applicable.

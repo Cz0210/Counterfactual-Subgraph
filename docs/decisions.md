@@ -18595,3 +18595,12 @@ It preserves method-version and prior-test disclosure in every output manifest;
 existing method thresholds, denominator, missing values and legacy minimum
 rules remain unchanged. No active execution worktree is updated by this export
 compatibility change.
+
+The BACE artifact standardizer already exported the frozen dataset-specific
+calibration grid, but the downstream four-by-four auditor unconditionally
+required the older601-point grid for every dataset. A bounded BACE-only path
+now independently reopens the SHA-bound frozen selector, verifies its source,
+oracle, test boundary, threshold payload/grid hashes and exact values, then
+validates Figure4 against that grid. Unknown/legacy schemas and other datasets
+retain the old gate. This changes validation of representation, not thresholds,
+coverage, test cohorts, ranking or scientific execution.

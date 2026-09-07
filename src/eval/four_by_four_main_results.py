@@ -236,6 +236,7 @@ def _method_rows(
     *,
     expected_method: str,
     kind: str,
+    frozen_figure4_thresholds: Sequence[float] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, str]]:
     fields, rows = _read_csv(path)
     method_field = _field(fields, ("method", "Method"), path=path)
@@ -295,21 +296,20 @@ def _method_rows(
             _finite(row[threshold_field], field=threshold_field, path=path)
             for row in rows
         ]
-        expected_thresholds = [
+        expected_thresholds = list(frozen_figure4_thresholds) if frozen_figure4_thresholds is not None else [
             FIGURE4_THRESHOLD_START
             + (FIGURE4_THRESHOLD_STOP - FIGURE4_THRESHOLD_START)
             * index
             / (FIGURE4_THRESHOLD_POINTS - 1)
             for index in range(FIGURE4_THRESHOLD_POINTS)
         ]
-        if len(thresholds) != FIGURE4_THRESHOLD_POINTS or any(
+        if len(thresholds) != len(expected_thresholds) or any(
             not math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-12)
             for observed, expected in zip(thresholds, expected_thresholds)
         ):
             raise MainResultsError(
                 f"{path}: Figure 4 grid must be the frozen "
-                f"{FIGURE4_THRESHOLD_POINTS}-point "
-                f"{FIGURE4_THRESHOLD_START}..{FIGURE4_THRESHOLD_STOP} grid"
+                f"{len(expected_thresholds)}-point source-bound grid"
             )
         if any(right <= left for left, right in zip(thresholds, thresholds[1:])):
             raise MainResultsError(
@@ -599,6 +599,36 @@ def _table2_path(root: Path, method: str) -> Path:
     return root / f"table2_{METHOD_SLUGS[method]}_k10.csv"
 
 
+def _bace_frozen_figure4_grid(dataset: str, method: str, evaluation: Mapping[str, Any]) -> list[float] | None:
+    """BACE's exact frozen calibration grid, not an arbitrary CSV override."""
+    if dataset != 'BACE' or evaluation.get('schema_version') != 'bace_frozen_cell_evaluation_manifest_v1':
+        return None
+    identity=evaluation.get('source_selection_manifest', {})
+    path=Path(str(identity.get('path','')))
+    if (not path.is_absolute() or path.is_symlink() or not path.is_file() or
+        path.stat().st_size>2*1024**2 or sha256_file(path)!=identity.get('sha256')):
+        raise MainResultsError('BACE Figure4 frozen selector identity missing or changed')
+    selection=_read_json_object(path)
+    if (selection.get('dataset')!='bace' or selection.get('method')!=method or
+        selection.get('stage') not in ('B12_SELECTOR','BASELINE_CALIBRATION_SELECTOR') or
+        selection.get('status')!='FROZEN' or selection.get('selection_frozen') is not True or
+        selection.get('selector_fitted_on_calibration') is not True or selection.get('test_loaded') is not False or
+        selection.get('oracle_checkpoint_hash')!=evaluation.get('oracle_checkpoint_hash')):
+        raise MainResultsError('BACE Figure4 requires the same frozen calibration selector and oracle')
+    thresholds=selection.get('thresholds', {})
+    if (thresholds.get('test_used') is not False or 'calibration' not in str(thresholds.get('threshold_source','')) or
+        stable_json_sha256(thresholds)!=evaluation.get('threshold_payload_hash')):
+        raise MainResultsError('BACE Figure4 threshold payload/source identity changed')
+    try: values=[float(item['threshold']) for item in thresholds['merged_thresholds']]
+    except (KeyError,TypeError,ValueError) as error:
+        raise MainResultsError('BACE Figure4 frozen grid missing') from error
+    if (not values or any(not math.isfinite(v) or v<0 for v in values) or
+        any(b<=a for a,b in zip(values,values[1:])) or values!=evaluation.get('threshold_values') or
+        stable_json_sha256(values)!=evaluation.get('threshold_config_hash')):
+        raise MainResultsError('BACE Figure4 exact frozen grid/hash mismatch')
+    return values
+
+
 def audit_cell(row: Mapping[str, Any]) -> CellArtifacts:
     dataset = _canonical_dataset_strict(row.get("dataset"))
     method = _canonical_method_strict(row.get("method"))
@@ -646,7 +676,8 @@ def audit_cell(row: Mapping[str, Any]) -> CellArtifacts:
     _validate_manifest_identity(payloads, row, dataset, method, root=root)
 
     figure3, _ = _method_rows(paths["figure3_coverage_vs_k.csv"], expected_method=method, kind="figure3")
-    figure4, _ = _method_rows(paths["figure4_coverage_vs_threshold.csv"], expected_method=method, kind="figure4")
+    figure4, _ = _method_rows(paths["figure4_coverage_vs_threshold.csv"], expected_method=method, kind="figure4",
+        frozen_figure4_thresholds=_bace_frozen_figure4_grid(dataset,method,payload_by_name['evaluation_manifest.json']))
     table2, _ = _method_rows(paths["table2"], expected_method=method, kind="table2")
     destination_fields, destination = _read_csv(paths["destination_distribution.csv"])
     destination_method_field = next(
