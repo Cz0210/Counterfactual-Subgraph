@@ -414,6 +414,46 @@ def status(spec):
     return result
 
 
+def export(spec):
+    """Use the existing per-result registry convention, never a matrix writer."""
+    validate(spec)
+    root = Path(spec["output_root"])
+    frozen = verified(root / "selection_freeze.json")
+    require_freeze(spec, frozen)
+    metrics = verified(root / "metrics.json")
+    audit_result = verified(root / "audit/final_audit.json")
+    terminal = verified(root / campaign_group(spec) / "test/terminal.json")
+    sha = stable_sha256(spec)
+    if (audit_result.get("state") != "SAVED_RECORD_AND_METRIC_CONSISTENCY_PASS"
+            or audit_result.get("spec_sha256") != sha
+            or audit_result.get("freeze_sha256") != frozen["self_sha256"]
+            or audit_result.get("metrics_sha256") != metrics["self_sha256"]
+            or metrics.get("spec_sha256") != sha
+            or metrics.get("freeze_sha256") != frozen["self_sha256"]
+            or terminal.get("state") != "PARENT_EVALUATION_COMPLETE"
+            or terminal.get("parent_count") != 141
+            or terminal.get("spec_sha256") != sha):
+        raise ValueError("A_PLUS_EXPORT_REQUIRES_ACTUAL_TEST_AND_BOUND_AUDIT")
+    path = root / "experiment_registry.json"
+    if path.exists():
+        prior = verified(path)
+        if prior["audit_sha256"] != audit_result["self_sha256"] or prior["spec_sha256"] != sha:
+            raise ValueError("A_PLUS_EXPERIMENT_PUBLICATION_CONFLICT")
+        return prior
+    names = ("contract.json", "selection_freeze.json", "metrics.json", "audit/final_audit.json",
+        "source_csv/ours_variant_comparison.csv", "source_csv/figure3_k1_20.csv",
+        "source_csv/figure4_exact_ecdf.csv", "source_csv/parent_best_distances.csv")
+    artifacts = {name: dict(bytes=(root / name).stat().st_size, sha256=sha256_file(root / name))
+                 for name in names}
+    return seal(path, dict(experiment_id=EXPERIMENT, state="VALIDATED_OURS_INCREMENTAL_COMPONENT",
+        result_role="OURS_COMPONENT_NOT_FOUR_METHOD_COMPLETION", ready_controls=list(frozen["controls"]),
+        spec_sha256=sha, audit_sha256=audit_result["self_sha256"], artifacts=artifacts,
+        science_execution_commit=spec["execution_commit"],
+        audit_scope=audit_result["audit_scope"], post_hoc_development=True,
+        test_results_previously_observed=True, main_matrix_write=False,
+        global_registry_authority_created=False, created_at=utc_now()))
+
+
 def audit(spec):
     """Stream saved parent records; independently reduce masks and final metrics."""
     from src.experiments.bace_gin_audit import audit_parent_rows, recompute_metrics, equal

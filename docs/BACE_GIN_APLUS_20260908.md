@@ -63,3 +63,20 @@ inventing witnesses or requiring100% reach. Test requires a fresh selector and
 a raw-only index that also covers prior Reach2607 test costs; a missing index
 blocks instead of silently recomputing known costs. This does not adopt the old
 Reach test metrics, flip masks or unresolved full-witness audit conclusions.
+
+## 2026-09-08: actual results and per-result export
+
+The bounded supplement used 64 new GIN queries for five train-gap parents,
+retained all2607 source candidates and added52 (total2659). All five parents
+have actual strict-flip witnesses. Calibration full-pool R43/H41/L32 is
+unchanged by those52 additions. The frozen new S10 covers30/66 at theta,
+versus7/66 for the original legal S10. Actual fixed141 test: new K10=54/141,
+K20=56/141; old66/new-selector equals old66/old-selector at27/141 and28/141.
+The70% target was not reached and does not trigger test-directed further work.
+
+The dataset-specific `export` action uses the existing per-result
+`experiment_registry.json` convention only after the bound real test terminal
+and independent saved-record/metric audit. It publishes the Ours incremental
+component, not a four-method completion or a new global authority. Portable
+copies preserve the scientific execution identity and the audit's limited
+scope. The paired CPU Slurm script passes the CLI action through unchanged.
