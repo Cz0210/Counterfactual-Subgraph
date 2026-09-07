@@ -14,7 +14,7 @@ set -eo pipefail
 test -f scripts/experiments/run_bace_gin_reach_v2.py
 export PYTHONPATH="$PWD"
 export CUDA_VISIBLE_DEVICES=""
-export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}" MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}" OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export TOKENIZERS_PARALLELISM=false PYTHONDONTWRITEBYTECODE=1
 echo "Python: $(command -v python)"
 python --version

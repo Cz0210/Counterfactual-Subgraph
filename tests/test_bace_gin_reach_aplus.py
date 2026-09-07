@@ -78,3 +78,35 @@ def test_mask_original66_adapter_unchanged():
     a = deletion_outcomes("CCC", candidate, "p")
     b = enumerate_connected_hard_deletions("CCC", "C", parent_id="p", candidate_id="r")
     assert [x.as_dict() for x in a] == [x.as_dict() for x in b]
+
+
+@pytest.mark.parametrize("flip,expected", [(True,"NO_TRAIN_REACH_GAP_REQUIRING_SUPPLEMENT"),
+    (False,"SUPPLEMENTAL_TRAIN_SEARCH_REQUIRED")])
+def test_train_gate_uses_complete_train_not_calibration_or_test(tmp_path, monkeypatch, flip, expected):
+    from src.experiments import bace_gin_reach_v2 as driver
+    from src.eval.bace_frozen_gnn_contracts import stable_sha256
+    spec = {"output_root": str(tmp_path)}
+    sha = stable_sha256(spec)
+    monkeypatch.setattr(driver, "plan", lambda s: {"adopted_candidate_count": 2})
+    seal(tmp_path / "adopted2607/train/terminal.json", dict(parent_count=386, spec_sha256=sha))
+    def units(s, group, split):
+        assert (group, split) == ("adopted2607", "train")
+        for i in range(386):
+            yield dict(parent_id=str(i), pair_rows=[dict(pred_before=int(i<318),
+                pair_strict_flip=flip and i<318) for _ in range(2)])
+    monkeypatch.setattr(driver, "_iter_units", units)
+    receipt = driver.train_gate(spec)
+    assert receipt["state"] == expected
+    assert receipt["eligible_count"] == 318
+    assert receipt["calibration_used"] is False and receipt["test_used"] is False
+    assert len(receipt["uncovered_parent_ids"]) == (0 if flip else 318)
+
+
+def test_train_gate_refuses_probe(tmp_path, monkeypatch):
+    from src.experiments import bace_gin_reach_v2 as driver
+    from src.eval.bace_frozen_gnn_contracts import stable_sha256
+    spec = {"output_root": str(tmp_path)}
+    monkeypatch.setattr(driver, "plan", lambda s: {"adopted_candidate_count": 2})
+    seal(tmp_path / "adopted2607/train/terminal.json", dict(parent_count=2, spec_sha256=stable_sha256(spec)))
+    with pytest.raises(ValueError, match="FULL_386"):
+        driver.train_gate(spec)

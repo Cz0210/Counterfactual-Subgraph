@@ -39,3 +39,12 @@ write the main authority and cannot train any model.
 Bounded new search remains contingent on the full train ceiling; it is not
 dispatched by the fixed saved-pool evaluation. A 70% research target is not a
 PASS requirement and cannot justify altered denominators or test-led search.
+# Train-only adoption decision and saved-record audit
+
+The complete 2607-pool train evaluation precedes the train adoption decision.
+Any same-GIN source training parent without a strict-flip witness triggers the
+bounded supplemental-search route. Calibration outcomes and all test records
+are excluded from this decision. A new global selector cannot silently bypass
+an unclosed supplemental-search decision. The observed 386-parent old-pool
+result is R158/H141/L87; full calibration old66 is R19/H18/L7. These are measurements,
+not target gates. A separate saved-application consistency audit precedes test.

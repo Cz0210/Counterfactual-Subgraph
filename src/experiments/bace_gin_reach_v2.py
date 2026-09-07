@@ -273,6 +273,9 @@ def freeze(spec):
         value = verified(root / "selection_freeze.json")
         require_freeze(spec, value)
         return value
+    gate = verified(root / "train_adoption_gate.json")
+    if gate["spec_sha256"] != stable_sha256(spec) or gate["state"] != "NO_TRAIN_REACH_GAP_REQUIRING_SUPPLEMENT":
+        raise ValueError("TRAIN_ONLY_SUPPLEMENT_MUST_CLOSE_BEFORE_FINAL_SELECTOR")
     old, pool, _ = pools(spec)
     from src.eval.bace_reach_selector import ReachMasks
     from src.ablations.gnn.cpu_evaluation import matrix_from_pairs
@@ -373,3 +376,44 @@ def audit(spec):
         audit_scope="SAVED_APPLICATIONS_AND_INDEPENDENT_METRIC_REDUCER_NOT_MODEL_REEXECUTION",
         main_matrix_write=False, new_method_final_science_claim="POST_HOC_FROZEN_GIN_REACH_AWARE")
     return seal(root / "audit/final_audit.json", receipt)
+
+
+def train_gate(spec):
+    """A train-only decision, never derived from the new calibration outcome."""
+    root = Path(spec["output_root"])
+    contract = plan(spec)
+    terminal = verified(root / "adopted2607/train/terminal.json")
+    if terminal["parent_count"] != 386 or terminal["spec_sha256"] != stable_sha256(spec):
+        raise ValueError("FULL_386_TRAIN_EVIDENCE_REQUIRED")
+    eligible, reached, uncovered = [], [], []
+    for unit in _iter_units(spec, "adopted2607", "train"):
+        rows = unit["pair_rows"]
+        if len(rows) != contract["adopted_candidate_count"] or len({r["pred_before"] for r in rows}) != 1:
+            raise ValueError("TRAIN_FULL_POOL_OR_SOURCE_PREDICTION_CONFLICT")
+        if rows[0]["pred_before"] != 1:
+            continue
+        eligible.append(unit["parent_id"])
+        (reached if any(r["pair_strict_flip"] for r in rows) else uncovered).append(unit["parent_id"])
+    return seal(root / "train_adoption_gate.json", dict(
+        state="SUPPLEMENTAL_TRAIN_SEARCH_REQUIRED" if uncovered else "NO_TRAIN_REACH_GAP_REQUIRING_SUPPLEMENT",
+        spec_sha256=stable_sha256(spec), train_terminal_sha256=terminal["self_sha256"],
+        eligible_count=len(eligible), reached_count=len(reached), uncovered_parent_ids=uncovered,
+        criterion="ANY_GIN_SOURCE_TRAIN_PARENT_WITHOUT_STRICT_FLIP_IN_COMPLETE_SAVED2607",
+        native_normalization_for_diagnosis_only=True, primary_denominator_unchanged=386,
+        calibration_used=False, test_used=False, additional_ppo_updates=0))
+
+
+def audit_calibration(spec):
+    """Validate actual new application records before selecting or opening test."""
+    from src.experiments.bace_gin_audit import audit_parent_rows
+    adopted = adapter.validate_gin_adoption(spec)
+    oracle = dict(model_sha256=adopted["model_sha256"], temperature=adopted["temperature"])
+    counts = []
+    for unit in _iter_units(spec, "adopted2607", "calibration"):
+        rows = unit["pair_rows"]
+        counts.append(dict(parent_id=unit["parent_id"], **audit_parent_rows(rows, unit["match_rows"],
+            method="ours", split="calibration", parent_id=unit["parent_id"],
+            parent_smiles=rows[0]["parent_smiles"], candidate_ids=[r["candidate_id"] for r in rows], oracle=oracle)))
+    return seal(Path(spec["output_root"]) / "audit/calibration_records.json", dict(
+        state="SAVED_CALIBRATION_RECORD_CONSISTENCY_PASS", spec_sha256=stable_sha256(spec),
+        parent_units=counts, model_inference_rerun=False, ot_recomputed=0, test_loaded=False))
