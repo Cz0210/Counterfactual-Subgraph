@@ -143,7 +143,21 @@ def evaluate(spec: Mapping[str, Any], method: str, split: str, start: int, stop:
         candidates = [indexed[x] for x in frozen["ordered_rule_ids"]]
     from src.experiments import bace_gin_ours as ours
     runtime_spec = copy.deepcopy(spec)
-    if split == "test":
+    if method in ("gcfexplainer", "comrecgc"):
+        # Native original full-graph costs need their own provenance migration.
+        # The sparse Ours deletion index is not proof all native costs are absent.
+        path = root / "manifests" / f"{method}_native_raw_adoption.json"
+        if not path.is_file():
+            raise ValueError(f"NATIVE_RAW_DISTANCE_ADOPTION_REQUIRED:{method}:{path}")
+        adoption = read_json(path)
+        if (adoption.get("spec_sha256") != stable_sha256(spec)
+                or adoption.get("pool_manifest_sha256") != spec["pools"][method]["sha256"]):
+            raise ValueError("NATIVE_RAW_ADOPTION_WRONG_EXPERIMENT")
+        source_index = adoption.get(split)
+        if source_index is None:
+            raise ValueError(f"NATIVE_RAW_SPLIT_ADOPTION_MISSING:{method}:{split}")
+        runtime_spec.setdefault("raw_cost_indexes",{})[split] = source_index
+    if split == "test" and method == "ours":
         from src.ablations.gnn.reach_raw_distance_reuse import build_index
         index_path = root / method / "raw_test_adoption.json"
         fp = freeze_path(spec, method)
@@ -308,6 +322,8 @@ def prefix_metrics(parent_ids: Sequence[str], candidates: Sequence[str], rows: S
     """Exact AT_MOST_K metrics; fixed base and native share one frozen sequence."""
     if len(candidates) > 20 or len(candidates) != len(set(candidates)):
         raise ValueError("INVALID_FROZEN_PREFIX")
+    if not candidates:
+        raise ValueError("BLOCKED_EMPTY_SELECTION_REQUIRES_EXPLICIT_PARENT_PREDICTIONS")
     by_pair = {(r["parent_id"], r["candidate_id"]): r for r in rows}
     if len(by_pair) != len(rows) or set(by_pair) != {(p,c) for p in parent_ids for c in candidates}:
         raise ValueError("TEST_CARTESIAN_PRODUCT_INCOMPLETE")
@@ -365,13 +381,19 @@ def aggregate(spec: Mapping[str, Any], method: str) -> dict:
                             cap=th.cost_cap, endpoints=th.raw_thresholds)
     result.update(state="EVALUATED", method=method, spec_sha256=stable_sha256(spec),
         freeze_sha256=sha256_file(freeze_path(spec, method)), main_matrix_write=False)
+    result["failure_funnel"] = {"split":"test", "pool_scope":"new_calibration_selected_prefix",
+        "base_parent_count":len(parents),"selected_rule_count":len(frozen["ordered_rule_ids"]),
+        "pair_count":len(rows),"gin_source_parents":sum(r["in_native"] for r in result["parent_predictions"]),
+        "applicable_pairs":sum(bool(r["applicable"]) for r in rows),
+        "strict_flip_pairs_with_exact_distance":sum(bool(r["pair_strict_flip"]) for r in rows),
+        "unavailable_distance_not_relabelled_zero":True}
     atomic_json(Path(spec["output_root"]) / method / "metrics.json", result)
     return {k:v for k,v in result.items() if not isinstance(v,list)}
 
 
 def export(spec: Mapping[str, Any]) -> dict:
     root = Path(spec["output_root"])
-    ready, pending, table, f3, f4, native, parents, distances = [], [], [], [], [], [], [], []
+    ready, pending, table, f3, f4, native, parents, distances, funnels = [], [], [], [], [], [], [], [], []
     for method in METHODS:
         path = root / method / "metrics.json"
         if not path.exists():
@@ -390,9 +412,11 @@ def export(spec: Mapping[str, Any]) -> dict:
         f4 += add([r for r in result["exact_ecdf"] if r["cohort"]=="fixed141"])
         parents += add(result["parent_predictions"])
         distances += add(result["parent_distances"])
+        funnels += add([result["failure_funnel"]])
     for name, rows in (("bace_gin_fixed141_table2",table),("bace_gin_fixed141_figure3",f3),
         ("bace_gin_fixed141_figure4_exact_ecdf",f4),("bace_gin_native_metrics",native),
-        ("bace_gin_parent_predictions",parents),("bace_gin_parent_best_distances",distances)):
+        ("bace_gin_parent_predictions",parents),("bace_gin_parent_best_distances",distances),
+        ("bace_gin_method_failure_funnel",funnels)):
         if rows: atomic_csv(root / "source_csv" / f"{name}.csv",rows)
     receipt = {"state":"PARTIAL" if pending else "EVALUATED_AWAITING_INDEPENDENT_AUDIT", "ready_methods":ready,
         "pending_methods":pending,"experiment_id":EXPERIMENT,"main_matrix_write":False,
