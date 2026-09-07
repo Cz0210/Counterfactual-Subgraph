@@ -23,6 +23,7 @@ from src.ablations.gnn.early_policy import gpu_allowed
 from src.eval.bace_frozen_gnn_contracts import atomic_json, sha256_file
 from src.utils.autodl_runtime import GPUFileLock, ProjectGPUSlotLock, query_gpu_inventory
 from src.utils.final16_owner_registry_v1 import process_start_ticks, validate_owner_registry
+from src.utils.stage_file_policy import config_file_admission, load_stage_policy
 
 RESOURCE_SCHEMA = "bace_llm_gpu_owner_resource_v1"
 DISPATCH_SCHEMA = "bace_llm_existing_owner_dispatch_v1"
@@ -34,7 +35,7 @@ def validate_resource_config(config):
     required = {"main_registry_path", "main_ready_sources", "proc_root", "cgroup_memory_root",
                 "persistent_root", "gpu_lock_root", "minimum_gpu_free_mb", "maximum_idle_utilization_percent",
                 "minimum_memory_headroom_bytes", "minimum_persistent_free_bytes", "checkpoint_resume_pass"}
-    optional = {"minimum_free_inodes", "reserved_new_inodes"}
+    optional = {"minimum_free_inodes", "reserved_new_inodes", "stage_file_policy"}
     if not required <= set(config) or set(config) - required - optional:
         raise ValueError("LLM_RESOURCE_SOURCE_CONFIG_FIELDS_CHANGED")
     for field in ("main_registry_path", "proc_root", "cgroup_memory_root", "persistent_root", "gpu_lock_root"):
@@ -49,9 +50,14 @@ def validate_resource_config(config):
         raise ValueError("INVALID_IDLE_UTILIZATION_THRESHOLD")
     if config["checkpoint_resume_pass"] is not True:
         raise ValueError("REAL_CHECKPOINT_RESUME_REQUIRED")
-    for field in optional:
+    for field in optional - {"stage_file_policy"}:
         if field in config and (type(config[field]) is not int or config[field] < 0):
             raise ValueError("INVALID_INODE_BUDGET:" + field)
+    if "stage_file_policy" in config:
+        descriptor = config["stage_file_policy"]
+        if (not isinstance(descriptor, dict) or set(descriptor) != {"path", "sha256"}
+                or not Path(descriptor["path"]).is_absolute() or len(descriptor["sha256"]) != 64):
+            raise ValueError("INVALID_STAGE_FILE_POLICY_DESCRIPTOR")
     return config
 
 
@@ -131,6 +137,9 @@ class ResourceSampler:
         self.idle_since = None
         self.last_sample = None
         self.admitted_idle_seconds = None
+        self.file_policy = (load_stage_policy(config["stage_file_policy"], config["persistent_root"])
+                            if "stage_file_policy" in config else None)
+        self.initial_free_slots = None
 
     def sample(self, *, child_pid=None, child_start_ticks=None):
         now, tick = self.clock(), self.monotonic()
@@ -151,7 +160,8 @@ class ResourceSampler:
         retired = set()
         for row in registry["tasks"]:
             successor = task_by_id.get(row.get("successor_task_id"))
-            terminal = row["owner_state"] in {"TERMINAL_FAILED_ENGINEERING", "SUPERSEDED", "RETIRED"}
+            terminal = row["owner_state"] in {"TERMINAL_FAILED_ENGINEERING", "SUPERSEDED", "RETIRED"} or (
+                row["owner_state"] == "BLOCKED" and successor is not None)
             held = any(lease["task_id"] == row["task_id"] and lease["state"] != "RELEASED"
                        for lease in registry["gpu_leases"])
             same_cell_successor = successor and all(successor[k] == row[k] for k in ("dataset", "method"))
@@ -166,6 +176,12 @@ class ResourceSampler:
                                 "reservation_released_by_this_sampler": False})
         if not heartbeat_paths:
             blockers.append("MAIN_READY_SOURCE_COVERAGE_UNAVAILABLE")
+        # A configured predecessor source can be retired only through the
+        # existing registry's explicit same-cell successor and released lease.
+        # The successor's real PID/heartbeat is still checked below. This does
+        # not suppress an arbitrary stale source or clear any reservation.
+        heartbeat_paths.difference_update(row.get("heartbeat") for row in registry["tasks"]
+                                         if row["task_id"] in retired)
         for row in registry["tasks"]:
             if row["task_id"] in retired:
                 continue
@@ -205,7 +221,10 @@ class ResourceSampler:
         for path in sorted(heartbeat_paths):
             try:
                 heartbeat, source = read_small(path)
-                fresh(heartbeat, now=now)
+                # A live writer may publish after sampling began. Compare with
+                # the clock after this read, without changing source timestamps
+                # or relaxing rejection of genuinely future/expired evidence.
+                fresh(heartbeat, now=self.clock())
             except (ValueError, OSError) as exc:
                 blockers.append(f"MAIN_SOURCE_NOT_CURRENT:{path}:{exc}")
                 continue
@@ -234,7 +253,11 @@ class ResourceSampler:
         headroom = memory_headroom(proc, Path(cfg["cgroup_memory_root"]))
         disk = os.statvfs(cfg["persistent_root"])
         free_bytes = disk.f_frsize * disk.f_bavail
-        required_inodes = cfg.get("minimum_free_inodes", 1) + cfg.get("reserved_new_inodes", 0)
+        if self.initial_free_slots is None:
+            self.initial_free_slots = disk.f_favail
+        file_admission = config_file_admission(cfg, disk.f_favail, stage_id="llm_gpu_generation",
+            policy=self.file_policy, baseline_available=self.initial_free_slots)
+        required_inodes = file_admission["required_free_inodes"]
         clean_idle = (not gpu.processes and not reserved and not pending and not blockers
                       and gpu.memory_free_mb >= cfg["minimum_gpu_free_mb"]
                       and gpu.utilization_gpu_percent <= cfg["maximum_idle_utilization_percent"])
@@ -297,7 +320,10 @@ class ResourceSampler:
                 "memory_headroom_bytes": headroom, "persistent_free_bytes": free_bytes,
                 "memory_safe": headroom >= cfg["minimum_memory_headroom_bytes"],
                 "free_inodes": disk.f_favail, "required_free_inodes": required_inodes,
-                "storage_safe": free_bytes >= cfg["minimum_persistent_free_bytes"] and disk.f_favail >= required_inodes,
+                "stage_file_admission": file_admission,
+                "stage_file_policy": cfg.get("stage_file_policy"),
+                "pause_requested": file_admission["pause_requested"],
+                "storage_safe": free_bytes >= cfg["minimum_persistent_free_bytes"] and file_admission["admitted"],
                 "checkpoint_resume_pass": cfg["checkpoint_resume_pass"] is True,
                 "active_early_ablation_gpus": other_llm,
                 "active_gpu_count_semantics": "OTHER_OWNERS_EXCLUDING_VERIFIED_CURRENT_LEASE",
@@ -401,9 +427,13 @@ def next_completed_evaluation(dispatch):
         row = dispatch["downstream_commands"][variant]
         candidate = Path(row["candidate_root"]) / "candidate_generation_receipt.json"
         if not candidate.is_file():
+            if "parser_correction_overlay" in dispatch:
+                raise ValueError("CORRECTION_COMPLETED_GENERATION_DISAPPEARED")
             return None
         generated, _ = read_small(candidate)
         if generated.get("status") != "CANDIDATE_POOL_PASS":
+            if "parser_correction_overlay" in dispatch:
+                raise ValueError("CORRECTION_COMPLETED_GENERATION_NOT_PASS")
             return None
         task, _ = read_small(row["task_spec"]["path"])
         if (sha256_file(row["task_spec"]["path"]) != row["task_spec"]["sha256"]
@@ -418,6 +448,20 @@ def next_completed_evaluation(dispatch):
             if (audit.get("state") != "PASS" or audit.get("main_matrix_write") is not False
                     or manifest.get("task_spec_sha256") != row["task_spec"]["sha256"]):
                 raise ValueError("DOWNSTREAM_FINAL_BINDING_CHANGED")
+            if "parser_correction_overlay" in dispatch:
+                from src.eval.bace_frozen_gnn_contracts import stable_sha256
+                correction, _ = read_small(output / "parser_correction_receipt.json")
+                correction_body = {key: value for key, value in correction.items() if key != "self_sha256"}
+                expected_source = dispatch["downstream_commands"][variant]["command"]
+                source_sha = expected_source[expected_source.index("--parser-correction-source-audit-sha256") + 1]
+                if (manifest.get("execution_commit") != dispatch["execution_commit"]
+                        or manifest.get("binding_sha256") != audit.get("binding_sha256")
+                        or correction.get("self_sha256") != stable_sha256(correction_body)
+                        or manifest.get("pool", {}).get("parser_correction_sha256") != stable_sha256(correction_body)
+                        or correction.get("parser_contract") != "structural_wrapper_extraction_v2"
+                        or manifest.get("parser_distance_reuse", {}).get("audit_sha256") != source_sha
+                        or audit.get("files", {}).get("parser_correction_receipt.json") != sha256_file(output / "parser_correction_receipt.json")):
+                    raise ValueError("CORRECTIVE_FINAL_PARSER_BINDING_CHANGED")
             continue
         return {"variant": variant, **row, "resume": output.exists()}
     return None
@@ -512,7 +556,7 @@ def run_owned_child(*, command, environment, sampler, output_root, lock_root, ru
                 while child.poll() is None:
                     try:
                         evidence = sampler.sample(child_pid=child.pid, child_start_ticks=binding["gpu_child_start_ticks"])
-                        evidence.update(binding, pause_requested=pause)
+                        evidence.update(binding, pause_requested=pause or evidence.get("pause_requested", False))
                     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
                         # Explicit error, not a fabricated refresh of old values.
                         evidence = {"schema_version": RESOURCE_SCHEMA, "pause_requested": True,

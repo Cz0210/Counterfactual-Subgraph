@@ -11,6 +11,13 @@ oracle, test, or parse success, and does not repair rings or decode SELFIES.
 Existing model, generation, parser outputs, evaluation and publication remain
 immutable. The source branch change affects only new explicitly selected runs.
 
+The existing AutoDL queue now has a narrow parser-correction dispatch binding:
+it must verify all three completed generation receipts and original evaluation
+audits, use a fresh ablation registry and one contract-bound owner root, and
+cannot fall through into any GPU generation. It reuses3038d81c resource sampling
+and parent-boundary pauses. Source generations and their three task specs stay
+at3b2605d6; this corrective evaluation driver is separately pinned.
+
 `reparse_bace_saved_responses.py` produces extraction-only diagnostics from
 saved L1/L2/L3 train responses. Its Slurm script is CPU-only because it neither
 loads a model nor evaluates chemistry/OT. This is not an ablation result PASS.

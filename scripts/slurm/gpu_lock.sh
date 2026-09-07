@@ -19,4 +19,6 @@ python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 # a Slurm allocation cannot supply main-priority reservation evidence.
 # --llm-complete-chain is the bounded existing AutoDL L1/L2/L3 continuation;
 # it releases each GPU lease before its CPU evaluator. This wrapper stays read-only.
+# The explicit parser-correction binding is CPU-evaluation-only, pinned to one
+# queue root, and cannot enter generation or obtain a GPU lease.
 python scripts/autodl/gpu_lock.py --config configs/hpc.yaml list

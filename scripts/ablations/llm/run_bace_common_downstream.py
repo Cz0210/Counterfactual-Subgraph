@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -49,9 +50,20 @@ def main() -> int:
         args["stage_file_policy"] = load_stage_policy(
             {"path": policy_path, "sha256": policy_sha}, policy["persistent_root"],
             stage_id="llm_cpu_evaluation")
+        from src.utils.stage_file_policy import stage_file_admission
+        ancestor = Path(args["output_root"])
+        while not ancestor.exists():
+            ancestor = ancestor.parent
+        if os.stat(ancestor).st_dev != policy["filesystem_device"]:
+            raise ValueError("CPU_EVALUATION_STAGE_RESOURCE_DOMAIN_CHANGED")
+        admission = stage_file_admission(args["stage_file_policy"], os.statvfs(ancestor).f_favail,
+                                         stage_id="llm_cpu_evaluation")
+        if not admission["admitted"]:
+            print(json.dumps({"state": "WAITING_CPU_RESOURCE", "file_admission": admission}))
+            return 75
     result = run_downstream(**args)
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["state"] in {"PASS", "PAUSED_AT_SAFE_PARENT_BOUNDARY"} else 2
+    return 0 if result["state"] == "PASS" else 75 if result["state"] == "PAUSED_AT_SAFE_PARENT_BOUNDARY" else 2
 
 
 if __name__ == "__main__":
