@@ -18633,3 +18633,10 @@ engineering retry. Record the temperature driver and the verifier driver separat
   raw-distance reuse receipts. Deployment/spec binding and final v2 evaluation
   remain separate from passing these unit tests. No old scientific audit is
   renamed as a v2 result.
+- The first real search retained 47 committed train parents, then rejected a
+  saved seed `C[C@H](C)C`: isolated recanonicalization removed its parent-derived
+  stereo/H annotation before comparing the identity. Validation now reconstructs
+  and checks the exact originally serialized attributed graph, without this
+  semantic rewrite. Candidate IDs, masks, residual chemistry, oracle, budgets,
+  parent checkpoints and previous failure evidence remain unchanged. Resume
+  adopts committed parents; it does not rerun the successful prefix or canary.
