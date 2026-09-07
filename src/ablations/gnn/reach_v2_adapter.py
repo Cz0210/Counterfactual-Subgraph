@@ -106,8 +106,10 @@ def freeze_backbone_orders(matrix, *, old_order, thresholds, backbone, cohort_mo
         old_calibration_S10=list(old_order[:10]), test_loaded=False,
         global_selector_after_complete_merge=True)
     result['self_sha256'] = stable_sha256(result)
-    if output.exists() and read_json(output) != result:
-        raise ValueError('FROZEN_V2_SELECTOR_CANNOT_BE_REPLACED')
+    if output.exists():
+        if read_json(output) != result:
+            raise ValueError('FROZEN_V2_SELECTOR_CANNOT_BE_REPLACED')
+        return result
     atomic_json(output, result)
     return result
 

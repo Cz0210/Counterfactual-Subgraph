@@ -19,8 +19,10 @@ def main():
     p.add_argument('--split', required=True, choices=('calibration', 'test'))
     p.add_argument('--backbone', required=True, choices=('gine', 'gin', 'gcn', 'gatv2', 'gatedgcn_plus'))
     p.add_argument('--index', type=int)
+    p.add_argument('--prepare-output-only', action='store_true',
+                   help='Seal a fresh result-root binding only; no model inference')
     args = p.parse_args()
-    if not args.config.is_file() or not os.environ.get('SLURM_JOB_ID'):
+    if not args.config.is_file() or (not args.prepare_output_only and not os.environ.get('SLURM_JOB_ID')):
         p.error('Existing config and HPC compute-node Slurm job required; no login-node inference')
     if os.environ.get('CUDA_VISIBLE_DEVICES', '') not in ('', '-1'):
         p.error('CPU-only chunk must not expose GPU')
@@ -41,6 +43,16 @@ def main():
     freeze = read_json(spec['candidate_freeze'])
     contract = read_json(spec['search_contract'])
     validate_pool(pool, freeze, current_pool_sha=pool_sha, old_ids=contract['old_candidate_ids'])
+    root_binding = dict(scope=SCOPE_NAME, spec_sha256=sha256_file(args.spec),
+                        pool_sha256=pool_sha, main_matrix_write=False)
+    root_marker = output / 'version_scope.json'
+    if args.prepare_output_only:
+        output.mkdir(parents=True, exist_ok=False)
+        atomic_json(root_marker, root_binding)
+        print(json.dumps(dict(state='FRESH_OUTPUT_BOUND_NOT_SCIENCE', **root_binding)))
+        return
+    if not root_marker.is_file() or read_json(root_marker) != root_binding:
+        raise ValueError('V2_EXPLICIT_FRESH_ROOT_PREPARATION_REQUIRED')
     test_freeze = None
     if args.split == 'test':
         test_freeze = read_json(spec['global_selector_freeze'])
