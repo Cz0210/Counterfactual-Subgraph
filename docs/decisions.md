@@ -18566,3 +18566,12 @@ features, with an explicitly approximate ST generator gradient. Old zero,
 Taste workers, mining, classifiers and test thresholds remain untouched.
 Train/validation rematerialization precedes the one authorized repair-finetune.
 See `docs/BACE_GLOBALGCE_CHEMALIGNED_V2.md`; no scientific PASS is claimed by code.
+
+The next isolated version adds the single preregistered post-warmup generator
+repair-finetune, complete recovery payload, fresh-generator reload canary,
+validation checkpoint selection and train-witness-gated native catalog export.
+Shared native evaluation accepts the adapter only through an explicit matching
+manifest/row tag; legacy/Taste behavior is unchanged. K is an upper bound, with
+no duplicated rules or altered BACE threshold. Invalid products never receive
+invented GINE predictions. See the detailed fixed objective and epoch/update
+definition in the same design document.

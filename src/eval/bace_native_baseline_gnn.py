@@ -86,6 +86,19 @@ def _minimum_candidate_count(method_id: str) -> int:
     return 10 if method_id in {"comrecgc", "globalgce"} else 20
 
 
+def _molecular_adapter_metadata(manifest):
+    adapter = manifest.get("molecular_adapter")
+    if adapter is None:
+        return {}
+    from src.baselines.bace_globalgce_chemaligned import SCHEMA
+    if (adapter != SCHEMA or manifest.get("method_id") != "globalgce"
+            or manifest.get("method_variant") != "GlobalGCE-ChemAligned"):
+        raise ValueError("Molecular adapter identity is not the explicit BACE ChemAligned version")
+    return {"molecular_adapter": adapter, "method_variant": "GlobalGCE-ChemAligned",
+            "benchmark_test_previously_seen": True, "repair_selected_using_test": False,
+            "rule_budget_semantics": "AT_MOST_K"}
+
+
 def _manifest_value(manifest: Mapping[str, Any], field: str) -> Any:
     """Read one lineage field from the shard or its explicit inputs block."""
 
@@ -377,7 +390,12 @@ def _load_candidates(
             raise ValueError("Frozen selector and selected_top20 ordering differ")
     if str(manifest.get("method_id")) != spec.method_id:
         raise ValueError("Baseline predecessor belongs to a different method")
-    minimum_candidates = _minimum_candidate_count(spec.method_id)
+    adapter = manifest.get("molecular_adapter")
+    if adapter is not None:
+        from src.baselines.bace_globalgce_chemaligned import SCHEMA
+        if spec.method_id != "globalgce" or adapter != SCHEMA or manifest.get("method_variant") != "GlobalGCE-ChemAligned":
+            raise ValueError("Unrecognized native molecular adapter")
+    minimum_candidates = 1 if adapter is not None else _minimum_candidate_count(spec.method_id)
     if len(candidates) < minimum_candidates:
         raise ValueError(
             "Native BACE baseline evaluation requires at least "
@@ -387,6 +405,8 @@ def _load_candidates(
     if any(not value for value in ids) or len(ids) != len(set(ids)):
         raise ValueError("Native BACE candidate IDs must be non-empty and unique")
     for row in candidates:
+        if row.get("molecular_adapter") != adapter:
+            raise ValueError("Candidate molecular adapter differs from its frozen manifest")
         if row.get("action_kind") != spec.action_kind:
             raise ValueError("Candidate action kind changed from its native method")
         if row.get("action_semantics") != spec.action_semantics:
@@ -604,7 +624,11 @@ def _globalgce_pair_rows(
         for candidate_index, rule in enumerate(rules):
             key = (parent_index, candidate_index)
             try:
-                rows = apply_rule_to_parent(parent.smiles, rule)
+                if candidates[candidate_index].get("molecular_adapter"):
+                    from src.baselines.bace_globalgce_chemaligned import apply_chemaligned_rule_to_parent
+                    rows = apply_chemaligned_rule_to_parent(parent.smiles, rule)
+                else:
+                    rows = apply_rule_to_parent(parent.smiles, rule)
             except Exception as exc:
                 rows = []
                 failures[key] = f"{type(exc).__name__}:{exc}"
@@ -947,6 +971,7 @@ def run_fullgraph_verification_shard(
     provenance = oracle_provenance(card, checkpoint)
     manifest = {
         "schema_version": "bace_native_baseline_verification_shard_v1",
+        **_molecular_adapter_metadata(predecessor_manifest),
         "dataset": DATASET,
         "method": spec.method,
         "method_id": method_id,
@@ -1183,6 +1208,9 @@ def merge_fullgraph_verification_shards(
         cohort = "test"
     if [str(row["candidate_id"]) for row in candidates] != candidate_ids:
         raise ValueError("Native baseline merged candidate order changed")
+    adapter_metadata = _molecular_adapter_metadata(_predecessor_manifest)
+    if any(_molecular_adapter_metadata(item) != adapter_metadata for item in manifests.values()):
+        raise ValueError("Native baseline shards and predecessor use different molecular adapters")
     output = fresh_output_dir(output_dir)
     atomic_jsonl(output / "pair_matrix.jsonl", pair_rows)
     atomic_jsonl(output / "selected_candidate_universe.jsonl", candidates)
@@ -1201,6 +1229,7 @@ def merge_fullgraph_verification_shards(
     atomic_json(output / "summary.json", summary)
     manifest = {
         "schema_version": "bace_native_baseline_verification_merge_v1",
+        **adapter_metadata,
         "dataset": DATASET,
         "method": spec.method,
         "method_id": method_id,
@@ -1409,7 +1438,8 @@ def run_native_baseline_selector(
     if "" in calibration_candidate_ids:
         raise ValueError("Calibration matrix contains an empty candidate ID")
     effective_k = min(20, len(calibration_candidate_ids))
-    minimum_k = _minimum_candidate_count(method_id)
+    adapter_metadata = _molecular_adapter_metadata(matrix_manifest)
+    minimum_k = 1 if adapter_metadata else _minimum_candidate_count(method_id)
     if effective_k < minimum_k:
         raise ValueError(
             f"Native selector has {effective_k} candidates, below minimum {minimum_k}"
@@ -1424,20 +1454,27 @@ def run_native_baseline_selector(
                 matrix_manifest=matrix_manifest,
             )
         )
-    elif method_id == "gcfexplainer":
+    elif method_id == "gcfexplainer" or adapter_metadata:
         raise ValueError(
             "GCFExplainer selection requires explicit --thresholds-json "
             "from the frozen Ours B12 selector"
         )
+    at_most_options = {}
+    if adapter_metadata:
+        from src.eval.mutagenicity_wnode_selector import DEFAULT_PREFIX_WEIGHTS
+        weights = list(DEFAULT_PREFIX_WEIGHTS[:effective_k])
+        weights[-1] += sum(DEFAULT_PREFIX_WEIGHTS[effective_k:])
+        at_most_options["prefix_weights"] = weights
     run_mutagenicity_wnode_selector(
         matrix_run_dir=matrix_root,
         output_dir=output,
         top_k=effective_k,
-        table_k=10,
+        table_k=min(10, effective_k) if adapter_metadata else 10,
         seed=int(seed),
         forbid_test=True,
         frozen_thresholds=frozen_thresholds,
         frozen_threshold_provenance=threshold_provenance,
+        **at_most_options,
     )
     decision = read_json(output / "calibration_decision.json")
     variant = str(decision.get("selected_variant") or "")
@@ -1453,6 +1490,7 @@ def run_native_baseline_selector(
         raise ValueError("GCFExplainer selector changed the frozen Ours thresholds")
     top20 = {
         "schema_version": "bace_native_baseline_selected_top20_v1",
+        **adapter_metadata,
         "dataset": DATASET,
         "method": spec.method,
         "method_id": method_id,
@@ -1465,6 +1503,7 @@ def run_native_baseline_selector(
     atomic_json(output / "selected_top20.json", top20)
     frozen = {
         "schema_version": "bace_native_baseline_selection_manifest_v1",
+        **adapter_metadata,
         "dataset": DATASET,
         "method": spec.method,
         "method_id": method_id,
@@ -1528,7 +1567,7 @@ def freeze_native_baseline_final(
         or test_manifest.get("test_loaded") is not True
     ):
         raise ValueError("Native baseline final freeze dependencies are incomplete")
-    for field in ("oracle_checkpoint_hash", "molclr_checkpoint_hash"):
+    for field in ("oracle_checkpoint_hash", "molclr_checkpoint_hash", "molecular_adapter", "method_variant"):
         if frozen.get(field) != test_manifest.get(field):
             raise ValueError(f"Native baseline selection/test identity changed: {field}")
     ids = list(frozen["ordered_rule_ids"])
@@ -1572,6 +1611,7 @@ def freeze_native_baseline_final(
     output = fresh_output_dir(output_dir)
     metrics = {
         "schema_version": "bace_native_baseline_test_metrics_v1",
+        **_molecular_adapter_metadata(frozen),
         "dataset": DATASET,
         "method": spec.method,
         "method_id": method_id,
@@ -1591,6 +1631,7 @@ def freeze_native_baseline_final(
     atomic_csv(output / "prefix_metrics.csv", prefix_metrics)
     final = {
         "schema_version": "bace_native_baseline_final_freeze_v1",
+        **_molecular_adapter_metadata(frozen),
         "dataset": DATASET,
         "method": spec.method,
         "method_id": method_id,

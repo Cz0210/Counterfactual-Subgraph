@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Repository GPU wrapper parity only. The current rematerialize action is CPU
 # and is launched by the existing AutoDL task authority, not on HPC login.
-# A future training action must first be explicitly bound to the GPU0 lease.
+# train/train-canary require --rematerialization-root, --device cuda:0 and a
+# separate sealed training contract; AutoDL launches through its existing
+# exclusive lease, never by submitting this static HPC compatibility wrapper.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --output=logs/%j.out

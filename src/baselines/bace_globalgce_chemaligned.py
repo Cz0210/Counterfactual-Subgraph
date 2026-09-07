@@ -212,3 +212,24 @@ class ChemAlignedBridge(FrozenGINEDifferentiableBridge):
         logits, audit = self._one_graph(product.feature, a, product.edge_attr.clamp_min(1e-30).log(),
                                         hard_graph_override=graph)
         return {"logits": logits, "y_pred": F.log_softmax(logits/self.temperature, -1), "audit": audit}
+
+
+def apply_chemaligned_rule_to_parent(parent_smiles, rule):
+    """Deploy already-joint hard rules with the identical complete materializer."""
+    from src.baselines.globalgce_bace_native_rules import build_parent_native_tensors, enumerate_labeled_rule_matches
+    from src.eval.bace_frozen_gnn_contracts import stable_sha256
+    parent = build_parent_native_tensors(parent_smiles, atom_symbols=rule.atom_symbols, bond_names=rule.bond_names)
+    rows = []
+    for position, mapping in enumerate(enumerate_labeled_rule_matches(parent, rule)):
+        row = {'match_index': position, 'mapping': list(mapping.items()), 'valid': False,
+               'match_id': stable_sha256({'adapter': SCHEMA, 'rule': rule.content_hash(),
+                                         'parent': parent.canonical_smiles, 'mapping': list(mapping.items())})}
+        try:
+            product = materialize(parent, rule, mapping, rule.rhs_feature, rule.rhs_edge_attr)
+            row.update(valid=True, canonical_smiles=product.canonical_smiles, sanitized=True, connected=True,
+                       boundary_attachments_preserved=True, boundary_attachment_count=product.boundary_count,
+                       source_attributes_inherited=product.attributes_inherited, failure_reason=None)
+        except ValueError as exc:
+            row['failure_reason'] = str(exc)
+        rows.append(row)
+    return rows

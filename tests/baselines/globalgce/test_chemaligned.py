@@ -38,7 +38,7 @@ def test_padding_and_zero_diagonal():
     _, a, e = hard_state_tensors(f, p.edge_attr)
     assert a.sum() == 0 and e[0, 0] == 1
 
-@pytest.mark.parametrize('smiles', ['CCO', 'C1CC1', '[NH3+]CC(=O)[O-]'])
+@pytest.mark.parametrize('smiles', ['CCO', 'C1CC1', '[NH3+]CC(=O)[O-]', 'N[C@@H](C)C(=O)O'])
 def test_identity_complete_graph_and_attributes(smiles):
     p, r = identity(smiles)
     product = materialize(p, r, {i: i for i in range(len(p.feature))}, p.feature, p.edge_attr)
