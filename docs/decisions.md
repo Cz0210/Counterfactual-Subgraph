@@ -18907,3 +18907,19 @@ negative WNode result for a real strict flip, matching the Ours adapter. A
 failed distance stage cannot seal that parent as complete and later appear as
 uncovered. No native action, threshold, model, or currently running execution
 is changed; only future immutable native evaluation uses this repair.
+
+## 2026-09-07: Independent saved-record GIN result audit
+
+The dedicated audit reads only completed parent units after the new method's
+selector freeze. It independently checks own application strict flips, native
+operation versus deletion semantics, pair minimum/tie-break, complete fixed
+cohorts, and recomputes capped/conditional prefix metrics and exact ECDF. The
+existing selector auditor checks all four calibration variants. It does not
+rerun models, graph chemistry, generation, fitting or OT, and explicitly calls
+its result saved-record consistency rather than reexecuted scientific proof.
+
+The original writer did not hash application JSONL in complete.json. Present
+files are checked against pair counts/minima and read under the existing lock,
+with before/after identity checks, then newly sealed by this independent audit.
+That fact is disclosed; it is not retroactively represented as an original
+writer binding. Missing or inconsistent applications block acceptance.
