@@ -1,0 +1,86 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+try:
+    from src.eval.bace_reach_closeout import retained_support_gate, reach_parent, freeze_final
+    from src.eval.bace_reach_v2 import seal
+    from src.chem.bace_reach_search import pattern_from_match
+    from rdkit import Chem
+except ImportError:
+    Chem = None
+
+
+@unittest.skipUnless(Chem is not None, "Existing AutoDL CPU environment supplies RDKit")
+class CloseoutTests(unittest.TestCase):
+    def row(self, pid, candidate="new"):
+        return {"parent_id": pid, "before": {"predicted_label": 1}, "old_pool_pairs": [],
+                "search": {"witnesses": [{"pattern": {"candidate_id": candidate}, "valid": True,
+                                            "strict_flip": True, "after": {"predicted_label": 0}}]}}
+
+    def test_retained_pool_gate_not_uncapped_witness_count(self):
+        rows = [self.row(str(i)) for i in range(10)]
+        rows[-1] = self.row("9", "discarded")
+        result = retained_support_gate(rows, [{"candidate_id": "new"}])
+        self.assertEqual(result["retained_verified_reach_lower_bound"], .9)
+        self.assertEqual(result["state"], "NO_ADDITIONAL_PPO_REQUIRED_BY_TRAIN_GATE")
+        self.assertFalse(result["full_pool_reach_exact"])
+        missing = retained_support_gate(rows, [])
+        self.assertEqual(missing["retained_verified_reach_lower_count"], 0)
+        self.assertEqual(missing["state"], "NEEDS_RETAINED_POOL_CROSS_PARENT_REACH_NOT_PPO_AUTHORIZED")
+
+    def test_source_denominator_and_duplicate_parent(self):
+        rows = [self.row("eligible"), {**self.row("wrong-source"), "before": {"predicted_label": 0}}]
+        self.assertEqual(retained_support_gate(rows, [{"candidate_id": "new"}])["source_eligible_count"], 1)
+        with self.assertRaisesRegex(ValueError, "DUPLICATE"):
+            retained_support_gate([self.row("x"), self.row("x")], [])
+
+    def test_full_pool_reach_only_oracle_no_ot_and_real_witness(self):
+        parent = SimpleNamespace(parent_id="p", smiles="CCC")
+        pattern = pattern_from_match(Chem.MolFromSmiles("CCC"), [0])
+        calls = []
+        def predict(smiles):
+            calls.extend(smiles)
+            return [{"predicted_label": 0, "probabilities": [.8, .2]} for _ in smiles]
+        result = reach_parent(parent=parent, candidates=[pattern], before={"predicted_label": 1},
+                              predict=predict, oracle_binding="oracle")
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["witness"]["residual_smiles"], "CC")
+        self.assertEqual(len(calls), 1)
+        known = [{"delete_valid": True, "residual_smiles": "CC", "p_after": [.8,.2],
+                  "pred_after": 0, "oracle_checkpoint_hash": "oracle"}]
+        cached = reach_parent(parent=parent, candidates=[pattern], before={"predicted_label": 1},
+                              predict=lambda _: self.fail("cached graph re-inferred"), oracle_binding="oracle", known_rows=known)
+        self.assertEqual(cached["new_graph_oracle_queries"], 0)
+
+    def test_single_final_root_freeze_without_opening_test(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            ref = root / "reference.json"
+            ref.write_text(json.dumps({"frozen_downstream": {"dataset_split_paths": {"test": str(root/"DO_NOT_OPEN_TEST")},
+                                                               "dataset_split_hashes": {"test": "a"*64}}}))
+            thresholds = root / "thresholds.json"
+            thresholds.write_text("{}")
+            contract = seal(root / "search_contract.json", {"paths": {"reference": str(ref), "thresholds": str(thresholds)}})
+            pool = seal(root / "candidate_freeze.json", {"state": "TRAIN_ONLY_POOL_FROZEN"})
+            order = [f"R{i}" for i in range(20)]
+            seal(root / "selector_freeze.json", {"candidate_freeze_sha256": pool["self_sha256"], "test_opened": False,
+                 "controls": {"old_pool_old_selector": order, "new_pool_old_selector": order},
+                 "reach_first": {"ordered_rule_ids": order}})
+            seal(root / "train_reach_gate.json", {"candidate_freeze_sha256": pool["self_sha256"],
+                                                "state": "NO_ADDITIONAL_PPO_REQUIRED_BY_TRAIN_GATE"})
+            descriptor = {"path": "unopened-old-pairs", "sha256": "b"*64,
+                          "receipt_path": "unopened-old-receipt", "receipt_sha256": "c"*64}
+            frozen = freeze_final(root, root/"final", old_test_pair_source=descriptor)
+            self.assertFalse(frozen["test_opened"])
+            self.assertEqual(frozen["selected_control"], "new_pool_reach_first")
+            self.assertEqual(len(frozen["controls"]), 3)
+            self.assertEqual(freeze_final(root, root/"final", old_test_pair_source=descriptor), frozen)
+            with self.assertRaisesRegex(ValueError, "IMMUTABLE_REACH_RECEIPT_EXISTS"):
+                freeze_final(root, root/"second-final", old_test_pair_source=descriptor)
+
+
+if __name__ == "__main__":
+    unittest.main()

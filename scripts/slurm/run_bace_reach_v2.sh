@@ -18,4 +18,6 @@ python --version
 python -c 'import torch; print("CUDA available:", torch.cuda.is_available())'
 # Explicit CPU stages may run here. GPU tasks require a bound existing owner FD;
 # a scheduler allocation alone must not be misrepresented as that owner receipt.
+# Post-search actions: train-gate; freeze-final (requires old-test descriptor);
+# final-test (same frozen output root, real resource-config; resumable CPU only).
 python scripts/run_bace_reach_v2.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false "$@"
