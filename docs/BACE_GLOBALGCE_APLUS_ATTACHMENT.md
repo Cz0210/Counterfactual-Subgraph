@@ -31,3 +31,20 @@ Identity and positive-control fixtures are engineering evidence, not generated
 counterfactuals, train coverage, or scientific test results. A+ results remain
 in an independent experiment registry; they do not replace the original GINE
 main row or add a matrix cell.
+# CPU closeout (2026-09-08)
+
+The separate `run_bace_globalgce_aplus_evaluation.py` leaf accepts a completed
+validation-selected native pool, evaluates calibration, freezes its own original
+GlobalGCE selector, then opens test. It retains all real LHS mappings and uses
+the minimum exact raw graph cost among current-GIN strict flips. A missing cost
+is a failed parent boundary, not a zero result. Native selector fingerprints
+remain the original aligned LHS/RHS transition bits, not invented deletion SMILES.
+
+The original Global selector provenance is the `selection-shared` directory in
+`bace_baseline_merge_closeout_0e5d31f_20260901T114200Z/globalgce`: its actual
+`variant_configs.json` and `frozen_selection_manifest.json` bind A1–A4, seed13,
+two local swap passes, top20/table10, and the original B12 frozen thresholds.
+The new leaf verifies these source files before selection; it never adopts the
+old GINE winner or flips. Its saved-record audit explicitly does not claim a
+second model, chemistry, or OT execution. Output is an independent A+ registry,
+not the original main-matrix authority.

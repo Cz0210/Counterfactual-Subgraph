@@ -189,7 +189,10 @@ def select_order(matrix: str | Path, selector_context: Mapping[str, Any]) -> dic
     """
     from src.eval.mutagenicity_wnode_selector import run_mutagenicity_wnode_selector, threshold_bundle_from_dict
     method = str(selector_context["method"])
-    if method not in NATIVE_CONTRACTS or selector_context.get("test_loaded") is not False:
+    global_native = (method == "globalgce"
+        and selector_context.get("native_attachment_contract") == "bace_globalgce_gin_aplus_attachment_v1"
+        and selector_context.get("original_global_selector_verified") is True)
+    if (method not in NATIVE_CONTRACTS and not global_native) or selector_context.get("test_loaded") is not False:
         raise ValueError("NATIVE_SELECTOR_CALIBRATION_CONTEXT_REQUIRED")
     config = dict(selector_context["original_selector_config"])
     frozen = {"top_k": 20, "table_k": 10, "seed": 13, "local_swap_passes": 2,
