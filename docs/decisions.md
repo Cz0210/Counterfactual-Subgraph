@@ -18859,3 +18859,22 @@ resume uses the original260 immutable pair chunks and starts at chunk260.
   accepted old calibration index. It preserves original action provenance but
   never exports another backbone's flip masks/minima as current decisions. A
   differing cost for the same bound graph pair fails closed; no OT is computed.
+
+## 2026-09-07: Frozen GIN with the original Ours66, not the deferred Reach upgrade
+
+The new independent fixed-pool experiment adopts the accepted corrected GIN
+weights and its actual validation187 temperature fit. It neither trains nor
+fits, and never changes the existing GINE main cell. The narrow Ours adapter
+uses exactly the original66 candidate identities and the original frozen
+greedy/insertion/local-swap objective. All66 ground-truth-source calibration
+parents remain the denominator, including GIN-predicted0 parents; GIN-native
+is auxiliary only. Old GIN/native/common selections and Reach/MIP are not used.
+
+Every parent uses the unchanged connected hard-deletion all-match evaluator,
+its own GIN predictions and minimum among its own strict flips. Only explicit
+graph-content/MolCLR/schema/kernel-bound raw costs are reusable. Heldout input
+and its cost index require the new experiment's actual selector freeze.
+Two fixed train parents/all66 rules provide a real CPU timing stage, not model
+training or scientific acceptance. Its paired intel CPU Slurm wrapper is the
+explicit task-specific exception to the generic GPU template. Existing Reach
+outputs and failed/pending audit history remain preserved and deferred.
