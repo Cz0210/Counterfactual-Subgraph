@@ -9,13 +9,21 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from src.eval.bace_frozen_gnn_contracts import atomic_json, read_json, stable_sha256
+from src.eval.bace_frozen_gnn_contracts import atomic_json, read_json, stable_sha256, sha256_file
 
 SCOPE_NAME = 'GINE_GUIDED_PROPOSAL_FIXED_BACKBONE_SENSITIVITY_REACH_V2'
 BACKBONES = ('gine', 'gin', 'gcn', 'gatv2', 'gatedgcn_plus')
 
 
-def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candidates):
+def split_chunk_size(spec, split):
+    value=spec.get('chunk_size_by_split', {}).get(split, spec['chunk_size'])
+    if type(value) is not int or not 1 <= value <= 32:
+        raise ValueError('INVALID_BOUNDED_PARENT_CHUNK_SIZE')
+    return value
+
+
+def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candidates,
+                               model_files=None, chunk_size=None):
     """Read only completed calibration chunks, never heldout records.
 
     Each shard declares the same complete native cohort. The union of its
@@ -26,7 +34,7 @@ def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candi
         raise ValueError('INVALID_CALIBRATION_PARTITION_SIZE')
     merged = {}
     for backbone in BACKBONES:
-        native, seen, rows = None, set(), []
+        native, seen, rows, source_files = None, set(), [], {}
         for index in range(slots):
             directory = output / backbone / 'calibration' / f'{index:04d}'
             terminal = read_json(directory / 'terminal.json')
@@ -36,6 +44,10 @@ def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candi
                 main_matrix_write=False)
             if any(terminal.get(key) != value for key, value in expected.items()):
                 raise ValueError('CALIBRATION_SHARD_TERMINAL_CONFLICT')
+            if type(terminal.get('index')) is not int:
+                raise ValueError('CALIBRATION_CHUNK_INDEX_MUST_BE_INTEGER')
+            if model_files is not None and terminal.get('model_files') != model_files[backbone]:
+                raise ValueError('CALIBRATION_CHUNK_MODEL_BINDING_CONFLICT')
             declared = terminal['native_cohort_ids']
             if declared != sorted(set(declared)) or native is not None and native != declared:
                 raise ValueError('CALIBRATION_NATIVE_COHORT_CONFLICT')
@@ -43,6 +55,9 @@ def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candi
             ids = terminal['parent_ids']
             if len(ids) != len(set(ids)) or seen.intersection(ids) or not set(ids) <= set(native):
                 raise ValueError('CALIBRATION_PARTITION_DUPLICATE_OR_OUTSIDE_COHORT')
+            if chunk_size is not None and ids != native[index*chunk_size:(index+1)*chunk_size]:
+                raise ValueError('CALIBRATION_STABLE_PARTITION_CONFLICT')
+            source_files[str((directory/'terminal.json').relative_to(output))] = sha256_file(directory/'terminal.json')
             chunk_rows, checkpoint_parents = [], set()
             for checkpoint in sorted((directory / 'parents').glob('*.json')):
                 saved = read_json(checkpoint)
@@ -53,11 +68,17 @@ def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candi
                         or saved.get('science_sha256') != stable_sha256(scientific)):
                     raise ValueError('CALIBRATION_PARENT_CONTENT_CONFLICT')
                 parent_rows = scientific['pair_rows']
+                if model_files is not None:
+                    from src.ablations.gnn.reach_v2_closeout import verify_own_match_minima
+                    verify_own_match_minima(scientific,
+                        candidate_ids=[c['candidate_id'] for c in candidates],
+                        model_sha=model_files[backbone]['model.pt'])
                 actual_ids = {row['parent_id'] for row in parent_rows}
                 if len(actual_ids) != 1 or checkpoint_parents.intersection(actual_ids):
                     raise ValueError('CALIBRATION_PARENT_CHECKPOINT_DUPLICATE_OR_EMPTY')
                 checkpoint_parents.update(actual_ids)
                 chunk_rows.extend(parent_rows)
+                source_files[str(checkpoint.relative_to(output))] = sha256_file(checkpoint)
             if checkpoint_parents != set(ids) or len(chunk_rows) != terminal['pair_count']:
                 raise ValueError('CALIBRATION_SHARD_MISSING_OR_EXTRA_PARENT_CHECKPOINT')
             matrix_from_pairs(ids, candidates, chunk_rows, root=directory, split='calibration')
@@ -65,12 +86,13 @@ def collect_calibration_chunks(output: Path, *, spec_sha, pool_sha, slots, candi
             rows.extend(chunk_rows)
         if seen != set(native):
             raise ValueError('CALIBRATION_PARTITION_OMITS_PARENTS')
-        merged[backbone] = {'parent_ids': native, 'pairs': rows}
+        merged[backbone] = {'parent_ids': native, 'pairs': rows, 'source_files':source_files}
     return merged
 
 
 def merge_and_freeze_calibration(output: Path, *, spec_sha, pool_sha, slots,
-                                 candidates, thresholds, old_orders, solver_seconds=120):
+                                 candidates, thresholds, old_orders, solver_seconds=120,
+                                 model_files=None, chunk_size=None):
     """A single complete merge then ten global selectors, not shard top-K."""
     from src.ablations.gnn.cpu_evaluation import matrix_from_pairs
     target = output / 'CALIBRATION_FREEZE.json'
@@ -81,7 +103,8 @@ def merge_and_freeze_calibration(output: Path, *, spec_sha, pool_sha, slots,
             raise ValueError('FROZEN_GNN_SPEC_CONFLICT')
         return frozen
     complete = collect_calibration_chunks(output, spec_sha=spec_sha, pool_sha=pool_sha,
-                                         slots=slots, candidates=candidates)
+                                         slots=slots, candidates=candidates,
+                                         model_files=model_files, chunk_size=chunk_size)
     common = sorted(set.intersection(*(set(complete[name]['parent_ids']) for name in BACKBONES)))
     if not common or any(not complete[name]['parent_ids'] for name in BACKBONES):
         raise ValueError('BLOCKED_EMPTY_CALIBRATION_COHORT')
@@ -102,6 +125,8 @@ def merge_and_freeze_calibration(output: Path, *, spec_sha, pool_sha, slots,
                 solver_seconds=solver_seconds)
     result = dict(scope=SCOPE_NAME, spec_sha256=spec_sha, pool_sha256=pool_sha,
         test_loaded=False, selectors=selectors, common_calibration_parent_ids=common,
+        own_match_minimum_replayed=model_files is not None,
+        calibration_files={k:v for n in BACKBONES for k,v in complete[n]['source_files'].items()},
         scientific_core_complete=False, main_matrix_write=False)
     require_global_freeze(result, pool_sha)
     atomic_json(target, result)
@@ -202,6 +227,7 @@ def freeze_backbone_orders(matrix, *, old_order, thresholds, backbone, cohort_mo
     selection = select_nested(masks, old_order, solver_seconds=solver_seconds)
     result = dict(selection, scope=SCOPE_NAME, backbone=backbone, cohort_mode=cohort_mode,
         pool_sha256=pool_sha, cohort_sha256=stable_sha256(list(matrix.parent_ids)),
+        calibration_parent_ids=list(matrix.parent_ids),
         old_calibration_S10=list(old_order[:10]), test_loaded=False,
         global_selector_after_complete_merge=True)
     result['self_sha256'] = stable_sha256(result)

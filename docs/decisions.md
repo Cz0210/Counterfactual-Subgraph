@@ -18815,3 +18815,40 @@ pages, file cache, and high-water RSS are excluded from that subtraction.
 Unexpected child processes or missing memory evidence fail closed.384GiB of
 other-task headroom remains required. No numeric or candidate science changes;
 resume uses the original260 immutable pair chunks and starts at chunk260.
+- The first real search retained 47 committed train parents, then rejected a
+  saved seed `C[C@H](C)C`: isolated recanonicalization removed its parent-derived
+  stereo/H annotation before comparing the identity. Validation now reconstructs
+  and checks the exact originally serialized attributed graph, without this
+  semantic rewrite. Candidate IDs, masks, residual chemistry, oracle, budgets,
+  parent checkpoints and previous failure evidence remain unchanged. Resume
+  adopts committed parents; it does not rerun the successful prefix or canary.
+
+## 2026-09-07: Close the genuinely new GNN pool without relabeling old explanations
+
+- `reach_v2_closeout.py` verifies each completed calibration/test parent chunk,
+  its own classifier predictions, strict flips and minimum-distance legal match.
+  Stable partition coverage is exact; no per-shard selector or GINE flip mask is
+  adopted. Both cohort modes use each backbone's own frozen20-rule prefixes.
+- The ten global calibration selectors precede all new test payload reads.
+  Their output hashes and the later test raw-cost index are sealed in a small
+  post-freeze dependency receipt, without rewriting the original run spec.
+- Only unchanged classifier metrics are adopted through the accepted corrected
+  independent replay, exact weights/temperature/input bundle and source table.
+  No classifier training, temperature fit or old66-rule explanation is repeated
+  or misrepresented as new-pool evidence. Inference trainable count is labeled
+  as frozen, not as the number of parameters optimized during past training.
+- Held-out K10/K20 coverage and conditional/capped costs are explicit. Empty
+  cohorts are N/A; real no-flip nonempty cohorts remain zero coverage. A separate
+  independent numerical replay precedes new-pool acceptance and compact package.
+- The existing CPU chunk CLI now supports held-out merge, independent verify
+  and package. A raw-index variable no longer overwrites integer shard identity.
+  No scheduler, GPU lock or matrix authority is created. The authorized intel
+  CPU Slurm wrapper is synchronized; GPU training defaults do not apply here.
+- Actual specs/jobs require the real newly frozen candidate pool, its own ten
+  selectors and resource admission. Unit tests and raw-cost-index preparation
+  cannot claim completed new-pool sensitivity. Per-parent resume boundaries and
+  measured RSS/bytes/time support safe exact CPU stage sizing.
+- Split-specific bounded parent chunk sizes may be sealed before execution:
+  calibration can use one full new-pool parent for resource measurement while
+  held-out chunks contain up to 16 parents of the frozen native/common rule
+  union. This changes only partition granularity, not parents, rules or order.

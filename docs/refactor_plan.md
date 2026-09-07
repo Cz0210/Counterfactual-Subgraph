@@ -4327,3 +4327,7 @@ Mutagenicity roadmaps.
 - Added a count-only exact GREED stage and hash-bound embedding/mask reuse before
   pair allocation. Count, pair-store, exact DBSCAN, native summary and common
   evaluation remain distinct scientific stages; none is reported as another.
+- [x] New-pool GNN complete parent merge, ten calibration freezes, held-out own
+  flip/minimum audit, explicit K10/K20 tables and independent compact packaging.
+- [ ] Real new-pool GNN parent evaluation and accepted result transfer/publication;
+  old corrected seed7 reports remain separately available throughout execution.
