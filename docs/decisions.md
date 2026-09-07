@@ -1,5 +1,39 @@
 # Decisions Log
 
+## [2026-09-07] Correct saved native-response extraction without LLM regeneration
+
+The executed common parser split arbitrary colons, corrupting atom maps such
+as `[O-:1]`, and selected bare `I` from explanation prose as iodine. The new
+`structural_wrapper_extraction_v2` recognizes JSON/response wrappers, preserves
+whole chemical spans including atom-map/aromatic colons, and refuses prose
+pronouns. It extracts the first structural span in text order, never ranks by
+oracle, test, or parse success, and does not repair rings or decode SELFIES.
+Existing model, generation, parser outputs, evaluation and publication remain
+immutable. The source branch change affects only new explicitly selected runs.
+
+`reparse_bace_saved_responses.py` produces extraction-only diagnostics from
+saved L1/L2/L3 train responses. Its Slurm script is CPU-only because it neither
+loads a model nor evaluates chemistry/OT. This is not an ablation result PASS.
+The existing common evaluator's explicit `--reparse-saved-raw` reads and verifies
+the original native generation/spec, adds a fresh parser provenance overlay,
+then uses the unchanged train verification, calibration-global freeze, and
+post-freeze test path. It rejects BRICS and old-scored-row adoption in this mode.
+Raw generations, seeds, budgets, prompt/template, adapters and GINE are unchanged.
+The explicit completed-evaluation source is audited split by split: same
+original generation/spec, frozen bundle/reference, matching canonical rule,
+parent and residual graph, exact atom mapping and unchanged distance kernels.
+Only the raw scalar WNode is reused; fresh predictions/flip masks are never
+adopted. Old test match records cannot be opened before the fresh calibration
+selector is frozen. Missing new rule/match distances use the original exact
+implementation; no old live database is read. The previously deployed3038d81c
+lossless compact-node cache and stage-file policy implementation are retained.
+Original test outputs already existed before this repair; this is not a
+first-unseen-test claim and neither test performance nor an oracle selects
+the parser policy.
+
+This changes extraction semantics and must be disclosed as a corrective run,
+not silently substituted into original sealed results. L0 is not reparsed.
+
 ## [2026-09-06] Treat held empty coordination leases as resource blockers
 
 The first real sealed LLM dispatch observed a main coordination lock that is

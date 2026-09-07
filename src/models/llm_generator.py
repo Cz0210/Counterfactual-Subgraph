@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,8 @@ from src.models.local_loader import resolve_local_artifact_paths
 from src.models.prompt_builder import build_chemllm_messages, build_chemllm_prompt
 
 
-_SMILES_CANDIDATE_PATTERN = re.compile(r"[\[\]\(\)@+\-#%=\\/.*A-Za-z0-9]+")
+_SMILES_CANDIDATE_PATTERN = re.compile(r"[\[\]\(\)@+\-#%=:\\/.*A-Za-z0-9]+")
+SMILES_EXTRACTION_CONTRACT = "structural_wrapper_extraction_v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,44 +28,56 @@ class ChemLLMAssets:
 
 
 def clean_generated_smiles(raw_text: str) -> str:
-    """Extract one likely SMILES token from a verbose model response."""
+    """Extract one intact structural span, without chemistry-based ranking.
+
+    Colons belong to atom maps and aromatic bonds, not arbitrary prose labels.
+    Alphabetic atom symbols (notably ``I``) inside explanation text are not
+    candidates. Invalid/truncated structural spans are retained for the existing
+    chemistry validator; this function never repairs rings or decodes SELFIES.
+    """
 
     text = str(raw_text or "").strip()
     if not text:
         return ""
 
-    normalized = (
-        text.replace("```smiles", "\n")
-        .replace("```", "\n")
-        .replace("\r", "\n")
-        .strip()
-    )
+    normalized = re.sub(r"```(?:smiles|json)?", "\n", text, flags=re.IGNORECASE).replace("\r", "\n").strip()
+    try:
+        payload = json.loads(normalized)
+    except (ValueError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        lowered = {str(key).lower(): value for key, value in payload.items()}
+        for key in ("fragment_smiles", "smiles", "answer"):
+            value = lowered.get(key)
+            if isinstance(value, str):
+                return _intact_candidate(value) or _select_smiles_token(value)
+        return ""
+    if isinstance(payload, str):
+        return _intact_candidate(payload) or _select_smiles_token(payload)
 
-    keyword_patterns = (
-        r"FRAGMENT_SMILES\s*[:=]\s*([^\s,;]+)",
-        r"SMILES\s*[:=]\s*([^\s,;]+)",
-        r"ANSWER\s*[:=]\s*([^\s,;]+)",
-    )
-    for pattern in keyword_patterns:
-        match = re.search(pattern, normalized, flags=re.IGNORECASE)
-        if match:
-            candidate = _strip_wrapping_punctuation(match.group(1))
+    # Only a recognized response label may introduce a delimiter. The value is
+    # still a whole span: do not split at a later chemical colon.
+    label = re.compile(
+        r"\b(?:COUNTERFACTUAL_FRAGMENT_SMILES|FRAGMENT_SMILES|SMILES|ANSWER|FRAGMENT|RESPONSE|SOLUTION)\b"
+        r"[ \t]*(?:(?:is[ \t]*)?[:=]|is\b)[ \t]*(.*)$", re.IGNORECASE)
+    for line in normalized.splitlines():
+        match = label.search(line)
+        if match and match.group(1).strip():
+            value = match.group(1).strip()
+            candidate = _intact_candidate(value)
+            # The exact project label permits a leading multi-atom alphabetic
+            # span followed by explanation. A prose pronoun ``I`` does not.
+            first = _intact_candidate(value.split()[0])
+            if not candidate and first and len(first) > 1:
+                candidate = first
+            candidate = candidate or _select_smiles_token(value)
             if candidate:
                 return candidate
-
     for line in normalized.splitlines():
-        stripped_line = line.strip()
-        if not stripped_line:
-            continue
-        if ":" in stripped_line:
-            _, _, suffix = stripped_line.partition(":")
-            stripped_line = suffix.strip() or stripped_line
-        candidate = _select_smiles_token(stripped_line)
+        candidate = _intact_candidate(line) or _select_smiles_token(line)
         if candidate:
             return candidate
-
-    candidate = _select_smiles_token(normalized)
-    return candidate or _strip_wrapping_punctuation(normalized.split()[0])
+    return ""
 
 
 class ChemLLMGenerator(FragmentGenerator):
@@ -217,26 +231,26 @@ def _resolve_device(device: str, torch: Any) -> str:
 
 
 def _strip_wrapping_punctuation(text: str) -> str:
-    return str(text).strip().strip("`'\".,;")
+    return str(text).strip().strip("`'\",;")
+
+
+def _intact_candidate(text: str) -> str:
+    candidate = _strip_wrapping_punctuation(text)
+    if (candidate and _SMILES_CANDIDATE_PATTERN.fullmatch(candidate)
+            and re.search(r"[A-Za-z*]", candidate) and _looks_like_smiles(candidate)):
+        return candidate
+    return ""
 
 
 def _select_smiles_token(text: str) -> str:
-    candidates = [
-        _strip_wrapping_punctuation(match.group(0))
-        for match in _SMILES_CANDIDATE_PATTERN.finditer(text)
-    ]
-    ranked = sorted(
-        (
-            candidate
-            for candidate in candidates
-            if _looks_like_smiles(candidate)
-        ),
-        key=lambda candidate: (
-            0 if _is_parseable_smiles(candidate) else 1,
-            -len(candidate),
-        ),
-    )
-    return ranked[0] if ranked else ""
+    # Whitespace token boundaries retain brackets, maps, bonds and truncated
+    # tails. Never fish a parseable atom from a prose word or rank alternatives
+    # by RDKit validity, parent matching, oracle, or test performance.
+    for token in str(text).split():
+        candidate = _intact_candidate(token)
+        if candidate and any(char in candidate for char in "[]=#()/\\%@+:-.0123456789*"):
+            return candidate
+    return ""
 
 
 def _looks_like_smiles(candidate: str) -> bool:
@@ -244,9 +258,13 @@ def _looks_like_smiles(candidate: str) -> bool:
         return False
     if candidate.lower() in {"the", "smiles", "fragment", "answer", "is"}:
         return False
+    if "[" not in candidate and "]" not in candidate:
+        letters = re.sub(r"[^A-Za-z]", "", candidate)
+        if letters and re.fullmatch(r"(Br|Cl|Si|Na|Li|Ca|Mg|[BCNOFPSIKHbcnops])+", letters) is None:
+            return False
     if "*" in candidate:
         return True
-    special_chars = set("[]=#()/\\%@+-0123456789")
+    special_chars = set("[]=#()/\\%@+:-.0123456789")
     if any(char in special_chars for char in candidate):
         return True
     return re.fullmatch(r"(Br|Cl|Si|Na|Li|Ca|Mg|[BCNOFPSIKHbcnops])+", candidate) is not None

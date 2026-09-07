@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import fcntl
 import math
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -238,6 +239,8 @@ def _heldout(*, bundle: Path, manifest: Mapping[str, Any], output: Path, univers
             by_id = {row["candidate_id"]: row for row in universe}
             selected = [by_id[key] for key in freeze["ordered_rule_ids"]]
         candidates = universe if split == "calibration" else selected
+        if hasattr(distance, "prepare_split"):
+            distance.prepare_split(split, candidates)
         # Main-route scientific cohort: no correctly-predicted prefilter.
         try:
             parents = load_bace_parents(evaluation.bundle_file(bundle, manifest, manifest["splits"][split]), source_label=1)
@@ -309,7 +312,11 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                    output_root: str | Path, resume: bool = False, device: str = "cpu", batch_size: int = 64,
                    cpu_threads: int = 2, portable_input_bundle: str | Path | None = None,
                    train_adoption_overlay: str | Path | None = None,
-                   gnn_acceptance: str | Path | None = None, gnn_acceptance_sha256: str | None = None) -> dict[str, Any]:
+                   gnn_acceptance: str | Path | None = None, gnn_acceptance_sha256: str | None = None,
+                   reparse_saved_raw: bool = False,
+                   parser_correction_source_evaluation: str | Path | None = None,
+                   parser_correction_source_audit_sha256: str | None = None,
+                   stage_file_policy: dict[str, Any] | None = None) -> dict[str, Any]:
     from src.ablations.llm.corrected_core_gate import require_corrected_gnn_core
     from src.ablations.llm.bace_readiness import generation_calls
     from src.eval.bace_frozen_gnn_pool import _score_generated_candidates
@@ -318,6 +325,10 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
 
     # No model is loaded and no science/output starts before independent GNN PASS.
     archive = Path(gnn_verified_archive).resolve(strict=True)
+    if (parser_correction_source_evaluation is None) != (parser_correction_source_audit_sha256 is None):
+        raise ValueError("PARSER_DISTANCE_REUSE_PATH_AND_AUDIT_SHA_MUST_BE_PAIRED")
+    if parser_correction_source_evaluation is not None and not reparse_saved_raw:
+        raise ValueError("SAVED_MATCH_REUSE_REQUIRES_EXPLICIT_PARSER_CORRECTION")
     adoption = None
     if (gnn_acceptance is None) != (gnn_acceptance_sha256 is None):
         raise ValueError("GNN_ACCEPTANCE_PATH_AND_SHA_MUST_BE_PAIRED")
@@ -355,6 +366,15 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
     bind_downstream(bundle, manifest, reference.payload["frozen_downstream"])
     candidates_source = Path(candidate_root).resolve(strict=True)
     attempts, pool_evidence = load_attempts(spec, candidates_source, reference.file_sha256, file_resolver=resolve_file)
+    parser_overlay = None
+    if reparse_saved_raw:
+        if spec["variant"] == "BRICS_FIXED" or train_adoption_overlay is not None:
+            raise ValueError("PARSER_CORRECTION_ONLY_FOR_NATIVE_SAVED_RAW_WITHOUT_OLD_SCORED_ADOPTION")
+        from src.ablations.llm.parser_correction import reparse_attempts
+        attempts, parser_overlay = reparse_attempts(attempts)
+        # The original generation receipt/spec remain unchanged and verified.
+        # Corrected extraction is separate provenance, never a regenerated pool.
+        pool_evidence = {**pool_evidence, "parser_correction_sha256": stable_sha256(parser_overlay)}
     output = Path(output_root).resolve()
     registry = Path(registry_root).resolve()
     for source in (bundle, candidates_source, archive.parent, Path(reference.path).parent):
@@ -369,7 +389,16 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
     stopped = [False]
     previous_handler = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGTERM, lambda *_: stopped.__setitem__(0, True))
-    pause = lambda: stopped[0] or (output / "pause.request").is_file()
+    def pause():
+        if stopped[0] or (output / "pause.request").is_file():
+            return True
+        if stage_file_policy is not None:
+            from src.utils.stage_file_policy import stage_file_admission
+            decision = stage_file_admission(stage_file_policy,
+                os.statvfs(stage_file_policy["persistent_root"]).f_favail,
+                stage_id="llm_cpu_evaluation")
+            return not decision["admitted"]
+        return False
     try:
         with (output / "writer.lock").open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -382,6 +411,11 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                     _equal(old[key], value, "train_adoption_" + key)
             sources = [Path(__file__), Path(evaluation.__file__), Path(__import__("src.eval.bace_frozen_gnn_pool", fromlist=["_"]).__file__),
                        Path(__import__("src.eval.bace_frozen_gnn_verification", fromlist=["_"]).__file__)]
+            if parser_correction_source_evaluation is not None:
+                from src.ablations.llm import compact_node_cache, parser_correction, saved_match_distance_reuse
+                from src.models import llm_generator
+                sources.extend(Path(module.__file__) for module in
+                    (compact_node_cache, parser_correction, saved_match_distance_reuse, llm_generator))
             driver_commit = subprocess.check_output(["git", "rev-parse", "HEAD"],
                 cwd=Path(__file__).resolve().parents[3], text=True).strip()
             contract = {"schema_version": SCHEMA, "variant": spec["variant"], "dataset": "bace", "method": "ours",
@@ -396,14 +430,28 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                 "cohort_definition": COHORT, "bootstrap_scope": "within_seed7_parent_only_not_across_seed_std",
                 "selection_policy": POLICY,
                 "train_adoption": adoption["overlay_identity"] if adoption else None}
+            if stage_file_policy is not None:
+                contract["stage_file_policy_sha256"] = stage_file_policy["self_sha256"]
+            if parser_correction_source_evaluation is not None:
+                contract["parser_distance_reuse"] = {
+                    "source_root": str(Path(parser_correction_source_evaluation).resolve(strict=True)),
+                    "audit_sha256": parser_correction_source_audit_sha256,
+                    "scope": "UNCHANGED_CANONICAL_RULE_PARENT_MATCH_RAW_WNODE_ONLY",
+                    "test_loaded_only_after_fresh_freeze": True}
+                contract["node_cache_storage"] = "LOSSLESS_NPZ_BLOBS_IN_OWN_EXISTING_WNODE_SQLITE"
             binding = stable_sha256(contract)
             _sealed_json(output / "run_manifest.json", {**contract, "binding_sha256": binding})
+            if parser_overlay is not None:
+                _sealed_json(output / "parser_correction_receipt.json", parser_overlay)
+                atomic_jsonl(output / "reparsed_attempts.jsonl", attempts)
             if (output / "final_audit.json").is_file():
                 audit = read_json(output / "final_audit.json")
                 for rel, digest in audit["files"].items():
                     _equal(sha256_file(output / rel), digest, "final_inventory")
                 _index_result(registry, spec["variant"], output, audit)
                 return audit
+            if pause():
+                return {"state": "PAUSED_AT_SAFE_PARENT_BOUNDARY", "phase": "before_frozen_model_load"}
             oracle = GNNOracle.from_checkpoint(bundle / manifest["gine_reference_root"], device=device, batch_size=batch_size)
             _equal((oracle.backbone, oracle.source_label, oracle.num_classes), ("gine", 1, 2), "frozen_oracle")
             _equal(oracle.temperature, spec["downstream_contract"]["temperature"], "frozen_temperature")
@@ -444,6 +492,14 @@ def run_downstream(*, task_spec: str | Path, candidate_root: str | Path, gnn_inp
                 "calibration_loaded": False, "candidate_universe_sha256": sha256_file(output / "candidate_universe.jsonl"),
                 "binding_sha256": binding, "attempt_count": len(attempts), "universe_count": len(universe)})
             distance = evaluation._distance(bundle, manifest, output)
+            if parser_correction_source_evaluation is not None:
+                from src.ablations.llm.compact_node_cache import install_compact_node_cache
+                install_compact_node_cache(distance)
+                from src.ablations.llm.saved_match_distance_reuse import SavedMatchDistanceReuse
+                distance = SavedMatchDistanceReuse(distance,
+                    source_root=parser_correction_source_evaluation,
+                    audit_sha256=parser_correction_source_audit_sha256,
+                    current_contract=contract,output_root=output,current_binding=binding)
             try:
                 result = _heldout(bundle=bundle, manifest=manifest, output=output, universe=universe,
                     selector=selector, oracle=oracle, featurizer=featurizer, distance=distance,

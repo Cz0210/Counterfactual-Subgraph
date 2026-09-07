@@ -1,5 +1,14 @@
 # Refactor Plan
 
+## 2026-09-07: Saved LLM response parser correction
+
+- [x] Preserve bracket/aromatic colons and reject prose iodine extraction.
+- [x] Add deterministic saved train-response reparse without model queries.
+- [x] Add an explicit fresh-overlay entry to the existing common evaluator.
+- [x] Preserve frozen generation/specs, old results and calibration-before-test order.
+- [ ] Bind existing compliant distance reuse before dispatching correction evaluation.
+- [ ] Publish independently audited corrected L1/L2/L3 results in fresh roots.
+
 ## 2026-09-06: T14 retry2 failed-stage continuation
 
 - [x] Bind one fresh replacement for the empty failed low-memory canary.

@@ -30,6 +30,16 @@ echo "Python: $(command -v python)"
 python -c 'import sys,torch; print(sys.version); print("CUDA available:",torch.cuda.is_available())'
 extra=()
 if [[ "${LLM_RESUME:-0}" == 1 ]]; then extra+=(--resume); fi
+if [[ "${LLM_REPARSE_SAVED_RAW:-0}" == 1 ]]; then extra+=(--reparse-saved-raw); fi
+if [[ -n "${LLM_STAGE_FILE_POLICY:-}" ]]; then
+  : "${LLM_STAGE_FILE_POLICY_SHA256:?stage policy SHA required}"
+  extra+=(--stage-file-policy "$LLM_STAGE_FILE_POLICY" --stage-file-policy-sha256 "$LLM_STAGE_FILE_POLICY_SHA256")
+fi
+if [[ -n "${LLM_PARSER_SOURCE_EVALUATION:-}" ]]; then
+  : "${LLM_PARSER_SOURCE_AUDIT_SHA256:?completed same-variant audit SHA required}"
+  extra+=(--parser-correction-source-evaluation "$LLM_PARSER_SOURCE_EVALUATION"
+          --parser-correction-source-audit-sha256 "$LLM_PARSER_SOURCE_AUDIT_SHA256")
+fi
 [[ -n "${L0_PORTABLE_INPUT_BUNDLE:-}" ]] && extra+=(--portable-input-bundle "$L0_PORTABLE_INPUT_BUNDLE")
 if [[ -n "${GNN_ACCEPTANCE:-}" ]]; then
   : "${GNN_ACCEPTANCE_SHA256:?small acceptance SHA required}"

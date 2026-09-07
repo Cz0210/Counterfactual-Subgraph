@@ -20,6 +20,12 @@ def main() -> int:
                  "gnn-verified-sha256", "registry-root", "output-root"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--reparse-saved-raw", action="store_true",
+                        help="Fresh correction overlay using unchanged completed native raw generations; never invokes an LLM")
+    parser.add_argument("--parser-correction-source-evaluation", help="Completed same-variant evaluation for exact match-level distance reuse")
+    parser.add_argument("--parser-correction-source-audit-sha256")
+    parser.add_argument("--stage-file-policy", help="Existing immutable stage file-policy JSON")
+    parser.add_argument("--stage-file-policy-sha256")
     parser.add_argument("--portable-input-bundle", help="Read original AutoDL manifest bytes through a SHA-bound L0 HPC mapping")
     parser.add_argument("--gnn-acceptance", help="Existing small corrected-GNN acceptance; avoids archive replay")
     parser.add_argument("--gnn-acceptance-sha256")
@@ -33,6 +39,16 @@ def main() -> int:
         parser.error("Downstream science overrides are forbidden; use the frozen reference")
     if args["batch_size"] < 1 or args["cpu_threads"] < 1:
         parser.error("Batch size and CPU threads must be positive")
+    policy_path = args.pop("stage_file_policy")
+    policy_sha = args.pop("stage_file_policy_sha256")
+    if (policy_path is None) != (policy_sha is None):
+        parser.error("Stage policy path and SHA must be paired")
+    if policy_path is not None:
+        from src.utils.stage_file_policy import load_stage_policy
+        policy = json.loads(Path(policy_path).read_text())
+        args["stage_file_policy"] = load_stage_policy(
+            {"path": policy_path, "sha256": policy_sha}, policy["persistent_root"],
+            stage_id="llm_cpu_evaluation")
     result = run_downstream(**args)
     print(json.dumps(result, sort_keys=True))
     return 0 if result["state"] in {"PASS", "PAUSED_AT_SAFE_PARENT_BOUNDARY"} else 2
