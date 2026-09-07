@@ -144,6 +144,11 @@ def prepare(aplus_root, spec_path, v1_source, v1_spec_path, output, *, progress_
     output.mkdir(parents=True,exist_ok=True)
     for name,rows in zip(INPUTS,collected):write_csv(output/name,rows)
     checked=derive(output)
+    # Stable requested paper filenames are reducer outputs, not hand-edited
+    # copies of selected performance values.
+    write_csv(output/'table2_k10.csv',checked['table2'])
+    write_csv(output/'figure3_k1_20.csv',checked['figure3'])
+    for k in (10,20):write_csv(output/f'figure4_k{k}_exact_ecdf.csv',checked['figure4'][k])
     progress=json.loads(Path(progress_path).read_text())
     write_csv(output/'reachability_and_pool_ceiling.csv',reach_diagnostics(progress))
     write_csv(output/'method_variant_comparison.csv',comparison)

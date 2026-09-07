@@ -70,6 +70,8 @@ def test_completed_uses_predeclared_control_not_test_best(tmp_path):
     table=read_csv(args['output']/INPUTS[0]);ours=next(r for r in table if r['method']=='Ours')
     assert float(ours['fixed_capped_mean'])==pytest.approx((140*.015+.03)/141)
     assert manifest['selected_control']=='expanded_pool_new_selector'
+    alias=next(r for r in read_csv(args['output']/'table2_k10.csv') if r['method']=='Ours')
+    assert alias['fixed_capped_mean']==ours['fixed_capped_mean']
     assert manifest['ours_audit_state']=='PENDING'  # don't invent an independent audit
     comparison=read_csv(args['output']/'method_variant_comparison.csv')
     assert len(comparison)==60
