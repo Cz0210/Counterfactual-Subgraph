@@ -515,10 +515,11 @@ class FrozenGINEDifferentiableBridge:
         return mapped, presence
 
     def _one_graph(
-        self, features: Any, adjacency: Any, edge_attributes: Any
+        self, features: Any, adjacency: Any, edge_attributes: Any,
+        *, hard_graph_override: _HardGraph | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         torch = _torch()
-        graph = _hard_graph(
+        graph = hard_graph_override if hard_graph_override is not None else _hard_graph(
             features=features,
             adjacency=adjacency,
             edge_attributes=edge_attributes,

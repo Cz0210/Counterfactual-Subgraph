@@ -18555,3 +18555,14 @@ engineering retry. Record the temperature driver and the verifier driver separat
 - The owning native canary forwards a resource-stop SIGTERM only to its newly
   created deterministic child and waits for exit before releasing the GPU lease.
   No process-group signals or forced kill are used.
+# 2026-09-07: Explicit BACE GlobalGCE-ChemAligned v2 adaptation
+
+User-authorized repair supersedes the old independent adjacency/bond hard
+decode for a new BACE version only. Sigmoid adjacency and affine categorical
+scores form one joint NONE/bond distribution; the hard graph is its argmax.
+Validate complete source-anchored molecular replacements and attachments, not
+isolated RHS connectivity. The frozen GINE receives only sanitized full-graph
+features, with an explicitly approximate ST generator gradient. Old zero,
+Taste workers, mining, classifiers and test thresholds remain untouched.
+Train/validation rematerialization precedes the one authorized repair-finetune.
+See `docs/BACE_GLOBALGCE_CHEMALIGNED_V2.md`; no scientific PASS is claimed by code.

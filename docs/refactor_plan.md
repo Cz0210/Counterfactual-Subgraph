@@ -4308,3 +4308,9 @@ Mutagenicity roadmaps.
   observations, a reused single-LLM slot, non-leaking descendants and immutable
   corrected-GNN acceptance reuse. Keep one-shot execution behind the existing
   outer queue; a live queue/GPU admission remains a deployment requirement.
+# 2026-09-07 BACE GlobalGCE-ChemAligned v2
+
+- [x] Add opt-in joint NONE/bond materializer and source-anchored full-graph ST bridge.
+- [x] Add isolated train/validation rematerialization CLI and paired Slurm wrapper.
+- [ ] Execute real rematerialization, then one bounded repair-finetune if needed.
+- [ ] Freeze calibration-selected rules and publish a scoped matrix supersession.
