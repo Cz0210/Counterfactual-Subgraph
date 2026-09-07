@@ -18932,3 +18932,34 @@ An implementation-derived next-stage memory estimate charges all finite rows,
 bitmap, candidate copies, sorting/map overhead, allocator slack and a separate
 1 GiB process allowance. Admission must still read actual joint cgroup headroom;
 the estimate does not waive active task reservations or replace measured RSS.
+
+## 2026-09-08: Finite native GIN post-freeze continuation
+
+The original fixed-pool BACE campaign receives one method-scoped Mac relay for
+GCFExplainer/ComRecGC, not a new controller or authority. It cannot run calibration,
+freeze a selector, generate candidates, train, acquire a GPU, or publish a main
+cell. After the existing Slurm freeze succeeds, it copies the exact new freeze
+and original spec to the already-deployed c216 CPU raw-cost migration interface.
+Only the new test raw-cost index returns to HPC. The existing method sidecar
+keeps its calibration entry and a byte-preserved prior receipt, then the actual
+d5 execution tree runs afterok test, aggregate, independent saved-record audit
+and export. The spec's scientific commit is not relabeled as the newer driver.
+After the actual independent audit, the finite relay copies only seven exported
+CSVs and this method's small provenance set to a fresh Mac result directory and
+runs the already-reviewed offline renderer pinned by source SHA. This is local
+partial delivery, not AutoDL result publication or a new matrix write. The
+exported rows of other methods retain their own independent audit obligations.
+
+The small CPU migration supervisor reads real cgroup/path resources and waits
+without a science child if the original 384 GiB other-task reserve plus its
+2 GiB peak, 2 GiB persistent bytes or 20600 file-slot bound is unavailable.
+The original main reservations remain untouched. Local flock is only for one
+campaign-method relay process, not a second GPU/science lock. Submission intents
+and receipts prevent duplicate owners/jobs on an uncertain network outcome;
+such unresolved outcomes fail closed rather than blindly resubmitting.
+
+Both local CLI and its same-name local shell are paired. This control-only
+entrypoint is deliberately not submitted through sbatch; scientific stages use
+the existing CPU Slurm wrappers. A sealed plan must supply real freeze job,
+native source binding, prior calibration entry and worker source identity before
+activation. Unit tests do not activate the relay or read heldout payloads.

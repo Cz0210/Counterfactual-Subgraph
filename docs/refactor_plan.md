@@ -4343,3 +4343,7 @@ Mutagenicity roadmaps.
 - [ ] Independent cross-method result acceptance and optional paper organization.
 - GlobalGCE original80 no-training materialization remains an explicit blocked
   method, not authority to train a new generator or fabricate a zero result.
+- [x] Finite Mac native post-freeze relay and paired local CLI, preserving
+  calibration adoption and binding afterok test/aggregate/audit/export.
+- [ ] Actual GCF continuation activation after the real freeze job and immutable
+  native/calibration manifests are supplied; no duplicate ComRec migration.
