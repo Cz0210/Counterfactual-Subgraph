@@ -15,7 +15,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--set", action="append", default=[])
-    p.add_argument("--action", required=True, choices=["plan", "canary", "train-search", "calibrate", "status", "owner"])
+    p.add_argument("--action", required=True, choices=["plan", "canary", "train-search", "calibrate", "status", "owner", "resource-overlay"])
     p.add_argument("--output-root", required=True, type=Path)
     p.add_argument("--reference", type=Path)
     p.add_argument("--proposal-source", choices=["OURS_MAIN_PPO_66", "L0", "L1", "L2", "L3"], default="OURS_MAIN_PPO_66")
@@ -39,6 +39,11 @@ def main():
         result = plan(args.reference, args.output_root, proposal_source=args.proposal_source, proposal_path=args.proposal_path)
     elif args.action == "status":
         result = {f: json.loads((args.output_root / f).read_text()) for f in ("progress.json", "candidate_freeze.json", "selector_freeze.json") if (args.output_root / f).is_file()}
+    elif args.action == "resource-overlay":
+        if not args.resource_config or not args.owner_root:
+            raise ValueError("RESOURCE_OVERLAY_NEEDS_PRIOR_CONFIG_AND_FRESH_ROOT")
+        from src.eval.bace_reach_resources import prepare_resources
+        result = prepare_resources(args.resource_config, args.owner_root, args.output_root)
     elif args.action == "owner":
         if not args.resource_config or not args.owner_root or not args.gpu_uuid or args.gpu_index != 0:
             raise ValueError("EXISTING_OWNER_GPU0_RESOURCE_BINDING_REQUIRED")
@@ -50,9 +55,18 @@ def main():
         # Reuse the existing owner, UUID lock, single-slot FD and live watchdog;
         # no alternative locks or reservation authority are introduced.
         env = dict(os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", TOKENIZERS_PARALLELISM="false")
-        return run_owned_child(command=command, environment=env, sampler=sampler,
+        code = run_owned_child(command=command, environment=env, sampler=sampler,
             output_root=args.owner_root, lock_root=config["gpu_lock_root"],
             run_id="bace-ours-reach-v2-" + args.output_root.name, interval=60, max_wait_seconds=args.wait_seconds)
+        if code == 0 and args.owned_action == "train-search":
+            # Existing owner has waited for child exit and released both GPU
+            # leases. The next executable stage is CPU-only calibration.
+            from src.eval.bace_reach_resources import cpu_boundary
+            boundary = lambda: cpu_boundary(config)
+            boundary()
+            result = run_calibration(args.output_root, device="cpu", boundary_check=boundary)
+        else:
+            return code
     else:
         from src.eval.bace_frozen_gnn_contracts import atomic_json, utc_now
         boundary = lambda: None
@@ -68,6 +82,11 @@ def main():
                     raise SystemExit(75)
             boundary()
         if args.action in ("canary", "train-search"):
+            if args.action == "train-search":
+                canary = args.output_root / "canary" / "canary_receipt.json"
+                proof = unseal(canary) if canary.exists() else run_train(args.output_root, device=args.device, boundary_check=boundary, canary_parents=1)
+                if proof["state"] != "BOUNDED_TRAIN_CANARY_COMPLETE" or proof["budget_exceeded"]:
+                    raise ValueError("TRAIN_CANARY_NOT_COMPLETE_OR_BUDGET_EXCEEDED")
             result = run_train(args.output_root, device=args.device, boundary_check=boundary,
                                canary_parents=1 if args.action == "canary" else 0)
         else:

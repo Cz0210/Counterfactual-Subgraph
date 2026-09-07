@@ -87,7 +87,7 @@ def plan(reference_path: Path, output: Path, *, proposal_source: str,
     for key, descriptor in (("thresholds", selector["thresholds"]), ("old_selector", selector["selector_manifest"])):
         if sha256_file(paths[key]) != descriptor["sha256"]:
             raise ValueError("FROZEN_SELECTOR_INPUT_CONFLICT:" + key)
-    if not (Path(paths["molclr_source"]) / "models" / "gin.py").is_file():
+    if not (Path(paths["molclr_source"]) / "models" / "ginet_molclr.py").is_file():
         raise ValueError("MOLCLR_SOURCE_LAYOUT_UNRESOLVED:" + paths["molclr_source"])
     output.mkdir(parents=True, exist_ok=True)
     budget = asdict(SearchBudget())
