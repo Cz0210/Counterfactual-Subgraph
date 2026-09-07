@@ -18643,3 +18643,22 @@ are saved after bounded replay of only selected recourses. Missing, inferred,
 or cross-parent transitions block publication. Historical trace and old matrix
 versions remain immutable. BACE's separate frozen-selector grid driver commits
 are integrated only into this future driver, never into active science trees.
+The ChemAligned CLI now dispatches its sealed canary and single repair through
+the existing `run_owned_child` UUID/project-slot lease mechanism. It waits for
+the bound Ours train-only pool freeze and actual prior child/lease release;
+it never acquires a lease while this predecessor is pending. The child checks
+its inherited real FDs and fresh resource evidence before CUDA and each new
+complete optimizer update. Paused work resumes only its same-root checkpoint.
+This adds a dataset-specific stage adapter, not a lock/registry/authority.
+The authorized GPU0 succession does not inherit LLM's unrelated1200s idle
+condition; current capacity, all main reservations and exclusive leases still
+must pass. CPU evaluation uses the previously tested compact node container.
+Original-authority version supersession remains an independent final audit
+interface; completed evaluation is not by itself matrix publication.
+
+The future-only BACE standardizer accepts fewer than ten rules only for the
+explicit ChemAligned adapter with matching final/selection/test identities.
+It preserves method-version and prior-test disclosure in every output manifest;
+existing method thresholds, denominator, missing values and legacy minimum
+rules remain unchanged. No active execution worktree is updated by this export
+compatibility change.
