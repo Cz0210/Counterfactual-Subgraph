@@ -60,8 +60,12 @@ def main():
     for mode in ('exact','display'):
         fig, axes = plt.subplots(1,2,figsize=(11.8,4.8))
         for k, ax in zip((10,20),axes):
+            common_end = max(records[n][k-1]['ecdf'][-1][0] for n in names)
             for name,label,color in zip(names,labels,colors):
-                points = staircase(records[name][k-1]['ecdf'], keys=(theta,cap))
+                observations = list(records[name][k-1]['ecdf'])
+                if observations[-1][0] < common_end:
+                    observations.append((common_end, observations[-1][1]))
+                points = staircase(observations, keys=(theta,cap))
                 shown, proof = simplify(points, keys=(theta,cap))
                 chosen = points if mode=='exact' else shown
                 ax.plot([p.x for p in chosen],[p.y for p in chosen],label=label,color=color)
