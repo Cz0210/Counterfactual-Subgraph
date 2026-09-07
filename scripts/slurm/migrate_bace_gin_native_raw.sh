@@ -23,5 +23,5 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-2}"
 export MKL_NUM_THREADS="$OMP_NUM_THREADS" OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
 echo "Python: $(command -v python)"
 python --version
-echo "No GPU, model inference, OT, heuristic fallback or test payload read"
+echo "No GPU/model/OT/heuristic fallback; test needs actual hash-bound new GIN freeze"
 python -I -B scripts/experiments/migrate_bace_gin_native_raw.py --config configs/hpc.yaml "$@"

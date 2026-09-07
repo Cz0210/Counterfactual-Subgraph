@@ -163,6 +163,31 @@ class NativeRawTests(unittest.TestCase):
         self.assertLess(bound['estimated_peak_rss_bound_bytes'], 4 * 1024**3)
         self.assertEqual(bound['serialized_full_copy_count'], 0)
 
+    def test_portable_actual_scheme_a_freeze_and_wrong_method_or_order(self):
+        spec = dict(experiment_id='BACE_GIN_FOUR_METHODS_FIXED_POOL_V1', scope='BACE_FIXED_POOL_FROZEN_GIN_V1',
+            base_counts={'calibration': 66, 'test': 141}, source_class=1, destination_class=0,
+            training_rerun=False, temperature_refit=False, candidate_generation_repeated=False,
+            reach_v2_candidates_used=False, main_matrix_write=False,
+            pools={'comrecgc': {'sha256': 'original44pool'}})
+        sha = stable_sha256(spec)
+        freeze = dict(state='FROZEN', test_loaded=False, experiment_id=spec['experiment_id'], method='comrecgc',
+            spec_sha256=sha, pool_manifest_sha256='original44pool', oracle_backbone='gin',
+            old_gine_flip_masks_reused=False, ordered_rule_ids=['own1','own2'],
+            order_sha256=stable_sha256(['own1','own2']), calibration_matrix_sha256='a'*64,
+            selector_details={'original_algorithm': True}, created_at='2026-09-07T16:00:00Z')
+        checked = raw.validate_portable_scheme_a_freeze(freeze, experiment_spec=spec, method='comrecgc',
+                                                      expected_spec_sha256=sha)
+        self.assertEqual(checked['state'], 'ACTUAL_NEW_SCHEME_A_FREEZE_VALIDATED')
+        for change in ({'method':'gcfexplainer'}, {'oracle_backbone':'gine'}, {'test_loaded':True},
+                       {'pool_manifest_sha256':'old20'}, {'ordered_rule_ids':['own2','own1']},
+                       {'old_gine_flip_masks_reused':True}, {'spec_sha256':'other-campaign'}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'ACTUAL_NEW_GIN'):
+                raw.validate_portable_scheme_a_freeze({**freeze, **change}, experiment_spec=spec,
+                    method='comrecgc', expected_spec_sha256=sha)
+        with self.assertRaisesRegex(ValueError, 'SCHEME_A_SPEC_REQUIRED'):
+            raw.validate_portable_scheme_a_freeze(freeze, experiment_spec={**spec, 'reach_v2_candidates_used':True},
+                method='comrecgc', expected_spec_sha256=sha)
+
 
 if __name__ == '__main__':
     unittest.main()

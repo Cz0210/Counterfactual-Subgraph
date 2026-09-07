@@ -91,6 +91,44 @@ def index_memory_bound(finite_rows, pair_rows, candidate_bytes):
         serialized_full_copy_count=0, estimated_peak_rss_bound_bytes=bound)
 
 
+def validate_portable_scheme_a_freeze(freeze, *, experiment_spec, method, expected_spec_sha256):
+    """The existing scheme-A freeze contract, copied verbatim across hosts.
+
+    This reads no source/test records and invents no new trust root. Its caller
+    binds the actual HPC freeze file SHA before calling; the original immutable
+    experiment spec (including pool and adopted GIN identities) remains intact.
+    """
+    spec = experiment_spec
+    if (method not in OPERATIONS or stable_sha256(spec) != expected_spec_sha256
+            or spec.get('experiment_id') != 'BACE_GIN_FOUR_METHODS_FIXED_POOL_V1'
+            or spec.get('scope') != 'BACE_FIXED_POOL_FROZEN_GIN_V1'
+            or spec.get('base_counts') != {'calibration': 66, 'test': 141}
+            or spec.get('source_class') != 1 or spec.get('destination_class') != 0
+            or spec.get('training_rerun') is not False or spec.get('temperature_refit') is not False
+            or spec.get('candidate_generation_repeated') is not False
+            or spec.get('reach_v2_candidates_used') is not False
+            or spec.get('main_matrix_write') is not False):
+        raise ValueError('NATIVE_RAW_PORTABLE_SCHEME_A_SPEC_REQUIRED')
+    ids = freeze.get('ordered_rule_ids', [])
+    if (freeze.get('state') != 'FROZEN' or freeze.get('test_loaded') is not False
+            or freeze.get('experiment_id') != spec['experiment_id'] or freeze.get('method') != method
+            or freeze.get('spec_sha256') != expected_spec_sha256
+            or freeze.get('pool_manifest_sha256') != spec['pools'][method]['sha256']
+            or freeze.get('oracle_backbone') != 'gin'
+            or freeze.get('old_gine_flip_masks_reused') is not False
+            or not isinstance(ids, list) or not 1 <= len(ids) <= 20
+            or any(not isinstance(i, str) or not i for i in ids)
+            or len(ids) != len(set(ids)) or freeze.get('order_sha256') != stable_sha256(ids)):
+        raise ValueError('NATIVE_RAW_ACTUAL_NEW_GIN_METHOD_FREEZE_REQUIRED')
+    matrix_sha = freeze.get('calibration_matrix_sha256', '')
+    if (len(matrix_sha) != 64 or any(c not in '0123456789abcdef' for c in matrix_sha)
+            or not isinstance(freeze.get('selector_details'), dict) or not freeze.get('created_at')):
+        raise ValueError('NATIVE_RAW_CALIBRATION_FREEZE_PROVENANCE_INCOMPLETE')
+    return dict(state='ACTUAL_NEW_SCHEME_A_FREEZE_VALIDATED', method=method,
+        spec_sha256=expected_spec_sha256, pool_manifest_sha256=freeze['pool_manifest_sha256'],
+        order_sha256=freeze['order_sha256'], oracle_backbone='gin', test_payload_opened=False)
+
+
 def _bound(path, sha256):
     data = Path(path).read_bytes()
     if hashlib.sha256(data).hexdigest() != sha256:

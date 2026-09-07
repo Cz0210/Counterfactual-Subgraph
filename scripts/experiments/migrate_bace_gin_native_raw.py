@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CPU-only one-pass native calibration raw-cost migration; no model/OT calls."""
+"""CPU-only native raw-cost migration; test requires the actual new GIN freeze."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -18,8 +18,11 @@ def main():
     parser.add_argument('--base-repo', help='Existing immutable import/kernel tree for a narrow code overlay')
     parser.add_argument('--base-commit', help='Actual base import-tree HEAD; required with --base-repo')
     parser.add_argument('--driver-commit', help='Committed overlay source; required with --base-repo')
-    parser.add_argument('--split', choices=('calibration',), default='calibration',
-                        help='Test migration is only callable through the actual new freeze validator API.')
+    parser.add_argument('--split', choices=('calibration', 'test'), default='calibration')
+    parser.add_argument('--experiment-spec', help='Unmodified original scheme-A spec copied from HPC')
+    parser.add_argument('--experiment-spec-sha', help='Expected semantic stable_sha256 of that sealed spec')
+    parser.add_argument('--test-freeze', help='Actual new per-method selection_freeze.json copied from HPC')
+    parser.add_argument('--test-freeze-sha', help='Actual file SHA of the new HPC freeze receipt')
     args = parser.parse_args()
     if not Path(args.config).is_file():
         parser.error('Actual --config path must exist')
@@ -46,6 +49,7 @@ def main():
         module = importlib.util.module_from_spec(loader)
         loader.loader.exec_module(module)
         build_native_index = module.build_native_index
+        validate_freeze = module.validate_portable_scheme_a_freeze
         overlay_receipt = dict(driver_commit=args.driver_commit, actual_base_import_commit=actual,
             base_import_root=str(base), driver_root=str(repo), files=identities,
             claim_full_driver_worktree_deployed=False, model_inference=False, ot_recomputed=0)
@@ -54,11 +58,22 @@ def main():
         if args.base_commit or args.driver_commit:
             parser.error('--base-repo is required for overlay pin arguments')
         from src.experiments.bace_gin_native_raw import build_native_index
+        from src.experiments.bace_gin_native_raw import validate_portable_scheme_a_freeze as validate_freeze
     if overlay_receipt is not None:
         from src.eval.bace_frozen_gnn_contracts import atomic_json
         atomic_json(Path(args.output).parent / (Path(args.output).stem + '.execution_overlay.json'), overlay_receipt)
-    result = build_native_index(json.loads(Path(args.binding).read_text()), split=args.split,
-        output=Path(args.output), repo=repo)
+    binding = json.loads(Path(args.binding).read_text())
+    test_options = {}
+    if args.split == 'test':
+        if not all((args.experiment_spec, args.experiment_spec_sha, args.test_freeze, args.test_freeze_sha)):
+            parser.error('Test requires sealed scheme-A spec and actual new method freeze, each hash-bound')
+        experiment = json.loads(Path(args.experiment_spec).read_text())
+        test_options = dict(test_freeze_path=args.test_freeze, test_freeze_sha=args.test_freeze_sha,
+            validate_test_freeze=lambda receipt: validate_freeze(receipt, experiment_spec=experiment,
+                method=binding['method_id'], expected_spec_sha256=args.experiment_spec_sha))
+    elif any((args.experiment_spec, args.experiment_spec_sha, args.test_freeze, args.test_freeze_sha)):
+        parser.error('Do not attach future test receipts to a calibration migration')
+    result = build_native_index(binding, split=args.split, output=Path(args.output), repo=repo, **test_options)
     print(json.dumps({k: result[k] for k in ('state','source_pair_rows','raw_cost_count',
         'source_missing_raw_distance_rows','ot_recomputed','self_sha256')}, sort_keys=True))
 
