@@ -1,5 +1,28 @@
 # Decisions Log
 
+## [2026-09-07] Package partial-snapshot reduction without a new science authority
+
+Add an offline, CPU-only CLI for the existing artifact-only frozen-parent
+reduction. It accepts explicit snapshot/output roots, validates complete ordered
+prefix rectangles and frozen K20/K10 semantics, preserves conditional N/A versus
+capped costs and pending cells, and reports original-versus-reduced values.
+No science, selector, remote source, active DB, model, matrix or manuscript is
+opened or changed. Only a fresh external artifact root receives output.
+
+The audit binds local JSON/CSV transport bytes but does not relabel inherited
+source SHA declarations as newly verified payloads; normalized embedded CSV text
+has a separate hash. Conflicting receipt declarations fail, and missing original
+per-file hashes and legacy identity waivers stay visible. Nonlegacy numerical
+disagreement fails; authorized legacy presentation discrepancies stay in a
+separate diff. Partial staging is not scientific PASS or the final16 exporter.
+
+The complete snapshot-specific renderer remains an artifact script: its
+external inputs and status/scientific captions require a separate bounded
+port and visual QA. No temporary source paths or measured values enter code.
+The paired Slurm wrapper is a task-specific intel CPU-only exception to the
+default A800/GPU template, under the explicit no-science/no-GPU authorization;
+no submission is performed. See `docs/PAPER_SNAPSHOT_REDUCTION.md`.
+
 ## [2026-09-07] Compare LLM heartbeat freshness after the actual source read
 
 The existing LLM owner paused at committed call259 when a concurrent T12
