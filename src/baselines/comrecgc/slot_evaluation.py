@@ -197,6 +197,8 @@ def load_official_slots(path: str | Path) -> list[dict[str, Any]]:
 
 def build_internal_valid_candidates(
     slots: Sequence[Mapping[str, Any]],
+    *, selection_method: str = SELECTION_METHOD,
+    adaptation_mode: str = ADAPTATION_MODE,
 ) -> list[dict[str, Any]]:
     """Build a compute-only CSV while retaining each candidate's native rank."""
 
@@ -225,8 +227,8 @@ def build_internal_valid_candidates(
                 "canonical_smiles": str(slot["repaired_smiles"]),
                 "candidate_set_preselected": True,
                 "selection_performed_in_eval": False,
-                "selection_method": SELECTION_METHOD,
-                "adaptation_mode": ADAPTATION_MODE,
+                "selection_method": selection_method,
+                "adaptation_mode": adaptation_mode,
             }
         )
     return rows
@@ -357,6 +359,9 @@ def compute_slot_metrics(
     max_k: int,
     source_label: int = 1,
     target_label: int = 0,
+    method_name: str = METHOD,
+    selection_method: str = SELECTION_METHOD,
+    adaptation_mode: str = ADAPTATION_MODE,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute frozen K prefixes using original rank slots and shared summaries."""
 
@@ -408,7 +413,7 @@ def compute_slot_metrics(
             if rank_by_id[str(row["candidate_id"])] <= requested_k
         ]
         shared = summarize_wnode_thresholds(
-            method=METHOD,
+            method=method_name,
             details=prefix_rows,
             threshold_rows=threshold_rows,
             total_parents=len(parent_ids),
@@ -418,7 +423,7 @@ def compute_slot_metrics(
             group_audit={
                 "candidate_set_preselected": True,
                 "selection_performed_in_eval": False,
-                "selection_method": SELECTION_METHOD,
+                "selection_method": selection_method,
                 "evaluation_row_unit": "parent_official_rank_slot",
                 "num_unique_parent_candidate_pairs": len(prefix_rows),
                 "num_detail_rows": len(prefix_rows),
@@ -462,7 +467,7 @@ def compute_slot_metrics(
         if theta_summary is None:
             theta_summary = {
                 **summarize_wnode_thresholds(
-                    method=METHOD,
+                    method=method_name,
                     details=prefix_rows,
                     threshold_rows=[
                         {
@@ -563,7 +568,7 @@ def compute_slot_metrics(
                 "fixed_capped_median_cost": _median(capped),
                 "coverage_redundancy": None,
                 "structural_redundancy": None,
-                "adaptation_mode": ADAPTATION_MODE,
+                "adaptation_mode": adaptation_mode,
                 "invalid_slot_backfill": False,
                 "rank_compaction": False,
             }
@@ -598,10 +603,11 @@ def _assert_monotonic(
 
 
 def table_row(
-    prefix: Mapping[str, Any], *, theta_star: float, dataset: str = "Mutagenicity"
+    prefix: Mapping[str, Any], *, theta_star: float, dataset: str = "Mutagenicity",
+    method_name: str = METHOD, adaptation_mode: str = ADAPTATION_MODE,
 ) -> dict[str, Any]:
     return {
-        "method": METHOD,
+        "method": method_name,
         "dataset": dataset,
         "source_label": 1,
         "target_label": 0,
@@ -620,7 +626,7 @@ def table_row(
         "num_parents": int(prefix["num_parents"]),
         "candidate_set_preselected": True,
         "selection_performed_in_eval": False,
-        "adaptation_mode": ADAPTATION_MODE,
+        "adaptation_mode": adaptation_mode,
         "invalid_slot_backfill": False,
         "rank_compaction": False,
     }
@@ -636,6 +642,8 @@ def build_final_audit(
     thresholds: Sequence[float],
     evaluator_invoked: bool,
     interface_probe_invoked: bool,
+    method_name: str = METHOD,
+    adaptation_mode: str = ADAPTATION_MODE,
 ) -> dict[str, Any]:
     valid_slots = sum(bool(row.get("candidate_slot_valid")) for row in slots)
     source_candidate_ids = [_source_candidate_id(row) for row in slots]
@@ -661,8 +669,8 @@ def build_final_audit(
         "audit_passed": not failures,
         "run_complete": not failures,
         "failed_hard_checks": failures,
-        "method": METHOD,
-        "adaptation_mode": ADAPTATION_MODE,
+        "method": method_name,
+        "adaptation_mode": adaptation_mode,
         "distance_line": "MolCLR-Node-Wasserstein",
         "distance_type": "node_wasserstein",
         "cf_mode": "strict_flip",

@@ -424,6 +424,7 @@ def _validate_bace_terminal(
     method: str,
     proc_root: str | Path,
     require_writer_audit: bool,
+    corrective_at_most_k: bool = False,
 ) -> dict[str, Any]:
     root = _physical_directory(root_like, label=f"BACE/{method} standardized root")
     if any((root / name).exists() for name in ("FAILED", "FAILED.json", "FAIL.json")):
@@ -505,7 +506,13 @@ def _validate_bace_terminal(
         effective_rules = int(run.get("effective_rule_count", -1))
     except (TypeError, ValueError) as exc:
         raise NonTasteMatrixAppendError("BACE effective rule count is invalid") from exc
-    if not 10 <= effective_rules <= 20:
+    if corrective_at_most_k:
+        if method != 'GlobalGCE' or run.get('method_variant') != 'GlobalGCE-ChemAligned' or run.get('rule_budget_semantics') != 'AT_MOST_K':
+            raise NonTasteMatrixAppendError('Corrective at-most-K requires the explicitly versioned ChemAligned contract')
+        lower_bound = 1
+    else:
+        lower_bound = 10
+    if not lower_bound <= effective_rules <= 20:
         raise NonTasteMatrixAppendError("BACE terminal has fewer than 10 or more than 20 rules")
     if summary.get("table2_k") != 10 or summary.get("effective_rule_count") != effective_rules:
         raise NonTasteMatrixAppendError("BACE summary K/effective-rule contract changed")
@@ -625,7 +632,8 @@ def _validate_bace_terminal(
 
 
 def _validate_rf_standardized(
-    science_root: Path, *, dataset: str, dataset_key: str
+    science_root: Path, *, dataset: str, dataset_key: str,
+    method_name: str = "COMRECGC-Adapted-DeterministicChemRepair",
 ) -> dict[str, Any]:
     label = dataset
     standardized = _physical_directory(
@@ -657,7 +665,7 @@ def _validate_rf_standardized(
         "schema_version": 1,
         "dataset": dataset,
         "dataset_key": dataset_key,
-        "method": "COMRECGC-Adapted-DeterministicChemRepair",
+        "method": method_name,
         "run_complete": True,
         "mode": "full",
         "distance_line": "MolCLR-Node-Wasserstein",
@@ -683,7 +691,7 @@ def _validate_rf_standardized(
         {
             "dataset": dataset,
             "dataset_key": dataset_key,
-            "method": "COMRECGC-Adapted-DeterministicChemRepair",
+            "method": method_name,
             "distance_line": "MolCLR-Node-Wasserstein",
             "cf_mode": "strict_flip",
             "candidate_set_preselected": True,
@@ -700,7 +708,7 @@ def _validate_rf_standardized(
             "schema_version": 1,
             "audit_passed": True,
             "run_complete": True,
-            "method": "COMRECGC-Adapted-DeterministicChemRepair",
+            "method": method_name,
             "distance_line": "MolCLR-Node-Wasserstein",
             "cf_mode": "strict_flip",
             "candidate_set_preselected": True,
@@ -717,7 +725,7 @@ def _validate_rf_standardized(
             "schema_version": 1,
             "dataset": dataset,
             "dataset_key": dataset_key,
-            "method": "COMRECGC-Adapted-DeterministicChemRepair",
+            "method": method_name,
             "standardized_output_root": str(standardized),
             "gate_return_code": 0,
         },
@@ -781,7 +789,7 @@ def _validate_rf_standardized(
             run.get("molclr_checkpoint_sha256"), label=f"{label} MolCLR SHA256"
         ),
         "threshold_config_hash": _valid_sha(
-            run.get("thresholds_sha256"), label=f"{label} thresholds SHA256"
+            run.get("threshold_config_hash") if method_name == 'ComRecGC-RFAligned' else run.get("thresholds_sha256"), label=f"{label} thresholds contract SHA256"
         ),
     }
     if not Path(identities["oracle_checkpoint"]).is_absolute():
@@ -2134,6 +2142,7 @@ def append_non_taste_matrix_cell(
     proc_root: str | Path = "/proc",
     require_writer_audit: bool = True,
     git_identity: Mapping[str, str] | None = None,
+    supersede_existing: bool = False,
 ) -> dict[str, Any]:
     """Append exactly one strict non-Taste terminal to a hash-closed authority."""
 
@@ -2145,7 +2154,10 @@ def append_non_taste_matrix_cell(
     prior = _verify_authority(prior_authority_root)
     prior_rows = prior["rows"]
     passing = {status.value for status in PASS_STATUSES}
-    if str(prior_rows[key].get("status") or "") in passing:
+    already_passing = str(prior_rows[key].get("status") or "") in passing
+    if supersede_existing and (not already_passing or key not in {('AIDS', 'ComRecGC'), ('BACE', 'GlobalGCE')}):
+        raise NonTasteMatrixAppendError('Corrective supersession requires an approved existing AIDS/BACE cell')
+    if already_passing and not supersede_existing:
         raise NonTasteMatrixAppendError(f"Prior authority already passes {dataset}/{method}")
     reference = prior_rows[(dataset, "Ours")]
     destination_logical = Path(output_root).expanduser()
@@ -2154,13 +2166,23 @@ def append_non_taste_matrix_cell(
     destination = destination_logical.resolve(strict=False)
     if destination.exists():
         raise NonTasteMatrixAppendError(f"Matrix output must be fresh: {destination}")
-    if dataset == "BACE":
+    if supersede_existing and dataset == 'AIDS':
+        from src.baselines.comrecgc.rf_aligned_release import validate_release
+        terminal = validate_release(cell_terminal_root, proc_root=proc_root, require_writer_audit=require_writer_audit)
+    elif dataset == "BACE":
         terminal = _validate_bace_terminal(
             cell_terminal_root,
             method=method,
             proc_root=proc_root,
             require_writer_audit=require_writer_audit,
+            corrective_at_most_k=supersede_existing,
         )
+        if supersede_existing:
+            repair = _json(Path(cell_terminal_root) / 'repair_scientific_audit.json', label='BACE corrective scientific audit')
+            _require_fields(repair, {'method_variant': 'GlobalGCE-ChemAligned', 'audit_passed': True, 'benchmark_test_previously_seen': True, 'repair_selected_using_test': False, 'selection_frozen_before_test': True, 'raw_ot_reuse_binding_pass': True, 'frozen_oracle_unchanged': True, 'frozen_test_cohort_unchanged': True}, label='BACE correction')
+            if repair.get('final_artifact_audit_sha256') != _sha(Path(cell_terminal_root) / 'final_artifact_audit.json'):
+                raise NonTasteMatrixAppendError('BACE corrective audit is not bound to standardized science')
+            terminal['corrective_audit_sha256'] = _sha(Path(cell_terminal_root) / 'repair_scientific_audit.json')
     elif dataset == "AIDS":
         terminal = _validate_aids_terminal(
             cell_terminal_root,
@@ -2177,7 +2199,7 @@ def append_non_taste_matrix_cell(
     cell_root = Path(str(terminal["root"])).resolve(strict=True)
     registry_cell_root = (
         Path(str(terminal["standardized"]["root"])).resolve(strict=True)
-        if dataset == "Mutagenicity"
+        if dataset == "Mutagenicity" or (supersede_existing and dataset == "AIDS")
         else cell_root
     )
     protected = {
@@ -2227,7 +2249,7 @@ def append_non_taste_matrix_cell(
     }
     target = proposed[key]
     aids_zero_threshold_equivalence: dict[str, Any] | None = None
-    if key == ("AIDS", "ComRecGC"):
+    if key == ("AIDS", "ComRecGC") and not supersede_existing:
         registry_reasons = {
             reason
             for reason in str(target.get("rerun_reason") or "").split(";")
@@ -2272,13 +2294,13 @@ def append_non_taste_matrix_cell(
     for old_key, old_row in prior_rows.items():
         if old_key != key:
             proposed[old_key] = dict(old_row)
-    expected_complete = int(prior["complete"]) + 1
+    expected_complete = int(prior["complete"]) + (0 if supersede_existing else 1)
     observed_complete = sum(
         str(row.get("status") or "") in passing for row in proposed.values()
     )
     if observed_complete != expected_complete:
         raise NonTasteMatrixAppendError(
-            f"Append did not add exactly one cell: prior={prior['complete']} proposed={observed_complete}"
+            f"Requested cell transition changed count incorrectly: prior={prior['complete']} proposed={observed_complete}"
         )
     result = replace(
         result,
@@ -2291,9 +2313,12 @@ def append_non_taste_matrix_cell(
         for field in ("commit", "tree")
     ):
         raise NonTasteMatrixAppendError("Execution Git identity is incomplete")
-    marker = f"[MATRIX_{expected_complete}_OF_16_PASS]"
+    marker = '[MATRIX_CELL_VERSION_SUPERSEDED]' if supersede_existing else f"[MATRIX_{expected_complete}_OF_16_PASS]"
     receipt = {
         "schema_version": APPEND_SCHEMA,
+        "operation": "SUPERSEDE_EXISTING_CELL_VERSION" if supersede_existing else "APPEND_MISSING_CELL",
+        "superseded_prior_cell": dict(prior_rows[key]) if supersede_existing else None,
+        "prior_cell_and_audit_preserved": bool(supersede_existing),
         "status": "PASS",
         "created_at": _utc_now(),
         "execution": execution,

@@ -18688,3 +18688,130 @@ engineering retry. Record the temperature driver and the verifier driver separat
   figures remain provisional until that audit and original-authority publication.
   All three predeclared controls remain visible regardless of test ranking.
 - The paired rendering Slurm script is a CPU-only task-specific exception.
+# 2026-09-07: AIDS native-pool RF alignment (reach-repair-v2)
+
+The first full screening exposed a glue-only NR/INR target-node-ID update
+omission. Preserve that first scan and reconcile only its explicitly rejected
+rows after natural completion; successful graphs and cached RF predictions are
+not regenerated. The new exact recourse stage filters source predictions while
+retaining the original 1283 evaluation denominator, reconstructs the original
+native graphs losslessly, and uses theta=.1, eps=.02, min_samples=3 with the
+existing external-memory exact DBSCAN and original greedy medoid selection.
+Pair storage is admitted from the actual RF0 universe and 64D GREED outputs;
+insufficient disk remains a stage blocker, not permission to truncate pairs.
+
+The first recourse job completed resource planning only: its full Cartesian
+upper bound exceeded disk admission, but no pair-store was created. A fresh
+successor first counts exact theta-close pairs in bounded 128-candidate batches,
+sealing unchanged GREED embeddings and lossless packed eligibility masks. The
+actual close-pair count, not the Cartesian upper bound, admits materialization.
+Materialization reuses those same embeddings and masks without model inference
+or distance reevaluation. Deserialization and graph/model stages have separate
+RAM bounds before allocation. Existing exact cluster-proof paths and streamed
+native medoid reduction remain unchanged. New Slurm scratch/cache writes stay
+inside the user-authorized /share/home/u20526/czx campaign root.
+
+The explicit reach-repair task authorizes an AIDS-only, GNN-proposed/RF-validated
+adaptation. The existing 1283 AIDS/HIV source rows remain the denominator and are
+not relabelled as unseen held-out data. Existing selected actions, predecessor
+ordering, candidate graph hashes, and the frozen RF class mapping own identity.
+The new screening entrypoint replays recorded native graph edits, checks every
+transition and candidate identity, rejects invalid/disconnected chemistry, and
+scores each unique chemical graph once with the frozen RF. It does not search,
+fit a model, generate OT distances, or adopt previous DBSCAN labels. Missing
+replay provenance remains EVIDENCE_INSUFFICIENT, never a fabricated action.
+Bounded 500-candidate atomic segments permit CPU-only resumption. A paired intel
+Slurm wrapper intentionally overrides the repository's generic GPU template
+under this task's explicit CPU authorization. New recourse dispatch must inspect
+the resulting RF0 universe before allocating pair-store and exact DBSCAN work.
+# 2026-09-07: AIDS RFAligned CPU cache handoff and native-summary evaluation
+
+The completed full native candidate pool (100262 records) and exact GREED
+count stage are immutable inputs. The HPC count stage completed 37342977
+theta-close pairs but correctly declined persistent pair-store admission.
+The authorized scoped AutoDL CPU continuation may remap physical input paths
+only after dataset fingerprint and transferred cache identity validation.
+It does not regenerate candidates, infer embeddings again, reuse old DBSCAN
+labels, or change theta=.1/eps=.02/min_samples=3. Native candidate/parent
+pair order is preserved. A phase memory limit covers consolidation mmap RSS,
+not only the small generation batches; the existing certified external
+DBSCAN route still forbids >100000-row brute-force fallback.
+
+The existing slot evaluator now accepts an explicit ComRecGC-RFAligned
+variant and evaluates every available native selected cluster representative
+in frozen order, rather than the legacy one-medoid input assumption.
+The shared RF/MolCLR-WNode kernels remain unchanged. The original AIDS/HIV
+1283 denominator and 1097 RF-source1 scope remain explicit, including the
+already-seen generation/evaluation overlap. No new held-out/calibration split
+is invented. Legacy slot evaluation defaults and sealed results are unchanged.
+The paired CPU Slurm wrappers remain synchronized with the new CLI actions.
+# 2026-09-07: Corrective same-cell publication, not matrix growth
+
+User-authorized AIDS/ComRecGC-RFAligned and BACE/GlobalGCE-ChemAligned releases
+may supersede the corresponding already-passing cell only through the original
+`fast16_matrix_authority` lock and compare-and-swap pointer. The caller binds
+the expected prior authority root and matrix SHA. A fresh authority root keeps
+the same passing-cell count/set and byte-equivalent non-target rows; the prior
+root/audit are retained and referenced. No missing cell is added by this path.
+The original append path and legacy strict validators remain the default.
+
+AIDS RFAligned publication requires full native-pool/count/DBSCAN and selected
+summary provenance plus the existing shared RF/WNode full gate and frozen
+artifacts. Its source denominator is still1283 with1097 RF-source1; overlap with
+generation is disclosed, not relabeled as unseen test. New nonzero results
+cannot use the old zero-coverage-only threshold compatibility waiver. Instead,
+the exact reference Figure4 threshold sequence retains its original raw-string
+identity separately from the generated configuration-file SHA, with explicit
+source/value verification. The original conditional and capped costs remain.
+BACE corrective1..20 availability is allowed only for its explicitly named
+AT_MOST_K ChemAligned version plus existing independent source/audit closure;
+zero is not promoted without a separate complete scientific-zero contract.
+# 2026-09-07 — AIDS native summary's actual corrective successor
+
+The dataset-specific repair CLI now has `release-after-recourse`: it waits for
+the existing CPU owner terminal and released writer boundary, then uses the
+unchanged shared RF/MolCLR-WNode evaluator, native summary freeze, full gate,
+and original-authority same-cell CAS publisher. Actual selected action chains
+are saved after bounded replay of only selected recourses. Missing, inferred,
+or cross-parent transitions block publication. Historical trace and old matrix
+versions remain immutable. BACE's separate frozen-selector grid driver commits
+are integrated only into this future driver, never into active science trees.
+The ChemAligned CLI now dispatches its sealed canary and single repair through
+the existing `run_owned_child` UUID/project-slot lease mechanism. It waits for
+the bound Ours train-only pool freeze and actual prior child/lease release;
+it never acquires a lease while this predecessor is pending. The child checks
+its inherited real FDs and fresh resource evidence before CUDA and each new
+complete optimizer update. Paused work resumes only its same-root checkpoint.
+This adds a dataset-specific stage adapter, not a lock/registry/authority.
+The authorized GPU0 succession does not inherit LLM's unrelated1200s idle
+condition; current capacity, all main reservations and exclusive leases still
+must pass. CPU evaluation uses the previously tested compact node container.
+Original-authority version supersession remains an independent final audit
+interface; completed evaluation is not by itself matrix publication.
+
+The future-only BACE standardizer accepts fewer than ten rules only for the
+explicit ChemAligned adapter with matching final/selection/test identities.
+It preserves method-version and prior-test disclosure in every output manifest;
+existing method thresholds, denominator, missing values and legacy minimum
+rules remain unchanged. No active execution worktree is updated by this export
+compatibility change.
+
+The BACE artifact standardizer already exported the frozen dataset-specific
+calibration grid, but the downstream four-by-four auditor unconditionally
+required the older601-point grid for every dataset. A bounded BACE-only path
+now independently reopens the SHA-bound frozen selector, verifies its source,
+oracle, test boundary, threshold payload/grid hashes and exact values, then
+validates Figure4 against that grid. Unknown/legacy schemas and other datasets
+retain the old gate. This changes validation of representation, not thresholds,
+coverage, test cohorts, ranking or scientific execution.
+# 2026-09-07 — AIDS pair-boundary resource pause and exact resume
+
+The first AutoDL CPU recourse stopped after260 committed chunks because the
+gate added the entire14GiB task peak to a cgroup usage already containing its
+private resident state. Original failure receipt/chunks are retained. At new
+safe boundaries, the unchanged14GiB bound is reduced only by a conservative
+lower bound of *current private anonymous* bytes from smaps_rollup; all shared
+pages, file cache, and high-water RSS are excluded from that subtraction.
+Unexpected child processes or missing memory evidence fail closed.384GiB of
+other-task headroom remains required. No numeric or candidate science changes;
+resume uses the original260 immutable pair chunks and starts at chunk260.

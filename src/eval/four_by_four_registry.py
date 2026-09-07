@@ -73,6 +73,7 @@ METHOD_ALIASES = {
     "globalgce": "GlobalGCE",
     "comrecgc": "ComRecGC",
     "comrecgcadapteddeterministicchemrepair": "ComRecGC",
+    "comrecgcrfaligned": "ComRecGC",
 }
 DATASET_ALIASES = {
     "aids": "AIDS",

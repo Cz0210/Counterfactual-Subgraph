@@ -702,6 +702,18 @@ def _close(actual: float, expected: Any, *, label: str) -> None:
         )
 
 
+def _molecular_version(inputs: FrozenInputs) -> dict[str, Any]:
+    manifests=(inputs.final_manifest,inputs.selection_manifest,inputs.test_manifest)
+    if all(value.get('molecular_adapter') is None for value in manifests):
+        return {}
+    expected={'molecular_adapter':'bace_globalgce_chemaligned_joint_states_v2',
+              'method_variant':'GlobalGCE-ChemAligned','benchmark_test_previously_seen':True,
+              'repair_selected_using_test':False,'rule_budget_semantics':'AT_MOST_K'}
+    if inputs.method_slug!='globalgce' or any(any(value.get(k)!=v for k,v in expected.items()) for value in manifests):
+        raise BACECellStandardizationError('Corrected molecular version changed across frozen stages')
+    return expected
+
+
 def _compute_metrics(
     inputs: FrozenInputs,
     *,
@@ -711,7 +723,7 @@ def _compute_metrics(
 ) -> dict[str, Any]:
     rows = _jsonl(inputs.pair_matrix_path)
     ordered = [str(value) for value in inputs.selection_manifest.get("ordered_rule_ids", [])]
-    minimum_rules = (
+    minimum_rules = 1 if _molecular_version(inputs) else (
         10 if inputs.method_slug in {"comrecgc", "globalgce"} else MAX_K
     )
     if (
@@ -1089,6 +1101,7 @@ def standardize_bace_frozen_cell(
         _write_csv(temporary / table_name, metrics["table2"])
 
         identities = {
+            **_molecular_version(inputs),
             "dataset": DATASET,
             "method": inputs.method,
             "stage": "BACE_FROZEN_CELL_STANDARDIZATION",

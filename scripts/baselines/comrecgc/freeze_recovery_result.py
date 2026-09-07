@@ -86,8 +86,11 @@ def freeze(
     gate_result = _load(gate / "gate_result.json")
     if run_manifest.get("run_complete") is not True or gate_result.get("audit_passed") is not True:
         raise ValueError("Only a completed full run with a passing full gate may be frozen.")
-    if run_manifest.get("method") != "COMRECGC-Adapted-DeterministicChemRepair":
+    method_name = str(run_manifest.get('method'))
+    if method_name not in {"COMRECGC-Adapted-DeterministicChemRepair", "ComRecGC-RFAligned"}:
         raise ValueError("Unexpected method in source run manifest.")
+    if method_name == 'ComRecGC-RFAligned' and (dataset != 'aids' or run_manifest.get('rf_pool_provenance_closed') is not True or run_manifest.get('repair_selected_using_test') is not False):
+        raise ValueError('RFAligned freeze requires its AIDS provenance contract')
     for name in REQUIRED:
         path = source / name
         if not path.is_file() or (
@@ -125,7 +128,7 @@ def freeze(
             "schema_version": 1,
             "dataset": "AIDS" if dataset == "aids" else "Mutagenicity",
             "dataset_key": dataset,
-            "method": "COMRECGC-Adapted-DeterministicChemRepair",
+            "method": method_name,
             "source_output_root": str(source),
             "standardized_output_root": str(destination),
             "source_run_manifest_sha256": sha256_file(source / "run_manifest.json"),
@@ -166,6 +169,7 @@ def freeze(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", help="Project config identity; no scientific computation is performed")
     parser.add_argument("--source-dir", required=True)
     parser.add_argument("--gate-dir", required=True)
     parser.add_argument("--output-dir", required=True)

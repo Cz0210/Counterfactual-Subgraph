@@ -4317,3 +4317,13 @@ Mutagenicity roadmaps.
 - [ ] Real resource-gated train canary and full search deployment.
 - [ ] Conditional <=300-update PPO successor if the train-only gate actually fires.
 - [ ] Per-LLM own-pool binding and post-freeze version-aware descriptive evaluation.
+# 2026-09-07 bounded AIDS RF-aligned screening
+
+- Added the dataset-specific `repair_aids_rf_aligned.py` CPU entrypoint and its
+  paired Slurm wrapper. It reuses native graph action replay and chemical decode.
+- Screening segments freeze full candidate accounting and RF predictions before
+  any new common-recourse universe is admitted. The following recourse adapter
+  remains a separate stage; screening alone is not a complete repaired result.
+- Added a count-only exact GREED stage and hash-bound embedding/mask reuse before
+  pair allocation. Count, pair-store, exact DBSCAN, native summary and common
+  evaluation remain distinct scientific stages; none is reported as another.
