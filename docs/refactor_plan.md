@@ -4331,3 +4331,12 @@ Mutagenicity roadmaps.
   flip/minimum audit, explicit K10/K20 tables and independent compact packaging.
 - [ ] Real new-pool GNN parent evaluation and accepted result transfer/publication;
   old corrected seed7 reports remain separately available throughout execution.
+
+## 2026-09-07 later fixed-GIN Scheme A direction
+
+- Defer new Reach-pool GNN families/selectors and generator training successors;
+  preserve completed parent/optimizer checkpoints and old scientific history.
+- [x] Classifier-independent original80 GlobalGCE hard materialization adapter
+  and fresh original-pool / prior train-validation chemistry evidence manifest.
+- GlobalGCE all-invalid original output is an explicit materialization blocker,
+  not a fabricated zero result or license to adopt the repaired generator pool.

@@ -18859,3 +18859,22 @@ resume uses the original260 immutable pair chunks and starts at chunk260.
   accepted old calibration index. It preserves original action provenance but
   never exports another backbone's flip masks/minima as current decisions. A
   differing cost for the same bound graph pair fails closed; no OT is computed.
+
+## 2026-09-07 fixed-GIN original-pool GlobalGCE scope
+
+- The user's later Scheme A supersedes Reach-v2 scheduling: retain the original
+  80 GlobalGCE generated outputs and the corrected seed7 GIN oracle. The separately
+  started generator-repair weights/pool are excluded, not silently adopted.
+- Added a classifier-independent extraction of the already reviewed joint NONE/
+  bond hard materializer. It performs native full-parent LHS/RHS replacement,
+  including existing attachments, with no bond forcing, decoder search, fitting,
+  graph sanitization repair, inference fallback, or new generation.
+- Existing completed 360-train/98-validation all-mapping chemistry evidence is
+  bound to original model/rules/catalog receipts. All-invalid materialization is
+  BLOCKED_MATERIALIZATION, not zero coverage or a GIN evaluation. Old GINE flip
+  counts and held-out metrics are not reused. Raw original candidate identities
+  and indices are retained separately from the execution/materializer identity.
+- The metadata-only seal CLI and paired intel CPU Slurm script create a fresh
+  manifest; they do not repeat training, model/OT evaluation, or large-package
+  hashing, and do not write the main matrix. Runtime adapter access requires the
+  original source identities and remains separate from common GIN evaluation.
