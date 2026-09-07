@@ -162,11 +162,17 @@ def prepare(aplus_root, spec_path, v1_source, v1_spec_path, output, *, progress_
     funnel_binding=None
     if funnel_root is not None:
         funnel_root=Path(funnel_root)
-        receipt=sealed(funnel_root/'funnel_manifest.json')
+        receipt=json.loads((funnel_root/'funnel_manifest.json').read_text())
+        # The existing saved-record exporter writes a plain atomic manifest,
+        # not a self-sealed science receipt. Bind its actual file below; never
+        # invent a self-hash or rewrite the exporter evidence for uniformity.
+        if 'self_sha256' in receipt:
+            sealed(funnel_root/'funnel_manifest.json')
         if (receipt.get('state')!='SAVED_RECORD_FUNNEL_EXPORTED'
             or receipt.get('spec_sha256')!=stable_sha256(spec)
             or receipt.get('model_inference') is not False
-            or receipt.get('ot_computed')!=0 or receipt.get('main_matrix_write') is not False):
+            or receipt.get('ot_computed')!=0 or receipt.get('main_matrix_write') is not False
+            or ('output_root' in spec and receipt.get('source_root')!=spec['output_root'])):
             raise ValueError('SAVED_FUNNEL_NOT_CURRENT_SPEC_BOUND')
         actual=read_csv(funnel_root/'method_funnel.csv')
         if not actual:

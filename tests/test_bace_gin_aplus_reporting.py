@@ -95,7 +95,7 @@ def test_actual_saved_funnel_is_preserved_not_overwritten_by_placeholder(tmp_pat
     args=case(tmp_path,True);funnel=tmp_path/'funnel';funnel.mkdir()
     spec=json.loads(args['spec_path'].read_text())
     write(funnel/'funnel_manifest.json',dict(state='SAVED_RECORD_FUNNEL_EXPORTED',
-        spec_sha256=stable_sha256(spec),model_inference=False,ot_computed=0,main_matrix_write=False),True)
+        spec_sha256=stable_sha256(spec),model_inference=False,ot_computed=0,main_matrix_write=False))
     write_csv(funnel/'method_funnel.csv',[dict(method='Ours-GIN-Aplus',scope='expanded_pool_new_selector_K10',
         applicable_pairs=75,chemically_valid_pairs=70,missing_raw_distance='N/A')])
     manifest=prepare(**args,funnel_root=funnel)
