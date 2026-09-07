@@ -54,7 +54,8 @@ def test_real_fd_competition_and_child_lifecycle(tmp_path):
     with lock.open("a+") as held:
         fcntl.flock(held, fcntl.LOCK_EX|fcntl.LOCK_NB)
         owner.validate_writer_fd(held.fileno(), tmp_path)
-        code = "from src.baselines.comrecgc.rf_aligned_phase_owner import validate_writer_fd;import sys;validate_writer_fd(int(sys.argv[1]),sys.argv[2])"
+        code = ("import src.baselines.comrecgc as p;p.__path__.insert(0,"+repr(str(Path(owner.__file__).parent))+");"
+                "from src.baselines.comrecgc.rf_aligned_phase_owner import validate_writer_fd;import sys;validate_writer_fd(int(sys.argv[1]),sys.argv[2])")
         child = subprocess.run([sys.executable,"-c",code,str(held.fileno()),str(tmp_path)], pass_fds=(held.fileno(),), capture_output=True,text=True)
         assert child.returncode == 0, child.stderr
         wrong = tmp_path/"other.lock"
