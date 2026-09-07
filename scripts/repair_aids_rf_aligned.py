@@ -35,11 +35,15 @@ def main():
         config = json.loads(Path(args.run_manifest).read_text())
         print(json.dumps(repair_screen_gaps(config, source_root=Path(args.pool_root), output_root=root), sort_keys=True))
     elif args.action == "recourse":
+        import fcntl
         from src.baselines.comrecgc.rf_aligned_recourse import run_recourse
         if not args.pool_root:
             parser.error("--pool-root is required for recourse")
         config = json.loads(Path(args.run_manifest).read_text())
-        print(json.dumps(run_recourse(config, pool_root=Path(args.pool_root), output_root=root), sort_keys=True))
+        root.mkdir(parents=True, exist_ok=True)
+        with (root / 'writer.lock').open('a+') as writer:
+            fcntl.flock(writer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            print(json.dumps(run_recourse(config, pool_root=Path(args.pool_root), output_root=root), sort_keys=True))
     else:
         config = json.loads(Path(args.run_manifest).read_text())
         print(json.dumps(screen_pool(config, root), sort_keys=True))

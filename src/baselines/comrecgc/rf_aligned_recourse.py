@@ -49,6 +49,36 @@ def storage_plan(*, parent_count: int, candidate_count: int, vector_dim: int,
             "pair_universe_truncated": False}
 
 
+def runtime_resource_gate(config, output_root: Path, phase: str):
+    """Use the existing file-policy contract and actual cgroup, CPU-only."""
+    if not config.get('autodl_cpu_resource_config'):
+        return None
+    from src.utils.stage_file_policy import load_stage_policy, config_file_admission
+    resource = json.loads(Path(config['autodl_cpu_resource_config']).read_text())
+    policy = load_stage_policy(resource['stage_file_policy'], resource['persistent_root'])
+    fs = os.statvfs(resource['persistent_root'])
+    files = config_file_admission(resource, fs.f_favail, stage_id='aids_rf_cpu_recourse', policy=policy)
+    cgroup = Path('/sys/fs/cgroup/memory')
+    limit = int((cgroup / 'memory.limit_in_bytes').read_text())
+    usage = int((cgroup / 'memory.usage_in_bytes').read_text())
+    own_peak = int(config['max_rss_bytes'])
+    # Preserve the bound in the immutable task resource config; no host-memory
+    # substitute and no interpretation of another task's current idle state.
+    other_peak = int(resource['other_tasks_headroom_reserve_bytes'])
+    receipt = {'phase': phase, 'sampled_at_unix': time.time(), 'pid': os.getpid(),
+               'cgroup_limit_bytes': limit, 'cgroup_usage_bytes': usage,
+               'cgroup_headroom_bytes': limit - usage,
+               'task_max_rss_bytes': own_peak,
+               'other_tasks_headroom_reserve_bytes': other_peak,
+               'persistent_available_bytes': fs.f_bavail * fs.f_frsize,
+               'file_admission': files, 'gpu_requested': False}
+    receipt['state'] = 'PASS' if files['admitted'] and limit - usage >= own_peak + other_peak and fs.f_bavail * fs.f_frsize >= int(resource['minimum_persistent_free_bytes']) else 'WAITING_RESOURCE'
+    atomic_json(output_root / 'runtime_resource_latest.json', receipt)
+    if receipt['state'] != 'PASS':
+        raise RuntimeError('CPU stage resource admission failed: ' + phase)
+    return receipt
+
+
 def run_recourse(config: Mapping[str, Any], *, pool_root: Path, output_root: Path):
     import numpy as np
     import torch
@@ -78,6 +108,7 @@ def run_recourse(config: Mapping[str, Any], *, pool_root: Path, output_root: Pat
         atomic_json(output_root / "terminal.json", {"state": "POOL_NO_RF0_COUNTERFACTUALS", "next_required_stage": "ONE_RF_GUIDED_NATIVE_VRRW", "new_search_started": False})
         return
     output_root.mkdir(parents=True, exist_ok=True)
+    runtime_resource_gate(config, output_root, 'INPUT_MATERIALIZATION')
     start_time = time.monotonic()
     max_rss = int(config.get('max_rss_bytes', 28 * 1024**3))
     # Bound deserialization before creating a full graph list. This reserves
@@ -144,7 +175,9 @@ def run_recourse(config: Mapping[str, Any], *, pool_root: Path, output_root: Pat
         atomic_json(output_root / "resource_admission.json", plan)
         if plan["state"] != "PASS":
             return plan
+        runtime_resource_gate(config, output_root, 'PAIR_MATERIALIZATION')
         store = ExternalPairStore(root=output_root / "pair_store", scientific_identity=identity, max_rss_bytes=max_rss, resume=True)
+        last_resource_check = time.monotonic()
         for chunk_index, begin in enumerate([] if store.complete else range(0, len(graphs), batch_size)):
             stop = min(len(graphs), begin + batch_size)
             chunk_identity = {"start": begin, "stop": stop, "candidate_ids": [r["stable_graph_sha256"] for r in records[begin:stop]]}
@@ -163,10 +196,14 @@ def run_recourse(config: Mapping[str, Any], *, pool_root: Path, output_root: Pat
             vectors = (embeddings[selected[:, 0]] - source_embeddings[selected[:, 1]]) / scale[selected[:, 0], selected[:, 1], None]
             pairs = np.asarray([(source_positions[int(parent)], begin + int(cf)) for cf, parent in selected.tolist()], dtype=np.int64).reshape(-1, 2)
             store.append(chunk_index=chunk_index, pairs=pairs, vectors=vectors.numpy(), chunk_identity=chunk_identity)
+            if time.monotonic() - last_resource_check >= 60:
+                runtime_resource_gate(config, output_root, 'PAIR_CHUNK_COMMITTED')
+                last_resource_check = time.monotonic()
             if len(pairs) and not (output_root / "first_valid_native_pair.json").exists():
                 parent_position, cf_index = pairs[0]
                 atomic_json(output_root / "first_valid_native_pair.json", {"stage": "RF_VALID_NATIVE_PAIR_NOT_YET_CLUSTER_MEDOID", "parent_id": source.parent_ids[parent_position], "candidate_index": records[cf_index]["candidate_index"], "candidate_smiles": records[cf_index]["canonical_smiles"], "pred_before": 1, "pred_after": 0, "rf": records[cf_index]["rf"], "normalized_greed_distance": counted_chunk["first_close_pair"]["normalized_greed_distance"], "candidate_graph_sha": records[cf_index]["stable_graph_sha256"]})
             atomic_json(output_root / "progress.json", {"stage": "PAIR_STORE", "candidates_completed": stop, "candidate_count": len(graphs), "elapsed_seconds": time.monotonic() - start_time})
+        runtime_resource_gate(config, output_root, 'PAIR_CONSOLIDATION')
         pair_result = store.finalize()
         if config.get('stop_after_pair_store', False):
             atomic_json(output_root / 'pair_stage_terminal.json', {'state': 'PAIR_STORE_COMPLETE_WAITING_DBSCAN_RESOURCE', 'pair_rows': pair_result.row_count, 'pair_manifest': str(pair_result.manifest_path), 'pair_manifest_sha': pair_result.manifest_sha256, 'max_rss_bytes': max_rss, 'dbscan_started': False})
@@ -175,6 +212,7 @@ def run_recourse(config: Mapping[str, Any], *, pool_root: Path, output_root: Pat
             atomic_json(output_root / "terminal.json", {"state": "POOL_NO_THETA_CLOSE_RF_RECOURSE", "next_required_stage": "ONE_RF_GUIDED_NATIVE_VRRW"})
             return
         contract = ExternalDBSCANContract(eps=.02, min_samples=3, query_block_size=8, checkpoint_interval_blocks=1, max_rss_bytes=max_rss, expected_sklearn_version=config["expected_sklearn_version"], shortcut_mode=ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT, exact_fallback_max_samples=100000)
+        runtime_resource_gate(config, output_root, 'CERTIFIED_EXACT_DBSCAN')
         # For >100k points this engine must prove its adaptive exact shortcut;
         # failure is explicit, never silent N-squared brute-force fallback.
         cluster = fit_external_memory_dbscan(vectors_path=pair_result.vectors_path, work_dir=output_root / "dbscan", contract=contract, expected_vectors_sha256=pair_result.vectors_sha256, resume=True)
