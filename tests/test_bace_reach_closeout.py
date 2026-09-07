@@ -3,9 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
-    from src.eval.bace_reach_closeout import retained_support_gate, reach_parent, freeze_final, verify_witness_application
+    from src.eval.bace_reach_closeout import retained_support_gate, reach_parent, freeze_final, verify_witness_application, run_cpu_closeout
     from src.eval.bace_reach_v2 import seal
     from src.chem.bace_reach_search import pattern_from_match
     from rdkit import Chem
@@ -81,13 +82,42 @@ class CloseoutTests(unittest.TestCase):
                                                 "state": "NO_ADDITIONAL_PPO_REQUIRED_BY_TRAIN_GATE"})
             descriptor = {"path": "unopened-old-pairs", "sha256": "b"*64,
                           "receipt_path": "unopened-old-receipt", "receipt_sha256": "c"*64}
-            frozen = freeze_final(root, root/"final", old_test_pair_source=descriptor)
+            raw = {"portable_manifest": {"path": "unopened-small-metadata", "sha256": "d"*64},
+                   "source_spec": {"path": "unopened-source-spec", "sha256": "e"*64}}
+            frozen = freeze_final(root, root/"final", old_test_pair_source=descriptor, raw_distance_source=raw)
             self.assertFalse(frozen["test_opened"])
             self.assertEqual(frozen["selected_control"], "new_pool_reach_first")
             self.assertEqual(len(frozen["controls"]), 3)
-            self.assertEqual(freeze_final(root, root/"final", old_test_pair_source=descriptor), frozen)
+            self.assertEqual(freeze_final(root, root/"final", old_test_pair_source=descriptor, raw_distance_source=raw), frozen)
             with self.assertRaisesRegex(ValueError, "IMMUTABLE_REACH_RECEIPT_EXISTS"):
-                freeze_final(root, root/"second-final", old_test_pair_source=descriptor)
+                freeze_final(root, root/"second-final", old_test_pair_source=descriptor, raw_distance_source=raw)
+
+    def test_cpu_successor_freezes_before_waiting_for_test_index(self):
+        with tempfile.TemporaryDirectory() as temp:
+            campaign = Path(temp)/"campaign"
+            campaign.mkdir()
+            (campaign/"selector_freeze.json").write_text("{}"); calls = []
+            index = Path(temp)/"index-descriptor.json"
+            def freeze(*args, **kwargs):
+                calls.append("freeze")
+                return seal(campaign/"final_test_binding.json", {"test_opened": False})
+            def wait(seconds):
+                self.assertTrue((campaign/"final_test_binding.json").is_file())
+                calls.append("index_ready")
+                index.write_text('{}')
+            def evaluate(*args, **kwargs):
+                calls.append("test")
+                return {"self_sha256": "final"}
+            with patch("src.eval.bace_reach_closeout.train_gate", return_value={"state": "NO_ADDITIONAL_PPO_REQUIRED_BY_TRAIN_GATE"}), \
+                 patch("src.eval.bace_reach_closeout.freeze_final", side_effect=freeze), \
+                 patch("src.eval.bace_reach_closeout.run_final_test", side_effect=evaluate), \
+                 patch("src.eval.bace_reach_closeout.time.sleep", side_effect=wait):
+                run_cpu_closeout(campaign, Path(temp)/"final", old_test_pair_source={},
+                    raw_distance_source={}, raw_test_index_descriptor=index, boundary_check=lambda: None)
+            self.assertEqual(calls, ["freeze", "index_ready", "test"])
+            terminal = json.loads((Path(temp)/"final/cpu_owner_terminal.json").read_text())
+            self.assertFalse(terminal["gpu_requested"])
+            self.assertTrue(terminal["independent_audit_still_required"])
 
 
 if __name__ == "__main__":

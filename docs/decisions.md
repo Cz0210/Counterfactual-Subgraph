@@ -18653,3 +18653,14 @@ engineering retry. Record the temperature driver and the verifier driver separat
   raw-distance reuse receipts. Deployment/spec binding and final v2 evaluation
   remain separate from passing these unit tests. No old scientific audit is
   renamed as a v2 result.
+- The Ours future closeout derives its raw-distance descriptor from the actual
+  frozen GINE schema and MolCLR source files plus the existing weight receipt;
+  it does not copy the source index's values as proof of current identity.
+  Same-GINE old selected20 pairs can be reused directly. Old unselected rules
+  and new rules recompute their current flips/minima while adopting only raw
+  graph costs. A post-freeze test index is bound to the actual final-freeze SHA.
+- The existing Reach CLI has a narrow CPU successor that waits for the active
+  owner's real calibration freeze, seals the train gate and one final test
+  binding, then awaits that split-scoped test index. It holds no GPU lease and
+  never publishes the main matrix. Its execution-complete receipt still
+  requires independent scientific audit and the original publisher.

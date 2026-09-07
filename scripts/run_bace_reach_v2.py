@@ -15,7 +15,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--set", action="append", default=[])
-    p.add_argument("--action", required=True, choices=["plan", "canary", "train-search", "calibrate", "status", "owner", "resource-overlay", "train-gate", "freeze-final", "final-test"])
+    p.add_argument("--action", required=True, choices=["plan", "canary", "train-search", "calibrate", "status", "owner", "resource-overlay", "train-gate", "freeze-final", "final-test", "cpu-closeout"])
     p.add_argument("--output-root", required=True, type=Path)
     p.add_argument("--reference", type=Path)
     p.add_argument("--proposal-source", choices=["OURS_MAIN_PPO_66", "L0", "L1", "L2", "L3"], default="OURS_MAIN_PPO_66")
@@ -29,6 +29,8 @@ def main():
     p.add_argument("--wait-seconds", type=int, default=86400)
     p.add_argument("--test-output-root", type=Path)
     p.add_argument("--old-test-pair-descriptor", type=Path)
+    p.add_argument("--raw-distance-source-descriptor", type=Path)
+    p.add_argument("--raw-test-index-descriptor", type=Path)
     args = p.parse_args()
     if not args.config.is_file():
         raise ValueError("EXPLICIT_EXISTING_CONFIG_REQUIRED")
@@ -39,8 +41,8 @@ def main():
         if not args.reference:
             raise ValueError("REFERENCE_REQUIRED")
         result = plan(args.reference, args.output_root, proposal_source=args.proposal_source, proposal_path=args.proposal_path)
-    elif args.action in ("train-gate", "freeze-final", "final-test"):
-        from src.eval.bace_reach_closeout import train_gate, freeze_final, run_final_test
+    elif args.action in ("train-gate", "freeze-final", "final-test", "cpu-closeout"):
+        from src.eval.bace_reach_closeout import train_gate, freeze_final, run_final_test, run_cpu_closeout
         if args.device != "cpu":
             raise ValueError("CLOSEOUT_ENTRY_IS_CPU_ONLY_NO_GPU_LEASE")
         if args.action == "train-gate":
@@ -50,7 +52,9 @@ def main():
                 raise ValueError("EXPLICIT_ONE_FINAL_TEST_ROOT_REQUIRED")
             if args.action == "freeze-final":
                 descriptor = json.loads(args.old_test_pair_descriptor.read_text()) if args.old_test_pair_descriptor else None
-                result = freeze_final(args.output_root, args.test_output_root, old_test_pair_source=descriptor)
+                raw_source = json.loads(args.raw_distance_source_descriptor.read_text()) if args.raw_distance_source_descriptor else None
+                result = freeze_final(args.output_root, args.test_output_root, old_test_pair_source=descriptor,
+                                      raw_distance_source=raw_source)
             else:
                 if not args.resource_config:
                     raise ValueError("REAL_CPU_RESOURCE_ADMISSION_REQUIRED")
@@ -58,7 +62,19 @@ def main():
                 config = json.loads(args.resource_config.read_text())
                 boundary = lambda: cpu_boundary(config)
                 boundary()
-                result = run_final_test(args.output_root, args.test_output_root, boundary_check=boundary)
+                if not args.raw_test_index_descriptor:
+                    raise ValueError("POST_FREEZE_TEST_RAW_INDEX_DESCRIPTOR_REQUIRED")
+                if args.action == "cpu-closeout":
+                    if not args.old_test_pair_descriptor or not args.raw_distance_source_descriptor:
+                        raise ValueError("CPU_CLOSEOUT_REQUIRES_FROZEN_SOURCE_DESCRIPTORS")
+                    result = run_cpu_closeout(args.output_root, args.test_output_root,
+                        old_test_pair_source=json.loads(args.old_test_pair_descriptor.read_text()),
+                        raw_distance_source=json.loads(args.raw_distance_source_descriptor.read_text()),
+                        raw_test_index_descriptor=args.raw_test_index_descriptor,
+                        boundary_check=boundary, max_wait_seconds=args.wait_seconds)
+                else:
+                    result = run_final_test(args.output_root, args.test_output_root,
+                        raw_test_index=json.loads(args.raw_test_index_descriptor.read_text()), boundary_check=boundary)
     elif args.action == "status":
         result = {f: json.loads((args.output_root / f).read_text()) for f in ("progress.json", "candidate_freeze.json", "selector_freeze.json") if (args.output_root / f).is_file()}
     elif args.action == "resource-overlay":
