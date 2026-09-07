@@ -18556,6 +18556,36 @@ engineering retry. Record the temperature driver and the verifier driver separat
   created deterministic child and waits for exit before releasing the GPU lease.
   No process-group signals or forced kill are used.
 
+## 2026-09-07: Keep exact numerical sources separate from bounded ECDF display
+
+- Reach-v2 is a new candidate/selector version, not a relabeling of the old
+  66-candidate main or backbone ablation. Existing tables remain versioned v1;
+  new scientific rows stay PENDING until their own evaluation and audit.
+- Figure4 derives from saved uncapped strict-flip distances. The display-only
+  polyline has a uniform <=0.5 percentage-point vertical-error bound, preserves
+  keys, endpoints, large jumps and plateaus, and never supplies metrics or ranks.
+  BACE displays at least 80% coverage; dataset axes are independent.
+- The accepted L1/L2/L3 common-parser correction supersedes their old numerical
+  display only. K10 auxiliary costs come from the K10 table, not unscoped K20
+  heldout fields; L3's real decline is not optimized away. L0 is retained.
+- These CPU-only rendering CLIs accept `--config configs/hpc.yaml`; their paired
+  Slurm wrappers use the explicitly authorized CPU partition, not the generic
+  GPU training template, and perform no inference, training or matrix write.
+- Commands: `scripts/paper/prepare_exact_ecdf_display.py --help` and
+  `scripts/paper/render_reach_repair_snapshot.py --help`.
+- `reach_v2_adapter.py` adds a new-pool parent chunk and global-selector adapter
+  to the existing GNN science functions. Cache identities include the new pool,
+  exact backbone, weight and temperature; all ten native/common calibration
+  selectors must bind this pool before the test entry can load heldout data.
+  The original seed7 results cannot satisfy this new version's gate. The CPU
+  chunk CLI is not a campaign launcher or a declaration of core completion;
+  its real spec can only be sealed after the train-side pool freeze exists.
+- A calibration-only merge now checks all expected parent chunks, exact native
+  and common cohort completeness and checkpoint contents before freezing the ten
+  global selectors. `--merge-calibration-only` never reads test payloads. Frozen
+  selection is not a scientific core PASS; heldout evaluation and independent
+  acceptance remain separate stages using the new pool.
+
 ## 2026-09-07: BACE Ours-Reach-v2 train-only candidate repair
 
 - This is a newly authorized method version, not a claim that prior scientific
@@ -18604,3 +18634,22 @@ engineering retry. Record the temperature driver and the verifier driver separat
   the retained attributed rule, requiring the same atom mask and valid residual.
   This is a chemistry/input consistency check only: it performs no new oracle
   calls or OT and does not treat an unwitnessed parent as unreachable.
+
+## 2026-09-07: Reuse raw graph costs across Reach-v2 pools without old flip masks
+
+- A split-scoped migration of accepted corrected-GNN parent records produces an
+  explicit canonical graph-pair/MolCLR/schema/exact-solver index, retaining every
+  contributing original action context and source member binding. Original
+  teacher/pool/action cache keys are never edited. Kernel identity is checked
+  against the original exact driver; mismatches fail closed.
+- New oracle predictions, strict flips and per-backbone match minima remain
+  independent. A new candidate can reuse an identical raw graph-pair cost, but
+  cannot inherit its source classifier's successful flip or chosen match.
+- The existing CPU chunk CLI gains `--prepare-raw-reuse-only`; it performs no
+  model or OT inference. Old parent files are migrated once per split, not
+  re-hashed by every worker. Test migration requires the actual new global
+  freeze validator and bound receipt before reading source test records.
+- The new-pool GNN runner requires the compact adopted index and saves explicit
+  raw-distance reuse receipts. Deployment/spec binding and final v2 evaluation
+  remain separate from passing these unit tests. No old scientific audit is
+  renamed as a v2 result.
