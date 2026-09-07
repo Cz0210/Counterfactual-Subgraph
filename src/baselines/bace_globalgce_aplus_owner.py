@@ -127,11 +127,19 @@ def run_owner(spec_path):
             if child.returncode: raise RuntimeError(f"CPU stage {stage['name']} failed code={child.returncode}")
         # The original authority's version-supersession interface is a distinct
         # independent audit/publishing stage. Never claim it ran from exit0 here.
-        final_state='APLUS_INDEPENDENT_CPU_EVALUATION_COMPLETE' if spec['cpu_successors'] else 'BLOCKED_CPU_SUCCESSORS_NOT_BOUND'
+        final_receipt=spec.get('final_evaluation_receipt')
+        evaluated=False
+        if final_receipt and Path(final_receipt).is_file():
+            final,_=read_small(final_receipt)
+            evaluated=(final.get('state')=='APLUS_GLOBALGCE_EVALUATION_COMPLETE'
+                and final.get('training_contract_sha256')==stable_sha256(config)
+                and final.get('main_matrix_write') is False)
+        final_state=('APLUS_INDEPENDENT_CPU_EVALUATION_COMPLETE' if evaluated else
+            'POOL_FROZEN_EVALUATION_SUCCESSOR_PENDING' if spec['cpu_successors'] else
+            'BLOCKED_CPU_SUCCESSORS_NOT_BOUND')
         atomic_json(root/'terminal.json', {'state':final_state,'created_at':utc_now(),'main_matrix_written':False})
         heartbeat(final_state)
         return 0 if spec['cpu_successors'] else 2
     except BaseException as error:
         atomic_json(root/'terminal.json', {'state':'FAILED_ENGINEERING','error':repr(error),'created_at':utc_now()})
         raise
-
