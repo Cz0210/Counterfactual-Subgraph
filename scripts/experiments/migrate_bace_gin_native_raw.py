@@ -34,7 +34,8 @@ def main():
             parser.error('Existing immutable base import HEAD changed')
         identities = {}
         for relative in ('scripts/experiments/migrate_bace_gin_native_raw.py',
-                         'src/experiments/bace_gin_native_raw.py'):
+                         'src/experiments/bace_gin_native_raw.py',
+                         'src/ablations/gnn/reach_raw_distance_reuse.py'):
             data = (repo / relative).read_bytes()
             original = subprocess.check_output(['git','show', args.driver_commit + ':' + relative], cwd=base)
             if data != original:

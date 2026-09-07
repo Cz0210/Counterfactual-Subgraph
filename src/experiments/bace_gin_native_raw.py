@@ -167,7 +167,7 @@ def _canonical(text):
 def _source_docs(binding, split, repo):
     # Load this small existing utility directly: importing the GNN package's
     # broad public __init__ is unnecessary for a no-inference migration worker.
-    location = repo / 'src/ablations/gnn/reach_raw_distance_reuse.py'
+    location = Path(__file__).resolve().parents[2] / 'src/ablations/gnn/reach_raw_distance_reuse.py'
     module_spec = importlib.util.spec_from_file_location('_bace_native_raw_kernel', location)
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
