@@ -18899,3 +18899,11 @@ failure is not zero coverage. Exact K prefixes, raw ECDF, fixed-capped mean and
 the same-sequence native denominator are exported independently of plotting.
 Intel CPU wrappers are the explicitly authorized exception to generic A800
 training scripts. No existing Taste or LLM execution files are modified.
+
+## 2026-09-07: Native GIN strict-flip distance failure is not zero coverage
+
+The original full-graph native adapter now rejects a missing, nonfinite or
+negative WNode result for a real strict flip, matching the Ours adapter. A
+failed distance stage cannot seal that parent as complete and later appear as
+uncovered. No native action, threshold, model, or currently running execution
+is changed; only future immutable native evaluation uses this repair.

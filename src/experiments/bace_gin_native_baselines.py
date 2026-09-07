@@ -145,7 +145,14 @@ def evaluate_parent(parent: Any, candidates: Sequence[Mapping[str, Any]], oracle
             if result.get("ok") is True and raw is not None and math.isfinite(float(raw)) and float(raw) >= 0:
                 value, hit = float(raw), bool(result.get("cache_hit"))
             else:
-                reason = str(result.get("error") or "wnode_distance_failed")
+                # A real strict flip with a missing/invalid cost is an unfinished
+                # evaluation, not evidence of zero threshold coverage. Leave the
+                # parent uncommitted so a later exact repair can resume it.
+                raise ValueError(
+                    "STRICT_FLIP_RAW_DISTANCE_FAILURE_NOT_ZERO_COVERAGE:"
+                    f"{parent.parent_id}:{candidate_id}:"
+                    f"{result.get('error') or 'wnode_distance_failed'}"
+                )
         else:
             reason = "frozen_gin_not_strict_flip"
         row = {"dataset": "bace", "method": METHOD_NAMES[method], "method_id": method,

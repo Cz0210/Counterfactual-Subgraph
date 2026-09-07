@@ -104,12 +104,16 @@ class NativeGINAdapterTests(unittest.TestCase):
             self.evaluate()
 
     def test_failed_raw_cost_not_zero_or_flip(self):
-        self.distance.distance = lambda *a: {"ok": False, "error": "CACHE_PROVENANCE_GAP"}
-        pairs, apps = self.evaluate()
-        self.assertTrue(pairs[0]["cf_flip"])
-        self.assertFalse(pairs[0]["pair_strict_flip"])
-        self.assertEqual(pairs[0]["failure_reason"], "CACHE_PROVENANCE_GAP")
-        self.assertIsNone(pairs[0]["wnode_distance"])
+        failures = ({"ok": False, "error": "CACHE_PROVENANCE_GAP"},
+                    {"ok": True, "distance": None},
+                    {"ok": True, "distance": float("inf")},
+                    {"ok": True, "distance": -1.})
+        for result in failures:
+            with self.subTest(result=result):
+                self.distance.distance = lambda *a: result
+                with self.assertRaisesRegex(ValueError,
+                        "STRICT_FLIP_RAW_DISTANCE_FAILURE_NOT_ZERO_COVERAGE:p:r1:"):
+                    self.evaluate()
 
     def test_original_selector_no_cap_no_reach_no_test_variant_choice(self):
         config = {"top_k": 20, "table_k": 10, "seed": 13, "local_swap_passes": 2,
