@@ -34,4 +34,6 @@ echo "CPU-only new-pool evaluation; no training or temperature fitting"
 # Test raw-reuse creates the post-freeze dependency receipt without mutating
 # the original execution spec. No GPU or generic campaign controller is added.
 # Optional chunk_size_by_split is read only from that sealed execution spec.
+# --extend-calibration-raw-only runs after a complete family; its fresh receipt
+# feeds --calibration-raw-extension for the next family, never another flip mask.
 python -I -B scripts/hpc/gnn/run_bace_gnn_reach_v2_chunk.py --config configs/hpc.yaml "$@"

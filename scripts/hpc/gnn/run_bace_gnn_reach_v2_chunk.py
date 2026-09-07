@@ -29,6 +29,10 @@ def main():
     p.add_argument('--split', required=True, choices=('calibration', 'test'))
     p.add_argument('--backbone', required=True, choices=('gine', 'gin', 'gcn', 'gatv2', 'gatedgcn_plus'))
     p.add_argument('--index', type=int)
+    p.add_argument('--calibration-raw-extension', type=Path,
+                   help='Sealed complete preceding-backbone raw graph costs; no flip/min adoption')
+    p.add_argument('--extend-calibration-raw-only', action='store_true',
+                   help='After whole family success, export own finite graph costs for the next family')
     p.add_argument('--prepare-output-only', action='store_true',
                    help='Seal a fresh result-root binding only; no model inference')
     p.add_argument('--merge-calibration-only', action='store_true',
@@ -40,10 +44,12 @@ def main():
     p.add_argument('--package-only', action='store_true', help='Package accepted new-pool results and unchanged-classifier adoption')
     args = p.parse_args()
     if sum((args.prepare_output_only, args.merge_calibration_only, args.prepare_raw_reuse_only,
-            args.merge_test_only, args.verify_only, args.package_only)) > 1:
+            args.merge_test_only, args.verify_only, args.package_only,args.extend_calibration_raw_only)) > 1:
         p.error('Preparation, raw-cost adoption and selection are distinct stages')
     if args.merge_calibration_only and args.split != 'calibration':
         p.error('Calibration merge is a distinct calibration-only compute-node stage')
+    if (args.calibration_raw_extension or args.extend_calibration_raw_only) and args.split!='calibration':
+        p.error('Calibration raw extension cannot be used for heldout data')
     if (args.merge_test_only or args.verify_only or args.package_only) and args.split != 'test':
         p.error('Held-out closeout requires split=test and all ten fresh selectors')
     if not args.config.is_file() or (not args.prepare_output_only and not os.environ.get('SLURM_JOB_ID')):
@@ -103,6 +109,11 @@ def main():
         return
     if not root_marker.is_file() or read_json(root_marker) != root_binding:
         raise ValueError('V2_EXPLICIT_FRESH_ROOT_PREPARATION_REQUIRED')
+    if args.extend_calibration_raw_only:
+        from src.ablations.gnn.reach_v2_raw_extensions import extend_calibration_costs
+        result=extend_calibration_costs(spec,spec_sha=root_binding['spec_sha256'],pool_sha=pool_sha,
+            candidates=pool,backbone=args.backbone,extension=args.calibration_raw_extension)
+        print(json.dumps({k:v for k,v in result.items() if k not in ('index','source_files')}));return
     if args.merge_calibration_only:
         # These small manifests bind old calibration orders and frozen thresholds;
         # no checkpoint/model/test payload is opened by the merge entry.
@@ -190,10 +201,14 @@ def main():
         install_compact_node_cache(distance)
         from src.ablations.gnn.reach_raw_distance_reuse import VerifiedRawGraphDistance, raw_contract_from_bundle
         source_index = spec['raw_cost_indexes'][args.split]
-        expected_index_sha = dependencies['test_index_sha256'] if dependencies else source_index['sha256']
-        if sha256_file(source_index['path']) != expected_index_sha:
-            raise ValueError('V2_RAW_COST_INDEX_NOT_BOUND')
-        raw_index = read_json(source_index['path'])
+        if args.split=='calibration':
+            from src.ablations.gnn.reach_v2_raw_extensions import resolve_calibration_index
+            raw_index,expected_index_sha=resolve_calibration_index(spec,root_binding['spec_sha256'],pool_sha,
+                args.backbone,args.calibration_raw_extension)
+        else:
+            expected_index_sha=dependencies['test_index_sha256']
+            if sha256_file(source_index['path'])!=expected_index_sha:raise ValueError('V2_RAW_COST_INDEX_NOT_BOUND')
+            raw_index=read_json(source_index['path'])
         if raw_index['split'] != args.split:
             raise ValueError('V2_RAW_COST_WRONG_SPLIT')
         distance = VerifiedRawGraphDistance(distance, index=raw_index,
@@ -221,6 +236,8 @@ def main():
             native_cohort_ids=[p.parent_id for p in cohort], pair_count=len(rows),
             model_files=spec['model_files'][args.backbone],
             global_freeze_sha256=dependencies['global_freeze_sha256'] if dependencies else None,
+            driver_execution_commit=os.environ.get('REACH_GNN_EXECUTION_COMMIT'),
+            adopted_raw_index_file_sha256=expected_index_sha,
             elapsed_seconds=time.monotonic()-started,
             process_peak_rss_bytes=int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)*1024,
             sealed_parent_bytes=sum(p.stat().st_size for p in (directory/'parents').glob('*.json')),

@@ -18670,3 +18670,9 @@ engineering retry. Record the temperature driver and the verifier driver separat
   calibration can use one full new-pool parent for resource measurement while
   held-out chunks contain up to 16 parents of the frozen native/common rule
   union. This changes only partition granularity, not parents, rules or order.
+- Complete calibration families can export a fresh content-bound raw-cost
+  extension for the next backbone. Each source parent, pair/match minimum and
+  full family partition is validated once; only finite raw graph costs cross
+  backbone boundaries. The old index and original run spec stay immutable.
+  A later driver commit is recorded separately in actual chunk terminals;
+  previously completed scientific chunks are not rerun or relabeled.
