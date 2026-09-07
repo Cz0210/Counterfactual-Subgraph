@@ -19,6 +19,28 @@ SCOPE = "BACE_FIXED_POOL_FROZEN_GIN_V1"
 ORIGINAL_UNIVERSE_SHA = "77fdb9f2243dc05271c7da653c609f39167eaf75aa7cc8c015aaf3d8af8b64ab"
 
 
+def with_native_graph_distance(delegate, *, index, current_raw_contract, repo):
+    """Expose exact graph-pair costs for native methods without fake delete keys."""
+    from src.ablations.gnn.reach_raw_distance_reuse import VerifiedRawGraphDistance, graph_key
+
+    class NativeGraphDistance(VerifiedRawGraphDistance):
+        def distance(self, parent, counterfactual):
+            key, p, cf = graph_key(parent, counterfactual, self.index["raw_contract_sha256"])
+            record = self.index["graph_costs"].get(key)
+            if record is not None:
+                self.used.append(dict(raw_graph_key=key, source_index_sha256=self.index["self_sha256"],
+                    current_native_graph_pair={"parent": p, "counterfactual": cf},
+                    source_records=record["source_records"]))
+                return dict(ok=True, distance=record["distance"], cache_hit=True, error=None,
+                    metadata={"reuse": "EXPLICIT_GRAPH_CONTENT_RAW_OT_ADOPTION"})
+            if key not in self.local:
+                self.local[key] = self.delegate.distance(parent, counterfactual)
+                self.fresh += not self.local[key].get("cache_hit", False)
+            return self.local[key]
+
+    return NativeGraphDistance(delegate, index=index, current_raw_contract=current_raw_contract, repo=repo)
+
+
 def _bound_json(path: Path, digest: str) -> dict[str, Any]:
     if not digest or sha256_file(path) != digest:
         raise ValueError(f"BOUND_INPUT_CHANGED:{path}")
@@ -122,7 +144,7 @@ def build_runtime(spec: Mapping[str, Any], output: str | Path, *, split="train",
                   test_freeze=None, validate_test_freeze=None):
     """Build one CPU oracle/distance runtime; the caller owns stage/parent commits."""
     from src.ablations.gnn.cpu_evaluation import _featurizer, _distance, frozen_selector
-    from src.ablations.gnn.reach_raw_distance_reuse import VerifiedRawGraphDistance, raw_contract_from_bundle
+    from src.ablations.gnn.reach_raw_distance_reuse import raw_contract_from_bundle
     from src.ablations.llm.compact_node_cache import install_compact_node_cache
     from src.oracles.gnn_oracle import GNNOracle
     if split not in ("train", "calibration", "test"):
@@ -167,7 +189,7 @@ def build_runtime(spec: Mapping[str, Any], output: str | Path, *, split="train",
                 freeze_path = Path(source_index["new_test_freeze_path"])
                 if sha256_file(freeze_path) != expected_freeze or read_json(freeze_path) != test_freeze:
                     raise ValueError("RAW_COST_BELONGS_TO_DIFFERENT_EXPERIMENT_FREEZE")
-            distance = VerifiedRawGraphDistance(distance, index=index,
+            distance = with_native_graph_distance(distance, index=index,
                 current_raw_contract=raw_contract_from_bundle(manifest), repo=Path(__file__).resolve().parents[2])
         receipt = dict(adopted, loaded_model_eval=True, loaded_trainable_parameters=0,
             split=split, device="cpu", main_matrix_write=False)
