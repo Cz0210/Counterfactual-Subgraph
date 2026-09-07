@@ -107,3 +107,11 @@ def test_joint_candidate_adapter_cannot_masquerade_as_legacy():
     assert _molecular_adapter_metadata({})=={}
     with pytest.raises(ValueError): _molecular_adapter_metadata({'molecular_adapter':SCHEMA,'method_id':'globalgce'})
     assert _molecular_adapter_metadata({'molecular_adapter':SCHEMA,'method_id':'globalgce','method_variant':'GlobalGCE-ChemAligned'})['rule_budget_semantics']=='AT_MOST_K'
+
+def test_identity_canary_is_not_claimed_as_generated_recourse_and_restores_rng():
+    from src.baselines.bace_globalgce_chemaligned_training import real_oracle_identity_canary
+    model,fss,bridge,index=fixture(); rng=snapshot_rng(); weights=copy.deepcopy(model.state_dict())
+    result=real_oracle_identity_canary(model,fss,bridge,index[0])
+    assert result['state']=='PASS' and result['target_flip_claimed'] is False
+    assert result['generator_gradient_l1']>0 and result['fixture_kind'].startswith('synthetic_train_identity')
+    assert_semantic_equal(rng,snapshot_rng()); assert_semantic_equal(weights,model.state_dict())

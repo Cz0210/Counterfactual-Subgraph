@@ -74,6 +74,11 @@ training and never uses calibration or test. The first update and every later
 epoch atomically save model, optimizer, scheduler, complete RNG, sampler state,
 input and joint-contract references. The bounded GPU canary additionally loads
 a fresh independent generator/optimizer and executes the next saved-state step.
+It also checks a known legal train identity fixture through the actual saved
+generator's differentiable decoder and real frozen GINE. Identity is explicitly
+forced only for that synthetic engineering fixture, never for actual generation
+or training; it is not reported as a generated recourse. Model buffers and RNG
+are restored after this fixture.
 
 At budget completion the validation-selected weights undergo a train-only
 existence search. A first actual flip ends this feasibility search (not a train

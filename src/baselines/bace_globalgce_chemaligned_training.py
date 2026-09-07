@@ -229,6 +229,40 @@ def confirm_best_train_feasibility(model, fss, bridge, index):
         'total_train_matches':len(index),'calibration_loaded':False,'test_loaded':False}
 
 
+def real_oracle_identity_canary(model, fss, bridge, item):
+    """Known legal train identity fixture through real generator and GINE.
+
+    Forward identity is an explicitly synthetic engineering fixture, never a
+    generated witness or training objective. Backward uses the actual decoder
+    graph, proving the valid-product path even when old decoded graphs fail.
+    """
+    rng=snapshot_rng(); training=model.training; initial=copy.deepcopy(model.state_dict())
+    model.train(); model.zero_grad(set_to_none=True)
+    row,parent,template,mapping,before=item; rid=template.native_rule_index
+    rules=model.get_rules(fss); raw=rules['features_reconst'][rid]
+    states=joint_states(rules['adj_reconst'][rid],rules['edge_attrs_reconst'][rid])
+    features=template.lhs_feature.to(raw.device)+(raw-raw.detach())
+    edges=template.lhs_edge_attr.to(states.device)+(states-states.detach())
+    product=materialize(parent,template,mapping,features,edges)
+    if product.canonical_smiles != parent.canonical_smiles:
+        raise ValueError('real train identity materialization changed the parent')
+    actual=bridge.score_materialized(product); expected=predict_smiles(bridge,parent.canonical_smiles)
+    probabilities=actual['y_pred'].exp()[0]
+    if not torch.allclose(probabilities.detach().cpu(),torch.tensor(expected['probabilities']),atol=2e-6,rtol=0):
+        raise ValueError('real GINE identity-forward parity failed')
+    (-actual['y_pred'][0,0]).backward()
+    finite=all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
+    norm=sum(float(p.grad.abs().sum()) for p in model.parameters() if p.grad is not None)
+    if not finite or norm<=0 or any(p.grad is not None for p in bridge.model.parameters()):
+        raise ValueError('real generator/GINE identity gradient failed')
+    result={'state':'PASS','parent_id':row['id'],'canonical_smiles':product.canonical_smiles,
+        'probabilities':probabilities.detach().cpu().tolist(),'generator_gradient_l1':norm,
+        'frozen_GINE_gradient':False,'fixture_kind':'synthetic_train_identity_not_generated_recourse',
+        'target_flip_claimed':False,'calibration_loaded':False,'test_loaded':False}
+    model.zero_grad(set_to_none=True); model.load_state_dict(initial,strict=True); model.train(training); restore_rng(rng)
+    return result
+
+
 def run_training(config_path, rematerialization_root, output_root, device, *, resume=False, canary=False):
     config = read_json(config_path)
     if config.get('training_contract') != TRAINING_CONTRACT:
@@ -274,7 +308,12 @@ def run_training(config_path, rematerialization_root, output_root, device, *, re
                 'official_source_commit': authority['official_commit'], 'classifier_unchanged': True,
                 'test_loaded': False, 'calibration_loaded': False, 'mining_rerun': False,
                 'source_generator': summary['globalgce_model_checkpoint'], 'train_matches': len(train_index),
-                'validation_matches': len(val_index), 'device': device})
+                'validation_matches': len(val_index), 'device': device, 'torch_version':torch.__version__,
+                'torch_threads':torch.get_num_threads(), 'cudnn_tf32':torch.backends.cudnn.allow_tf32,
+                'matmul_tf32':torch.backends.cuda.matmul.allow_tf32,
+                'deterministic_algorithms':torch.are_deterministic_algorithms_enabled()})
+    if canary and not resume:
+        atomic_json(output/'identity_oracle_canary.json',real_oracle_identity_canary(model,fss,bridge,train_index[0]))
     max_epochs = 2 if canary else 100
     for epoch in range(epoch_start, max_epochs):
         started = time.monotonic()
