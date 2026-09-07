@@ -18878,3 +18878,20 @@ Two fixed train parents/all66 rules provide a real CPU timing stage, not model
 training or scientific acceptance. Its paired intel CPU Slurm wrapper is the
 explicit task-specific exception to the generic GPU template. Existing Reach
 outputs and failed/pending audit history remain preserved and deferred.
+
+## 2026-09-07: Four native fixed pools, original calibration decisions, fixed141
+
+The new BACE-specific CLI seals all four source pools before new test access,
+preserves each native intervention, and records one checkpoint per stable
+parent. Full66 calibration matrices feed the original method selector. An
+important distinction: original B12 compared four preregistered variants, so
+this experiment repeats that calibration-only decision instead of importing
+the old GNN sensitivity route's already-selected A4 winner. GCF and ComRecGC
+likewise retain their original complete selector inputs and decision rule.
+
+The new result registry is independent of the main matrix. It distinguishes
+EVALUATED, PARTIAL and independent scientific acceptance; old graph-contract
+failure is not zero coverage. Exact K prefixes, raw ECDF, fixed-capped mean and
+the same-sequence native denominator are exported independently of plotting.
+Intel CPU wrappers are the explicitly authorized exception to generic A800
+training scripts. No existing Taste or LLM execution files are modified.

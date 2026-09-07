@@ -1,0 +1,15 @@
+experiment_id: BACE_GIN_FOUR_METHODS_FIXED_POOL_V1
+scope: POST_HOC_FIXED_POOL_CROSS_CLASSIFIER_COMPARISON
+oracle: {backbone: gin, seed: 7, retrain: false, temperature_refit: false}
+methods: [ours, globalgce, gcfexplainer, comrecgc]
+candidate_generation_repeated: false
+reach_v2_candidates_used: false
+base_counts: {calibration: 66, test: 141}
+source_class: 1
+destination_class: 0
+rule_budget_semantics: AT_MOST_K
+k_max: 20
+table_k: 10
+main_matrix_write: false
+resources: {max_concurrent_heavy_cpu_jobs: 2, cpus: 8, memory_gib: 32, max_memory_gib: 64}
+# Runtime JSON binds real artifact paths/hashes. This is not a dispatch spec.

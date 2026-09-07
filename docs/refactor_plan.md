@@ -4331,3 +4331,15 @@ Mutagenicity roadmaps.
   flip/minimum audit, explicit K10/K20 tables and independent compact packaging.
 - [ ] Real new-pool GNN parent evaluation and accepted result transfer/publication;
   old corrected seed7 reports remain separately available throughout execution.
+
+## 2026-09-07 direction override: frozen GIN four-method fixed pools
+
+- Reach-v2 additional search/PPO, reach-first followups and new-pool sensitivity
+  successors are DEFERRED_BY_USER_DIRECTION. Preserve completed evidence.
+- [x] Original Ours66 and native GCF21958/ComRecGC44 evaluation adapters.
+- [x] Stable parent driver, original global selector replay, separate fixed141
+  and GIN-native metrics, exact-CSV renderer and isolated CPU CLI.
+- [ ] Actual full calibration → freeze → test → export per admitted method.
+- [ ] Independent cross-method result acceptance and optional paper organization.
+- GlobalGCE original80 no-training materialization remains an explicit blocked
+  method, not authority to train a new generator or fabricate a zero result.
