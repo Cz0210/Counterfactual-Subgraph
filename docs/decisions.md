@@ -18676,3 +18676,15 @@ engineering retry. Record the temperature driver and the verifier driver separat
   binding, then awaits that split-scoped test index. It holds no GPU lease and
   never publishes the main matrix. Its execution-complete receipt still
   requires independent scientific audit and the original publisher.
+
+## 2026-09-07: Versioned Reach-v2 descriptive result displays
+
+- A thin paper renderer independently recomputes each frozen control's reach,
+  threshold coverage and conditional/capped costs from saved parent-prefix
+  distances. It rejects missing parents, non-nested distances and contradictory
+  summary values. No prediction, search, selection or OT is repeated.
+- Exact uncapped ECDF and uniformly bounded display polylines are both saved.
+  Numerical export checks are explicitly not independent scientific acceptance;
+  figures remain provisional until that audit and original-authority publication.
+  All three predeclared controls remain visible regardless of test ranking.
+- The paired rendering Slurm script is a CPU-only task-specific exception.
