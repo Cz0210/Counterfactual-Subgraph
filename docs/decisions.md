@@ -18588,3 +18588,10 @@ condition; current capacity, all main reservations and exclusive leases still
 must pass. CPU evaluation uses the previously tested compact node container.
 Original-authority version supersession remains an independent final audit
 interface; completed evaluation is not by itself matrix publication.
+
+The future-only BACE standardizer accepts fewer than ten rules only for the
+explicit ChemAligned adapter with matching final/selection/test identities.
+It preserves method-version and prior-test disclosure in every output manifest;
+existing method thresholds, denominator, missing values and legacy minimum
+rules remain unchanged. No active execution worktree is updated by this export
+compatibility change.

@@ -1,5 +1,7 @@
 #!/bin/bash
 # Static CLI-parity wrapper. The AutoDL continuation does not submit this file.
+# Explicit ChemAligned frozen manifests retain their method-version identity;
+# at-most-K permits a short frozen pool without padding. Legacy gates unchanged.
 #SBATCH --job-name=bace_cell_standardize
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1

@@ -564,6 +564,37 @@ def test_resource_capped_comrecgc_standardization_plateaus_after_effective_k(
     assert prefix[19]["plateau_after_effective_k"] is True
 
 
+def test_chemaligned_five_rules_preserve_version_and_at_most_k(tmp_path: Path) -> None:
+    checkpoint, checkpoint_id, test_hash = _checkpoint(tmp_path)
+    source = _source(tmp_path,method='GlobalGCE',checkpoint_id=checkpoint_id,test_hash=test_hash)
+    ordered=[f'c{rank:02d}' for rank in range(1,6)]
+    version={'molecular_adapter':'bace_globalgce_chemaligned_joint_states_v2',
+        'method_variant':'GlobalGCE-ChemAligned','benchmark_test_previously_seen':True,
+        'repair_selected_using_test':False,'rule_budget_semantics':'AT_MOST_K'}
+    selection_path=source/'frozen_selection_manifest.json'
+    selection=json.loads(selection_path.read_text());selection.update(version,ordered_rule_ids=ordered,effective_rule_count=5)
+    _write_json(selection_path,selection)
+    merge_path=source/'matrix_manifest.json'
+    merge=json.loads(merge_path.read_text());merge.update(version);_write_json(merge_path,merge)
+    pair_path=source/'pair_matrix.jsonl'
+    _write_jsonl(pair_path,[r for r in _pair_rows('GlobalGCE',checkpoint_id) if r['candidate_id'] in ordered])
+    metrics_path=source/'final_metrics.json'
+    metrics=json.loads(metrics_path.read_text());metrics.update(ordered_rule_ids=ordered,effective_rule_count=5)
+    _write_json(metrics_path,metrics)
+    final_path=source/'FINAL_PASS.json'
+    final=json.loads(final_path.read_text());final.update(version,ordered_rule_ids=ordered,effective_rule_count=5,
+        selection_manifest_identity=_identity(selection_path),test_manifest_identity=_identity(merge_path),
+        test_pair_matrix_identity=_identity(pair_path),final_metrics_identity=_identity(metrics_path))
+    _write_json(final_path,final)
+    out=tmp_path/'standardized'
+    result=standardize_bace_frozen_cell(method='GlobalGCE',source_final_root=source,gnn_checkpoint=checkpoint,output_dir=out)
+    assert result['effective_rule_count']==5
+    manifest=json.loads((out/'run_manifest.json').read_text())
+    assert all(manifest[k]==v for k,v in version.items())
+    prefix=json.loads((out/'prefix_metrics.json').read_text())['prefix_metrics']
+    assert len(prefix)==20 and prefix[4]['CCRCov']==prefix[19]['CCRCov']
+
+
 def test_standardization_rejects_pair_matrix_tamper(tmp_path: Path) -> None:
     checkpoint, checkpoint_id, test_hash = _checkpoint(tmp_path)
     source = _source(tmp_path, method="Ours", checkpoint_id=checkpoint_id, test_hash=test_hash)
