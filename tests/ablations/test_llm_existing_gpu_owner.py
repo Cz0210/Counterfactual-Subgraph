@@ -21,6 +21,12 @@ from src.utils.final16_owner_registry_v1 import build_owner_registry
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def fixture_pythonpath():
+    """Same-commit compact source for real test subprocesses, never production."""
+    archive = ROOT / 'source.zip'
+    return os.pathsep.join([str(archive), str(ROOT)]) if archive.is_file() else str(ROOT)
+
+
 def stat_fixture(root, pid, ticks=123):
     directory = root / str(pid)
     directory.mkdir(exist_ok=True)
@@ -185,7 +191,7 @@ with open(e['gpu_lock_path'],'r+') as competitor:
         value['t13_admission']=decision(sampler.t13_dispatch,value)
         return value
     sampler.sample=sample
-    code=owner.run_owned_child(command=command,environment=dict(os.environ,PYTHONPATH=str(ROOT)),
+    code=owner.run_owned_child(command=command,environment=dict(os.environ,PYTHONPATH=fixture_pythonpath()),
         sampler=sampler,output_root=tmp_path/'owner',lock_root=Path(cfg['gpu_lock_root']),
         run_id='t13-cpu-transport',interval=.05)
     assert code==0 and len(held)==1
@@ -255,7 +261,7 @@ def test_real_child_fds_competitor_lifecycle_and_grandchild_no_leak(tmp_path, mo
         monkeypatch.setattr(owner, "process_start_ticks", lambda proc, pid: stat_fixture(Path(proc), pid))
     sampler = TransportSampler(cfg)
     result_path = tmp_path / "result.json"
-    environment = dict(os.environ, PYTHONPATH=str(ROOT), CUDA_VISIBLE_DEVICES="")
+    environment = dict(os.environ, PYTHONPATH=fixture_pythonpath(), CUDA_VISIBLE_DEVICES="")
     run = tmp_path / "owner"
     code = owner.run_owned_child(command=[sys.executable, "-c", CHILD, str(result_path), str(exit_code)],
         environment=environment, sampler=sampler, output_root=run, lock_root=Path(cfg["gpu_lock_root"]),
@@ -287,7 +293,7 @@ def test_owner_sigterm_requests_checkpoint_and_waits_for_child(tmp_path, monkeyp
     thread.start()
     try:
         code = owner.run_owned_child(command=[sys.executable, "-c", CHILD, str(result), "pause"],
-            environment=dict(os.environ, PYTHONPATH=str(ROOT)), sampler=TransportSampler(cfg),
+            environment=dict(os.environ, PYTHONPATH=fixture_pythonpath()), sampler=TransportSampler(cfg),
             output_root=tmp_path / "owner", lock_root=Path(cfg["gpu_lock_root"]), run_id="pause", interval=.05)
     finally:
         thread.join(6)
