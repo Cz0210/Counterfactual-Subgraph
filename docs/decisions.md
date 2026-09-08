@@ -18559,3 +18559,20 @@ engineering retry. Record the temperature driver and the verifier driver separat
   resource gate. The original unstarted promotable branch must generate and
   independently reload its own0–500 before any full continuation. See
   `docs/T14_FORMAL_VERSION_BINDING_20260907.md`.
+# 2026-09-08: T14 bounded causal diagnosis begins at the actual saved state
+
+The current authorization replaces the former 64-transition cap with a total
+170 (reference 251–335 and low-memory 251–335, each from its own sealed 250).
+The offline ledgers show a discrete NLC divergence at step335 but do not prove
+the two arms started at an equal checkpoint250. A new narrow CPU inspection
+loads each sealed checkpoint once using that arm's original execution source,
+records value-based component identities and the full saved RNG, and compares
+candidate order/frequency, bridge records, loop and transition components.
+It does not infer parity from pickle bytes, modify old artifacts, train, or
+grant formal promotion. Native random draws and actual sampling locals have a
+tested observational hook for the subsequent bounded transition implementation.
+The initial CPU stage has a 12GiB self-RSS limit and retains the existing T14
+96GiB runtime headroom; it records the real cgroup and RSS each second. All new
+outputs are persistent. The paired Slurm wrapper is kept in sync for project
+workflow compliance; the deployed execution is the explicitly authorized
+AutoDL CPU diagnostic, not an HPC GPU job or a replacement GPU owner.
