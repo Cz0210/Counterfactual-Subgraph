@@ -100,6 +100,8 @@ def semantic(value: Any) -> Any:
     if hasattr(value, "dtype") and hasattr(value, "shape"):
         import numpy as np
         array = np.asarray(value)
+        if array.ndim == 0:
+            return semantic(array.item())
         if array.size <= 32:
             return {"dtype": str(array.dtype), "shape": list(array.shape), "values": semantic(array.tolist())}
         return {"dtype": str(array.dtype), "shape": list(array.shape), "content_sha256": hashlib.sha256(array.tobytes(order="C")).hexdigest()}
@@ -234,7 +236,7 @@ def inspect_checkpoint(*, source_root: Path, output_root: Path) -> dict:
     with gzip.open(output_root / "rng250.pkl.gz", "wb") as stream:
         pickle.dump(loaded.rng_state, stream, protocol=5)
     official = state["official_state"]
-    excluded = {"graph_map", "counterfactual_candidates", "transitions"}
+    excluded = {"graph_map", "counterfactual_candidates", "transitions", "schema_version", "graph_objects_saved", "full_python_candidate_list_saved"}
     bridge = state["bridge_state"]
     record_metadata = {
         str(key): semantic({name: value for name, value in row.items() if name != "embedding_values"})
@@ -255,6 +257,7 @@ def inspect_checkpoint(*, source_root: Path, output_root: Path) -> dict:
         "status": "CHECKPOINT250_COMPONENTS_RECORDED", "source_root": str(source_root),
         "checkpoint_digest": loaded.validation.checkpoint_digest,
         "source_execution_commit": identity["provenance"]["execution_commit"],
+        "storage_schema_recorded_not_compared_as_science": official.get("schema_version"),
         "completed_step": 250, "new_transitions": 0, "total_transition_cap": TOTAL_TRANSITION_CAP,
         "formal_dispatch_allowed": False, "raw_rng": str(output_root / "rng250.pkl.gz"),
         "components": {name: {"path": str(output_root / (name + ".json")), "semantic_sha256": digest(value)} for name, value in components.items()},

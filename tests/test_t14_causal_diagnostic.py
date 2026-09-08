@@ -16,6 +16,12 @@ def test_first_difference_values_not_pickle_bytes():
     assert first_difference(semantic({3, 2}), semantic({2, 3})) is None
 
 
+def test_scalar_storage_wrappers_not_scientific_differences():
+    import numpy as np
+    assert semantic(np.int64(7)) == semantic(7)
+    assert semantic(np.float64(0.25)) == semantic(0.25)
+
+
 def test_observer_does_not_change_rng_or_selected_actions():
     def choose(hashes, importances, importance_args):
         probabilities = [row[0] for row in importances]
