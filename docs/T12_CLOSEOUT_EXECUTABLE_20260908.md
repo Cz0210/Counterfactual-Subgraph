@@ -19,7 +19,10 @@ launched by this development change, including no replay of0–250.
   new ledger directories prevent silently repeating a segment.
 - `run_live_tail`: seals the500 ledger before501, uses the same live
   walker/bridge/model/RNG objects, then seals510. This is an explicit conditional
-  extra10-step segment, not an independent reload.
+  extra10-step segment, not an independent reload. Official relative native
+  output is isolated in a new tail directory; the sealed500 native file is not
+  overwritten. Independent reload uses a separate committed500 fork, never the
+  continuous root that already contains510.
 - Existing `run_t12_reference_500_v1.py` optionally calls
   `dispatch_inherited_activation` only after full parity exists. The actual FD
   is passed using `pass_fds`; child repeats the existing registry/resource checks.
@@ -37,7 +40,8 @@ old transport-only pin; this source audit is not runtime parity.
 
 1. Current reader must finish its510 receipt naturally.
 2. Immutable stage specs must use fresh fork roots and correct absolute paths;
-   existing fork function copies only committed original250 prefixes.
+   the existing prefix copier accepts committed250 or500 only, retaining the
+   original250-only wrapper and preserving all scientific state and record bytes.
 3. Build the explicit new source-equivalence receipt against1ad12b56.
 4. Run the allowed train-only observational regression with the actual adapter;
    CPU fixture tests are not that GPU production evidence.

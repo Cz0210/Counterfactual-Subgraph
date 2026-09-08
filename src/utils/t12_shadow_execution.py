@@ -35,9 +35,18 @@ def run_live_tail(*, plan: dict, arm: str, observer: Any, resolver: RawEvidenceR
         from src.baselines.tastemolnet_gcf_smoke import _run_official_walk_segment
         walk = _run_official_walk_segment
     from src.baselines.tastemolnet_gcf_full import PRODUCTION_TELEPORT
-    result = walk(vrrw=live["vrrw"], input_graphs=live["input_graphs"],
-        importance_args=live["importance_args"], teleport_probability=PRODUCTION_TELEPORT,
-        start_step=501, end_step=510, resume_graph_hash=live["current_graph_identity"])
+    # Official summary writes relative native-result files. A fresh directory
+    # prevents the tail from overwriting the already sealed500 result.
+    runtime = ledger_root / "continuous-native-runtime"
+    runtime.mkdir(exist_ok=False)
+    old_cwd = Path.cwd()
+    try:
+        os.chdir(runtime)
+        result = walk(vrrw=live["vrrw"], input_graphs=live["input_graphs"],
+            importance_args=live["importance_args"], teleport_probability=PRODUCTION_TELEPORT,
+            start_step=501, end_step=510, resume_graph_hash=live["current_graph_identity"])
+    finally:
+        os.chdir(old_cwd)
     live["sources"].revalidate()
     manifest = live["orchestrator"].commit(completed_steps=510, vrrw=live["vrrw"],
         bridge=live["bridge"], adapter=live["adapter"], action_counts=live["action_counts"],
@@ -106,6 +115,17 @@ def run_shadow_segment(*, plan: dict, task_spec: Path, stage_id: str,
     import torch
     from src.baselines.tastemolnet_gcf_full import run_t12_generation_segment
     output = Path(spec["output_root"])
+    if not output.exists():
+        from src.utils.tastemolnet_t12_accelerated_from250 import fork_committed_diagnostic_prefix
+        from src.baselines.tastemolnet_gcf_full_resume import production_checkpoint_identity
+        source_root = Path(binding["fork_source_root"])
+        source_checkpoint = Path(binding["fork_source_checkpoint"])
+        source_run = json.loads((source_root / "run_identity.json").read_text())
+        expected = production_checkpoint_identity(source_run["identity_template"],
+                                                  checkpoint_cursor=stage["restore_cursor"])
+        fork_committed_diagnostic_prefix(source_root=source_root, target_root=output,
+            source_checkpoint_manifest=source_checkpoint, expected_identity=expected,
+            torch=torch, checkpoint_cursor=stage["restore_cursor"])
     checkpoint = output / "checkpoints" / f"checkpoint-{stage['restore_cursor']:08d}.manifest.json"
     if json.loads(checkpoint.read_text()).get("checkpoint_cursor") != stage["restore_cursor"]:
         raise ValueError("T12_SHADOW_RESTORE_CURSOR_CHANGED")

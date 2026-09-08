@@ -484,17 +484,18 @@ def test_reference_identity_reconciles_only_a_stale_manifest_locator(
         )
 
 
-def test_checkpoint250_common_fork_and_firstseen_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("cursor", [250, 500])
+def test_committed_diagnostic_fork_and_firstseen_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cursor: int
 ) -> None:
     source = (tmp_path / "reference").resolve()
     target = (tmp_path / "accelerated").resolve()
     source.mkdir()
     _write_prefix_fixture(source)
-    source_manifest = source / "checkpoints/checkpoint-00000250.manifest.json"
+    source_manifest = source / f"checkpoints/checkpoint-{cursor:08d}.manifest.json"
     source_manifest.parent.mkdir()
     source_manifest.write_text("{}", encoding="utf-8")
-    payload = _payload(source, cursor=250)
+    payload = _payload(source, cursor=cursor)
 
     import src.baselines.tastemolnet_gcf_full_resume as resume
 
@@ -511,20 +512,24 @@ def test_checkpoint250_common_fork_and_firstseen_bytes(
         )
         assert observed["rng"] == payload["rng"]
         root.mkdir(parents=True)
-        path = root / "checkpoint-00000250.manifest.json"
+        path = root / f"checkpoint-{cursor:08d}.manifest.json"
         path.write_text("{}", encoding="utf-8")
         return path
 
     monkeypatch.setattr(resume, "write_checkpoint", fake_write)
-    result = fork_step250_prefix(
+    from src.utils.tastemolnet_t12_accelerated_from250 import fork_committed_diagnostic_prefix
+    fork = fork_step250_prefix if cursor == 250 else fork_committed_diagnostic_prefix
+    result = fork(
         source_root=source,
         target_root=target,
         source_checkpoint_manifest=source_manifest,
-        expected_identity={"checkpoint_cursor": 250},
+        expected_identity={"checkpoint_cursor": cursor},
         torch=object(),
+        **({"checkpoint_cursor": cursor} if cursor == 500 else {}),
     )
     assert result["status"] == "PASS"
     assert result["scientific_state_mutated"] is False
+    assert result["schema_version"] == f"tastemolnet_t12_step{cursor}_prefix_fork_v1"
     assert (target / "bridge_history/history-one.bin").read_bytes() == b"history-prefix"
     assert (
         target / "bridge_history/first-seen-embeddings/embeddings-one.bin"

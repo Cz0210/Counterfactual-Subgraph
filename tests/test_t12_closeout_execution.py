@@ -68,8 +68,10 @@ def test_continuous_tail_keeps_same_objects_and_seals_before_tail(tmp_path):
     vrrw = SimpleNamespace(traversed_hashes=list(range(500)))
     original_objects = [vrrw, object(), object()]
     events = []
+    original_cwd = Path.cwd()
 
     def walk(**kwargs):
+        assert Path.cwd() == tmp_path / "continuous-native-runtime"
         assert cp500.exists() and (tmp_path / "steps-00251-00500.jsonl.joint.json").exists()
         assert kwargs["vrrw"] is vrrw
         assert kwargs["start_step"] == 501 and kwargs["end_step"] == 510
@@ -97,6 +99,7 @@ def test_continuous_tail_keeps_same_objects_and_seals_before_tail(tmp_path):
     result = run_live_tail(plan=plan, arm="reference", observer=observer,
         resolver=RawEvidenceResolver("a" * 64), ledger_root=tmp_path, live=live, walk=walk)
     assert events == ["walk", "revalidate", "commit"]
+    assert Path.cwd() == original_cwd
     assert result["new_transitions"] == 10
     assert result["status"] == "DIAGNOSTIC_TAIL_COMMITTED_NOT_PARITY"
     assert len(read_ledger(tmp_path / "steps-00501-00510.jsonl.gz",

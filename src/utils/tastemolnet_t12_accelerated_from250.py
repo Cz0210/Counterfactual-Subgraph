@@ -874,15 +874,16 @@ def _clone_manifest_segments(
     return copied
 
 
-def fork_step250_prefix(
+def fork_committed_diagnostic_prefix(
     *,
     source_root: Path,
     target_root: Path,
     source_checkpoint_manifest: Path,
     expected_identity: Mapping[str, Any],
     torch: Any,
+    checkpoint_cursor: int,
 ) -> dict[str, Any]:
-    """Fork step 250 into a fresh root without changing scientific state.
+    """Fork a committed diagnostic 250/500 into a fresh root, preserving state.
 
     Segment file names and record bytes are retained.  Only their absolute
     parent paths change, so the checkpoint state hash is recomputed while the
@@ -896,6 +897,8 @@ def fork_step250_prefix(
     )
     from src.baselines.tastemolnet_gcf_smoke import _semantic_sha256
 
+    if checkpoint_cursor not in (250, 500):
+        raise T12AcceleratedError("T12 diagnostic fork cursor must be 250 or 500")
     if target_root.exists() or target_root.is_symlink():
         raise T12AcceleratedError("T12 accelerated output root must be fresh")
     source_root = source_root.resolve(strict=True)
@@ -905,8 +908,8 @@ def fork_step250_prefix(
         expected_identity=expected_identity,
         torch=torch,
     )
-    if payload["identity"]["checkpoint_cursor"] != REFERENCE_STEP:
-        raise T12AcceleratedError("T12 accelerated fork is not rooted at step 250")
+    if payload["identity"]["checkpoint_cursor"] != checkpoint_cursor:
+        raise T12AcceleratedError("T12 diagnostic fork checkpoint cursor differs")
     cloned = copy.deepcopy(payload)
     history = cloned["state"]["bridge"]["history"]
     first_seen = history["first_seen_embedding_store"]
@@ -962,7 +965,7 @@ def fork_step250_prefix(
             target_root / "checkpoints", cloned, torch=torch
         )
         result = {
-            "schema_version": "tastemolnet_t12_step250_prefix_fork_v1",
+            "schema_version": f"tastemolnet_t12_step{checkpoint_cursor}_prefix_fork_v1",
             "status": "PASS",
             "source_root": str(source_root),
             "target_root": str(target_root),
@@ -978,7 +981,7 @@ def fork_step250_prefix(
             "first_seen_embedding_record_bytes_copied_exactly": True,
             "copied_files": copied,
         }
-        receipt = target_root / "step250_fork_receipt.json"
+        receipt = target_root / f"step{checkpoint_cursor}_fork_receipt.json"
         from src.utils.main_ready_task_specs import atomic_json
 
         atomic_json(receipt, result)
@@ -987,6 +990,15 @@ def fork_step250_prefix(
         # A failed, unpublished fresh fork is not a resumable science root.
         # Preserve it for diagnosis rather than deleting user data.
         raise
+
+
+def fork_step250_prefix(*, source_root: Path, target_root: Path,
+                        source_checkpoint_manifest: Path,
+                        expected_identity: Mapping[str, Any], torch: Any) -> dict[str, Any]:
+    """Backward-compatible original 250-only fork; no scientific replay."""
+    return fork_committed_diagnostic_prefix(source_root=source_root, target_root=target_root,
+        source_checkpoint_manifest=source_checkpoint_manifest, expected_identity=expected_identity,
+        torch=torch, checkpoint_cursor=250)
 
 
 def checkpoint_science_projection(payload: Mapping[str, Any]) -> dict[str, Any]:

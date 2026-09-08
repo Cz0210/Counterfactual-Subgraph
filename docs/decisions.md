@@ -24,6 +24,13 @@ matrix write, model retraining or scientific-budget change is introduced.
 
 See `docs/T12_CLOSEOUT_EXECUTABLE_20260908.md` for delivery limitations.
 
+The independent reload uses a fresh committed500 prefix fork; it cannot run in
+the continuous root after510 already exists. Generalize only the existing exact
+prefix relocation helper to250/500 and retain its original250 wrapper. Isolate
+same-process tail native summary files in a fresh directory so the sealed500
+artifact remains unchanged. These are storage/dispatch corrections, not new
+science steps or evidence that production observational parity has passed.
+
 ## [2026-09-06] Correct T14's pre-science GPU-mask bootstrap binding once
 
 The replacement owner failed before CUDA/science because a generic gpu_lock
