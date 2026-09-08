@@ -83,6 +83,55 @@ AUDITED_SOURCE_SCOPES = {
     ),
 }
 
+# User-authorized 2026-09-08 exact diagnostic COMBINATION, reviewed at
+# docs/T12_FOUR_FILE_SOURCE_SCOPE_AUDIT_20260908.md. Not four independent
+# allowlists. Producer identities are retained, never relabelled as this verifier.
+REVIEWED_FOUR_FILE_COMMIT = "1e3301766356d3dd1b2a7eb700f5859458505c36"
+REVIEWED_FOUR_FILE_BASIS = "EXACT_REVIEWED_FOUR_FILE_DIAGNOSTIC_BINDING"
+REVIEWED_FOUR_FILES = {
+    "src/baselines/tastemolnet_gcf_full.py": (
+        "80bac42c3ca202074f192d9bcdc76c195fcd52fe4cd7847e024e9b0cd5393f6f", 31214,
+        "98863f955dd998a25f90401f2c69462dbf16436f44aeecd7557e7b4e9ba0d830", 44066,
+        "fb95ca45e984fdf4baeecf9be85ca3689b13c401",
+        "cross_gpu_identity_disposable_transport_and_diagnostic_live_tail"),
+    "src/baselines/tastemolnet_gcf_production_state.py": (
+        "b3315f9c02d99c39e4b5a9abd322242b158b6ae982911cfde7a441df9450ca98", 76087,
+        "5bbb44fc63f90dd35f401d611c19b98093820c11d6a91a073f828b984ead6e50", 77056,
+        "5fc9ca2c3866ccdd0f86e297b378bdf57c04f199",
+        "future_only_optional_history_cache_default_none_codec_unchanged"),
+    "src/baselines/tastemolnet_gcf_full_verify.py": (
+        "80ebebd9d70b629e079b8a42e0c0d32d564aafb890eb8c8e418aa02a73685a6c", 15548,
+        "fbf8db0f489094ad12d6405789f76f7b4b72618e9f41d668321eb83f73fb31d6", 16318,
+        "d92975786391f9e211950b78456da07a730787f2",
+        "formal_cadence_gate_not_invoked_by_diagnostic_shadow"),
+    "src/baselines/tastemolnet_gcf_full_postprocess.py": (
+        "5cf0a50e9366409c821cba81f06672c1d54e15a2bb865dbc94838ba2736b2d8b", 78782,
+        "8a5a49eaa4dd0fdd3b73510a65e12bc4744868d1ad5b710a9ed6f9e5a16b06d5", 78977,
+        "d92975786391f9e211950b78456da07a730787f2",
+        "formal_generation_cadence_gate_selector_and_evaluation_ast_unchanged"),
+}
+
+
+def _reviewed_four_file_audit(reference_rows, current_rows, changed_paths):
+    if sorted(changed_paths) != sorted(REVIEWED_FOUR_FILES):
+        raise T12AcceleratedError("T12 reviewed four-file combination differs")
+    result = []
+    for path in sorted(REVIEWED_FOUR_FILES):
+        old_sha, old_size, new_sha, new_size, producer, scope = REVIEWED_FOUR_FILES[path]
+        if (reference_rows[path] != {"path": path, "sha256": old_sha, "bytes": old_size}
+                or current_rows[path] != {"path": path, "sha256": new_sha, "bytes": new_size}):
+            raise T12AcceleratedError(f"T12 reviewed source content differs: {path}")
+        result.append({
+            "path": path, "reference_sha256": old_sha, "reference_bytes": old_size,
+            "current_sha256": new_sha, "current_bytes": new_size,
+            "producer_commit": producer, "reviewed_combination_commit": REVIEWED_FOUR_FILE_COMMIT,
+            "audit_scope": scope,
+            "audit_reference": "docs/T12_FOUR_FILE_SOURCE_SCOPE_AUDIT_20260908.md",
+            "scientific_parameters_changed": False, "official_vrrw_changed": False,
+            "runtime_parity_claimed": False, "diagnostic_checkpoint_promotable": False,
+        })
+    return result
+
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_EQUIVALENCE_KEYS = {
@@ -244,9 +293,9 @@ def build_scientific_source_equivalence(
 
     The full Git commit/tree check remains in force for each task spec.  This
     receipt permits the checkpoint's older identity to cross into that already
-    verified current execution tree only when the complete T12 GCF source and
-    vendored upstream inventory is either byte-identical or has exactly the
-    one content-pinned transport-glue delta below.
+    verified current execution tree only for identical source, the existing
+    transport pin, or the explicitly reviewed four-file diagnostic combination.
+    This source binding never establishes observational or runtime parity.
     """
 
     root = _physical_repo(repo_root)
@@ -281,7 +330,11 @@ def build_scientific_source_equivalence(
         path for path in reference_rows if reference_rows[path] != current_rows[path]
     )
     audited_differences: list[dict[str, Any]] = []
-    if changed_paths:
+    if changed_paths == sorted(REVIEWED_FOUR_FILES):
+        audited_differences = _reviewed_four_file_audit(
+            reference_rows, current_rows, changed_paths)
+        basis = REVIEWED_FOUR_FILE_BASIS
+    elif changed_paths:
         if changed_paths != [AUDITED_TRANSPORT_GLUE_PATH]:
             raise T12AcceleratedError(
                 "T12 scientific source changed outside the audited transport glue"
@@ -429,6 +482,7 @@ def validate_scientific_source_equivalence_binding(
         not in {
             "BYTE_IDENTICAL_SCIENTIFIC_SOURCE_INVENTORY",
             "EXACT_AUDITED_TRANSPORT_GLUE_BINDING",
+            REVIEWED_FOUR_FILE_BASIS,
         }
     ):
         raise T12AcceleratedError(
@@ -503,6 +557,11 @@ def validate_scientific_source_equivalence_binding(
     if receipt["equivalence_basis"] == "BYTE_IDENTICAL_SCIENTIFIC_SOURCE_INVENTORY":
         if observed_changed or audit:
             raise T12AcceleratedError("T12 byte-identical source receipt has a delta")
+    elif receipt["equivalence_basis"] == REVIEWED_FOUR_FILE_BASIS:
+        if reference_commit != REFERENCE_IMPLEMENTATION_COMMIT or audit != _reviewed_four_file_audit(
+            reference_rows, current_rows, observed_changed
+        ):
+            raise T12AcceleratedError("T12 reviewed four-file producer/audit binding differs")
     else:
         if observed_changed != [AUDITED_TRANSPORT_GLUE_PATH] or len(audit) != 1:
             raise T12AcceleratedError("T12 source delta is not the one audited file")

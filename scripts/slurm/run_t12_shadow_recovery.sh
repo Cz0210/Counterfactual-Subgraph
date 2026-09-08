@@ -1,4 +1,5 @@
 #!/bin/bash
+# Source-only reviewed four-file binding does not waive raw/runtime parity.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --cpus-per-task=2

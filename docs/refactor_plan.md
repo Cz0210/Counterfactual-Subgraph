@@ -1,5 +1,12 @@
 # Refactor Plan
 
+### 2026-09-08 compact closeout
+
+- Authorized reviewed four-file diagnostic combination implemented and tested;
+  keep producer identities separate from the new verifier commit.
+- Bind actual missing raw evidence, post-natural-terminal owner and GPU before
+  running the existing bounded shadow plan. No runtime parity claim yet.
+
 ### 2026-09-08 T12 closeout interface increment
 
 - Implemented actual raw-call resolver, finite shadow-segment and same-process

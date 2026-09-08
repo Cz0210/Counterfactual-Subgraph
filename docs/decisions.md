@@ -1,5 +1,18 @@
 # Decisions Log
 
+## [2026-09-08] Adopt explicitly authorized exact four-file diagnostic binding
+
+The user re-authorized the previously declined four-file combination through
+CODEX_MAIN16_AND_ABLATIONS_COMPACT.md. The normal tool approval accepted the
+same target validator update. Preserve all four reviewed contents, actual Git
+producer commits and original reference identity in the receipt. The combination
+is indivisible; a rehashed substituted file/producer or mixed older version is
+rejected. This is source compatibility, never runtime parity or permission to
+promote a diagnostic checkpoint. No active reader or producer file is edited.
+New focused binding plus relevant observation/parity regressions: 53 passed.
+Remaining real raw evidence, physical execution identity and owner activation
+must still close independently before fresh-zero production.
+
 ## [2026-09-08] Audit T12's inherited four-file delta before any guard update
 
 The physical source-equivalence build found pre-existing formal-cadence and
