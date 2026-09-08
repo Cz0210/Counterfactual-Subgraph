@@ -1196,6 +1196,7 @@ def _validate_exact_one_cluster_source(
             ALL_CORE_ONE_COMPONENT_SHORTCUT,
             ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
             ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY,
+            "aids_global_radius_witness_one_component_v1",
         }
         or manifest.get("shortcut_proof_path") is None
         or manifest.get("shortcut_proof_sha256") is None
@@ -1209,7 +1210,10 @@ def _validate_exact_one_cluster_source(
         raise ExternalMemoryDBSCANError(
             "one-cluster summary requires a complete exact anchor proof"
         )
-    if manifest["clustering_path"] == ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY:
+    if manifest["clustering_path"] == "aids_global_radius_witness_one_component_v1":
+        from .aids_witness_adoption import validate_partition
+        validate_partition(manifest_path,expected_sha=dbscan_manifest_sha256)
+    elif manifest["clustering_path"] == ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY:
         _validate_component_recovery_closure(
             manifest=manifest, root=manifest_path.parent
         )
@@ -1725,7 +1729,13 @@ def summarize_proven_one_cluster_external(
     pair_authority_path: Path | None = None
     if pair_filename:
         pair_path = Path(pair_filename).resolve(strict=True)
-        if _sha256_file(pair_path) != str(pairs_sha256):
+        if dbscan_manifest["clustering_path"]=="aids_global_radius_witness_one_component_v1":
+            from .external_memory_dbscan import _assert_source_stat_identity
+            recorded=dbscan_manifest['pairs_stat_identity']
+            if recorded['sha256']!=str(pairs_sha256) or recorded['path']!=str(pair_path):
+                raise ExternalMemoryDBSCANError('Witness adopted pair identity mismatch')
+            _assert_source_stat_identity(pair_path,expected_stat={k:recorded[k] for k in ('device','inode','size','mtime_ns','ctime_ns','mode')},phase='witness summary pairs')
+        elif _sha256_file(pair_path) != str(pairs_sha256):
             raise ExternalMemoryDBSCANError("one-cluster pair checksum mismatch")
         pairs_storage = "physical_npy"
     else:
@@ -1749,11 +1759,12 @@ def summarize_proven_one_cluster_external(
         str(getattr(recourse_vectors, "filename", "") or "")
     ).resolve(strict=True)
     dbscan_identity = dbscan_manifest["scientific_identity"]
-    if (
-        Path(str(dbscan_identity.get("vectors_path") or "")).resolve(strict=True)
-        != vector_path
-        or _sha256_file(vector_path) != dbscan_identity.get("vectors_sha256")
-    ):
+    if Path(str(dbscan_identity.get("vectors_path") or "")).resolve(strict=True) != vector_path:
+        raise ExternalMemoryDBSCANError("one-cluster vector checksum mismatch")
+    if dbscan_manifest["clustering_path"]=="aids_global_radius_witness_one_component_v1":
+        from .external_memory_dbscan import _assert_source_stat_identity
+        _assert_source_stat_identity(vector_path,expected_stat=dbscan_identity['vectors_stat_identity'],phase='witness summary vectors')
+    elif _sha256_file(vector_path) != dbscan_identity.get("vectors_sha256"):
         raise ExternalMemoryDBSCANError("one-cluster vector checksum mismatch")
     identity = {
         "schema_version": ONE_CLUSTER_SUMMARY_SCHEMA,

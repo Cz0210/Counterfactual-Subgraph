@@ -30,6 +30,8 @@ python --version
 echo "cpu_only=true worker_count=1 thread_limit=2 job=${SLURM_JOB_ID:-local}"
 # Source vectors remain on AutoDL. This paired wrapper documents the same CPU
 # CLI; do not transfer/recompute the 10GB pair store to use it on HPC.
+# phase_route=GLOBAL_RADIUS_WITNESS_ADOPTION uses the independent finite-edge
+# validator, fresh exact partition, then the existing summary/release chain.
 exec nice -n 10 python -B scripts/continue_aids_rf_pairs.py --config configs/hpc.yaml \
   --run-manifest "$AIDS_RUN_MANIFEST" --recourse-root "$AIDS_RECOURSE_ROOT" \
   --pool-root "$AIDS_POOL_ROOT" --output-root "$AIDS_OUTPUT_ROOT" --action "${AIDS_ACTION:-owner}"

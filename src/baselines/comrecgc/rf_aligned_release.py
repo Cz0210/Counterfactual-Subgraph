@@ -191,7 +191,11 @@ def validate_release(root_like, *, proc_root='/proc', require_writer_audit=True)
     contract = ExternalDBSCANContract(**cluster['scientific_identity']['contract'])
     # This API takes its terminal-only branch. It verifies the existing exact
     # certificates and immutable source stat/hash binding, never mines or fits.
-    fit_external_memory_dbscan(vectors_path=cluster['scientific_identity']['vectors_path'], work_dir=dbscan_root, contract=contract, expected_vectors_sha256=cluster['scientific_identity']['vectors_sha256'], resume=True)
+    if cluster['clustering_path']=='aids_global_radius_witness_one_component_v1':
+        from .aids_witness_adoption import validate_partition
+        validate_partition(dbscan_root/'run_manifest.json',expected_sha=sources['dbscan_manifest']['sha256'])
+    else:
+        fit_external_memory_dbscan(vectors_path=cluster['scientific_identity']['vectors_path'], work_dir=dbscan_root, contract=contract, expected_vectors_sha256=cluster['scientific_identity']['vectors_sha256'], resume=True)
     standardized = _validate_rf_standardized(root, dataset='AIDS', dataset_key='aids', method_name='ComRecGC-RFAligned')
     if run.get('standardized_run_manifest_sha256') != standardized['run_manifest_sha256']:
         raise ValueError('Standardized evaluation does not bind to this release')
@@ -243,6 +247,11 @@ def complete_release(config, *, recourse_root: Path, output_root: Path):
         from src.eval.non_taste_matrix_append import _validate_rf_standardized
         _validate_rf_standardized(release, dataset='AIDS', dataset_key='aids', method_name='ComRecGC-RFAligned')
     paths = {'native_terminal': recourse_root / 'terminal.json', 'native_summary': recourse_root / 'selected_native_recourses.json', 'universe': recourse_root / 'universe_manifest.json', 'count_manifest': recourse_root / 'exact_count/manifest.json', 'dbscan_manifest': recourse_root / 'dbscan/run_manifest.json', 'summary_freeze': output_root / 'summary_freeze/run_manifest.json', 'source_pool_terminal': Path(config['runtime_pool_root']) / 'terminal.json', 'selected_action_lineage': lineage_path}
+    native_terminal=json.loads(paths['native_terminal'].read_text())
+    if native_terminal.get('dbscan_manifest_path'):
+        actual=Path(native_terminal['dbscan_manifest_path']).resolve(strict=True)
+        if recourse_root.resolve() not in actual.parents: raise ValueError('DBSCAN adoption path escaped native recourse namespace')
+        paths['dbscan_manifest']=actual
     receipt = {'schema_version': 'aids_rf_aligned_release_v1', 'status': 'PASS', 'method_variant': 'ComRecGC-RFAligned', 'dataset': 'aids', 'source_label': 1, 'target_label': 0, 'source_denominator': 1283, 'rf_source1_count': 1097, 'old_dbscan_labels_reused': False, 'benchmark_test_previously_seen': True, 'repair_selected_using_test': False, 'selection_frozen_before_evaluation': True, 'generation_rerun': False, 'bound_sources': {k: {'path': str(p), 'sha256': file_sha(p)} for k, p in paths.items()}, 'standardized_run_manifest_sha256': file_sha(release / 'standardized/run_manifest.json')}
     atomic_json(release / 'run_manifest.json', receipt)
     independent = validate_release(release, require_writer_audit=False)
@@ -330,6 +339,13 @@ def publish_release(config, *, output_root: Path):
         prior = {'root': before['latest_authority_root'], 'matrix_sha256': before['latest_matrix_status_sha256'], 'complete': before['latest_count']}
         destination = Path(authority['output_parent']) / ('aids-rfaligned-' + str(uuid.uuid4()))
         command = [sys.executable, '-I', '-B', str(worktree / 'scripts/autodl/append_non_taste_matrix_authority.py'), '--dataset', 'AIDS', '--method', 'ComRecGC', '--cell-terminal-root', str(output_root / 'release'), '--output-root', str(destination), '--supersede-existing', '--expected-prior-authority-root', prior['root'], '--expected-prior-matrix-sha256', prior['matrix_sha256'], '--authority-state-path', authority['state_path'], '--authority-lock-path', authority['lock_path']]
+        if config.get('witness_publication_phase_manifest'):
+            request=output_root/f'original_publication_request_{attempt}.json'
+            atomic_json(request,{'original_entrypoint':str(worktree/'scripts/autodl/append_non_taste_matrix_authority.py'),'argv':command[4:]})
+            command=[sys.executable,'-I','-B',config['witness_phase_cli'],
+                '--config',str(worktree/'configs/hpc.yaml'),'--run-manifest',config['witness_publication_phase_manifest'],
+                '--recourse-root',str(Path(config['native_recourse_root'])), '--pool-root',str(Path(config['runtime_pool_root'])),
+                '--output-root',str(output_root),'--action','publish-existing','--publication-request',str(request)]
         atomic_json(output_root / f'publication_dispatch_{attempt}.json', {'argv': command, 'expected_prior_complete': prior['complete'], 'operation': 'SAME_CELL_VERSION_SUPERSESSION'})
         result = subprocess.run(command, cwd=worktree, text=True, capture_output=True)
         log = output_root / f'publication_attempt_{attempt}.log'

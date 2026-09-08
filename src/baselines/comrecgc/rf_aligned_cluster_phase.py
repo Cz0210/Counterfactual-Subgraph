@@ -54,7 +54,7 @@ def sealed_pairs(config: Mapping[str, Any], root: Path) -> dict[str, Any]:
             raise ValueError("Completed array header differs: " + key)
         stat = path.stat()
         arrays[key] = {"path": str(path), "sha256": manifest[key + "_sha256"],
-                       "size": stat.st_size, "inode": stat.st_ino, "device": stat.st_dev,
+                       "size": stat.st_size, "inode": stat.st_ino, "device": stat.st_dev, "mode": stat.st_mode,
                        "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns,
                        "shape": list(shape), "dtype": dtype}
         del values
@@ -269,12 +269,20 @@ def run_summary_only(config, *, pool_root: Path, recourse_root: Path, evidence_r
             or pool_terminal.get("state") != "POOL_SCREEN_COMPLETE"
             or pool_terminal.get("contract_sha") != identity["pool_contract"]):
         raise ValueError("Summary pool terminal differs from completed pair universe")
-    manifest_path = recourse_root / "dbscan/run_manifest.json"
+    manifest_path = Path(config.get("witness_partition_root",recourse_root/"dbscan"))/"run_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     contract = ExternalDBSCANContract(**manifest["scientific_identity"]["contract"])
-    cluster = fit_external_memory_dbscan(vectors_path=binding["arrays"]["vectors"]["path"],
-        work_dir=manifest_path.parent, contract=contract,
-        expected_vectors_sha256=binding["arrays"]["vectors"]["sha256"], resume=True)
+    if manifest["clustering_path"]=="aids_global_radius_witness_one_component_v1":
+        from .aids_witness_adoption import validate_partition
+        from .external_memory_dbscan import ExternalDBSCANResult
+        validate_partition(manifest_path,expected_sha=file_sha(manifest_path))
+        cluster=ExternalDBSCANResult(labels_path=Path(manifest['labels_path']),core_mask_path=Path(manifest['core_mask_path']),
+            neighbor_counts_path=None,shortcut_proof_path=Path(manifest['shortcut_proof_path']),manifest_path=manifest_path,
+            num_samples=binding['rows'],num_features=64,cluster_count=1,noise_count=0,core_count=binding['rows'],manifest_sha256=file_sha(manifest_path))
+    else:
+        cluster = fit_external_memory_dbscan(vectors_path=binding["arrays"]["vectors"]["path"],
+            work_dir=manifest_path.parent, contract=contract,
+            expected_vectors_sha256=binding["arrays"]["vectors"]["sha256"], resume=True)
     vectors = np.load(binding["arrays"]["vectors"]["path"], mmap_mode="r", allow_pickle=False)
     pairs = np.load(binding["arrays"]["pairs"]["path"], mmap_mode="r", allow_pickle=False)
     labels = np.load(cluster.labels_path, mmap_mode="r", allow_pickle=False)
@@ -321,6 +329,7 @@ def run_summary_only(config, *, pool_root: Path, recourse_root: Path, evidence_r
         "pair_rows": PAIR_ROWS, "dbscan_cluster_count": cluster.cluster_count, "summary_audit": audit,
         "old_cluster_labels_reused": False, "evaluation_complete": False, "test_loaded": False,
         "pair_chunks_recomputed": 0, "phase_only_execution": True}
+    terminal['dbscan_manifest_path']=str(manifest_path)
     atomic_json(recourse_root / "terminal.json", terminal)
     atomic_json(evidence_root / "terminal.json", terminal)
     return terminal

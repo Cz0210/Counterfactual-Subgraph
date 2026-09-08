@@ -28,7 +28,7 @@ def child_env(worktree, scratch=None):
 
 
 def phase_argv(*, python, worktree, manifest, recourse_root, pool_root, evidence, phase, fd, cli=None):
-    if phase not in ("cluster-existing", "summary-existing", "global-witness"):
+    if phase not in ("cluster-existing", "summary-existing", "global-witness", "adopt-global-witness"):
         raise ValueError("Existing-pair owner cannot dispatch pair generation")
     return ["nice", "-n", "10", python, "-B", str(cli or Path(worktree)/"scripts/continue_aids_rf_pairs.py"),
             "--config", str(Path(worktree)/"configs/hpc.yaml"), "--run-manifest", str(manifest),
@@ -116,13 +116,19 @@ def run_owner(config, *, manifest, recourse_root, pool_root, output_root):
                 "next_stage": "INDEPENDENT_CERTIFICATE_AND_PARTITION_ADOPTION" if result["complete_dbscan_certificate"]
                               else "BOUNDED_WITNESS_RESUME_OR_GENERAL_EXACT_COST_REVIEW"})
             return
-        for action, phase in (("cluster-existing", "CERTIFIED_EXACT_DBSCAN"), ("summary-existing", "NATIVE_SUMMARY")):
+        phases=(("cluster-existing", "CERTIFIED_EXACT_DBSCAN"), ("summary-existing", "NATIVE_SUMMARY"))
+        if config.get("phase_route")=="GLOBAL_RADIUS_WITNESS_ADOPTION":
+            phases=(("adopt-global-witness", "NATIVE_SUMMARY"), ("summary-existing", "NATIVE_SUMMARY"))
+        for action, phase in phases:
             evidence = root/action; evidence.mkdir(exist_ok=True)
             if (root/(action+"_terminal.json")).exists():
                 if json.loads((root/(action+"_terminal.json")).read_text())["returncode"] != 0:
                     raise ValueError("Previous failed phase cannot be silently retried")
                 continue
             plan = phase_memory_plan(binding, phase=phase)
+            if action=='adopt-global-witness':
+                from .aids_witness_adoption import adoption_memory_plan
+                plan=adoption_memory_plan(binding)
             atomic_json(evidence/"phase_memory_plan.json", plan)
             wait_admission(config, plan, root, phase)
             command = phase_argv(python=sys.executable, worktree=worktree, manifest=manifest,
@@ -137,12 +143,22 @@ def run_owner(config, *, manifest, recourse_root, pool_root, output_root):
             raise ValueError("Existing release successor input changed")
         release = json.loads(release_source.read_text())
         release.update(execution_commit=actual_commit, predecessor_owner_terminal=str(root/"summary-existing_terminal.json"))
+        if config.get('phase_route')=='GLOBAL_RADIUS_WITNESS_ADOPTION':
+            release.update(witness_publication_phase_manifest=str(manifest),witness_phase_cli=config['phase_cli_path'],
+                native_recourse_root=str(recourse),corrective_driver_commit=config['phase_overlay_commit'])
         release["matrix_publication"].update(worktree=str(worktree), execution_commit=actual_commit)
         release_manifest = root/"release_run_manifest.json"; atomic_json(release_manifest, release)
         wait_admission(config, phase_memory_plan(binding, phase="RF_WNODE_RELEASE"), root, "RF_WNODE_RELEASE")
         command = ["nice", "-n", "10", sys.executable, "-B", str(worktree/"scripts/repair_aids_rf_aligned.py"),
                    "--config", str(worktree/"configs/hpc.yaml"), "--run-manifest", str(release_manifest),
                    "--pool-root", str(recourse), "--output-root", str(root/"shared_evaluation"), "--action", "release-after-recourse"]
+        if config.get("phase_route")=="GLOBAL_RADIUS_WITNESS_ADOPTION":
+            release_wrapper=dict(config,bound_release_manifest=str(release_manifest))
+            wrapper=root/"release_overlay_manifest.json";atomic_json(wrapper,release_wrapper)
+            command=["nice","-n","10",sys.executable,"-B",config["phase_cli_path"],
+                "--config",str(worktree/"configs/hpc.yaml"),"--run-manifest",str(wrapper),
+                "--recourse-root",str(recourse),"--pool-root",str(pool),
+                "--output-root",str(root/"shared_evaluation"),"--action","release-existing"]
         run_child(command, worktree=worktree, root=root, phase="release", env=child_env(worktree,root/"scratch"))
         atomic_json(root/"terminal.json", {"state": "EXISTING_PAIRS_TO_ORIGINAL_RELEASE_COMPLETE", "pair_rows": binding["rows"],
             "pairs_recomputed": False, "new_search_started": False, "old_failure_preserved": True})

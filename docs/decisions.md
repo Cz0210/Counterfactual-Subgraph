@@ -18985,6 +18985,18 @@ subgraph cannot establish noncore status in the complete universe. A new
 resource provider, with one CPU process and at most two math threads. It reads
 the completed seed/failure ledger once and preserves all prior failures.
 
+The actual pilot found all 55 core witnesses plus seed-component attachments
+within 4096 source rows (225280 pair comparisons, 1.581s, 199278592B measured
+RSS). This is not just an anchor-core assertion: the already-complete original
+seed/failure ledger binds every other row's two real seed neighbors. A separate
+finite-edge verifier replays all saved distances and graph connectivity before
+writing a fresh all-zero/all-core partition. The old failed DBSCAN root remains
+unchanged. A specifically named witness-partition source path is admitted by
+the original one-cluster summary and release validators; no DBSCAN is rerun.
+Original source stat/hash receipts avoid repeatedly reading the immutable10GB
+vectors. New label arrays are completely validated. Summary keeps its original
+14GiB phase limit and independently waits for actual resource admission.
+
 The first pilot admits at most 1,048,576 new source rows (256 MiB of source
 pages) per process plus sparse anchors, bounded radius output, static-ledger
 decoding and runtime under a 2 GiB charged bound. It retains the existing
