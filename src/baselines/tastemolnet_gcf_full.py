@@ -18,7 +18,7 @@ import math
 import os
 from pathlib import Path
 import random
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 import uuid
 
 from src.baselines.tastemolnet_comrecgc_full import (
@@ -491,11 +491,14 @@ def run_t12_generation_segment(
     scientific_source_equivalence_receipt_path: str | Path | None = None,
     materialize_terminal_candidates: bool = True,
     diagnostic_only: bool = False,
+    diagnostic_after_checkpoint: Callable[..., Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run exactly fresh 1..10k or resumed 10001..20k generation."""
 
     if mode not in {"fresh", "resume"}:
         raise TasteGCFFullResumeError("T12 production mode must be fresh/resume")
+    if diagnostic_after_checkpoint is not None and not diagnostic_only:
+        raise TasteGCFFullResumeError("T12 live-state tail hook is diagnostic-only")
     if diagnostic_only and (
         materialize_terminal_candidates or PRODUCTION_TOTAL_STEPS != 510
     ):
@@ -994,6 +997,20 @@ def run_t12_generation_segment(
                     f"generation_receipt_{plan['checkpoint_cursor']:08d}.json"
                 )
                 _write_new(receipt_path, receipt)
+                if diagnostic_after_checkpoint is not None:
+                    # The original segment receipt is sealed before the tail.
+                    # Objects remain live inside their original source/bridge
+                    # contexts; the callback may not relabel this as production.
+                    tail = diagnostic_after_checkpoint(
+                        checkpoint_cursor=plan["checkpoint_cursor"],
+                        checkpoint_manifest=manifest, vrrw=vrrw, bridge=bridge,
+                        adapter=adapter, action_counts=action_counts,
+                        current_graph_identity=current_graph, input_graphs=input_graphs,
+                        importance_args=importance_args, orchestrator=orchestrator,
+                        sources=sources, np=np, torch=torch,
+                    )
+                    return {**receipt, "receipt_path": str(receipt_path),
+                            "separate_diagnostic_tail": dict(tail)}
                 return {**receipt, "receipt_path": str(receipt_path)}
         except BaseException:
             science_body_failed = True

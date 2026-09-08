@@ -8,7 +8,8 @@
 #SBATCH --error=logs/%j.err
 #SBATCH --job-name=t12-shadow-interface
 
-# Repository submission baseline only; this is not an approved T12 science job.
+# Interface/test baseline. shadow-segment is AutoDL-canonical-owner only:
+# an ordinary sbatch job cannot invent its inherited owner FD/resource binding.
 source ~/.bashrc
 conda activate smiles_pip118
 set -euo pipefail

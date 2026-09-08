@@ -72,6 +72,16 @@ AUDITED_REFERENCE_SOURCE_SHA256 = (
 AUDITED_CURRENT_SOURCE_SHA256 = (
     "a630d945f8e22e1e3330aa74670bbff0c9f110402b289c65ac91b3590a98a2d3"
 )
+AUDITED_DIAGNOSTIC_TAIL_SOURCE_SHA256 = (
+    "98863f955dd998a25f90401f2c69462dbf16436f44aeecd7557e7b4e9ba0d830"
+)
+AUDITED_SOURCE_SCOPES = {
+    AUDITED_CURRENT_SOURCE_SHA256: "cross_gpu_identity_and_disposable_transport_glue_only",
+    AUDITED_DIAGNOSTIC_TAIL_SOURCE_SHA256: (
+        "cross_gpu_transport_plus_explicit_post_checkpoint_diagnostic_callback_"
+        "default_body_ast_unchanged_not_full_runtime_parity"
+    ),
+}
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -280,7 +290,7 @@ def build_scientific_source_equivalence(
         current_row = current_rows[AUDITED_TRANSPORT_GLUE_PATH]
         if (
             reference_row["sha256"] != AUDITED_REFERENCE_SOURCE_SHA256
-            or current_row["sha256"] != AUDITED_CURRENT_SOURCE_SHA256
+            or current_row["sha256"] not in AUDITED_SOURCE_SCOPES
         ):
             raise T12AcceleratedError(
                 "T12 audited transport-glue source content changed"
@@ -292,9 +302,7 @@ def build_scientific_source_equivalence(
                 "reference_bytes": reference_row["bytes"],
                 "current_sha256": current_row["sha256"],
                 "current_bytes": current_row["bytes"],
-                "audit_scope": (
-                    "cross_gpu_identity_and_disposable_transport_glue_only"
-                ),
+                "audit_scope": AUDITED_SOURCE_SCOPES[current_row["sha256"]],
                 "scientific_parameters_changed": False,
                 "official_vrrw_changed": False,
             }
@@ -502,9 +510,10 @@ def validate_scientific_source_equivalence_binding(
             "path": AUDITED_TRANSPORT_GLUE_PATH,
             "reference_sha256": AUDITED_REFERENCE_SOURCE_SHA256,
             "reference_bytes": reference_rows[AUDITED_TRANSPORT_GLUE_PATH]["bytes"],
-            "current_sha256": AUDITED_CURRENT_SOURCE_SHA256,
+            "current_sha256": current_rows[AUDITED_TRANSPORT_GLUE_PATH]["sha256"],
             "current_bytes": current_rows[AUDITED_TRANSPORT_GLUE_PATH]["bytes"],
-            "audit_scope": "cross_gpu_identity_and_disposable_transport_glue_only",
+            "audit_scope": AUDITED_SOURCE_SCOPES.get(
+                current_rows[AUDITED_TRANSPORT_GLUE_PATH]["sha256"]),
             "scientific_parameters_changed": False,
             "official_vrrw_changed": False,
         }
@@ -513,7 +522,7 @@ def validate_scientific_source_equivalence_binding(
             or reference_rows[AUDITED_TRANSPORT_GLUE_PATH]["sha256"]
             != AUDITED_REFERENCE_SOURCE_SHA256
             or current_rows[AUDITED_TRANSPORT_GLUE_PATH]["sha256"]
-            != AUDITED_CURRENT_SOURCE_SHA256
+            not in AUDITED_SOURCE_SCOPES
         ):
             raise T12AcceleratedError("T12 audited source delta content changed")
     return dict(receipt)

@@ -516,3 +516,33 @@ def activate_inherited_owner(*, plan: dict, parity: dict, binding: dict, output:
                                     "owner_pid": owner_pid, "registry_already_bound": True})
     finally:
         os.close(held)
+
+
+def dispatch_inherited_activation(*, binding_path: Path, plan_path: Path,
+                                  parity_path: Path, output: Path,
+                                  python: str, entrypoint: Path,
+                                  config: Path, held_lease: Any) -> int:
+    """Existing owner call-side: pass its actual FD, not a JSON-only integer.
+
+    Called only after that owner's existing registry handover has completed.
+    Child repeats parent/registry/lease/resource checks; no lock is created here.
+    """
+    from src.utils.final16_owner_registry_v1 import process_start_ticks
+    binding = json.loads(binding_path.read_text())
+    if (binding.get("owner_pid") != os.getpid()
+            or binding.get("owner_start_ticks") != process_start_ticks("/proc", os.getpid())):
+        raise ValueError("T12_ACTIVATION_CALLER_NOT_CANONICAL_OWNER")
+    parity = json.loads(parity_path.read_text())
+    validate_full_parity(parity)
+    descriptor = held_lease.fileno()
+    opened, named = os.fstat(descriptor), Path(binding["lease_path"]).lstat()
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+        raise ValueError("T12_ACTIVATION_CALLER_LEASE_CHANGED")
+    env = dict(os.environ)
+    env.update(T12_OWNER_HELD_GPU_FD=str(descriptor),
+               CUDA_VISIBLE_DEVICES=binding["gpu_uuid"])
+    command = [python, "-I", "-B", str(entrypoint), "--config", str(config),
+               "--set", "inference.fallback_to_heuristic=false", "activate-inherited",
+               "--plan", str(plan_path), "--parity", str(parity_path),
+               "--owner-binding", str(binding_path), "--output", str(output)]
+    return subprocess.run(command, env=env, pass_fds=(descriptor,), check=False).returncode

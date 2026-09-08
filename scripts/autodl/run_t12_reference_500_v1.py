@@ -208,6 +208,27 @@ def _owner(args: argparse.Namespace) -> int:
             "calibration_loaded": False,
             "test_loaded": False,
         })
+        activation = spec["science_contract"].get("post_natural_510_activation")
+        if activation is not None:
+            # Future immutable owner only. Existing running reader/owner never
+            # imports this addition or receives a hot replacement.
+            from src.utils.t12_shadow_recovery import dispatch_inherited_activation
+            if not Path(activation["parity_path"]).is_file():
+                state["phase"] = "SEALED_WAITING_FULL_SHADOW_PARITY"
+                atomic_json(root / "activation_waiting.json", {
+                    "status": state["phase"], "activation": activation,
+                    "science_started": False, "diagnostic_promotion_allowed": False,
+                })
+            else:
+                state["phase"] = "FORMAL_ACTIVATION_FROM_EXISTING_OWNER"
+                return dispatch_inherited_activation(
+                    binding_path=Path(activation["binding_path"]),
+                    plan_path=Path(activation["plan_path"]),
+                    parity_path=Path(activation["parity_path"]),
+                    output=Path(activation["output_root"]), python=spec["python"],
+                    entrypoint=Path(activation["entrypoint"]),
+                    config=Path(spec["config_path"]), held_lease=lease,
+                )
         return 0
     finally:
         state["stop"] = True

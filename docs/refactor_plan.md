@@ -1,5 +1,13 @@
 # Refactor Plan
 
+### 2026-09-08 T12 closeout interface increment
+
+- Implemented actual raw-call resolver, finite shadow-segment and same-process
+  post-checkpoint500 diagnostic tail; added existing-owner FD call-side.
+- Preserve active reader and all old evidence. Deployment must bind new source
+  delta, real regression and current owner/provider; absent historical raw values
+  remain blockers rather than inferred values. No full parity result is claimed.
+
 ## 2026-09-06: Future-only T12 immutable local history cache
 
 - [x] Reuse original history and first-seen codecs through optional bounded local reads.

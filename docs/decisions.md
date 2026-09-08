@@ -1,5 +1,29 @@
 # Decisions Log
 
+## [2026-09-08] Bind T12 missing raw evidence and same-process tail explicitly
+
+The 520+conditional20 recovery plan described missing ledgers but had no science
+subcommand, raw-cache resolver or live-state tail. Add a finite shadow-segment
+entrypoint under the existing owner, observational graph/query-bound raw capture,
+and an opt-in diagnostic callback after checkpoint500/its original receipt have
+sealed, before the original bridge closes. The callback continues the same
+objects and RNG through501–510 and commits a separate ledger/checkpoint. Default
+production code is AST-identical after removing only that explicit hook.
+
+Old first-seen probabilities are not raw logits; thresholded masks are not raw
+NeuroSED. Missing historical raw evidence remains an explicit gap and cannot
+release production. Existing and new source-delta pins are distinct; old receipts
+remain verifiable and no short diagnostic is called full-trajectory parity.
+
+The original reference-owner call side now optionally invokes the existing
+fresh-zero activation with its actual inherited FD after complete parity and
+registry binding. It is not installed in the active reader or old owner. Actual
+owner/provider/spec deployment and real observational regression remain mandatory
+before launching any new diagnostic steps. No0–250 replay, active-file mutation,
+matrix write, model retraining or scientific-budget change is introduced.
+
+See `docs/T12_CLOSEOUT_EXECUTABLE_20260908.md` for delivery limitations.
+
 ## [2026-09-06] Correct T14's pre-science GPU-mask bootstrap binding once
 
 The replacement owner failed before CUDA/science because a generic gpu_lock

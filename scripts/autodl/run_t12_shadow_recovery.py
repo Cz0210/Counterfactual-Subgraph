@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded T12 plan/status, evidence comparison and inherited-owner activation.
-
-This entrypoint does not launch an observer, acquire a GPU, or install a new
-controller. Shadow execution remains blocked until live-state tail and raw-cache
-evidence bindings are implemented and their observational regression passes.
-"""
+"""Bounded T12 evidence segments and inherited-owner activation (no new owner)."""
 from __future__ import annotations
 
 import argparse
@@ -54,6 +49,11 @@ def main(argv=None):
     activate.add_argument("--parity", required=True, type=Path)
     activate.add_argument("--owner-binding", required=True, type=Path)
     activate.add_argument("--output", required=True, type=Path)
+    shadow = sub.add_parser("shadow-segment")
+    shadow.add_argument("--plan", required=True, type=Path)
+    shadow.add_argument("--task-spec", required=True, type=Path)
+    shadow.add_argument("--stage-id", required=True)
+    shadow.add_argument("--raw-input", type=Path)
     args = parser.parse_args(argv)
     if not args.config.is_file():
         raise ValueError("T12_CONFIG_ABSENT")
@@ -75,16 +75,23 @@ def main(argv=None):
             natural = str(exc)
         result = {"plan": str(args.plan), "natural_510": natural,
                   "transitions_budgeted": plan["transitions_budgeted"],
-                  "science_started": False, "status": "BLOCKED_IMPLEMENTATION",
-                  "first_unclosed_function": "selected_raw_cache_evidence_binding",
-                  "remaining_interfaces": ["live_state_continuous_501_510_tail",
-                      "observer_train_only_exact_regression", "canonical_owner_activation_binding"],
+                  "science_started": False, "status": "WAITING_EXECUTION_BINDINGS",
+                  "implemented_interfaces": ["actual_call_raw_evidence_resolver",
+                      "live_state_continuous_501_510_tail", "shadow_segment_entrypoint"],
+                  "required_runtime_evidence": ["new_source_equivalence_receipt",
+                      "observer_train_only_exact_regression", "canonical_owner_fd_and_resource_binding",
+                      "historical_raw_cache_coverage_or_explicit_missing_evidence"],
                   "active_reader_changed": False, "matrix_write": False}
     elif args.action == "compare":
         left = read_ledger(args.left, binding_sha=args.binding_sha, start=args.start, end=args.end)
         right = read_ledger(args.right, binding_sha=args.binding_sha, start=args.start, end=args.end)
         result = compare_ledgers(left, right)
         atomic_json(args.output, result)
+    elif args.action == "shadow-segment":
+        from src.utils.t12_shadow_execution import run_shadow_segment
+        result = run_shadow_segment(plan=_read(args.plan), task_spec=args.task_spec,
+            stage_id=args.stage_id, raw_input=args.raw_input,
+            process_alive=lambda pid, ticks: process_start_ticks("/proc", pid) == ticks)
     else:
         result = activate_inherited_owner(plan=_read(args.plan), parity=_read(args.parity),
             binding=_read(args.owner_binding), output=args.output)
