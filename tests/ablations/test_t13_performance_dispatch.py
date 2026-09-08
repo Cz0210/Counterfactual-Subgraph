@@ -14,7 +14,7 @@ def observation():
 
 def test_live_ram_failure_remains_distinct_from_claim_gap():
     result = decision(dict(canonical_gpu2_diagnostic_claim=None), observation())
-    assert result["state"] == "BLOCKED_RESOURCE_AND_CANONICAL_CLAIM"
+    assert result["state"] == "BLOCKED_RESOURCE_OR_BINDING"
     assert result["required_headroom_bytes"] == 448*GIB
     assert result["actual_headroom_bytes"] == 391*GIB
     assert result["science_started"] is False
@@ -26,7 +26,7 @@ def test_free_ram_does_not_fake_a_canonical_claim_or_held_provider():
     live = observation()
     live.update(memory_safe=True, memory_headroom_bytes=460*GIB)
     result = decision(dict(canonical_gpu2_diagnostic_claim=None), live)
-    assert result["state"] == "BLOCKED_CANONICAL_CLAIM_AND_HELD_PROVIDER"
+    assert result["state"] == "BLOCKED_RESOURCE_OR_BINDING"
     assert result["automatic_waiting_owner_started"] is False
     assert result["registry_modified"] is False
 
@@ -44,7 +44,7 @@ def test_arbitrary_future_json_cannot_activate_same_lock_bypass():
     live = observation()
     live.update(memory_safe=True)
     result = decision(dict(canonical_gpu2_diagnostic_claim={"status":"PASS"}), live)
-    assert "HELD_LEASE_TERMINAL_PROVIDER_ADAPTER_NOT_ACTIVATED" in result["blockers"]
+    assert "CANONICAL_GPU2_DIAGNOSTIC_CLAIM_NOT_BOUND" in result["blockers"]
     assert result["science_started"] is False
 
 
@@ -56,6 +56,33 @@ def test_dispatch_uses_original_provider_without_second_lock_platform():
     assert "GPUFileLock(" not in source
     assert "atomic_write_owner_registry" not in source
     assert "subprocess.Popen" not in source
+
+
+def test_bound_diagnostic_can_reach_original_lease_attempt_without_fake_gpu_pass():
+    spec = dict(task_id='diagnostic', gpu_uuid='GPU-real',
+                terminal_release_binding={'path':'/old/release.json','sha256':'a'*64},
+                concurrent_file_peak_fully_bound=True)
+    spec['canonical_gpu2_diagnostic_claim'] = dict(task_id='diagnostic',gpu_uuid='GPU-real',
+        scope='RELEASED_GPU2_T13_DIAGNOSTIC_ONLY', terminal_release=spec['terminal_release_binding'])
+    obs = observation(); obs.update(memory_safe=True, memory_headroom_bytes=460*GIB)
+    result = decision(spec, obs)
+    assert result['allowed'] and not result['science_started'] and not result['gpu_lease_acquired']
+    obs.update(gpu_main_reservation=True)
+    assert not decision(spec,obs)['allowed']
+
+
+def test_t13_child_provider_maps_only_actual_admitted_owner_evidence():
+    from src.utils.t13_performance_dispatch import child_evidence
+    value = dict(task_family='t13_performance_diagnostic', plan_sha256='b'*64,
+        t13_admission={'allowed':True}, observed_at='2026-09-08T10:00:00+00:00',
+        gpu_owner_pid=42,gpu_child_pid=43,gpu_owner_start_ticks=12,gpu_child_start_ticks=13,
+        other_tasks_headroom_reserve_bytes=384*GIB)
+    mapped=child_evidence(value,plan_sha='b'*64)
+    assert mapped['owner_pid']==42 and mapped['resource_admission']=='PASS'
+    value['pause_requested']=True
+    with pytest.raises(ValueError,match='PAUSE'): child_evidence(value,plan_sha='b'*64)
+    value['pause_requested']=False;value['t13_admission']={'allowed':False}
+    assert child_evidence(value,plan_sha='b'*64)['resource_admission']=='BLOCKED'
 
 
 def test_full_run_not_misrepresented_by_parent_receipt():

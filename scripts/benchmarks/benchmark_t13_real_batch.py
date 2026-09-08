@@ -60,6 +60,14 @@ def main():
         print(json.dumps(dict(state="INPUT_PATHS_PRESENT" if all(paths.values()) else "MISSING_INPUT",
             paths=paths, synthetic=False, science_started=False, active_handover_ready=False), sort_keys=True))
         return 0 if all(paths.values()) else 2
+    use_owner_pipe = 'AUTODL_LLM_OWNER_BOOTSTRAP_FD' in os.environ
+    if use_owner_pipe:
+        if args.held_gpu_fd is not None or args.owner_evidence is not None:
+            parser.error('Do not mix the inherited owner pipe with manual FD fields')
+        from src.ablations.llm.existing_gpu_owner import receive_owner_binding
+        binding = receive_owner_binding()
+        args.held_gpu_fd = binding['held_gpu_lock_fd']
+        args.owner_evidence = Path(binding['resource_live_evidence'])
     if args.held_gpu_fd is None or args.owner_evidence is None:
         parser.error("run requires the existing owner's actually inherited GPU FD and fresh evidence")
     if output.exists():
@@ -67,6 +75,9 @@ def main():
 
     def resources_and_lease():
         evidence = json.loads(args.owner_evidence.read_text())
+        if use_owner_pipe:
+            from src.utils.t13_performance_dispatch import child_evidence
+            evidence = child_evidence(evidence, plan_sha=plan_sha)
         age = time.time() - float(evidence["observed_at_epoch_seconds"])
         if not 0 <= age <= 120 or evidence.get("resource_admission") != "PASS":
             raise ValueError("T13_CANARY_STALE_OR_FAILED_OWNER_EVIDENCE")

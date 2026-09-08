@@ -1,5 +1,21 @@
 # Decisions Log
 
+## [2026-09-08] T13 existing-owner held-FD diagnostic adapter
+
+The real Taste performance benchmark is callable through explicit
+`gpu_lock.py run --t13-performance-execute`, reusing the existing UUID/one-slot
+owner and startup pipe. The child adapts actual refreshed resource evidence.
+The retired T14 terminal verifier validates the same held descriptor by inode,
+live owner binding and an independent losing contender, rather than classifying
+the authorized owner's own lock as foreign occupancy. Other families and the
+original unheld-terminal check retain their prior behavior.
+
+This is interface implementation, not GPU evidence. The existing 448 GiB
+(384 GiB other-task reserve plus 64 GiB diagnostic peak) gate remains effective
+until a defensible next-boundary memory proof is supplied. No GPU diagnostic
+has been started, no active T13 process changed, no formal attempt consumed,
+and `after_epoch_checkpoint=None` remains no deployed safe pause hook.
+
 ## [2026-09-08] BACE GIN A+ adopts saved Reach candidates as a new method version
 
 The explicit A+ authorization supersedes fixed-pool-only limits, but not the

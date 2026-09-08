@@ -144,9 +144,19 @@ class ResourceSampler:
                  observation_only=False):
         validate_resource_config(config, observation_only=observation_only)
         self.observation_only = observation_only
-        if task_family not in ("llm", "ours_reach", "globalgce_aplus"):
+        if task_family not in ("llm", "ours_reach", "globalgce_aplus", "t13_performance_diagnostic"):
             raise ValueError("EXISTING_OWNER_FAMILY_NOT_SUPPORTED")
         self.task_family, self.reach_contract = task_family, reach_contract
+        self.held_terminal_lease = None
+        self.t13_dispatch = None
+        if task_family == "t13_performance_diagnostic":
+            from src.utils.t13_performance_dispatch import bound_json
+            self.t13_dispatch = bound_json(reach_contract)
+            if (not observation_only or int(gpu_index) != 2
+                    or self.t13_dispatch.get('task_family') != task_family
+                    or self.t13_dispatch.get('borrow_enabled') is not False
+                    or self.t13_dispatch.get('max_full_starts_consumed') != 0):
+                raise ValueError('T13_DIAGNOSTIC_SCOPE_REQUIRED')
         if task_family == "ours_reach":
             from src.eval.bace_reach_v2 import unseal
             value = unseal(Path(reach_contract["path"]))
@@ -175,6 +185,15 @@ class ResourceSampler:
                             if "stage_file_policy" in config else None)
         self.initial_free_slots = None
 
+    def bind_t13_held_lease(self, fd, run_id):
+        if self.task_family != 't13_performance_diagnostic':
+            return
+        if run_id != self.t13_dispatch['task_id']:
+            raise ValueError('T13_HELD_LEASE_TASK_CHANGED')
+        self.held_terminal_lease = dict(fd=fd, owner_pid=os.getpid(),
+            owner_start_ticks=process_start_ticks(self.config['proc_root'], os.getpid()),
+            run_id=run_id, gpu_uuid=self.uuid)
+
     def sample(self, *, child_pid=None, child_start_ticks=None):
         now, tick = self.clock(), self.monotonic()
         cfg, blockers, sources = self.config, [], []
@@ -194,7 +213,8 @@ class ResourceSampler:
         retired = set()
         for descriptor in cfg.get('terminal_resource_dependencies', []):
             from src.utils.terminal_resource_dependency import verify_terminal_dependency
-            retired.add(verify_terminal_dependency(descriptor, registry, proc))
+            retired.add(verify_terminal_dependency(descriptor, registry, proc,
+                        held_lease=self.held_terminal_lease))
             sources.append({**descriptor, 'role': 'FAILED_STAGE_NO_PHYSICAL_OCCUPANCY',
                             'future_science_gate': 'WAITING_PARITY', 'reservation_modified': False})
         for row in registry["tasks"]:
@@ -351,7 +371,7 @@ class ResourceSampler:
             if (metadata.get("state") == "LOCKED" and metadata.get("ablation_family") in ("llm", "ours_reach", "globalgce_aplus")
                     and metadata.get("pid") != os.getpid()):
                 other_llm += 1
-        return {"schema_version": RESOURCE_SCHEMA,
+        result = {"schema_version": RESOURCE_SCHEMA,
                 "task_family": self.task_family, "reach_contract": self.reach_contract,
                 "ours_reach_contract_verified": self.task_family == "ours_reach",
                 "globalgce_aplus_contract_verified": self.task_family == "globalgce_aplus",
@@ -375,6 +395,16 @@ class ResourceSampler:
                 "active_early_ablation_gpus": other_llm,
                 "active_gpu_count_semantics": "OTHER_OWNERS_EXCLUDING_VERIFIED_CURRENT_LEASE",
                 "max_llm_gpus": 1, "borrow_enabled": False}
+        if self.task_family == 't13_performance_diagnostic':
+            from src.utils.t13_performance_dispatch import decision
+            result.update(t13_dispatch=self.reach_contract,
+                plan_sha256=self.t13_dispatch['performance_plan']['sha256'],
+                other_tasks_headroom_reserve_bytes=self.t13_dispatch['other_tasks_headroom_reserve_bytes'],
+                required_headroom_bytes=cfg['minimum_memory_headroom_bytes'])
+            if child_pid is not None:
+                result['gpu_child_pid'] = child_pid
+            result['t13_admission'] = decision(self.t13_dispatch, result)
+        return result
 
 
 def validate_inherited_lease(evidence, held_fd, slot_fd=None):
@@ -533,6 +563,14 @@ def run_owned_child(*, command, environment, sampler, output_root, lock_root, ru
         raise ValueError("Owner wait must be bounded to 0..86400 seconds")
     output = Path(output_root)
     family = getattr(sampler, "task_family", "llm")
+    def allowed(evidence):
+        if family == 't13_performance_diagnostic':
+            from src.utils.t13_performance_dispatch import decision
+            return decision(sampler.t13_dispatch, evidence)
+        return gpu_allowed({**evidence, "gnn_core_seed7_audit": "PASS"}, family=family)
+    if family == 't13_performance_diagnostic':
+        if command != sampler.t13_dispatch['science_command_without_owner_fds']:
+            raise ValueError('T13_OWNER_COMMAND_NOT_SEALED')
     if family == "ours_reach":
         if (len(command) < 5 or Path(command[3]).name != "run_bace_reach_v2.py"
             or command.count("--action") != 1
@@ -556,7 +594,7 @@ def run_owned_child(*, command, environment, sampler, output_root, lock_root, ru
         while True:
             try:
                 evidence = sampler.sample()
-                decision = gpu_allowed({**evidence, "gnn_core_seed7_audit": "PASS"}, family=family)
+                decision = allowed(evidence)
             except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 sampler.idle_since = None
                 evidence = {"observed_at": datetime.now(timezone.utc).isoformat(), "source_error": str(exc)}
@@ -577,9 +615,11 @@ def run_owned_child(*, command, environment, sampler, output_root, lock_root, ru
         with ExitStack() as stack:
             slot = stack.enter_context(ProjectGPUSlotLock(Path(lock_root) / "llm-ablation", max_slots=1, owner=owner))
             gpu = stack.enter_context(GPUFileLock(Path(lock_root), gpu_index=sampler.index, gpu_uuid=sampler.uuid, owner=owner))
+            if family == 't13_performance_diagnostic':
+                sampler.bind_t13_held_lease(gpu._handle.fileno(), run_id)
             # Re-sample after both existing locks; an idle preflight is not a lease.
             evidence = sampler.sample()
-            decision = gpu_allowed({**evidence, "gnn_core_seed7_audit": "PASS"}, family=family)
+            decision = allowed(evidence)
             if not decision["allowed"] or pause:
                 terminal.update(blockers=decision["blockers"])
                 return 75

@@ -1,5 +1,14 @@
 # Refactor Plan
 
+## 2026-09-08: T13 held-FD diagnostic follow-up
+
+- [x] Extend the existing owner/terminal provider with the T13 real-batch
+  dispatch adapter, inherited startup pipe and CPU lock-exclusion tests.
+- [ ] Supply a source-bound next-safe-boundary joint memory proof; retain the
+  source 64 GiB diagnostic bound and existing reserve until then.
+- [ ] Coordinate the real GPU2 canary after T14. No synthetic GPU PASS or
+  automatic handover of the active GPU1 formal worker.
+
 ## 2026-09-08: BACE GIN A+ narrow execution
 
 - [x] Implement declared reach-aware nested selector and focused regressions.

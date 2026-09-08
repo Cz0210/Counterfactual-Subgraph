@@ -1,6 +1,8 @@
 #!/bin/bash
 # The physical Taste canary is AutoDL-owner controlled; this paired HPC wrapper
 # is an input-only inspection entry and is not an authorization to run it on HPC.
+# Actual AutoDL child receives the existing owner pipe/FD; manual FD integers
+# do not constitute an authorization, and the inspection wrapper supplies none.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --cpus-per-task=1

@@ -1,8 +1,7 @@
-"""T13-only read-only preflight for the existing gpu_lock run entry.
+"""T13-only adapter for the existing gpu_lock owner and resource provider.
 
-It intentionally cannot invent the absent canonical GPU2 diagnostic claim.
-The provider is the existing terminal-aware ResourceSampler, not another
-registry or resource truth source.
+No registry writes or second lock: the canonical T14 release evidence is
+reopened before and after the original physical UUID lease is held.
 """
 from __future__ import annotations
 
@@ -57,7 +56,7 @@ def validate_dispatch(spec, *, project_root, gpu_index, gpu_uuid, lock_root):
 def decision(spec, observation):
     blockers = list(observation.get("source_blockers", []))
     if not observation.get("memory_safe"):
-        blockers.append("JOINT_HEADROOM_BELOW_AIDS384_PLUS_CANARY64_GIB")
+        blockers.append("JOINT_HEADROOM_BELOW_BOUND_OTHER_RESERVE_PLUS_CANARY64_GIB")
     if not observation.get("storage_safe"):
         blockers.append("PERSISTENT_NEXT_STAGE_SPACE_OR_FILE_BOUND_NOT_ADMITTED")
     if observation.get("gpu_main_reservation"):
@@ -65,25 +64,27 @@ def decision(spec, observation):
     if observation.get("main_ready_waiting_gpu"):
         blockers.append("MAIN_READY_GPU_TASK_PRESENT")
     gpu = observation.get("actual_gpu_observation", {})
-    if gpu.get("process_count", len(gpu.get("processes", [None]))):
+    if gpu.get("process_count", len(gpu.get("processes", [None]))) and not observation.get('gpu_child_pid'):
         blockers.append("GPU2_HAS_ACTUAL_PROCESS")
     if not spec.get("concurrent_file_peak_fully_bound", False):
         blockers.append("CONCURRENT_NEXT_BOUNDARY_FILE_PEAK_REQUIRES_CANONICAL_STAGE_BINDING")
-    if spec.get("canonical_gpu2_diagnostic_claim") is None:
+    claim = spec.get("canonical_gpu2_diagnostic_claim")
+    if not isinstance(claim, dict) or claim != {
+            'task_id': spec.get('task_id'), 'gpu_uuid': spec.get('gpu_uuid'),
+            'scope': 'RELEASED_GPU2_T13_DIAGNOSTIC_ONLY',
+            'terminal_release': spec.get('terminal_release_binding')} or not spec.get('terminal_release_binding'):
         blockers.append("CANONICAL_GPU2_DIAGNOSTIC_CLAIM_NOT_BOUND")
-    # Even a declarative future claim is not the actual CAS plus held-FD proof.
-    # This narrow command does not create it or bypass the terminal verifier.
-    blockers.append("HELD_LEASE_TERMINAL_PROVIDER_ADAPTER_NOT_ACTIVATED")
-    return dict(state="BLOCKED_RESOURCE_AND_CANONICAL_CLAIM" if not observation.get("memory_safe")
-                else "BLOCKED_CANONICAL_CLAIM_AND_HELD_PROVIDER", blockers=blockers,
+    if observation.get('active_early_ablation_gpus', 0) != 0:
+        blockers.append('ANOTHER_EARLY_GPU_OWNER_ACTIVE')
+    return dict(state="ADMITTED_TO_EXISTING_OWNER_LEASE_ATTEMPT" if not blockers else "BLOCKED_RESOURCE_OR_BINDING",
+                allowed=not blockers, blockers=blockers,
                 science_started=False, science_pid=None, gpu_lease_acquired=False,
                 automatic_waiting_owner_started=False, registry_modified=False,
                 max_full_starts_consumed=0, safe_handover_performed=False,
-                required_headroom_bytes=448 * GIB,
+                required_headroom_bytes=observation.get('required_headroom_bytes', 448 * GIB),
                 actual_headroom_bytes=observation.get("memory_headroom_bytes"),
-                source_observation=observation,
                 next_binding_point="ResourceSampler.sample -> verify_terminal_dependency: canonical diagnostic claim and real inherited FD required before same-lock resampling",
-                condition_for_reconsideration="AIDS phase reaches its genuine safe boundary / releases reserved resources; re-read all resource and canonical stage bindings")
+                condition_for_reconsideration="Supply defensible next-boundary remaining-peak evidence or wait for genuine resource release; re-read source and canonical stage bindings")
 
 
 def preflight(*, spec_descriptor, project_root, gpu_index, gpu_uuid, lock_root, output_root,
@@ -101,6 +102,7 @@ def preflight(*, spec_descriptor, project_root, gpu_index, gpu_uuid, lock_root, 
     sampler = sampler_factory(config, gpu_index, gpu_uuid, observation_only=True)
     observed = sampler.sample()
     result = decision(spec, observed)
+    result['source_observation'] = observed
     result.update(observed_at_epoch_seconds=time.time(), inspector_pid=os.getpid(),
                   performance_plan=spec["performance_plan"], resource_config=spec["resource_config"],
                   execution_root=str(project_root), task_id=spec["task_id"],
@@ -111,3 +113,45 @@ def preflight(*, spec_descriptor, project_root, gpu_index, gpu_uuid, lock_root, 
     atomic_json(output / "preflight.json", result)
     print(json.dumps(result, sort_keys=True))
     return 75
+
+
+def run(*, spec_descriptor, project_root, gpu_index, gpu_uuid, lock_root, output_root,
+        wait_seconds=0, refresh_seconds=60):
+    """Use the original bounded owner; absent bindings remain non-running."""
+    from src.ablations.llm.existing_gpu_owner import ResourceSampler, run_owned_child
+    from src.utils.autodl_runtime import sanitized_environment
+    spec = bound_json(spec_descriptor)
+    plan, config = validate_dispatch(spec, project_root=project_root, gpu_index=gpu_index,
+                                    gpu_uuid=gpu_uuid, lock_root=lock_root)
+    dependencies = config.get('terminal_resource_dependencies', [])
+    if dependencies != [spec.get('terminal_release_binding')]:
+        raise ValueError('T13_ORIGINAL_TERMINAL_RELEASE_NOT_BOUND')
+    backend = json.loads(Path(plan['source_runtime_backend_receipt']).read_text())
+    from src.utils.t13_deterministic_execution import BACKEND
+    if (backend.get('observed_backend') != BACKEND
+            or backend.get('torch_num_threads') != plan['torch_num_threads']
+            or backend.get('torch_num_interop_threads') != plan['torch_num_interop_threads']):
+        raise ValueError('T13_SOURCE_BACKEND_CHANGED')
+    env = dict(sanitized_environment(), **backend['thread_environment'])
+    env.update(CUBLAS_WORKSPACE_CONFIG=':4096:8', PYTHONDONTWRITEBYTECODE='1',
+               TMPDIR=str(Path(output_root).parent), CUDA_VISIBLE_DEVICES=gpu_uuid)
+    sampler = ResourceSampler(config, gpu_index, gpu_uuid, observation_only=True,
+        task_family='t13_performance_diagnostic', reach_contract=spec_descriptor)
+    return run_owned_child(command=spec['science_command_without_owner_fds'],
+        environment=env, sampler=sampler, output_root=output_root, lock_root=lock_root,
+        run_id=spec['task_id'], interval=refresh_seconds, max_wait_seconds=wait_seconds)
+
+
+def child_evidence(value, *, plan_sha):
+    """Adapt actual inherited-provider fields, never invent a resource PASS."""
+    from datetime import datetime
+    if (value.get('task_family') != 't13_performance_diagnostic'
+            or value.get('plan_sha256') != plan_sha or value.get('source_error')
+            or value.get('pause_requested')):
+        raise ValueError('T13_CHILD_PROVIDER_SCOPE_OR_PAUSE')
+    status = value.get('t13_admission', {})
+    return dict(value, resource_admission='PASS' if status.get('allowed') else 'BLOCKED',
+        observed_at_epoch_seconds=datetime.fromisoformat(value['observed_at'].replace('Z', '+00:00')).timestamp(),
+        owner_pid=value['gpu_owner_pid'], child_pid=value['gpu_child_pid'],
+        owner_start_ticks=value['gpu_owner_start_ticks'], child_start_ticks=value['gpu_child_start_ticks'],
+        other_task_headroom_required_bytes=value['other_tasks_headroom_reserve_bytes'])

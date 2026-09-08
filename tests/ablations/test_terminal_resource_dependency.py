@@ -68,6 +68,29 @@ class TerminalResourceTests(unittest.TestCase):
         self.lock.rename(self.root/'preserved.lock'); self.lock.write_text('new')
         with self.assertRaisesRegex(ValueError,'IDENTITY_CHANGED'): self.verify()
 
+    def test_same_owner_held_fd_is_exclusive_not_self_competition(self):
+        owner=12345
+        directory=self.proc/str(owner);directory.mkdir()
+        (directory/'stat').write_text(str(owner)+' (owner) '+' '.join(['S']+['0']*18+['71']))
+        metadata={'pid':owner,'run_id':'t13-diagnostic','gpu_uuid':'GPU-two',
+                  'ablation_family':'t13_performance_diagnostic'}
+        self.lock.write_text(json.dumps(metadata))
+        path=self.root/'release.json';atomic_json(path,self.receipt)
+        descriptor={'path':str(path),'sha256':sha256_file(path)}
+        with self.lock.open('r+') as held:
+            lease=dict(fd=held.fileno(),owner_pid=owner,owner_start_ticks=71,
+                       run_id='t13-diagnostic',gpu_uuid='GPU-two')
+            with self.assertRaisesRegex(ValueError,'NOT_EXCLUSIVE'):
+                verify_terminal_dependency(descriptor,self.registry,self.proc,held_lease=lease)
+            fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertEqual(verify_terminal_dependency(descriptor,self.registry,self.proc,held_lease=lease),'t14')
+            command=[sys.executable,'-c','import fcntl,sys; f=open(sys.argv[1],"r+"); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)',str(self.lock)]
+            self.assertNotEqual(subprocess.run(command,capture_output=True).returncode,0)
+            lease['gpu_uuid']='GPU-wrong'
+            with self.assertRaisesRegex(ValueError,'OWNER_BINDING'):
+                verify_terminal_dependency(descriptor,self.registry,self.proc,held_lease=lease)
+        self.assertEqual(subprocess.run(command,capture_output=True).returncode,0)
+
     def test_terminal_changed_rejected(self):
         atomic_json(self.terminal,{'status':'PASS'})
         with self.assertRaisesRegex(ValueError,'TERMINAL_CHANGED'): self.verify()

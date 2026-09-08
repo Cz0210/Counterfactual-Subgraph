@@ -43,6 +43,8 @@ def parser() -> argparse.ArgumentParser:
         if name == "run":
             command.add_argument("--t13-performance-spec", type=Path)
             command.add_argument("--t13-performance-spec-sha256")
+            command.add_argument("--t13-performance-execute", action="store_true",
+                                 help="Actual existing-owner diagnostic dispatch; default remains preflight")
             command.add_argument("--llm-dispatch-spec", type=Path)
             command.add_argument("--llm-dispatch-spec-sha256")
             command.add_argument("--owner-output-root", type=Path)
@@ -93,10 +95,12 @@ def main() -> int:
         if args.t13_performance_spec:
             if args.llm_dispatch_spec or args.command or not args.t13_performance_spec_sha256 or not args.owner_output_root:
                 raise AutoDLRuntimeError("T13 diagnostic requires sealed spec, fresh receipt root, and no injected command")
-            from src.utils.t13_performance_dispatch import preflight
-            return preflight(spec_descriptor={"path":str(args.t13_performance_spec),"sha256":args.t13_performance_spec_sha256},
+            from src.utils.t13_performance_dispatch import preflight, run
+            operation = run if args.t13_performance_execute else preflight
+            extra = dict(wait_seconds=args.wait_seconds, refresh_seconds=args.refresh_seconds) if args.t13_performance_execute else {}
+            return operation(spec_descriptor={"path":str(args.t13_performance_spec),"sha256":args.t13_performance_spec_sha256},
                 project_root=PROJECT_ROOT,gpu_index=args.gpu_index,gpu_uuid=args.gpu_uuid,
-                lock_root=layout.locks_dir,output_root=args.owner_output_root)
+                lock_root=layout.locks_dir,output_root=args.owner_output_root, **extra)
         if args.llm_dispatch_spec:
             if args.command or not args.llm_dispatch_spec_sha256 or not args.owner_output_root:
                 raise AutoDLRuntimeError("LLM dispatch requires sealed SHA, fresh owner root, and no injected command")

@@ -141,6 +141,57 @@ class TransportSampler:
                 "checkpoint_resume_pass": True, "active_early_ablation_gpus": 0, "borrow_enabled": False}
 
 
+def test_t13_original_owner_pipe_actual_fd_mapping_and_release(tmp_path, monkeypatch):
+    from src.utils.t13_performance_dispatch import decision
+    cfg, _ = source_fixture(tmp_path)
+    if Path('/proc/self/stat').exists():
+        cfg['proc_root'] = '/proc'
+    else:
+        monkeypatch.setattr(owner,'process_start_ticks',lambda proc,pid:stat_fixture(Path(proc),pid))
+    child_code = '''
+import os,json,fcntl
+from pathlib import Path
+from src.ablations.llm.existing_gpu_owner import receive_owner_binding
+from src.utils.t13_performance_dispatch import child_evidence
+b=receive_owner_binding()
+raw=json.loads(Path(b['resource_live_evidence']).read_text())
+e=child_evidence(raw,plan_sha='c'*64)
+assert e['owner_pid']==os.getppid() and e['child_pid']==os.getpid()
+assert e['resource_admission']=='PASS' and e['target_gpu_uuid']==os.environ['CUDA_VISIBLE_DEVICES']
+fd=b['held_gpu_lock_fd'];assert not os.get_inheritable(fd)
+with open(e['gpu_lock_path'],'r+') as competitor:
+ try: fcntl.flock(competitor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ except BlockingIOError: pass
+ else: raise AssertionError('No held exclusive GPU lease')
+'''
+    command=[sys.executable,'-c',child_code]
+    sampler=TransportSampler(cfg);sampler.index=2
+    sampler.task_family='t13_performance_diagnostic'
+    sampler.t13_dispatch=dict(task_id='t13-cpu-transport',gpu_uuid=sampler.uuid,
+        terminal_release_binding={'path':'/fixture/terminal','sha256':'b'*64},
+        concurrent_file_peak_fully_bound=True, science_command_without_owner_fds=command)
+    sampler.t13_dispatch['canonical_gpu2_diagnostic_claim']=dict(task_id='t13-cpu-transport',
+        gpu_uuid=sampler.uuid,scope='RELEASED_GPU2_T13_DIAGNOSTIC_ONLY',
+        terminal_release=sampler.t13_dispatch['terminal_release_binding'])
+    held=[]
+    sampler.bind_t13_held_lease=lambda fd,run_id:held.append((os.fstat(fd).st_ino,run_id))
+    base_sample=sampler.sample
+    def sample(**kw):
+        value=base_sample(**kw)
+        value.update(task_family=sampler.task_family,plan_sha256='c'*64,
+            other_tasks_headroom_reserve_bytes=384*1024**3,
+            actual_gpu_observation={'process_count':0})
+        if kw.get('child_pid'):value['gpu_child_pid']=kw['child_pid']
+        value['t13_admission']=decision(sampler.t13_dispatch,value)
+        return value
+    sampler.sample=sample
+    code=owner.run_owned_child(command=command,environment=dict(os.environ,PYTHONPATH=str(ROOT)),
+        sampler=sampler,output_root=tmp_path/'owner',lock_root=Path(cfg['gpu_lock_root']),
+        run_id='t13-cpu-transport',interval=.05)
+    assert code==0 and len(held)==1
+    with GPUFileLock(Path(cfg['gpu_lock_root']),gpu_index=2,gpu_uuid=sampler.uuid):pass
+
+
 CHILD = r'''
 import json, os, subprocess, sys, time
 from pathlib import Path
