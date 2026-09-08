@@ -1,8 +1,7 @@
-"""Prepare immutable Global CPU binding; update only AIDS existing dynamic policy.
+"""Existing Global CPU resource binding and narrowly authorized waiter handoff.
 
-The user explicitly protects CPU owner447477. This tool has no signal, spawn,
-owner/registry write or handover action. Prepared CPU specs cannot take effect
-until a separately authorized original-owner boundary is available.
+Legacy prepare/activate-aids remain unchanged. The 20260908 closeout actions
+require their separate authorization and preserve the frozen pool/science.
 """
 from __future__ import annotations
 import sys
@@ -202,7 +201,7 @@ def audit_memory(out):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
-    parser.add_argument('--action', required=True, choices=['prepare', 'activate-aids', 'audit-memory', 'status'])
+    parser.add_argument('--action', required=True, choices=['prepare', 'activate-aids', 'audit-memory', 'status', 'memory-pilot', 'handoff'])
     parser.add_argument('--output-root', required=True, type=Path)
     args = parser.parse_args()
     if not Path(args.config).is_file(): parser.error('existing config required')
@@ -211,6 +210,9 @@ def main():
     if args.action == 'prepare': prepare(args.output_root)
     elif args.action == 'activate-aids': activate_aids(args.output_root)
     elif args.action == 'audit-memory': audit_memory(args.output_root)
+    elif args.action in ('memory-pilot', 'handoff'):
+        from src.utils import global_cpu_closeout
+        print(json.dumps(getattr(global_cpu_closeout, args.action.replace('-', '_'))(args.output_root)))
     else:
         for name in ('prepared.json', 'aids_dynamic_rebind.json', 'aids_child_ack.json', 'cpu_joint_memory_audit.json'):
             path = args.output_root/name

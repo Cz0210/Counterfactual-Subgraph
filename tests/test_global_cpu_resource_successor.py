@@ -35,13 +35,14 @@ class ResourceSuccessorTests(unittest.TestCase):
         assert_dynamic_config_only(old, new)
         with self.assertRaises(ValueError): assert_dynamic_config_only(old, {**new, 'reserve': 0})
 
-    def test_no_cpu_signal_or_spawn_interface(self):
+    def test_legacy_cli_separately_routes_new_authorized_handoff(self):
         from pathlib import Path
         code = (Path(__file__).resolve().parents[1]/'scripts/autodl/prepare_global_cpu_resource_successor.py').read_text()
         self.assertNotIn('os.kill(', code)
         self.assertNotIn('subprocess.', code)
         self.assertNotIn('atomic_write_owner_registry(', code)
         self.assertIn('CPU_SPEC_SEALED_NOT_ACTIVATED', code)
+        self.assertIn("args.action in ('memory-pilot', 'handoff')", code)
 
     def test_eight_gib_floor_is_not_peak_proof(self):
         result = joint_memory_assessment(legacy_floor=8, concurrent_reserve=384, headroom=391)

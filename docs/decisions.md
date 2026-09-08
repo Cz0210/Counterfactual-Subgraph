@@ -18999,3 +18999,12 @@ evaluation. Retain a bounded waiting-owner atomic-record margin, giving
 max(96+8, 128+8, 128)=136 new files, rather than reserving only GPU generation's
 96 or counting the two CPU stages concurrently. Current T13/T12 guards and
 future-stage re-admission are preserved. No scientific implementation changes.
+# [2026-09-08] Exact Global CPU waiter closeout after frozen pool80
+
+The new closeout authorization supersedes only the protection of CPU waiter
+447477. Extend the existing preparation CLI with a bounded CPU memory pilot
+and one-shot, child-free PID/start/argv/cwd/CAS handoff under the original
+publication lock. Keep old roots/receipts, pool80, validation-selected epoch60,
+oracle, selector and test boundary unchanged. New temporary/cache/deployment
+files use persistent storage. No new controller, GPU lease or main-table cell.
+The pilot is a calibration-only memory bound, not full evaluation PASS.

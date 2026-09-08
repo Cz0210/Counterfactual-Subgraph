@@ -4357,3 +4357,9 @@ Mutagenicity roadmaps.
   calibration adoption and binding afterok test/aggregate/audit/export.
 - [ ] Actual GCF continuation activation after the real freeze job and immutable
   native/calibration manifests are supplied; no duplicate ComRec migration.
+# 2026-09-08 Global CPU closeout
+
+- [x] Add explicit-authorized, exact waiting-owner identity/CAS handoff.
+- [x] Preserve frozen science while rebinding operational resource/owner paths.
+- [x] Add actual CPU model-loading and calibration geometry memory pilot.
+- [ ] Observe real calibration/freeze/test and publish the fourth A+ component.

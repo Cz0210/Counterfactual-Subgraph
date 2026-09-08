@@ -3,7 +3,7 @@
 #SBATCH --gres=gpu:a800:1
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
-# Compatibility wrapper only: resource preparation belongs on AutoDL, not HPC.
+# Compatibility wrapper only: preparation/pilot/handoff belong on AutoDL, not HPC.
 # This guard exits before environment activation or any task action.
 echo "AutoDL-only one-shot resource binding: do not submit this wrapper to HPC."
 exit 2
