@@ -18976,3 +18976,20 @@ entrypoint is deliberately not submitted through sbatch; scientific stages use
 the existing CPU Slurm wrappers. A sealed plan must supply real freeze job,
 native source binding, prior calibration entry and worker source identity before
 activation. Unit tests do not activate the relay or read heldout payloads.
+# 2026-09-08: Global CPU successor resource preparation without owner termination
+
+The independent Global CPU owner 447477 is explicitly protected by the recovery
+task book. Its frozen spec binds an obsolete resource SHA and the owner has no
+dynamic reload interface. Prepare a fresh resource-only spec without activating
+it; do not signal, replace, or rewrite that owner or its original sealed spec.
+Any later handover requires separate authorization and a real original-namespace
+handover implementation; preparation is not dispatch or scientific completion.
+
+AIDS retains its existing child, memory reserve, byte guard, pair data, and
+dynamic resource provider. Only its stage-file-policy descriptor may change via
+the existing publication lock and compare-and-swap. The Global chain is serial:
+GPU generation -> CPU export -> frozen pool terminal -> independent CPU
+evaluation. Retain a bounded waiting-owner atomic-record margin, giving
+max(96+8, 128+8, 128)=136 new files, rather than reserving only GPU generation's
+96 or counting the two CPU stages concurrently. Current T13/T12 guards and
+future-stage re-admission are preserved. No scientific implementation changes.
