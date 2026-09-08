@@ -1,4 +1,7 @@
 #!/bin/bash
+# The bounded compact reader is CPU-tested; current production source lacks
+# its persisted mask/index payload. Do not dispatch this legacy full-expansion
+# interceptor as a bounded canary until that input and call-site are closed.
 # The physical Taste canary is AutoDL-owner controlled; this paired HPC wrapper
 # is an input-only inspection entry and is not an authorization to run it on HPC.
 # Actual AutoDL child receives the existing owner pipe/FD; manual FD integers

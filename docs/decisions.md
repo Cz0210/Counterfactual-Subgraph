@@ -19066,3 +19066,14 @@ The first deployment correctly rejected unproven canary resume before sampling.
 A narrow read-only observation mode now retains checkpoint_resume_pass=false
 while reading real resources. Normal owner admission still requires true; no
 existing Global/AIDS config is changed and no fabricated resume evidence is used.
+# 2026-09-08: T13 bounded compact payload reader, not historical reconstruction
+
+The stopped target0 epoch29 checkpoint contains mask/index identities and RNG,
+not the compact index arrays or split lists. A bounded reader now materializes
+only two500-row train batches and one500-row validation batch from a separately
+committed payload. Missing payloads fail explicitly; masks are never reseeded.
+This reader and incremental memory calculator are CPU-tested but NOT wired into
+the old full-expansion performance interceptor until a true historical payload
+or an independently bound deterministic reconstruction exists. No GPU test or
+same-run resume is claimed. Remaining autograd/validation/checkpoint increments
+must have evidence; existing RSS is not charged twice.
