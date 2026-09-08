@@ -15,6 +15,16 @@ from src.baselines.t13_real_batch_performance import GIB, validate_plan
 from src.eval.bace_frozen_gnn_contracts import atomic_json
 
 SCHEMA = "t13_real_batch_existing_owner_dispatch_v1"
+SOURCE_BACKEND_SHA = '637e9e7f7880275eef23f7cfbe812ba273532df0428dfca4094307c0769aaaf3'
+
+
+def source_backend(plan):
+    """Read the exact c0eb helper; the diagnostic branch lacks that module."""
+    from src.baselines.t13_real_batch_performance import reference_module
+    path = Path(plan['reference_source']).parents[2] / 'src/utils/t13_deterministic_execution.py'
+    if path.is_symlink():
+        raise ValueError('T13_SOURCE_BACKEND_INDIRECT')
+    return reference_module(path, SOURCE_BACKEND_SHA)
 
 
 def bound_json(descriptor):
@@ -127,12 +137,19 @@ def run(*, spec_descriptor, project_root, gpu_index, gpu_uuid, lock_root, output
     if dependencies != [spec.get('terminal_release_binding')]:
         raise ValueError('T13_ORIGINAL_TERMINAL_RELEASE_NOT_BOUND')
     backend = json.loads(Path(plan['source_runtime_backend_receipt']).read_text())
-    from src.utils.t13_deterministic_execution import BACKEND
+    BACKEND = source_backend(plan).BACKEND
     if (backend.get('observed_backend') != BACKEND
             or backend.get('torch_num_threads') != plan['torch_num_threads']
             or backend.get('torch_num_interop_threads') != plan['torch_num_interop_threads']):
         raise ValueError('T13_SOURCE_BACKEND_CHANGED')
-    env = dict(sanitized_environment(), **backend['thread_environment'])
+    env = dict(sanitized_environment())
+    for name, value in backend['thread_environment'].items():
+        if name not in {'OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'}:
+            raise ValueError('T13_THREAD_ENVIRONMENT_SCOPE_CHANGED')
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
     env.update(CUBLAS_WORKSPACE_CONFIG=':4096:8', PYTHONDONTWRITEBYTECODE='1',
                TMPDIR=str(Path(output_root).parent), CUDA_VISIBLE_DEVICES=gpu_uuid)
     sampler = ResourceSampler(config, gpu_index, gpu_uuid, observation_only=True,

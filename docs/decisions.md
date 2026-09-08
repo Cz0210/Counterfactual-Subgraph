@@ -16,6 +16,16 @@ until a defensible next-boundary memory proof is supplied. No GPU diagnostic
 has been started, no active T13 process changed, no formal attempt consumed,
 and `after_epoch_checkpoint=None` remains no deployed safe pause hook.
 
+Runtime import audit also found that the diagnostic branch does not contain
+`t13_deterministic_execution.py`. The adapter now loads only the already-pinned
+c0eb helper from the protected source worktree with its exact file SHA,
+preserving the original backend implementation rather than inventing a copy.
+An explicitly absent source thread environment value removes that variable
+in the new child; it is not passed as invalid `None` to `subprocess`.
+Compact deployment preserves the exact adapter/bridge/oracle source leaves as
+physical files because the original official-source auditor opens them. The
+remaining package modules stay in `source.zip`; no source audit is bypassed.
+
 ## [2026-09-08] BACE GIN A+ adopts saved Reach candidates as a new method version
 
 The explicit A+ authorization supersedes fixed-pool-only limits, but not the

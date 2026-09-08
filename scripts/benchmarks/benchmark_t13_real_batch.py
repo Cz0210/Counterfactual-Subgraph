@@ -18,6 +18,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 if (ROOT / "source.zip").is_file():
     sys.path.insert(0, str(ROOT / "source.zip"))
+    # The pinned official provenance checker opens three project .py leaves.
+    # Keep those exact same-commit leaves physical; other modules may remain
+    # in the compact source archive. This does not weaken its source checks.
+    import src
+    src.__path__.insert(0, str(ROOT / 'src'))
+    import src.baselines
+    if str(ROOT / 'source.zip/src/baselines') not in src.baselines.__path__:
+        src.baselines.__path__.append(str(ROOT / 'source.zip/src/baselines'))
 
 
 def main():
@@ -161,7 +169,9 @@ def main():
     try:
         # The owner establishes CUBLAS before creating this child, never afterwards.
         import torch
-        from src.utils.t13_deterministic_execution import apply_backend, BACKEND
+        from src.utils.t13_performance_dispatch import source_backend
+        backend_helper = source_backend(plan)
+        apply_backend, BACKEND = backend_helper.apply_backend, backend_helper.BACKEND
         source_backend = json.loads(Path(plan["source_runtime_backend_receipt"]).read_text())
         if (source_backend["observed_backend"] != BACKEND
                 or source_backend["torch_num_threads"] != plan["torch_num_threads"]
