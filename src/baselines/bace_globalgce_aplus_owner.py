@@ -162,7 +162,51 @@ def cpu_predecessor_state(evaluation_spec):
     return 'READY'
 
 
-def run_cpu_handoff(evaluation_spec_path):
+def prepare_cpu_freeze_repair(spec,spec_path,receipt_path):
+    """Resume only the failed exporter, under the original publication lock."""
+    import fcntl
+    from src.experiments.bace_globalgce_aplus_evaluation import bound
+    receipt=read_small(receipt_path)[0]
+    if (receipt.get('reason')!='MISSING_CALIBRATION_SUMMARY_STRICT_FLIP_COUNT'
+        or receipt.get('source_spec_sha256')!=sha256_file(spec_path)
+        or receipt.get('repair_attempt') not in (1,2)
+        or receipt.get('resume_action')!='freeze'
+        or receipt.get('science_records_changed') is not False):
+        raise ValueError('NARROW_FREEZE_REPAIR_RECEIPT_REQUIRED')
+    old=bound(receipt['failed_owner']);terminal=bound(receipt['failed_terminal'])
+    if terminal.get('state')!='BLOCKED' or 'freeze failed code=1' not in terminal.get('error',''):
+        raise ValueError('FAILED_FREEZE_ONLY')
+    completed=bound(receipt['calibration_terminal'])
+    if completed.get('state')!='EVALUATION_COMPLETE' or completed.get('spec_sha256')!=stable_sha256(spec):
+        raise ValueError('COMPLETED_CALIBRATION_REQUIRED')
+    root=Path(receipt['fresh_owner_root'])
+    if root.parent!=Path(spec['output_root']).parent or root==Path(spec['cpu_handoff_root']):
+        raise ValueError('FRESH_SAME_CAMPAIGN_OWNER_REQUIRED')
+    lock=Path('/autodl-fs/data/counterfactual-subgraph-runtime/control/fast16_matrix_authority/publish.lock')
+    with lock.open('r+') as handle:
+        fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        if process_start_ticks(Path('/proc'),old['pid'])==old['start_ticks']:
+            raise ValueError('PREVIOUS_OWNER_STILL_ALIVE')
+        for proc in Path('/proc').iterdir():
+            if not proc.name.isdigit() or int(proc.name)==os.getpid():continue
+            try:argv=proc.joinpath('cmdline').read_bytes().split(b'\0')
+            except OSError:continue
+            if str(spec_path).encode() in argv:
+                raise ValueError('DUPLICATE_EVALUATION_PROCESS:'+proc.name)
+            for fd in proc.joinpath('fd').glob('*'):
+                try:target=os.readlink(fd).removesuffix(' (deleted)')
+                except OSError:continue
+                if target.startswith(str(spec['output_root'])+'/'):
+                    raise ValueError('EVALUATION_OPEN_FILE:'+proc.name)
+        root.mkdir(parents=True,exist_ok=False)
+        atomic_json(root/'repair_claim.json',{'receipt_path':str(receipt_path),
+            'receipt_sha256':sha256_file(receipt_path),'pid':os.getpid(),
+            'start_ticks':process_start_ticks(Path('/proc'),os.getpid()),'created_at':utc_now()})
+        atomic_json(Path(spec['output_root'])/'freeze_repair_execution.json',receipt)
+    return root
+
+
+def run_cpu_handoff(evaluation_spec_path,*,repair_receipt=None):
     """Fresh immutable four-stage CPU handoff after the existing owner retires.
 
     Uses the same resource admission and output contracts. No GPU lock is
@@ -173,7 +217,9 @@ def run_cpu_handoff(evaluation_spec_path):
     root=Path(spec['cpu_handoff_root'])
     if not root.is_absolute() or root.parent!=Path(spec['output_root']).parent:
         raise ValueError('CANONICAL_CPU_HANDOFF_PATH_REQUIRED')
-    root.mkdir(parents=True,exist_ok=False)
+    if repair_receipt:
+        root=prepare_cpu_freeze_repair(spec,evaluation_spec_path,repair_receipt)
+    else:root.mkdir(parents=True,exist_ok=False)
     identity={'pid':os.getpid(),'start_ticks':process_start_ticks(Path('/proc'),os.getpid()),
         'spec_path':str(evaluation_spec_path),'spec_sha256':sha256_file(evaluation_spec_path),'created_at':utc_now(),
         'cpu_only':True,'gpu_lease_acquired':False}
@@ -182,7 +228,8 @@ def run_cpu_handoff(evaluation_spec_path):
     try:
         while cpu_predecessor_state(spec)!='READY':
             heartbeat('WAITING_TRAINING_AND_POOL_FREEZE',science_started=False);time.sleep(60)
-        for action in ('calibration','freeze','test','aggregate'):
+        actions=('freeze','test','aggregate') if repair_receipt else ('calibration','freeze','test','aggregate')
+        for action in actions:
             attempt=0
             while True:
                 resource=bound(spec['cpu_resource_config']);evidence,ready=cpu_admission(resource)

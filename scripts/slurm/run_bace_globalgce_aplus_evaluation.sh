@@ -1,5 +1,6 @@
 #!/bin/bash
 # User-authorized BACE exact CPU exception: native cal/freeze/test, no GPU.
+# Failed freeze-only continuation accepts --cpu-repair-receipt via the existing CLI.
 #SBATCH --partition=intel
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

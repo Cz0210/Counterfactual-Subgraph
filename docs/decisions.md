@@ -19015,3 +19015,13 @@ evaluation split's actual parent/match cardinality. Held-out input remains close
 until the existing selector freeze. Its resource bound must pass before model
 load; the scientific spec and selected epoch60/80-rule pool remain unchanged.
 Handover additionally rejects scoped open file descriptors and active claims.
+# 2026-09-08 — Global completed-calibration exporter repair
+
+All 66 calibration parents completed. The derived matrix exporter omitted
+`strict_flip_pair_count`, and the unchanged selector correctly rejected the
+summary. Derive that count from the bound pair rows in fresh `summary_v2`
+matrix/selector directories. Preserve the failed owner and old derived files.
+The existing CPU owner accepts a narrowly bound failed-freeze continuation,
+reuses the unchanged science spec and calibration records, and resumes only
+freeze → test → aggregate. No training, pool export, inference or OT is rerun
+for calibration. The new driver is recorded separately from the science spec.

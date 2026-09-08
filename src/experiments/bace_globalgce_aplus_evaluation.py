@@ -265,11 +265,13 @@ def sealed_matrix_file(path,value,*,jsonl=False):
 def freeze(spec):
     validate(spec);manifest,candidates=pool(spec);root=Path(spec['output_root']);fp=root/'selection_freeze.json'
     if fp.exists():return verified_freeze(spec)
-    matrix=root/'calibration_matrix';matrix.mkdir(exist_ok=True)
+    # The first exporter omitted strict_flip_pair_count. Keep its failed
+    # matrix/selector immutable; rebuild only this small derived view.
+    matrix=root/'calibration_matrix_summary_v2';matrix.mkdir(exist_ok=True)
     pairs=list(rows(spec,'calibration'))
     if len(pairs)!=66*len(candidates) or any(p['split']!='calibration' for p in pairs):raise ValueError('CALIBRATION_MATRIX_INCOMPLETE')
     sealed_matrix_file(matrix/'pair_matrix.jsonl',pairs,jsonl=True);sealed_matrix_file(matrix/'selected_candidate_universe.jsonl',candidates,jsonl=True)
-    sealed_matrix_file(matrix/'summary.json',{'parent_count':66,'selected_candidate_count':len(candidates),'test_loaded':False})
+    sealed_matrix_file(matrix/'summary.json',calibration_summary(pairs,candidates))
     sealed_matrix_file(matrix/'run_manifest.json',{'inputs':{'cohort_name':'calibration'},'split':'calibration','test_loaded':False,'classifier_family':'gin'})
     original=bound(spec['original_global_selector_manifest']);v=bound(spec['original_global_variant_config'])
     from src.eval.mutagenicity_wnode_selector import preregistered_variant_configs
@@ -286,18 +288,33 @@ def freeze(spec):
         'native_attachment_contract':SCHEMA,'original_global_selector_verified':True,
         'available_rule_count':len(candidates),'rule_budget_semantics':'AT_MOST_K',
         'original_selector_config':config,'thresholds':t,'threshold_provenance':original['threshold_provenance'],
-        'output_root':str(root/'selector')})
+        'output_root':str(root/'selector_summary_v2')})
     result={'state':'FROZEN','spec_sha256':stable_sha256(spec),'pool_manifest_sha256':stable_sha256(manifest),
         'ordered_rule_ids':details['ordered_rule_ids'],'test_loaded':False,'selector_details':details,
         'original_selector_manifest':spec['original_global_selector_manifest'],'original_variants':spec['original_global_variant_config'],
         'created_at':utc_now()}
-    sources={'decision':root/'selector/calibration_decision.json',
-        'selected':root/'selector/variants'/details['selected_variant']/'selected_top20.json',
+    result['matrix_summary_contract']='COUNTS_DERIVED_FROM_BOUND_PAIR_ROWS_V2'
+    sources={'decision':root/'selector_summary_v2/calibration_decision.json',
+        'selected':root/'selector_summary_v2/variants'/details['selected_variant']/'selected_top20.json',
         'matrix':matrix/'pair_matrix.jsonl','candidate_universe':matrix/'selected_candidate_universe.jsonl'}
     result['selector_artifacts']={k:{'path':str(p),'sha256':sha256_file(p)} for k,p in sources.items()}
     result['ordered_rules_sha256']=stable_sha256(result['ordered_rule_ids'])
     result['self_sha256']=stable_sha256(result)
     atomic_json(fp,result);return verified_freeze(spec)
+
+
+def calibration_summary(pairs,candidates):
+    """Use actual records, including valid zeros; never default a missing count."""
+    ids=[c['candidate_id'] for c in candidates]
+    parents=list(dict.fromkeys(p['parent_id'] for p in pairs))
+    keys={(p['parent_id'],p['candidate_id']) for p in pairs}
+    if (len(ids)!=len(set(ids)) or len(keys)!=len(pairs)
+        or keys!={(p,c) for p in parents for c in ids}
+        or any(p.get('split')!='calibration' or type(p.get('pair_strict_flip')) is not bool for p in pairs)):
+        raise ValueError('BOUND_CALIBRATION_PAIR_COUNTS_REQUIRED')
+    return {'parent_count':len(parents),'selected_candidate_count':len(ids),
+        'strict_flip_pair_count':sum(p['pair_strict_flip'] for p in pairs),
+        'pair_count':len(pairs),'test_loaded':False}
 
 def aggregate(spec):
     config=validate(spec);f=verified_freeze(spec);pairs=list(rows(spec,'test'))
@@ -323,5 +340,7 @@ def aggregate(spec):
         'saved_record_result_consistency':'PASS','oracle_reexecuted_by_this_audit':False,'ot_recomputed_by_this_audit':False,
         'benchmark_test_previously_seen':True,'repair_selected_using_test':False,'main_matrix_write':False,
         'metrics_sha256':sha256_file(root/'metrics.json'),'created_at':utc_now()}
+    repair=root/'freeze_repair_execution.json'
+    if repair.exists():audit['selector_export_repair']={'path':str(repair),'sha256':sha256_file(repair)}
     atomic_json(root/'final_audit.json',audit);atomic_json(root/'experiment_registry.json',audit)
     return audit

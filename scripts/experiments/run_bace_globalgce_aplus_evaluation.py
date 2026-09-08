@@ -8,6 +8,7 @@ def main():
     p.add_argument('--config',required=True);p.add_argument('--spec',required=True)
     p.add_argument('--action',required=True,choices=('calibration','freeze','test','aggregate','cpu-handoff','status'))
     p.add_argument('--set',action='append',default=[])
+    p.add_argument('--cpu-repair-receipt',help='Bound failed-freeze-only continuation; retains all calibration records')
     a=p.parse_args()
     if not Path(a.config).is_file():p.error('real runtime config required')
     if os.environ.get('CUDA_VISIBLE_DEVICES') not in ('','-1'):p.error('CPU evaluation requires no visible GPU')
@@ -16,7 +17,8 @@ def main():
     spec=json.loads(Path(a.spec).read_text())
     if a.action=='cpu-handoff':
         from src.baselines.bace_globalgce_aplus_owner import run_cpu_handoff
-        return run_cpu_handoff(a.spec)
+        return run_cpu_handoff(a.spec,repair_receipt=a.cpu_repair_receipt)
+    if a.cpu_repair_receipt:p.error('--cpu-repair-receipt is only valid for cpu-handoff')
     if a.action in ('calibration','test'):result=leaf.evaluate(spec,a.action)
     elif a.action=='status':
         root=Path(spec['output_root']);result={}
