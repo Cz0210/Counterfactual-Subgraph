@@ -85,6 +85,11 @@ def clone_route_state(source_root, output_root, loaded, diagnostic):
 
 def validate_campaign(campaign_path: Path, *, source_spec_path: Path, output_root: Path) -> list[Path]:
     value = json.loads(campaign_path.read_text())
+    if value.get('campaign_kind') != 'ADDITIONAL_FOLLOWER_CAPTURE_170':
+        raise ValueError('FRESH_ADDITIONAL_FOLLOWER_AUTHORIZATION_REQUIRED')
+    preflight=json.loads(Path(value['raw_field_preflight']).read_text())
+    if preflight.get('state')!='FULL_FOLLOWER_RAW_SAVE_REOPEN_PASS' or preflight.get('hash_only_fields') is not False:
+        raise ValueError('FULL_RAW_FIELD_PREFLIGHT_REQUIRED')
     if value.get("total_new_transition_cap") != 170 or set(value.get("arms", {})) != {"reference", "lowmemory"}:
         raise ValueError("T14 campaign requires exactly two arms and total170")
     roots = []
@@ -174,11 +179,12 @@ def execute_replay(*, source_worktree, source_spec_path, output_root, gpu_uuid, 
         else:
             restore_official_state(module, loaded.algorithm_state.pop("official_state"), consume=True)
         store = full._prepare_runtime_store(output_root, loaded)
+        native_move_code=module.move_to_next_graph.__code__
         with full._bounded_t14_runtime(module=module, bridge=bridge, graph_store_path=store, seed=parameters.seed, expanded_capacity=full.TRANSITION_EXPANDED_CAPACITY, route_c_root=output_root / "route_c_state" if lowmemory else None, route_c_resume=lowmemory) as handles:
             state = full._restore_checkpoint_state(module=module, bridge=bridge, loaded=loaded, handles=handles)
             started = completed = 0
             start_time = time.monotonic()
-            with gzip.open(output_root / "raw_step_observations.pkl.gz", "wb") as observations, (output_root / "step_summary.jsonl").open("x") as summaries, diagnostic.SamplingObserver(module) as observer:
+            with gzip.open(output_root / "raw_step_observations.pkl.gz", "wb") as observations, (output_root / "step_summary.jsonl").open("x") as summaries, diagnostic.SamplingObserver(module,follower_code=native_move_code,action_lookup=handles.transition_map._entries.get) as observer:
                 original_move = module.move_to_next_graph
                 def observed_move(*args, **kwargs):
                     nonlocal started
@@ -195,6 +201,7 @@ def execute_replay(*, source_worktree, source_spec_path, output_root, gpu_uuid, 
                     started += 1
                     diagnostic.atomic_json(output_root / "transition_budget.json", {"started_new_transitions": started, "completed_new_transitions": completed, "step_in_progress": 250 + started, "arm_cap": 85, "campaign_cap": 170, "auto_retry_allowed": False})
                     observer.events.clear()
+                    observer.capture_follower = (250 + started == 335)
                     pickle.dump({"phase": "BEFORE", "step": 250+started, "rng": capture_rng_state()}, observations, protocol=5)
                     observations.flush()
                     return original_move(*args, **kwargs)
@@ -213,6 +220,18 @@ def execute_replay(*, source_worktree, source_spec_path, output_root, gpu_uuid, 
                     row = {"phase": "AFTER", "step": loop_state.completed_step, "rng": capture_rng_state(), "actual_sampling_events": observer.events, "compact_candidate_actions": compact_actions, "native_observation": handles.step_observation, "loop_state": loop_state.to_checkpoint_state()}
                     pickle.dump(row, observations, protocol=5)
                     observations.flush()
+                    if loop_state.completed_step==334:
+                        before_save=capture_rng_state()
+                        saved=save_generation_checkpoint(output_root/'pre335_checkpoint',completed_step=334,step_complete=True,
+                            algorithm_state=full._checkpoint_algorithm_state(module=module,bridge=bridge,loop_state=loop_state,handles=handles),
+                            trace_state={'enabled':True,'policy':'follower_capture_only_not_promotable'},
+                            sqlite_source=handles.live_graph_state.store.checkpoint_connection,
+                            provenance_fingerprints=identity['provenance'],scientific_argv=identity['scientific_argv'],
+                            command_sha256=identity['command_sha256'],total_steps=25000,reload_after_write=False)
+                        if diagnostic.digest(before_save)!=diagnostic.digest(capture_rng_state()):
+                            raise ValueError('DIAGNOSTIC_CHECKPOINT_CONSUMED_RNG')
+                        diagnostic.atomic_json(output_root/'pre335_receipt.json',{'completed_step':334,
+                            'checkpoint_digest':saved.checkpoint_digest,'diagnostic_only':True,'rng_unchanged':True})
                     selected_actions = handles.step_observation.get("selected_transitions", ())
                     summaries.write(json.dumps({"completed_step": loop_state.completed_step, "elapsed_seconds": time.monotonic()-start_time, "selected_transitions": diagnostic.semantic(selected_actions), "sampling_draws": len(observer.events)}, sort_keys=True) + "\n")
                     summaries.flush()
@@ -229,5 +248,11 @@ def execute_replay(*, source_worktree, source_spec_path, output_root, gpu_uuid, 
                 sqlite_source=handles.live_graph_state.store.checkpoint_connection,
                 provenance_fingerprints=identity["provenance"], scientific_argv=identity["scientific_argv"], command_sha256=identity["command_sha256"], total_steps=25000, reload_after_write=False)
             result = {"status": "BOUNDED_DIAGNOSTIC_335_COMPLETE", "completed_step": 335, "started_new_transitions": started, "completed_new_transitions": completed, "arm_cap": 85, "total_cap": 170, "formal_dispatch_allowed": False, "parity_claimed": False, "checkpoint_digest": checkpoint.checkpoint_digest, "checkpoint_scope": "DIAGNOSTIC_ONLY_NOT_PROMOTABLE", "elapsed_seconds": time.monotonic()-start_time}
+            followers=[x for x in observer.events if x.get('api')=='follower_argmin']
+            if len(followers)!=parameters.heads-1:
+                raise ValueError('STEP335_FULL_FOLLOWER_CAPTURE_INCOMPLETE')
+            result['follower_records_335']=len(followers)
+            result['prior_diagnostic170_replaced']=False
+            result['self_resume40_consumed']=0
             diagnostic.atomic_json(output_root / "terminal.json", result)
             return result

@@ -12,7 +12,7 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--action", choices=("inspect-checkpoint", "compare", "replay-arm", "compare-replay"), required=True)
+    parser.add_argument("--action", choices=("inspect-checkpoint", "compare", "replay-arm", "compare-replay", "follower-preflight", "compare-followers"), required=True)
     parser.add_argument("--source-worktree", type=Path)
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -40,7 +40,12 @@ def main():
     spec.loader.exec_module(module)
     output_existed_before = args.output_root.exists()
     try:
-        if args.action == "inspect-checkpoint":
+        if args.action == 'follower-preflight':
+            result=module.follower_field_preflight(args.output_root)
+        elif args.action == 'compare-followers':
+            if not args.reference or not args.lowmemory:parser.error('Both completed follower replay roots required')
+            result=module.compare_followers(args.reference,args.lowmemory,args.output_root)
+        elif args.action == "inspect-checkpoint":
             resource_root = args.output_root.with_name(args.output_root.name + "-resources")
             resource_root.mkdir(parents=True, exist_ok=False)
             with module.ResourceSampler(resource_root):

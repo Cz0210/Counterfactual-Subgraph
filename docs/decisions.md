@@ -18601,3 +18601,11 @@ retains actual scores, cumulative probabilities and sampled values for the
 first action discrepancy. An earlier floating drift is not automatically
 declared the cause of the later discrete discrepancy. This future overlay is
 deployed independently of the immutable410ade5d replay already running.
+# 2026-09-08: additional T14 follower-argmin evidence only
+
+The new authorized 170-transition capture is separate from the completed prior
+170 and optional self-resume40. Observe the actual pinned official follower
+np.argmin call once. Preserve full vectors, embeddings, action/hash order, dtype,
+layout, exact ties and RNG at step335, plus a diagnostic334 checkpoint. No
+epsilon tie classification or formal promotion is introduced. Raw-array
+save/reopen tests precede any new replay. Existing failed evidence is unchanged.

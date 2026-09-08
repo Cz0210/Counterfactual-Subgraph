@@ -45,6 +45,9 @@ def test_campaign_rejects_extra_arm_or_other_root(tmp_path):
     import json
     path = tmp_path / "campaign.json"
     value = {"total_new_transition_cap": 170, "arms": {name: {"start_step": 250, "end_step": 335, "new_transition_cap": 85, "source_spec": str(tmp_path / (name+"-spec.json")), "output_root": str(tmp_path/name)} for name in ("reference", "lowmemory")}}
+    from src.baselines.t14_causal_diagnostic import follower_field_preflight
+    follower_field_preflight(tmp_path/'raw-field-preflight')
+    value.update(campaign_kind='ADDITIONAL_FOLLOWER_CAPTURE_170',raw_field_preflight=str(tmp_path/'raw-field-preflight/terminal.json'))
     path.write_text(json.dumps(value))
     assert len(validate_campaign(path, source_spec_path=tmp_path/"reference-spec.json", output_root=tmp_path/"reference")) == 2
     with pytest.raises(ValueError):

@@ -137,10 +137,13 @@ def first_difference(left: Any, right: Any, path: str = "$") -> dict[str, Any] |
 class SamplingObserver:
     """Call original RNG once; observe actual native locals at function return."""
 
-    def __init__(self, module: Any):
+    def __init__(self, module: Any, *, follower_code=None, action_lookup=None):
         self.module = module
         self.events: list[dict[str, Any]] = []
         self._profile = None
+        self.capture_follower = False
+        self.follower_code=follower_code
+        self.action_lookup=action_lookup
 
     def __enter__(self):
         self._random = random._inst.random
@@ -156,9 +159,27 @@ class SamplingObserver:
             value = self._getrandbits(count)
             self.events.append({"api": "Random.getrandbits", "bits": count, "value": value})
             return value
+        self._target = self.module.move_from_known_graph.__code__
+        self._follower_target = self.follower_code or getattr(getattr(self.module,'move_to_next_graph',None),'__code__',None)
+        self._np=getattr(self.module,'np',None)
+        self._argmin = self._np.argmin if self._np is not None else None
+        def observed_argmin(*args, **kwargs):
+            # Call the native implementation once with untouched arguments.
+            result = self._argmin(*args, **kwargs)
+            frame = sys._getframe(1)
+            if self.capture_follower and frame.f_code is self._follower_target:
+                row=follower_snapshot(frame.f_locals,args[0],result)
+                if self.action_lookup is not None:
+                    entry=self.action_lookup(row['source_hash'])
+                    if entry is None or tuple(entry.target_hashes)!=tuple(row['candidate_order']):
+                        raise ValueError('FOLLOWER_NATIVE_ACTION_ORDER_UNBOUND')
+                    row['ordered_actions']=tuple(entry.actions)
+                    row['selected_action']=tuple(entry.actions[row['selected_index']])
+                self.events.append(row)
+            return result
         random._inst.random = draw
         random._inst.getrandbits = bits
-        self._target = self.module.move_from_known_graph.__code__
+        if self._np is not None:self._np.argmin = observed_argmin
         self._choices_target = random._inst.choices.__func__.__code__
         sys.setprofile(self._observe)
         return self
@@ -205,6 +226,102 @@ class SamplingObserver:
         sys.setprofile(self._profile)
         random._inst.random = self._random
         random._inst.getrandbits = self._getrandbits
+        if self._np is not None:self._np.argmin = self._argmin
+
+
+def follower_snapshot(local, argmin_input, selected):
+    """Copy actual follower locals, never reconstruct them from the selected min."""
+    import numpy as np
+    names=('recourse','matching_recourses','difference','target_graphs_embedding',
+           'start_embedding','selected_elements','start_elements','target_graphs_importance_parts')
+    missing=[name for name in (*names,'k','i','select','target_graphs_hashes') if name not in local]
+    if missing:raise ValueError('FOLLOWER_RAW_LOCALS_MISSING:'+','.join(missing))
+    difference=np.asarray(argmin_input)
+    if difference.ndim!=1 or not np.array_equal(difference,np.asarray(local['difference']),equal_nan=True):
+        raise ValueError('FOLLOWER_ARGMIN_INPUT_BINDING')
+    ids=list(local['target_graphs_hashes'])
+    if len(ids)!=len(difference) or len(set(ids))!=len(ids) or not np.isfinite(difference).all():
+        raise ValueError('FOLLOWER_CANDIDATES_OR_NONFINITE')
+    arrays={}
+    for name in names:
+        a=np.asarray(local[name])
+        if a.dtype.hasobject or a.nbytes>128*1024**2:
+            raise ValueError('FOLLOWER_RAW_ARRAY_BOUND_OR_OBJECT:'+name)
+        arrays[name]={'dtype':str(a.dtype),'shape':list(a.shape),'strides':list(a.strides),
+                      'values':np.array(a,copy=True,order='K')}
+    best=float(difference[int(selected)])
+    sorted_values=np.sort(difference,kind='stable')
+    return dict(api='follower_argmin',head=int(local['k']),source_hash=int(local['i']),
+        lead_head=int(local['select']),candidate_order=ids,selected_index=int(selected),
+        selected_hash=ids[int(selected)],exact_minimum_indices=np.flatnonzero(difference==best).tolist(),
+        min_value=best,second_min_value=float(sorted_values[1]) if len(sorted_values)>1 else None,
+        arrays=arrays,original_argmin_called_once=True,extra_rng_calls=0)
+
+
+def follower_field_preflight(output_root):
+    """Full raw-array save/reopen test before charging any replay transition."""
+    import numpy as np
+    root=Path(output_root);root.mkdir(parents=True,exist_ok=False)
+    local=dict(k=1,i=11,select=0,target_graphs_hashes=list(range(100,140)),
+        difference=np.arange(40,dtype=np.float32),recourse=np.zeros(64,dtype=np.float32),
+        matching_recourses=np.arange(2560,dtype=np.float32).reshape(40,64),
+        target_graphs_embedding=np.arange(2560,dtype=np.float32).reshape(40,64),
+        start_embedding=np.zeros(64,dtype=np.float32),selected_elements=np.ones(40,dtype=np.int64),
+        start_elements=np.int64(3),target_graphs_importance_parts=np.ones((40,3),dtype=np.float32))
+    row=follower_snapshot(local,local['difference'],0)
+    path=root/'raw_fields.pkl.gz'
+    with gzip.open(path,'wb') as f:pickle.dump(row,f,protocol=5)
+    with gzip.open(path,'rb') as f:loaded=pickle.load(f)
+    for name,info in row['arrays'].items():
+        observed=loaded['arrays'][name]
+        if info['dtype']!=observed['dtype'] or info['shape']!=observed['shape'] or not np.array_equal(info['values'],observed['values']):
+            raise ValueError('RAW_FIELD_ROUNDTRIP:'+name)
+    result=dict(state='FULL_FOLLOWER_RAW_SAVE_REOPEN_PASS',new_transitions=0,
+        array_fields=list(row['arrays']),raw_file=str(path),raw_bytes=path.stat().st_size,
+        captured_candidates=len(loaded['candidate_order']),hash_only_fields=False)
+    atomic_json(root/'terminal.json',result)
+    return result
+
+
+def compare_followers(reference, lowmemory, output_root):
+    import numpy as np
+    def read(root):
+        root=Path(root)
+        terminal=json.loads((root/'terminal.json').read_text())
+        if terminal.get('follower_records_335')!=4:
+            raise ValueError('COMPLETE_STEP335_FOLLOWERS_REQUIRED')
+        with gzip.open(root/'raw_step_observations.pkl.gz','rb') as f:
+            while True:
+                try:row=pickle.load(f)
+                except EOFError:break
+                if row['phase']=='AFTER' and row['step']==335:
+                    return {e['head']:e for e in row['actual_sampling_events'] if e['api']=='follower_argmin'}
+        raise ValueError('RAW_STEP335_MISSING')
+    left,right=read(reference),read(lowmemory)
+    if set(left)!=set(right):raise ValueError('FOLLOWER_HEAD_SET_DIFFERS')
+    rows=[]
+    for head in sorted(left):
+        a,b=left[head],right[head];differences={}
+        for name,info in a['arrays'].items():
+            x=info['values'];y=b['arrays'][name]['values']
+            same_shape=x.shape==y.shape
+            same=np.array_equal(x,y) if same_shape else False
+            first=np.argwhere(x!=y)[0].tolist() if same_shape and not same else None
+            differences[name]=dict(exact_equal=same,left_dtype=str(x.dtype),right_dtype=str(y.dtype),
+                left_shape=list(x.shape),right_shape=list(y.shape),first_difference_index=first,
+                max_abs=float(np.max(np.abs(x.astype(np.float64)-y.astype(np.float64)))) if same_shape and x.size else None)
+        rows.append(dict(head=head,candidate_order_equal=a['candidate_order']==b['candidate_order'],
+            actions_equal=a['ordered_actions']==b['ordered_actions'],left_selected_action=a['selected_action'],
+            right_selected_action=b['selected_action'],left_argmin=a['selected_index'],right_argmin=b['selected_index'],
+            left_exact_ties=a['exact_minimum_indices'],right_exact_ties=b['exact_minimum_indices'],
+            left_min=a['min_value'],right_min=b['min_value'],left_second=a['second_min_value'],right_second=b['second_min_value'],
+            arrays=differences))
+    root=Path(output_root);root.mkdir(parents=True,exist_ok=False)
+    result=dict(state='FOLLOWER_335_RAW_COMPARISON_COMPLETE',followers=rows,
+        root_cause_classification='EVIDENCE_ONLY_REQUIRES_SEMANTIC_REVIEW',
+        parity_claimed=False,formal_dispatch_allowed=False,new_transitions=0)
+    atomic_json(root/'follower_comparison.json',result)
+    return result
 
 
 def candidate_snapshot(algorithm: dict, source_root: Path) -> list:

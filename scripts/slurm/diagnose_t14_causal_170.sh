@@ -8,6 +8,9 @@
 #SBATCH --error=logs/%j.err
 # Paired CLI wrapper only: actual deployment is AutoDL CPU inspection then
 # GPU2 via its existing UUID lock. This template is not GPU2 authorization.
+# follower-preflight is a CPU-only full raw-array save/reopen test; new replay
+# requires an independent ADDITIONAL_FOLLOWER_CAPTURE_170 campaign receipt.
+# compare-followers audits saved335 vectors/actions and never grants promotion.
 # compare-replay is CPU-only postprocessing (optional bounded 60s terminal
 # checks); production uses the existing AutoDL170 campaign, not this GPU job.
 source ~/.bashrc
