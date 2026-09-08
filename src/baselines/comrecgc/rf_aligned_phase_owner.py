@@ -28,7 +28,7 @@ def child_env(worktree, scratch=None):
 
 
 def phase_argv(*, python, worktree, manifest, recourse_root, pool_root, evidence, phase, fd, cli=None):
-    if phase not in ("cluster-existing", "summary-existing"):
+    if phase not in ("cluster-existing", "summary-existing", "global-witness"):
         raise ValueError("Existing-pair owner cannot dispatch pair generation")
     return ["nice", "-n", "10", python, "-B", str(cli or Path(worktree)/"scripts/continue_aids_rf_pairs.py"),
             "--config", str(Path(worktree)/"configs/hpc.yaml"), "--run-manifest", str(manifest),
@@ -99,6 +99,23 @@ def run_owner(config, *, manifest, recourse_root, pool_root, output_root):
         fcntl.flock(writer, fcntl.LOCK_EX|fcntl.LOCK_NB)
         binding = sealed_pairs(config, recourse)
         atomic_json(root/"source_pair_adoption.json", binding)
+        if config.get("phase_route") == "GLOBAL_RADIUS_WITNESS_ONLY":
+            from .aids_global_witness import memory_plan
+            plan = memory_plan(binding)
+            evidence = root/"global-witness"; evidence.mkdir(exist_ok=True)
+            atomic_json(evidence/"phase_memory_plan.json", plan)
+            wait_admission(config, plan, root, "AIDS_GLOBAL_RADIUS_WITNESS")
+            command = phase_argv(python=sys.executable, worktree=worktree, manifest=manifest,
+                recourse_root=recourse, pool_root=pool, evidence=evidence, phase="global-witness",
+                fd=writer.fileno(), cli=config.get("phase_cli_path"))
+            run_child(command, worktree=worktree, root=root, phase="global-witness",
+                env=child_env(worktree,root/"scratch"), pass_fds=(writer.fileno(),))
+            result = json.loads((evidence/"terminal.json").read_text())
+            atomic_json(root/"terminal.json", {"state": "WITNESS_PILOT_COMPLETE", "witness_result": result,
+                "full_summary_or_publication_dispatched": False, "pair_rows_recomputed": 0,
+                "next_stage": "INDEPENDENT_CERTIFICATE_AND_PARTITION_ADOPTION" if result["complete_dbscan_certificate"]
+                              else "BOUNDED_WITNESS_RESUME_OR_GENERAL_EXACT_COST_REVIEW"})
+            return
         for action, phase in (("cluster-existing", "CERTIFIED_EXACT_DBSCAN"), ("summary-existing", "NATIVE_SUMMARY")):
             evidence = root/action; evidence.mkdir(exist_ok=True)
             if (root/(action+"_terminal.json")).exists():

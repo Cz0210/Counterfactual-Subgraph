@@ -3,7 +3,7 @@
 #SBATCH --partition=intel
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
 #SBATCH --time=12:00:00
 #SBATCH --job-name=aids-rf-existing-pairs
@@ -23,9 +23,11 @@ export PYTHONPATH="$PWD"
 export CUDA_VISIBLE_DEVICES=""
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
+mkdir -p "$AIDS_OUTPUT_ROOT/scratch"
+export TMPDIR="$AIDS_OUTPUT_ROOT/scratch" XDG_CACHE_HOME="$AIDS_OUTPUT_ROOT/scratch/cache"
 echo "python=$(command -v python)"
 python --version
-echo "cpu_only=true worker_count=1 job=${SLURM_JOB_ID:-local}"
+echo "cpu_only=true worker_count=1 thread_limit=2 job=${SLURM_JOB_ID:-local}"
 # Source vectors remain on AutoDL. This paired wrapper documents the same CPU
 # CLI; do not transfer/recompute the 10GB pair store to use it on HPC.
 exec nice -n 10 python -B scripts/continue_aids_rf_pairs.py --config configs/hpc.yaml \

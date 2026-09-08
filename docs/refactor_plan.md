@@ -4357,3 +4357,13 @@ Mutagenicity roadmaps.
   calibration adoption and binding afterok test/aggregate/audit/export.
 - [ ] Actual GCF continuation activation after the real freeze job and immutable
   native/calibration manifests are supplied; no duplicate ComRec migration.
+# 2026-09-08 AIDS targeted global-witness closeout
+
+- [x] Add a bounded exact `global-witness` phase to the existing completed-pair
+  owner/CLI; retain the original writer FD and source-selection authority.
+- [x] Preserve eps=.02/min_samples=3, float32 original sklearn kernel, pair
+  order and row identity. Partial queries do not classify noise/noncore.
+- [x] Bound source windows and output, checkpoint actual neighbor witnesses and
+  elapsed-time/cursor state, and synchronize the CPU Slurm wrapper.
+- [ ] Complete real witness/pilot, independently close any full certificate and
+  adopt a fresh exact partition before the original summary/release.

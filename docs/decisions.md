@@ -18976,6 +18976,30 @@ entrypoint is deliberately not submitted through sbatch; scientific stages use
 the existing CPU Slurm wrappers. A sealed plan must supply real freeze job,
 native source binding, prior calibration entry and worker source identity before
 activation. Unit tests do not activate the relay or read heldout payloads.
+# 2026-09-08: Bounded AIDS global radius witnesses after an inconclusive anchor proof
+
+The closeout authorization permits targeted exact neighbor queries against the
+already-sealed 37,342,977 float32/64-dimensional vectors. The original 55-anchor
+subgraph cannot establish noncore status in the complete universe. A new
+`global-witness` phase reuses the existing AIDS owner, writer FD and dynamic
+resource provider, with one CPU process and at most two math threads. It reads
+the completed seed/failure ledger once and preserves all prior failures.
+
+The first pilot admits at most 1,048,576 new source rows (256 MiB of source
+pages) per process plus sparse anchors, bounded radius output, static-ledger
+decoding and runtime under a 2 GiB charged bound. It retains the existing
+384 GiB other-task reserve and persistent byte/file gates. The 2-hour cumulative
+cursor budget cannot be reset by resume. New output and scratch are persistent;
+no pair regeneration, global neighbor list, GPU use or NVMe staging is allowed.
+
+Witness records retain actual original row IDs and sklearn kernel distances.
+Partial absence means UNKNOWN. Only complete-domain absence establishes
+noncore. Even 55 proven core anchors are not a global DBSCAN certificate without
+the complete original nonfailure seed-neighbor ledger and actual connectivity
+edges. A witness-only owner exits with a small truthful result and does not
+invoke summary/publication or the >100k quadratic fallback. A subsequent
+partition adoption still needs its own independent certificate/manifest closure.
+
 # 2026-09-08: Global CPU successor resource preparation without owner termination
 
 The former CPU admission's 8 GiB minimum headroom is not a measured evaluator

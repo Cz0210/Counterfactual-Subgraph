@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--recourse-root", required=True)
     parser.add_argument("--pool-root", required=True)
     parser.add_argument("--output-root", required=True)
-    parser.add_argument("--action", choices=["plan", "owner", "cluster-existing", "summary-existing", "status"], required=True)
+    parser.add_argument("--action", choices=["plan", "owner", "cluster-existing", "summary-existing", "global-witness", "status"], required=True)
     parser.add_argument("--writer-fd", type=int)
     args = parser.parse_args()
     root = Path(args.output_root); recourse = Path(args.recourse_root); pool = Path(args.pool_root)
@@ -28,6 +28,8 @@ def main():
         # the new driver. Only three named AIDS files can override base imports.
         expected = {"scripts/continue_aids_rf_pairs.py", "src/baselines/comrecgc/rf_aligned_cluster_phase.py",
                     "src/baselines/comrecgc/rf_aligned_phase_owner.py"}
+        if config.get("phase_route") == "GLOBAL_RADIUS_WITNESS_ONLY":
+            expected.add("src/baselines/comrecgc/aids_global_witness.py")
         overlay = Path(config["phase_overlay_root"])
         if set(config["phase_overlay_files"]) != expected or Path(__file__).resolve() != overlay/"scripts/continue_aids_rf_pairs.py":
             raise ValueError("Unrecognized phase-only code overlay")
@@ -54,7 +56,10 @@ def main():
         else:
             if args.writer_fd is None: parser.error("science child requires the actual inherited original writer FD")
             validate_writer_fd(args.writer_fd, recourse)
-            if args.action == "cluster-existing": run_cluster_only(config, recourse_root=recourse, evidence_root=root)
+            if args.action == "global-witness":
+                from src.baselines.comrecgc.aids_global_witness import run_witness
+                run_witness(config, recourse_root=recourse, evidence_root=root)
+            elif args.action == "cluster-existing": run_cluster_only(config, recourse_root=recourse, evidence_root=root)
             else: run_summary_only(config, pool_root=pool, recourse_root=recourse, evidence_root=root)
     except Exception as exc:
         atomic_json(root/"failed.json", {"state": "FAILED_STAGE", "error_type": type(exc).__name__, "error": str(exc),
