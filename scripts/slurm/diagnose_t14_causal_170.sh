@@ -6,8 +6,8 @@
 #SBATCH --time=01:00:00
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
-# Paired CLI wrapper only: this repair runs CPU checkpoint inspection on
-# AutoDL; do not submit this GPU template as a substitute for GPU2 authority.
+# Paired CLI wrapper only: actual deployment is AutoDL CPU inspection then
+# GPU2 via its existing UUID lock. This template is not GPU2 authorization.
 source ~/.bashrc
 conda activate smiles_pip118
 cd /share/home/u20526/czx/counterfactual-subgraph
@@ -15,5 +15,5 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("CUDA available:", torch.cuda.is_available())'
-# No inference/heuristic override: this entry only reads sealed checkpoints.
+# No heuristic fallback is available in this narrowly frozen replay entry.
 python -I -B scripts/autodl/diagnose_t14_causal_170.py --config configs/hpc.yaml "$@"

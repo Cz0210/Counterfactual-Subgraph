@@ -191,7 +191,7 @@ class SamplingObserver:
         probabilities = local.get("probabilities")
         self.events.append({
             "api": "move_from_known_graph.return", "candidate_order": semantic(hashes),
-            "raw_importances": semantic(local.get("importances")),
+            "raw_importances": semantic([row.tolist() if hasattr(row, "tolist") else row for row in local.get("importances", ())]),
             "importance_values": semantic(local.get("importance_values")),
             "actual_probabilities": semantic(probabilities.tolist() if hasattr(probabilities, "tolist") else probabilities),
             "existing_candidate_frequency": frequency,

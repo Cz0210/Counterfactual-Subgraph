@@ -18561,6 +18561,20 @@ engineering retry. Record the temperature driver and the verifier driver separat
   `docs/T14_FORMAL_VERSION_BINDING_20260907.md`.
 # 2026-09-08: T14 bounded causal diagnosis begins at the actual saved state
 
+The follow-up replay entry is a dataset-specific wrapper around each original
+arm's exact 250 checkpoint and original `_bounded_t14_runtime`/outer loop. It
+clones only the committed Route C external prefixes and reconstructs mmap
+frequency/order/metadata from the sealed checkpoint; old live SQLite/WAL is
+never queried or copied. Source-path relocation is an explicit diagnostic
+overlay, not a forged promotion. The original updater revalidates before251.
+Actual Python `Random.choices` cumulative weights, original random draws,
+native candidate order and importance, action records, and full per-step RNG
+are stored in one compressed segment. The 85-transition per-arm cap is counted
+before each attempted transition, including a failed partial transition;
+failures do not reset the counter or authorize retries. The 335 checkpoint is
+diagnostic-only and cannot promote full science. Only the existing AutoDL UUID
+lease may launch this child; resource coordination is separate from code tests.
+
 The current authorization replaces the former 64-transition cap with a total
 170 (reference 251–335 and low-memory 251–335, each from its own sealed 250).
 The offline ledgers show a discrete NLC divergence at step335 but do not prove
