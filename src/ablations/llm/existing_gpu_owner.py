@@ -35,7 +35,7 @@ def validate_resource_config(config):
     required = {"main_registry_path", "main_ready_sources", "proc_root", "cgroup_memory_root",
                 "persistent_root", "gpu_lock_root", "minimum_gpu_free_mb", "maximum_idle_utilization_percent",
                 "minimum_memory_headroom_bytes", "minimum_persistent_free_bytes", "checkpoint_resume_pass"}
-    optional = {"minimum_free_inodes", "reserved_new_inodes", "stage_file_policy"}
+    optional = {"minimum_free_inodes", "reserved_new_inodes", "stage_file_policy", "terminal_resource_dependencies"}
     if not required <= set(config) or set(config) - required - optional:
         raise ValueError("LLM_RESOURCE_SOURCE_CONFIG_FIELDS_CHANGED")
     for field in ("main_registry_path", "proc_root", "cgroup_memory_root", "persistent_root", "gpu_lock_root"):
@@ -50,7 +50,7 @@ def validate_resource_config(config):
         raise ValueError("INVALID_IDLE_UTILIZATION_THRESHOLD")
     if config["checkpoint_resume_pass"] is not True:
         raise ValueError("REAL_CHECKPOINT_RESUME_REQUIRED")
-    for field in optional - {"stage_file_policy"}:
+    for field in optional - {"stage_file_policy", "terminal_resource_dependencies"}:
         if field in config and (type(config[field]) is not int or config[field] < 0):
             raise ValueError("INVALID_INODE_BUDGET:" + field)
     if "stage_file_policy" in config:
@@ -58,6 +58,14 @@ def validate_resource_config(config):
         if (not isinstance(descriptor, dict) or set(descriptor) != {"path", "sha256"}
                 or not Path(descriptor["path"]).is_absolute() or len(descriptor["sha256"]) != 64):
             raise ValueError("INVALID_STAGE_FILE_POLICY_DESCRIPTOR")
+    if "terminal_resource_dependencies" in config:
+        descriptors = config['terminal_resource_dependencies']
+        if not isinstance(descriptors, list) or len(descriptors) != 1:
+            raise ValueError('ONE_EXPLICIT_T14_TERMINAL_DEPENDENCY_REQUIRED')
+        for descriptor in descriptors:
+            if (set(descriptor) != {'path', 'sha256'} or not Path(descriptor['path']).is_absolute()
+                    or len(descriptor['sha256']) != 64):
+                raise ValueError('INVALID_TERMINAL_RESOURCE_DESCRIPTOR')
     return config
 
 
@@ -180,6 +188,11 @@ class ResourceSampler:
         identities = {}
         task_by_id = {row["task_id"]: row for row in registry["tasks"]}
         retired = set()
+        for descriptor in cfg.get('terminal_resource_dependencies', []):
+            from src.utils.terminal_resource_dependency import verify_terminal_dependency
+            retired.add(verify_terminal_dependency(descriptor, registry, proc))
+            sources.append({**descriptor, 'role': 'FAILED_STAGE_NO_PHYSICAL_OCCUPANCY',
+                            'future_science_gate': 'WAITING_PARITY', 'reservation_modified': False})
         for row in registry["tasks"]:
             successor = task_by_id.get(row.get("successor_task_id"))
             terminal = row["owner_state"] in {"TERMINAL_FAILED_ENGINEERING", "SUPERSEDED", "RETIRED"} or (

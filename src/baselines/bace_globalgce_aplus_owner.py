@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import fcntl
 
 from src.ablations.llm.existing_gpu_owner import ResourceSampler, run_owned_child, read_small, memory_headroom
 from src.eval.bace_frozen_gnn_contracts import atomic_json, sha256_file, stable_sha256, utc_now
@@ -33,7 +34,10 @@ def predecessor_ready(descriptor):
 def training_command(spec, config, stage, *, resume):
     action = 'train-canary' if stage == 'canary' else 'train'
     root = config['gpu_canary_root'] if stage == 'canary' else config['formal_output_root']
-    command = [sys.executable, '-I', '-B', str(Path(__file__).resolve().parents[2] / 'scripts/run_bace_globalgce_aplus.py'),
+    entry = spec.get('science_entrypoint', str(Path(__file__).resolve().parents[2] / 'scripts/run_bace_globalgce_aplus.py'))
+    if 'science_entrypoint' in spec and sha256_file(entry) != spec['science_entrypoint_sha256']:
+        raise ValueError('UNCHANGED_SCIENCE_ENTRYPOINT_BINDING_FAILED')
+    command = [sys.executable, '-I', '-B', entry,
         '--config', spec['runtime_config'], '--repair-config', spec['training_contract'],
         '--rematerialization-root', config['rematerialization_root'], '--device', 'cuda:0',
         '--action', action, '--output-root', root]
@@ -65,17 +69,40 @@ def run_owner(spec_path):
     resource, _ = read_small(spec['resource_config'])
     if spec['gpu_index'] != 0 or spec['gpu_borrow_or_colocation'] is not False:
         raise ValueError('GPU0_EXCLUSIVE_ONLY')
-    root = Path(spec['owner_root']); root.mkdir(parents=True, exist_ok=False)
     identity = {'pid':os.getpid(), 'start_ticks':process_start_ticks(Path('/proc'),os.getpid()),
         'owner_spec':str(spec_path), 'owner_spec_sha256':sha256_file(spec_path), 'created_at':utc_now()}
-    atomic_json(root/'owner.json', identity)
+    root = Path(spec['owner_root'])
+    if 'waiting_owner_handover' in spec:
+        binding = spec['waiting_owner_handover']
+        old, _ = read_small(root/'owner.json')
+        if (sha256_file(root/'owner.json') != binding['old_owner_sha256']
+                or old['pid'] != binding['old_pid'] or old['start_ticks'] != binding['old_start_ticks']
+                or process_start_ticks(Path('/proc'), old['pid']) == old['start_ticks']
+                or not (Path(config['formal_output_root'])/'latest.pt').is_file()
+                or (root/'terminal.json').exists()):
+            raise ValueError('WAITING_OWNER_HANDOVER_NOT_READY')
+        receipt, _ = read_small(binding['receipt_path'])
+        if sha256_file(binding['receipt_path']) != binding['receipt_sha256'] or receipt['state'] != 'OLD_WAITING_OWNER_EXIT_CONFIRMED':
+            raise ValueError('WAITING_OWNER_EXIT_RECEIPT_REQUIRED')
+        # Same namespace and original publisher lock; no additional authority.
+        lock = open(binding['existing_publication_lock'], 'r+')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if sha256_file(root/'owner.json') != binding['old_owner_sha256']:
+                raise ValueError('OWNER_IDENTITY_CAS_CHANGED')
+            atomic_json(root/'owner.json', identity)
+        finally:
+            lock.close()
+    else:
+        root.mkdir(parents=True, exist_ok=False)
+        atomic_json(root/'owner.json', identity)
     def heartbeat(state, **extra):
         atomic_json(root/'heartbeat.json', {**identity, 'state':state, 'updated_at':utc_now(), **extra})
     try:
         for stage in ('canary','formal'):
             output = Path(config['gpu_canary_root'] if stage=='canary' else config['formal_output_root'])
             expected = 'CANARY_COMPLETE' if stage=='canary' else 'REPAIR_TRAINING_COMPLETE'
-            attempt=0
+            attempt=max([int(p.name.rsplit('-',1)[1]) for p in root.glob(stage+'-lease-*')], default=0)
             while True:
                 if (output/'terminal.json').exists():
                     terminal,_=read_small(output/'terminal.json')

@@ -18976,3 +18976,30 @@ entrypoint is deliberately not submitted through sbatch; scientific stages use
 the existing CPU Slurm wrappers. A sealed plan must supply real freeze job,
 native source binding, prior calibration entry and worker source identity before
 activation. Unit tests do not activate the relay or read heldout payloads.
+
+## 2026-09-08 — Failed T14 stage resource decoupling and existing baseline resumption
+
+The explicit recovery authorization distinguishes the failed T14 scientific
+parity gate, current physical occupancy, and unstarted future reservations.
+A one-shot AutoDL tool uses the original publish.lock and registry CAS to mark
+the dead stage BLOCKED/FAILED_PARITY_WAITING_COMPONENT_EVIDENCE and release only
+its demonstrably unheld lease. Original terminal, ledgers, locks and publisher
+remain intact. New resource consumers require a hash-bound terminal receipt,
+same boot, absent original process identities, unchanged blocked registry row,
+released lease and actual nonblocking flock evidence. A new stage or physical
+holder invalidates this narrow exception; arbitrary failed owners are not ignored.
+
+AIDS dynamically reopens its existing resource_config, so an archived old config
+and fresh stage policy allow its same child and pair-store to continue. GlobalGCE
+has no such reload: its confirmed child-free waiting owner is gracefully handed
+over in the same namespace, original root, epoch60 checkpoint and one-used quota.
+The new driver uses an explicitly pinned original science entrypoint. Inner
+lease pause is followed only at the outer child-free retry sleep if necessary;
+no science process receives a signal. New lease attempt directories avoid
+overwriting old evidence. Active T12/T13 code and science are unchanged.
+
+Future T14/T12 diagnostics and T13 performance tests remain separately pending
+resource evidence; unknown peaks are not zero. Existing stage-file bounds and
+AIDS's 384GiB other-task memory reserve are retained. This AutoDL-only control
+entrypoint has a paired Slurm compatibility wrapper which deliberately refuses
+HPC execution: no GPU or science submission is appropriate for registry repair.
