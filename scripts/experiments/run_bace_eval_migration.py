@@ -14,12 +14,17 @@ def main():
     p.add_argument('--spec',required=True,type=Path)
     p.add_argument('--raw-reconciliation-root',type=Path,
         help='LLM-only fresh provenance overlay; reuse unchanged calibration and freeze')
-    p.add_argument('--action',choices=('plan','run','resume','freeze','export','status'),required=True)
+    p.add_argument('--acceptance-root',type=Path)
+    p.add_argument('--action',choices=('plan','run','resume','freeze','export','status','accept-package'),required=True)
     a=p.parse_args()
     if not a.config.is_file() or a.set!=['inference.fallback_to_heuristic=false']:
         p.error('Actual config and fail-closed inference required')
     spec=json.loads(a.spec.read_text());root=validate(spec)
-    if a.action=='status':
+    if a.action=='accept-package':
+        if a.acceptance_root is None:p.error('--acceptance-root is required')
+        from src.experiments.bace_migration_acceptance import package
+        value=package(a.spec,a.acceptance_root)
+    elif a.action=='status':
         value={x:json.loads((root/x).read_text()) for x in ('final_audit.json','progress.json') if (root/x).is_file()}
     elif a.action=='plan': value={'scope':spec['scope'],'roles':list(spec['roles']),'science_started':False}
     elif a.action in ('run','resume'): value=run(spec,raw_reconciliation_root=a.raw_reconciliation_root)

@@ -19012,3 +19012,11 @@ are retained. Zero calibration conflicts permits byte-preserved264 units and
 freeze; any calibration conflict stops for explicit dependency repair. Existing
 GNN source/cache and prior failure evidence stay immutable. See
 docs/LLM_RAW_RECONCILIATION_20260908.md. This is not a new generation or metric.
+# 2026-09-08: BACE migration saved-record acceptance
+
+GNN-A and LLM-GIN receive fresh acceptance/package roots. The independent reducer
+checks every saved match -> pair -> parent -> prefix/ECDF/table reduction,
+model identity, common/native cohorts and frozen selection boundaries. It does
+not reload models, regenerate proposals or solve OT. Arithmetic CSV closure is
+not numerical trajectory parity. Small packages bind externally retained parent
+records and exclude weights and main-matrix authority. Original audits remain.
