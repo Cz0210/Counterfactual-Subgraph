@@ -3,6 +3,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+_source_zip = Path(__file__).resolve().parents[2]/'source.zip'
+if _source_zip.is_file():
+    # Compact immutable source deployment avoids thousands of FUSE writes.
+    # The archive is exported from the same pinned private Git commit.
+    sys.path.insert(0, str(_source_zip))
 import argparse
 import copy
 import fcntl
