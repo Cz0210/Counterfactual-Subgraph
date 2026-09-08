@@ -97,7 +97,8 @@ def preflight(*, spec_descriptor, project_root, gpu_index, gpu_uuid, lock_root, 
     output = Path(output_root)
     if output.exists():
         raise ValueError("T13_PREFLIGHT_FRESH_RECEIPT_ROOT_REQUIRED")
-    sampler = sampler_factory(config, gpu_index, gpu_uuid)
+    # Sampling before the real canary must never claim checkpoint/resume PASS.
+    sampler = sampler_factory(config, gpu_index, gpu_uuid, observation_only=True)
     observed = sampler.sample()
     result = decision(spec, observed)
     result.update(observed_at_epoch_seconds=time.time(), inspector_pid=os.getpid(),

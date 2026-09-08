@@ -31,7 +31,7 @@ READY = {"READY", "READY_WAITING_GPU", "WAITING_GPU", "WAITING_FOR_GPU", "READY_
 FAILED = {"FAILED", "BLOCKED", "TERMINAL_FAILED_ENGINEERING", "MISSING"}
 
 
-def validate_resource_config(config):
+def validate_resource_config(config, *, observation_only=False):
     required = {"main_registry_path", "main_ready_sources", "proc_root", "cgroup_memory_root",
                 "persistent_root", "gpu_lock_root", "minimum_gpu_free_mb", "maximum_idle_utilization_percent",
                 "minimum_memory_headroom_bytes", "minimum_persistent_free_bytes", "checkpoint_resume_pass"}
@@ -48,8 +48,10 @@ def validate_resource_config(config):
             raise ValueError("POSITIVE_RESOURCE_ADMISSION_THRESHOLD_REQUIRED:" + field)
     if not isinstance(config["maximum_idle_utilization_percent"], int) or not 0 <= config["maximum_idle_utilization_percent"] <= 10:
         raise ValueError("INVALID_IDLE_UTILIZATION_THRESHOLD")
-    if config["checkpoint_resume_pass"] is not True:
+    if config["checkpoint_resume_pass"] is not True and not observation_only:
         raise ValueError("REAL_CHECKPOINT_RESUME_REQUIRED")
+    if type(config["checkpoint_resume_pass"]) is not bool:
+        raise ValueError("CHECKPOINT_RESUME_BOOLEAN_REQUIRED")
     for field in optional - {"stage_file_policy", "terminal_resource_dependencies"}:
         if field in config and (type(config[field]) is not int or config[field] < 0):
             raise ValueError("INVALID_INODE_BUDGET:" + field)
@@ -138,8 +140,10 @@ def bounded_gpu_inventory():
 class ResourceSampler:
     """Refresh source values; idle history is accumulated only in this owner."""
     def __init__(self, config, gpu_index, gpu_uuid, *, inventory=bounded_gpu_inventory,
-                 clock=time.time, monotonic=time.monotonic, task_family="llm", reach_contract=None):
-        validate_resource_config(config)
+                 clock=time.time, monotonic=time.monotonic, task_family="llm", reach_contract=None,
+                 observation_only=False):
+        validate_resource_config(config, observation_only=observation_only)
+        self.observation_only = observation_only
         if task_family not in ("llm", "ours_reach", "globalgce_aplus"):
             raise ValueError("EXISTING_OWNER_FAMILY_NOT_SUPPORTED")
         self.task_family, self.reach_contract = task_family, reach_contract
@@ -366,7 +370,8 @@ class ResourceSampler:
                 "stage_file_policy": cfg.get("stage_file_policy"),
                 "pause_requested": file_admission["pause_requested"],
                 "storage_safe": free_bytes >= cfg["minimum_persistent_free_bytes"] and file_admission["admitted"],
-                "checkpoint_resume_pass": cfg["checkpoint_resume_pass"] is True,
+                "checkpoint_resume_pass": cfg["checkpoint_resume_pass"] is True and not self.observation_only,
+                "observation_only": self.observation_only,
                 "active_early_ablation_gpus": other_llm,
                 "active_gpu_count_semantics": "OTHER_OWNERS_EXCLUDING_VERIFIED_CURRENT_LEASE",
                 "max_llm_gpus": 1, "borrow_enabled": False}

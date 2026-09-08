@@ -62,3 +62,15 @@ def test_full_run_not_misrepresented_by_parent_receipt():
     result = decision(dict(canonical_gpu2_diagnostic_claim=None), observation())
     assert result["max_full_starts_consumed"] == 0
     assert result["safe_handover_performed"] is False
+
+
+def test_observation_mode_never_fakes_checkpoint_resume_admission():
+    from src.ablations.llm.existing_gpu_owner import validate_resource_config
+    cfg = dict(main_registry_path="/registry", main_ready_sources=["/heartbeat"],
+        proc_root="/proc", cgroup_memory_root="/cgroup", persistent_root="/runtime",
+        gpu_lock_root="/locks", minimum_gpu_free_mb=40000,
+        maximum_idle_utilization_percent=5, minimum_memory_headroom_bytes=448*GIB,
+        minimum_persistent_free_bytes=100*GIB, checkpoint_resume_pass=False)
+    with pytest.raises(ValueError, match="REAL_CHECKPOINT_RESUME"):
+        validate_resource_config(cfg)
+    assert validate_resource_config(cfg, observation_only=True)["checkpoint_resume_pass"] is False

@@ -19035,3 +19035,8 @@ In particular the old terminal verifier would independently contend against
 the future diagnostic's own lock, so no same-lock bypass is silently enabled.
 The actual command returns BLOCKED_RESOURCE_AND_CANONICAL_CLAIM/exit75 while
 that next stage is unbound. This is executable preflight, not automatic queuing.
+
+The first deployment correctly rejected unproven canary resume before sampling.
+A narrow read-only observation mode now retains checkpoint_resume_pass=false
+while reading real resources. Normal owner admission still requires true; no
+existing Global/AIDS config is changed and no fabricated resume evidence is used.
