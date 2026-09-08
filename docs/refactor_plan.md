@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## 2026-09-08: Evaluation-only A+ sensitivity migration
+
+- Two BACE-specific CPU scopes reuse existing parent evaluator, frozen models,
+  parser universes, exact raw costs and A+ selector. No trainer or generator.
+- Parent checkpoints feed one global calibration freeze, held-out evaluation
+  and versioned CSV export. Keep old66/GINE and new2659/GIN scopes separate.
+
 ## 2026-09-08: BACE GIN A+ narrow execution
 
 - [x] Implement declared reach-aware nested selector and focused regressions.

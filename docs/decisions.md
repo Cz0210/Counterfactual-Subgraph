@@ -1,5 +1,19 @@
 # Decisions Log
 
+## [2026-09-08] Add evaluation-only GNN-A and LLM-GIN migration scopes
+
+The compact user task authorizes CPU migration, not training or generation.
+GNN-A holds the final2659 GINE-origin/GIN-supplement A+ pool fixed across five
+accepted calibrated backbones. LLM-GIN retains each parser-corrected universe,
+3088 attempts and its original prompt/projection disclosures. Both use the
+existing A+0.25-reach/0.75-normalized-grid selector with their bound original
+calibration S10 floor, and a fresh global calibration freeze before test. These
+are proposal-fixed / fixed-output sensitivity, not end-to-end A+ ablations.
+Actual per-parent model decisions and minima are recomputed; only graph-content
+bound, unchanged-kernel raw costs may be adopted. Original matrices/results
+remain immutable. New CPU-only Slurm CLI has resumable parent records and direct
+calibration/freeze/test/CSV successor, with two-job compact storage admission.
+
 ## [2026-09-08] BACE GIN A+ adopts saved Reach candidates as a new method version
 
 The explicit A+ authorization supersedes fixed-pool-only limits, but not the
