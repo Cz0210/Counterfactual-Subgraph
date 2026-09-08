@@ -68,3 +68,18 @@ def test_raw_cache_is_job_scoped_not_backbone_scoped():
     assert "_distance(bundle,manifest,root/'raw_cache')" in source
     assert "root/role/'raw_cache'" not in source
     assert 'oracle_checkpoint_id=oracle.checkpoint_id' in source
+
+
+def test_actual_aplus_acceptance_schema_not_generic_pass():
+    audit=dict(state='SAVED_RECORD_AND_METRIC_CONSISTENCY_PASS',
+        audit_scope='SAVED_APPLICATIONS_AND_INDEPENDENT_METRIC_REDUCER_NOT_MODEL_REEXECUTION',
+        spec_sha256='bound',main_matrix_write=False,model_inference_rerun=False,ot_recomputed=0,
+        parent_units=[dict(split=s,parent_id=str(i)) for s,n in [('calibration',66),('test',141)] for i in range(n)])
+    def seal(v):
+        return dict(v,self_sha256=m.stable_sha256({k:x for k,x in v.items() if k!='self_sha256'}))
+    assert m.validate_aplus_source_audit(seal(audit),dict(spec_sha256='bound'))['state']==audit['state']
+    for key,value in [('state','PASS'),('spec_sha256','wrong'),('main_matrix_write',True)]:
+        with pytest.raises(ValueError,match='A_PLUS_SOURCE_NOT_ACCEPTED'):
+            m.validate_aplus_source_audit(seal(dict(audit,**{key:value})),dict(spec_sha256='bound'))
+    with pytest.raises(ValueError,match='COMPLETENESS'):
+        m.validate_aplus_source_audit(seal(dict(audit,parent_units=audit['parent_units'][:-1])),dict(spec_sha256='bound'))

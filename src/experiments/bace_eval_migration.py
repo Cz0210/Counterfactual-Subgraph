@@ -69,7 +69,29 @@ def validate(spec):
             raise ValueError('A_PLUS_CALIBRATION_FLOOR_ORDER_NOT_BOUND')
         if family=='llm_gin' and config['attempts'] != 3088:
             raise ValueError('ATTEMPT_BUDGET_CHANGED')
+    for source in spec.get('saved_raw_sources',[]):
+        if source['kind']=='aplus':
+            validate_aplus_source_audit(bound(source['audit']),source)
     return root
+
+
+def validate_aplus_source_audit(audit, source):
+    """Use the actual accepted A+ audit schema, not a generic PASS string."""
+    if (audit.get('state')!='SAVED_RECORD_AND_METRIC_CONSISTENCY_PASS'
+            or audit.get('audit_scope')!='SAVED_APPLICATIONS_AND_INDEPENDENT_METRIC_REDUCER_NOT_MODEL_REEXECUTION'
+            or audit.get('spec_sha256')!=source['spec_sha256']
+            or audit.get('self_sha256')!=stable_sha256({k:v for k,v in audit.items() if k!='self_sha256'})
+            or audit.get('main_matrix_write') is not False
+            or audit.get('model_inference_rerun') is not False or audit.get('ot_recomputed')!=0):
+        raise ValueError('A_PLUS_SOURCE_NOT_ACCEPTED')
+    units=audit['parent_units']
+    for split,count in (('calibration',66),('test',141)):
+        ids=[r['parent_id'] for r in units if r['split']==split]
+        if len(ids)!=count or len(set(ids))!=count:
+            raise ValueError('A_PLUS_AUDITED_PARENT_COMPLETENESS')
+    if len(units)!=207:
+        raise ValueError('A_PLUS_UNEXPECTED_AUDITED_RECORD')
+    return audit
 
 
 def require_freeze(spec):
@@ -121,9 +143,7 @@ def load_raw(spec, split, delegate, bundle_manifest):
     added = 0
     for source in (spec.get('saved_raw_sources', []) if split!='train' else []):
         if source['kind']=='aplus':
-            audit = bound(source['audit'])
-            if audit.get('state') != 'PASS':
-                raise ValueError('A_PLUS_SOURCE_NOT_ACCEPTED')
+            audit = validate_aplus_source_audit(bound(source['audit']),source)
             directory=Path(source['root'])/'aligned_pool'/split
             files=sorted(directory.glob('parent-*.json'))
             if len(files) != {'calibration':66,'test':141}[split]:

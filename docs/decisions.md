@@ -16,6 +16,13 @@ calibration/freeze/test/CSV successor, with two-job compact storage admission.
 Before first submission, share newly computed graph-pair costs between serial
 roles of the same CPU job. The raw-only cache remains separate between jobs;
 model logits, strict flips, selected matches and selectors are never shared.
+First CPU attempts2621658/2621659 preserved their completed train-only timing,
+then stopped before calibration: the new adapter incorrectly expected generic
+PASS, whereas the actual A+ producer seals SAVED_RECORD_AND_METRIC_CONSISTENCY_PASS.
+Accept only that exact schema plus its self/source hash, no-matrix/no-reinference
+scope and complete66/141 parent inventory. Preflight now checks it before sbatch.
+No source audit, model, pool, selector, numerical kernel or finished parent
+record is modified. A single engineering resume reuses the sealed timing.
 
 ## [2026-09-08] BACE GIN A+ adopts saved Reach candidates as a new method version
 
