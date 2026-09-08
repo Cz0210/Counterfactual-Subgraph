@@ -18590,3 +18590,14 @@ The initial CPU stage has a 12GiB self-RSS limit and retains the existing T14
 outputs are persistent. The paired Slurm wrapper is kept in sync for project
 workflow compliance; the deployed execution is the explicitly authorized
 AutoDL CPU diagnostic, not an HPC GPU job or a replacement GPU owner.
+
+The existing CLI now also supports `compare-replay`: a one-shot CPU-only
+consumer of the two sealed diagnostic segments. It can check terminal files
+at 60-second intervals for a bounded deadline, then stream exactly251–335.
+It never launches science, acquires a GPU lease, retries failed arms, or
+grants formal promotion. The comparison separates the first raw numerical
+difference, first RNG difference, and first selected-action difference, and
+retains actual scores, cumulative probabilities and sampled values for the
+first action discrepancy. An earlier floating drift is not automatically
+declared the cause of the later discrete discrepancy. This future overlay is
+deployed independently of the immutable410ade5d replay already running.

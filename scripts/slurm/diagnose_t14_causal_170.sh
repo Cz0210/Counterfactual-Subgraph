@@ -8,6 +8,8 @@
 #SBATCH --error=logs/%j.err
 # Paired CLI wrapper only: actual deployment is AutoDL CPU inspection then
 # GPU2 via its existing UUID lock. This template is not GPU2 authorization.
+# compare-replay is CPU-only postprocessing (optional bounded 60s terminal
+# checks); production uses the existing AutoDL170 campaign, not this GPU job.
 source ~/.bashrc
 conda activate smiles_pip118
 cd /share/home/u20526/czx/counterfactual-subgraph
