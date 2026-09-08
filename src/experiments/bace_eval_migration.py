@@ -208,7 +208,10 @@ def evaluate_role(spec, role, split, *, timing=False):
         p.requires_grad_(False)
     oracle.model.eval()
     feat=_featurizer(bundle,manifest)
-    dist=_distance(bundle,manifest,root/role/'raw_cache')
+    # Roles run serially under this job's writer lease. Share only the delegate's
+    # graph-pair raw-cost cache, never a model/action/flip result or another job's
+    # active SQLite. Preserve newly computed exact costs across roles, too.
+    dist=_distance(bundle,manifest,root/'raw_cache')
     install_compact_node_cache(dist)
     dist=load_raw(spec,split,dist,manifest)
     started=time.monotonic(); total_bytes=0

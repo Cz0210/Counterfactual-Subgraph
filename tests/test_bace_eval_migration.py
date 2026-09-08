@@ -60,3 +60,11 @@ def test_cpu_slurm_matches_entrypoint_without_gpu_request():
     s=p.read_text();assert '--partition=intel' in s and '--gres=' not in s
     assert 'run_bace_eval_migration.py' in s and '--config configs/hpc.yaml' in s
     assert s.index('source ~/.bashrc')<s.index('set -eo pipefail')
+
+
+def test_raw_cache_is_job_scoped_not_backbone_scoped():
+    import inspect
+    source=inspect.getsource(m.evaluate_role)
+    assert "_distance(bundle,manifest,root/'raw_cache')" in source
+    assert "root/role/'raw_cache'" not in source
+    assert 'oracle_checkpoint_id=oracle.checkpoint_id' in source

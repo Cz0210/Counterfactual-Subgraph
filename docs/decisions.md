@@ -13,6 +13,9 @@ Actual per-parent model decisions and minima are recomputed; only graph-content
 bound, unchanged-kernel raw costs may be adopted. Original matrices/results
 remain immutable. New CPU-only Slurm CLI has resumable parent records and direct
 calibration/freeze/test/CSV successor, with two-job compact storage admission.
+Before first submission, share newly computed graph-pair costs between serial
+roles of the same CPU job. The raw-only cache remains separate between jobs;
+model logits, strict flips, selected matches and selectors are never shared.
 
 ## [2026-09-08] BACE GIN A+ adopts saved Reach candidates as a new method version
 
