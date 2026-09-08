@@ -14,6 +14,11 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))  # -I deliberately ignores PYTHONPATH.
+# Low-inode immutable deployment: the pinned source archive and this thin
+# physical entrypoint live together. No PYTHONPATH dependency under -I.
+BUNDLE = Path(__file__).resolve().with_name("source.zip")
+if BUNDLE.is_file():
+    sys.path.insert(0, str(BUNDLE))
 
 from src.utils.main_ready_task_specs import atomic_json
 from src.utils.final16_owner_registry_v1 import process_start_ticks
