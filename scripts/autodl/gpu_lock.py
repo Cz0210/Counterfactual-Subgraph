@@ -13,6 +13,10 @@ import time
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
+# Compact immutable deployments carry the same-commit source archive; no
+# dependence on PYTHONPATH (which isolated children intentionally ignore).
+if (PROJECT_ROOT / "source.zip").is_file():
+    sys.path.insert(0, str(PROJECT_ROOT / "source.zip"))
 from src.utils.autodl_runtime import (
     AutoDLRuntimeError,
     GPUFileLock,
@@ -37,6 +41,8 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--gpu-uuid", required=True)
         command.add_argument("--run-id")
         if name == "run":
+            command.add_argument("--t13-performance-spec", type=Path)
+            command.add_argument("--t13-performance-spec-sha256")
             command.add_argument("--llm-dispatch-spec", type=Path)
             command.add_argument("--llm-dispatch-spec-sha256")
             command.add_argument("--owner-output-root", type=Path)
@@ -50,7 +56,15 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     try:
-        project_root = resolve_project_root(args.project_root)
+        if (args.action == "run" and args.t13_performance_spec
+                and (PROJECT_ROOT / "source.zip").is_file()):
+            # The diagnostic preflight is read-only and validates its sealed
+            # execution path below; do not fabricate .git for zip deployments.
+            if args.project_root is None or args.project_root.resolve() != PROJECT_ROOT:
+                raise AutoDLRuntimeError("Compact T13 preflight requires its explicit immutable source root")
+            project_root = PROJECT_ROOT
+        else:
+            project_root = resolve_project_root(args.project_root)
         data_root = select_data_root(project_root, explicit=args.data_root)
         layout = build_runtime_layout(project_root=project_root, data_root=data_root).ensure()
         if args.action == "list":
@@ -76,6 +90,13 @@ def main() -> int:
                 )
             )
             return 0 if available else 3
+        if args.t13_performance_spec:
+            if args.llm_dispatch_spec or args.command or not args.t13_performance_spec_sha256 or not args.owner_output_root:
+                raise AutoDLRuntimeError("T13 diagnostic requires sealed spec, fresh receipt root, and no injected command")
+            from src.utils.t13_performance_dispatch import preflight
+            return preflight(spec_descriptor={"path":str(args.t13_performance_spec),"sha256":args.t13_performance_spec_sha256},
+                project_root=PROJECT_ROOT,gpu_index=args.gpu_index,gpu_uuid=args.gpu_uuid,
+                lock_root=layout.locks_dir,output_root=args.owner_output_root)
         if args.llm_dispatch_spec:
             if args.command or not args.llm_dispatch_spec_sha256 or not args.owner_output_root:
                 raise AutoDLRuntimeError("LLM dispatch requires sealed SHA, fresh owner root, and no injected command")

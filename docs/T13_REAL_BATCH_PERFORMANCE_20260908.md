@@ -45,10 +45,20 @@ Required evidence fields are `observed_at_epoch_seconds`, `resource_admission`,
 `other_task_headroom_required_bytes`. These fields must be mapped from actual
 existing owner/provider observations, never hand-filled PASS receipts.
 
-Current deployment gap: the general existing GPU2 owner has not yet been
-bound to this canary child/evidence schema. This runner intentionally does not
-create another waiting controller. The paired Slurm script is inspect-only;
-the actual Taste GPU path stays on AutoDL after P0 resource admission.
+The existing `gpu_lock.py run --t13-performance-spec` entry now calls the actual
+terminal-aware ResourceSampler for a fresh, read-only preflight. The complete
+diagnostic source can be deployed with this adapter; no new waiting controller
+is created. It returns exit75 and precise resource/claim blockers, not RUNNING.
+
+The remaining activation boundary is canonical, not a guessed FD integer:
+`ResourceSampler.sample -> verify_terminal_dependency` tests the old GPU2 lock
+independently. After a future diagnostic holder acquires that same inode, a
+naive repeat would self-reject. The future canonical stage claim, original
+publication-lock CAS and actual inherited FD must be explicitly bound before
+activating a held-lease provider path. This preflight does not bypass the test,
+does not write the main registry, and does not invent a claim even if RAM fits.
+The paired Slurm script remains inspect-only; actual Taste GPU use stays on
+AutoDL after P0 resource admission and that physical stage binding.
 
 Current live handover gap: `run_native_branch` supplies no epoch pause callback.
 Do not SIGTERM a healthy target0 to adopt this optimization. Keep the current

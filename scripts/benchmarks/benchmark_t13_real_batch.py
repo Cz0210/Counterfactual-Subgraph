@@ -16,6 +16,8 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+if (ROOT / "source.zip").is_file():
+    sys.path.insert(0, str(ROOT / "source.zip"))
 
 
 def main():

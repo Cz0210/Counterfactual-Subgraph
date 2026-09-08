@@ -21,4 +21,7 @@ python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 # it releases each GPU lease before its CPU evaluator. This wrapper stays read-only.
 # The explicit parser-correction binding is CPU-evaluation-only, pinned to one
 # queue root, and cannot enter generation or obtain a GPU lease.
+# --t13-performance-spec runs the existing terminal-aware provider preflight
+# only; missing canonical GPU2 claim/held-provider mapping stays BLOCKED.
+# It does not acquire a lease, modify registry, or launch a Taste canary.
 python scripts/autodl/gpu_lock.py --config configs/hpc.yaml list

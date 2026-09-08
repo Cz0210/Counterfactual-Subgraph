@@ -19022,3 +19022,16 @@ HPC execution: no GPU or science submission is appropriate for registry repair.
   deployed safe performance pause callback. Even a successful benchmark is
   not a same-run handover authorization or a promotable training checkpoint.
   See `docs/T13_REAL_BATCH_PERFORMANCE_20260908.md` for the remaining owner gate.
+
+### 2026-09-08: bind real T13 preflight into the existing GPU owner entry
+
+The existing `gpu_lock.py run` gains a T13-only sealed-spec preflight using the
+already-fixed ResourceSampler and T14 terminal-dependency verifier. It reopens
+real registry/heartbeat/NVML/cgroup/statvfs data and retains AIDS384GiB plus the
+unchanged64GiB canary estimate. It never takes a GPU lock or changes registry.
+An absent canonical GPU2 diagnostic claim is independent of RAM availability;
+the real held-lease provider mapping is not satisfied by a guessed JSON or FD.
+In particular the old terminal verifier would independently contend against
+the future diagnostic's own lock, so no same-lock bypass is silently enabled.
+The actual command returns BLOCKED_RESOURCE_AND_CANONICAL_CLAIM/exit75 while
+that next stage is unbound. This is executable preflight, not automatic queuing.
