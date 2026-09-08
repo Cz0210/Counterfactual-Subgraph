@@ -1,5 +1,17 @@
 # Decisions Log
 
+## [2026-09-08] Audit T12's inherited four-file delta before any guard update
+
+The physical source-equivalence build found pre-existing formal-cadence and
+future-cache edits in addition to the expected full-kernel transport/callback.
+The guard correctly rejected them. Add concrete original1ad/current codec
+regression and function-level AST scope tests, preserving that failure and
+requiring distinct driver identity. The tool approver rejected the proposed
+four-file content-pin update twice, including after42 focused tests passed; no
+alternate write mechanism was used and no new science was launched. Explicit
+approval of that binding remains required. See
+`docs/T12_FOUR_FILE_SOURCE_SCOPE_AUDIT_20260908.md`.
+
 ## [2026-09-08] Bind T12 missing raw evidence and same-process tail explicitly
 
 The 520+conditional20 recovery plan described missing ledgers but had no science
