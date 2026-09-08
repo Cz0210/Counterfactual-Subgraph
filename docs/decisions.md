@@ -19003,3 +19003,22 @@ resource evidence; unknown peaks are not zero. Existing stage-file bounds and
 AIDS's 384GiB other-task memory reserve are retained. This AutoDL-only control
 entrypoint has a paired Slurm compatibility wrapper which deliberately refuses
 HPC execution: no GPU or science submission is appropriate for registry repair.
+
+### 2026-09-08: real Taste batches before any T13 performance handover
+
+- Add a future-only benchmark around the actual official generator, frozen
+  Taste GINE, same held checkpoint snapshot and exact reconstructed compact
+  dataset identity. Use two distinct real train batches and one validation
+  batch; repeated reference/optimized/reload arms do not add candidate science.
+- Preserve c0eb892d reference versus d757b030 bridge optimization and the
+  complete frozen deterministic backend. Bound the entire run to 1800 seconds,
+  including real cohort/index preparation. Synthetic evidence cannot substitute
+  for a missing batch or a timed-out real comparison.
+- Use only an inherited existing GPU2 lock and fresh parent-bound resource
+  evidence. No lock/controller or automatic admission receipt is created here.
+  Keep 64GiB canary peak budget separate from other main tasks' required
+  headroom; no NVMe or tmpfs-only outputs and no active process intervention.
+- The active c0eb892d worker passes `after_epoch_checkpoint=None`: it lacks a
+  deployed safe performance pause callback. Even a successful benchmark is
+  not a same-run handover authorization or a promotable training checkpoint.
+  See `docs/T13_REAL_BATCH_PERFORMANCE_20260908.md` for the remaining owner gate.
