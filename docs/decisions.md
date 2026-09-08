@@ -18544,3 +18544,19 @@ engineering retry. Record the temperature driver and the verifier driver separat
 - Keep timing of first copy separate from subsequent local decoding; do not
   claim cold kernel caches, scientific step progress or full-runtime speedup.
   See `docs/AUTODL_T12_FUTURE_HISTORY_CACHE_20260906.md`.
+
+### 2026-09-08 — Bound missing T12 evidence and expose a finite activation interface
+
+- Keep the existing reference 500→510 reader and all original checkpoints untouched.
+  Predeclare 520 transitions, with at most 20 additional same-process tail transitions
+  only for genuinely absent continuous evidence; do not replay 0–250.
+- Add actual selected-action/RNG observation and compact joint ledger/checkpoint
+  primitives. Missing cached raw logits or NeuroSED distances stay explicit gaps,
+  never inverse-softmax estimates or invented distances. The small CPU observer
+  fixture is not a production scientific parity receipt.
+- Add a finite consumer of the existing 15-stage fresh-zero plan, callable only
+  after complete evidence and canonical-owner FD/UUID/provider handoff. No second
+  registry, lock, owner or matrix publisher is created. Existing runtime/source
+  bindings remain required; full science is currently blocked on the precise raw
+  cache/live-state tail interfaces documented in
+  `docs/T12_MISSING_LEDGER_RECOVERY_20260908.md`.

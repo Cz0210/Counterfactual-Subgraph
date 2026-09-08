@@ -4308,3 +4308,9 @@ Mutagenicity roadmaps.
   observations, a reused single-LLM slot, non-leaking descendants and immutable
   corrected-GNN acceptance reuse. Keep one-shot execution behind the existing
   outer queue; a live queue/GPU admission remains a deployment requirement.
+- [x] Add T12 bounded shadow plan/status, selected-action observer and joint ledger
+  primitives, plus an inherited-owner finite fresh-zero activation interface.
+- [ ] Complete T12 graph/query-bound cached raw evidence and same-process live-state
+  501–510 tail; pass the real train-only observer regression and bind the existing
+  canonical owner at its natural boundary. Do not call the partial interface a
+  dispatchable science chain or full parity PASS.
