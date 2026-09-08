@@ -159,11 +159,24 @@ class SamplingObserver:
         random._inst.random = draw
         random._inst.getrandbits = bits
         self._target = self.module.move_from_known_graph.__code__
+        self._choices_target = random._inst.choices.__func__.__code__
         sys.setprofile(self._observe)
         return self
 
     def _observe(self, frame, event, result):
-        if event != "return" or frame.f_code is not self._target:
+        if event != "return":
+            return
+        if frame.f_code is self._choices_target:
+            local = frame.f_locals
+            self.events.append({
+                "api": "Random.choices.return", "caller": frame.f_back.f_code.co_name if frame.f_back else None,
+                "population": semantic(list(local["population"])),
+                "actual_cumulative_weights": semantic(local.get("cum_weights")),
+                "actual_total": semantic(local.get("total")),
+                "k": int(local["k"]), "selected": semantic(result),
+            })
+            return
+        if frame.f_code is not self._target:
             return
         local = frame.f_locals
         hashes = local.get("hashes", ())
@@ -276,6 +289,26 @@ def compare_checkpoints(left: Path, right: Path, output: Path) -> dict:
     for name in receipts[0]["components"]:
         values = [json.loads(Path(row["components"][name]["path"]).read_text()) for row in receipts]
         differences[name] = first_difference(*values)
-    result = {"status": "STARTING_STATE_DIFFERENT" if any(differences.values()) else "STARTING_COMPONENTS_EQUAL", "component_first_differences": differences, "new_transitions": 0, "formal_dispatch_allowed": False, "scope": "CHECKPOINT250_SAVED_COMPONENTS_NOT_FULL_EXECUTION_PARITY"}
+    result = {"status": "STARTING_STATE_DIFFERENT" if any(differences.values()) else "STARTING_COMPONENTS_EQUAL", "component_first_differences": differences, "raw_rng_first_differences": compare_saved_rng(left, right), "new_transitions": 0, "formal_dispatch_allowed": False, "causal_source_of_step335_proven": False, "scope": "CHECKPOINT250_SAVED_COMPONENTS_NOT_FULL_EXECUTION_PARITY"}
     atomic_json(output, result)
     return result
+
+
+def compare_saved_rng(left: Path, right: Path) -> dict:
+    """Expand only the tiny saved RNG states; report the first actual byte."""
+    import numpy as np
+    states = []
+    for root in (left, right):
+        with gzip.open(root / "rng250.pkl.gz", "rb") as stream:
+            states.append(pickle.load(stream))
+    def expanded(value):
+        if hasattr(value, "detach"):
+            return {"dtype": str(value.dtype), "shape": list(value.shape), "values": value.cpu().tolist()}
+        if isinstance(value, np.ndarray):
+            return {"dtype": str(value.dtype), "shape": list(value.shape), "values": value.tolist()}
+        if isinstance(value, dict):
+            return {key: expanded(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [expanded(item) for item in value]
+        return semantic(value)
+    return {key: first_difference(expanded(states[0][key]), expanded(states[1][key]), "$." + key) for key in states[0]}

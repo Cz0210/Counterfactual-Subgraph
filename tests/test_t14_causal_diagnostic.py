@@ -41,6 +41,9 @@ def test_observer_does_not_change_rng_or_selected_actions():
     assert native["candidate_order"] == ["a", "b"]
     assert native["actual_probabilities"] == [0.4, 0.6]
     assert any(row["api"] == "Random.random" and "u" in row for row in observer.events)
+    choices = next(row for row in observer.events if row["api"] == "Random.choices.return")
+    assert choices["actual_cumulative_weights"] == [0.4, 1.0]
+    assert choices["actual_total"] == 1.0
 
 
 def test_observer_restores_rng_method_on_failure():
