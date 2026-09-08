@@ -1416,38 +1416,19 @@ def compare_step_ledgers(
     start_step: int = 1,
     end_step: int = PROMOTABLE_CHECKPOINT_STEP,
 ) -> dict[str, Any]:
+    from src.baselines.t14_semantic_review import compare_rows
+
     left = _jsonl_rows(reference)
     right = _jsonl_rows(candidate)
     if start_step <= 0 or end_step < start_step:
         raise T14RouteCFreshError("Route C parity interval is invalid")
-    first = None
-    differing_fields: list[str] = []
-    for step in range(start_step, end_step + 1):
-        if step > len(left) or step > len(right):
-            first = step
-            differing_fields = ["missing_step"]
-            break
-        if left[step - 1] != right[step - 1]:
-            first = step
-            differing_fields = sorted(
-                key
-                for key in set(left[step - 1]) | set(right[step - 1])
-                if left[step - 1].get(key) != right[step - 1].get(key)
-            )
-            break
-    receipt = {
-        "schema_version": PARITY_SCHEMA,
-        "status": "PASS" if first is None else "FAILED",
+    receipt = compare_rows(left, right, start_step=start_step, end_step=end_step)
+    receipt.update({
         "reference": str(reference),
         "candidate": str(candidate),
-        "start_step": start_step,
-        "end_step": end_step,
-        "first_semantic_divergence_step": first,
-        "differing_fields": differing_fields,
-        "discrete_state_exact": first is None,
         "reference_sha256": file_sha256(reference),
         "candidate_sha256": file_sha256(candidate),
-    }
+    })
     receipt["receipt_sha256"] = stable_sha256(receipt)
     return receipt
 

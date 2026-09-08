@@ -50,6 +50,18 @@ OWNER_SCHEMA = "tastemolnet_t14_route_c_owner_v1"
 WAITING_EXIT = 75
 
 
+def _compare_and_record_canaries(owner_root: Path, reference: Path, continuous: Path, reload: Path) -> dict[str, Any]:
+    """Write all three fresh receipts before the caller raises or promotes."""
+    from src.baselines.t14_semantic_review import review_three_ledgers
+
+    root = owner_root / "componentwise_parity_reviews" / str(uuid4())
+    summary = review_three_ledgers(reference, continuous, reload, output_root=root)
+    return {
+        key: json.loads(Path(row["path"]).read_text(encoding="utf-8"))
+        for key, row in summary["receipts"].items()
+    }
+
+
 def _absolute(value: str) -> Path:
     path = Path(value)
     if not path.is_absolute():
@@ -1019,11 +1031,7 @@ def main(argv: list[str] | None = None) -> int:
             reference_ledger = Path(children['REFERENCE_500']['output_root'])/'route_c_step_states.jsonl'
             continuous_ledger = Path(children['LOW_MEMORY_CONTINUOUS_510']['output_root'])/'route_c_step_states.jsonl'
             reload_ledger = Path(children['LOW_MEMORY_RELOAD_510']['output_root'])/'route_c_step_states.jsonl'
-            receipts = {
-                'reference_vs_lowmemory_1_500':compare_step_ledgers(reference_ledger,continuous_ledger,start_step=1,end_step=500),
-                'continuous_vs_reload_1_500':compare_step_ledgers(continuous_ledger,reload_ledger,start_step=1,end_step=500),
-                'continuous_vs_reload_501_510':compare_step_ledgers(continuous_ledger,reload_ledger,start_step=501,end_step=510),
-            }
+            receipts = _compare_and_record_canaries(owner_root, reference_ledger, continuous_ledger, reload_ledger)
             if any(row['status'] != 'PASS' for row in receipts.values()):
                 raise T14RouteCFreshError('T14 existing canary ledgers changed at formal dispatch')
             return _continue_formal(master,args.task_spec,args.continuation_spec,owner_root,continuous_ledger,receipts)
@@ -1117,17 +1125,7 @@ def main(argv: list[str] | None = None) -> int:
         reference_ledger = Path(reference["output_root"]) / "route_c_step_states.jsonl"
         continuous_ledger = Path(continuous["output_root"]) / "route_c_step_states.jsonl"
         reload_ledger = Path(reload_spec["output_root"]) / "route_c_step_states.jsonl"
-        receipts = {
-            "reference_vs_lowmemory_1_500": compare_step_ledgers(
-                reference_ledger, continuous_ledger, start_step=1, end_step=500
-            ),
-            "continuous_vs_reload_1_500": compare_step_ledgers(
-                continuous_ledger, reload_ledger, start_step=1, end_step=500
-            ),
-            "continuous_vs_reload_501_510": compare_step_ledgers(
-                continuous_ledger, reload_ledger, start_step=501, end_step=510
-            ),
-        }
+        receipts = _compare_and_record_canaries(owner_root, reference_ledger, continuous_ledger, reload_ledger)
         if any(value["status"] != "PASS" for value in receipts.values()):
             raise T14RouteCFreshError("T14 Route C semantic parity failed")
 

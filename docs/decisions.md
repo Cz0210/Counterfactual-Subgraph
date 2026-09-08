@@ -1,5 +1,20 @@
 # Decisions Log
 
+## [2026-09-08] Preserve T14 failure evidence and classify saved-ledger differences
+
+User-authorized recovery keeps original FAILED artifacts, models, native actions,
+and numerical contracts immutable. All three canary comparison receipts must be
+written to a fresh review root before any owner raises. Existing small ledgers
+are reviewed completely, separating explicit observational fields, exact discrete
+science, and numerical/raw-state evidence. A different mixed-state or pickled RNG
+digest is EVIDENCE_INCOMPLETE, not automatic algorithm failure and not PASS.
+No general trajectory tolerance is inferred from the bridge's cohort-specific
+low-bit reuse tolerance. A true action/graph/candidate change still fails.
+The offline CLI loads no model and executes zero transitions; review status is
+not a formal-dispatch authorization. New diagnostics remain capped at 64 total
+transitions including access replay, and must not be mistaken for full parity.
+
+
 ## [2026-09-06] Correct T14's pre-science GPU-mask bootstrap binding once
 
 The replacement owner failed before CUDA/science because a generic gpu_lock
