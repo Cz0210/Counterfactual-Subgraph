@@ -204,7 +204,13 @@ def execute_replay(*, source_worktree, source_spec_path, output_root, gpu_uuid, 
                     completed += 1
                     if loop_state.completed_step != 250 + completed or completed != started:
                         raise ValueError("T14 completed-step accounting drift")
-                    row = {"phase": "AFTER", "step": loop_state.completed_step, "rng": capture_rng_state(), "actual_sampling_events": observer.events, "native_observation": handles.step_observation, "loop_state": loop_state.to_checkpoint_state()}
+                    compact_actions = []
+                    for event in observer.events:
+                        if event.get("api") == "move_from_known_graph.return" and event.get("actual_source_hash") is not None:
+                            entry = handles.transition_map._entries.get(event["actual_source_hash"])
+                            if entry is not None:
+                                compact_actions.append({"source_hash": event["actual_source_hash"], "target_hashes": tuple(entry.target_hashes), "ordered_actions": tuple(entry.actions)})
+                    row = {"phase": "AFTER", "step": loop_state.completed_step, "rng": capture_rng_state(), "actual_sampling_events": observer.events, "compact_candidate_actions": compact_actions, "native_observation": handles.step_observation, "loop_state": loop_state.to_checkpoint_state()}
                     pickle.dump(row, observations, protocol=5)
                     observations.flush()
                     selected_actions = handles.step_observation.get("selected_transitions", ())

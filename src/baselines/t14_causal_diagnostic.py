@@ -180,6 +180,7 @@ class SamplingObserver:
             return
         local = frame.f_locals
         hashes = local.get("hashes", ())
+        parent = frame.f_back.f_locals if frame.f_back and frame.f_back.f_code.co_name == "move_to_next_graph" else {}
         frequency = []
         for key in hashes:
             if key in self.module.graph_index_map:
@@ -196,6 +197,8 @@ class SamplingObserver:
             "actual_probabilities": semantic(probabilities.tolist() if hasattr(probabilities, "tolist") else probabilities),
             "existing_candidate_frequency": frequency,
             "selected_index": int(result) if result is not None else None,
+            "actual_lead_head": semantic(parent.get("select")),
+            "actual_source_hash": semantic(parent.get("graph_hash")),
         })
 
     def __exit__(self, *_):
