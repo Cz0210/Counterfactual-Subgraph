@@ -19008,3 +19008,10 @@ publication lock. Keep old roots/receipts, pool80, validation-selected epoch60,
 oracle, selector and test boundary unchanged. New temporary/cache/deployment
 files use persistent storage. No new controller, GPU lease or main-table cell.
 The pilot is a calibration-only memory bound, not full evaluation PASS.
+# 2026-09-08 Global CPU stage memory binding follow-up
+
+The new operational handoff measures calibration model RSS, then rechecks each
+evaluation split's actual parent/match cardinality. Held-out input remains closed
+until the existing selector freeze. Its resource bound must pass before model
+load; the scientific spec and selected epoch60/80-rule pool remain unchanged.
+Handover additionally rejects scoped open file descriptors and active claims.

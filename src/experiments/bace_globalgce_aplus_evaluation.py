@@ -214,13 +214,18 @@ def evaluate(spec,split):
         old=read_json(terminal)
         if old['spec_sha256']!=stable_sha256(spec):raise ValueError('STAGE_BINDING_CHANGED')
         return old
+    from src.utils.global_cpu_closeout import stage_resource_config
+    from src.baselines.bace_globalgce_aplus_owner import cpu_admission
+    stage_resource=stage_resource_config(spec,parents,candidates,split)
+    admission,ok=cpu_admission(stage_resource)
+    if not ok:raise ValueError('CPU_BOUNDARY_RESOURCE_WAIT:'+json.dumps(admission))
     oracle,featurizer,distance=runtime(spec,split)
     try:
         with (root/'writer.lock').open('a+') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             for i,parent in enumerate(parents):
                 from src.baselines.bace_globalgce_aplus_owner import cpu_admission
-                resource=bound(spec['cpu_resource_config']);admission,ok=cpu_admission(resource)
+                admission,ok=cpu_admission(stage_resource)
                 if not ok:raise ValueError('CPU_BOUNDARY_RESOURCE_WAIT:'+json.dumps(admission))
                 path=root/f'parent-{i:05d}.json'
                 binding=stable_sha256(dict(spec=stable_sha256(spec),split=split,parent_id=parent.parent_id,

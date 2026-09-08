@@ -58,6 +58,46 @@ def validate_spec_change(old, new):
         raise ValueError('ORIGINAL_CAMPAIGN_NAMESPACE_REQUIRED')
 
 
+def projected_stage_peak(rss, counts, parent_count, rule_count):
+    if not counts or len(counts) != parent_count or min(counts) < 0:
+        raise ValueError('REAL_STAGE_CARDINALITY_REQUIRED')
+    objects=(max(counts)*4+sum(counts)+parent_count*rule_count*4)*65536
+    peak=rss*2+objects+512*1024**2
+    return ((peak+1024**3-1)//1024**3)*1024**3, objects
+
+
+def stage_resource_config(spec, parents, candidates, split):
+    """Rebind held-out cardinality only after the evaluator's own freeze.
+
+    The immutable spec is not edited, and this does not select candidates or
+    inspect predictions. A larger test bound must pass actual admission before
+    loading the CPU models. This sidecar is operational, not a new trust root.
+    """
+    from src.experiments import bace_globalgce_aplus_evaluation as leaf
+    from src.baselines.bace_globalgce_aplus import build_parent
+    from src.baselines.globalgce_bace_native_rules import GlobalGCENativeRule, enumerate_labeled_rule_matches
+    config=leaf.bound(spec['cpu_resource_config'])
+    profile=config.get('joint_memory_receipt')
+    if not isinstance(profile,dict):return config
+    measured=leaf.bound(profile)
+    if measured.get('state')!='CPU_MODEL_AND_CALIBRATION_BOUND_MEASURED':return config
+    if split=='test':leaf.verified_freeze(spec)
+    rules=[GlobalGCENativeRule.from_payload(c['rule']) for c in candidates]
+    counts=[]
+    for p in parents:
+        graph=build_parent(p.smiles,atom_symbols=rules[0].atom_symbols,bond_names=rules[0].bond_names)
+        counts.append(sum(sum(1 for _ in enumerate_labeled_rule_matches(graph,r)) for r in rules))
+    peak,objects=projected_stage_peak(measured['runtime_peak_rss_bytes'],counts,len(parents),len(rules))
+    effective=copy.deepcopy(config)
+    effective['minimum_memory_headroom_bytes']=384*1024**3+peak
+    atomic_json(Path(spec['output_root'])/split/'stage-memory-admission.json',{
+        'state':'ACTUAL_STAGE_CARDINALITY_BOUND','split':split,'parents':len(parents),
+        'rules':len(rules),'matches_by_parent':counts,'incremental_peak_bytes':peak,
+        'object_reservation_bytes':objects,'model_peak_source':profile,
+        'test_opened_after_own_freeze':split=='test','created_at':utc_now()})
+    return effective
+
+
 def memory_pilot(out):
     """Load frozen CPU models and bound calibration object sizes, no test/OT."""
     import torch
@@ -99,9 +139,7 @@ def memory_pilot(out):
     # All retained per-parent applications/mappings/probabilities, raw-cost
     # scalar map and selector matrix. 64 KiB/record is conservative vs actual
     # primitive schema; 4 copies cover JSON encoding and atomic serialization.
-    object_bytes=(max(counts)*4+sum(counts)+66*80*4)*65536
-    peak=rss*2+object_bytes+512*1024**2
-    peak=((peak+1024**3-1)//1024**3)*1024**3
+    peak,object_bytes=projected_stage_peak(rss,counts,len(parents),len(candidates))
     result={'state':'CPU_MODEL_AND_CALIBRATION_BOUND_MEASURED','created_at':utc_now(),
         'old_spec':desc(OLD_SPEC),'pool80':desc(Path(old['pool_root'])/'run_manifest.json'),
         'selected_epoch':60,'calibration_parents':len(parents),'matches_by_parent':counts,
@@ -180,6 +218,17 @@ def handoff(out):
             except (OSError,PermissionError):continue
             if str(OLD_SPEC).encode() in cmd or str(spec['output_root']).encode() in cmd:
                 raise ValueError('OTHER_CAMPAIGN_PROCESS:'+p.name)
+            for fd in p.joinpath('fd').glob('*'):
+                try:target=os.readlink(fd).removesuffix(' (deleted)')
+                except OSError:continue
+                if target==str(spec['output_root']) or target.startswith(str(spec['output_root'])+'/'):
+                    raise ValueError('OTHER_CAMPAIGN_OPEN_FD:'+p.name+':'+fd.name)
+        # A waiting owner may write its bounded stdout/heartbeat, but must not
+        # hold an active scientific writer or a child claim at handover.
+        for name in ('active_claim.json','science_claim.json'):
+            path=oldroot/name
+            if path.exists() and read(path).get('state') not in ('RELEASED','RETIRED','COMPLETE'):
+                raise ValueError('OLD_OWNER_ACTIVE_CLAIM:'+str(path))
         atomic_json(intent,{'state':'INTENT_SEALED','old_identity':ident,'new_spec':desc(out/'spec.json'),
             'authorization':desc(out/'authorization.json'),'successful_replacements':0,'created_at':utc_now()})
         atomic_json(out/'old-owner-evidence.json',{'owner':read(oldroot/'owner.json'),'heartbeat':hb,'identity':ident})

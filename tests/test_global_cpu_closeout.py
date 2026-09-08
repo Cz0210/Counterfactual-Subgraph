@@ -1,7 +1,7 @@
 import copy
 from pathlib import Path
 import pytest
-from src.utils.global_cpu_closeout import validate_spec_change, checked_identity
+from src.utils.global_cpu_closeout import validate_spec_change, checked_identity, projected_stage_peak
 
 
 def test_resource_owner_location_only_science_unchanged():
@@ -39,3 +39,13 @@ def test_pilot_does_not_open_test_or_compute_ot():
     assert "leaf.split_parents(probe, 'calibration')" in text
     assert 'selected_epoch' in text
     assert '384*1024**3+peak' in text
+
+
+def test_test_stage_uses_actual_cardinality_after_freeze():
+    small,_=projected_stage_peak(1024**3,[2]*66,66,80)
+    large,_=projected_stage_peak(1024**3,[10000]*141,141,20)
+    assert large>small
+    with pytest.raises(ValueError):projected_stage_peak(1024,[2],141,20)
+    text=(Path(__file__).resolve().parents[1]/'src/utils/global_cpu_closeout.py').read_text()
+    assert "if split=='test':leaf.verified_freeze(spec)" in text
+    assert 'OTHER_CAMPAIGN_OPEN_FD' in text
