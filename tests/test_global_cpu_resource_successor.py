@@ -1,6 +1,6 @@
 import unittest
 from src.utils.global_cpu_resource_successor import (serial_chain_peak, assert_export_only,
-    prepare_cpu_spec, assert_dynamic_config_only)
+    prepare_cpu_spec, assert_dynamic_config_only, joint_memory_assessment)
 
 
 class ResourceSuccessorTests(unittest.TestCase):
@@ -42,6 +42,20 @@ class ResourceSuccessorTests(unittest.TestCase):
         self.assertNotIn('subprocess.', code)
         self.assertNotIn('atomic_write_owner_registry(', code)
         self.assertIn('CPU_SPEC_SEALED_NOT_ACTIVATED', code)
+
+    def test_eight_gib_floor_is_not_peak_proof(self):
+        result = joint_memory_assessment(legacy_floor=8, concurrent_reserve=384, headroom=391)
+        self.assertFalse(result['full_resource_admission'])
+        self.assertFalse(result['activation_allowed'])
+        self.assertIsNone(result['required_headroom_bytes'])
+        self.assertIsNone(result['shortfall_bytes'])
+
+    def test_proven_peak_adds_real_concurrent_reserve(self):
+        result = joint_memory_assessment(legacy_floor=8, concurrent_reserve=384,
+                                        headroom=391, proven_incremental_peak=8)
+        self.assertEqual(result['required_headroom_bytes'], 392)
+        self.assertEqual(result['shortfall_bytes'], 1)
+        self.assertFalse(result['activation_allowed'])
 
 
 if __name__ == '__main__': unittest.main()

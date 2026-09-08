@@ -48,3 +48,25 @@ def assert_dynamic_config_only(old, new):
     if before != after:
         raise ValueError('AIDS_DYNAMIC_REBIND_CHANGED_NONFILE_RESOURCE_CONTRACT')
 
+
+def joint_memory_assessment(*, legacy_floor, concurrent_reserve, headroom,
+                            proven_incremental_peak=None):
+    """An old 8 GiB floor is not evidence that a whole evaluator peaks at 8 GiB."""
+    known = (legacy_floor, concurrent_reserve, headroom)
+    if any(type(v) is not int or v < 0 for v in known):
+        raise ValueError('MEMORY_OBSERVATION_INVALID')
+    if proven_incremental_peak is None:
+        return {'state': 'CPU_JOINT_MEMORY_PEAK_EVIDENCE_INSUFFICIENT',
+            'legacy_floor_bytes': legacy_floor, 'legacy_floor_is_peak_evidence': False,
+            'concurrent_reserve_bytes': concurrent_reserve, 'headroom_bytes': headroom,
+            'next_stage_incremental_peak_bytes': None, 'required_headroom_bytes': None,
+            'full_resource_admission': False, 'shortfall_bytes': None,
+            'activation_allowed': False}
+    if type(proven_incremental_peak) is not int or proven_incremental_peak < 0:
+        raise ValueError('MEMORY_PEAK_INVALID')
+    required = max(legacy_floor, concurrent_reserve + proven_incremental_peak)
+    return {'state': 'PASS' if headroom >= required else 'WAITING_JOINT_MEMORY',
+        'required_headroom_bytes': required, 'headroom_bytes': headroom,
+        'shortfall_bytes': max(0, required-headroom),
+        'full_resource_admission': headroom >= required,
+        'activation_allowed': headroom >= required}

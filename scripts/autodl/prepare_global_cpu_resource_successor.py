@@ -20,7 +20,7 @@ from src.utils.stage_file_policy import canonical_sha, load_stage_policy, config
 from src.utils.final16_owner_registry_v1 import process_start_ticks
 from src.utils.terminal_resource_dependency import verify_terminal_dependency
 from src.utils.global_cpu_resource_successor import (serial_chain_peak, assert_export_only,
-    prepare_cpu_spec, assert_dynamic_config_only)
+    prepare_cpu_spec, assert_dynamic_config_only, joint_memory_assessment)
 
 R = Path('/autodl-fs/data/counterfactual-subgraph-runtime')
 G = R/'control/bace-gin-aplus-globalgce-41b7ecb-20260908'
@@ -182,10 +182,27 @@ def activate_aids(out):
     print(json.dumps(read(out/'aids_dynamic_rebind.json')))
 
 
+def audit_memory(out):
+    config = read(out/'cpu-resource.json')
+    concurrent = read(A/'resource_config.json')['other_tasks_headroom_reserve_bytes']
+    cg = Path(config['cgroup_memory_root'])
+    limit = int((cg/'memory.limit_in_bytes').read_text())
+    usage = int((cg/'memory.usage_in_bytes').read_text())
+    audit = joint_memory_assessment(legacy_floor=config['minimum_memory_headroom_bytes'],
+        concurrent_reserve=concurrent, headroom=limit-usage)
+    audit.update(created_at=utc_now(), cgroup_limit_bytes=limit, cgroup_usage_bytes=usage,
+        cpu_spec_activation=False, source_cpu_resource=descriptor(out/'cpu-resource.json'),
+        previous_legacy_only_preflight=str(out/'cpu_full_resource_preflight.json'),
+        legacy_return_does_not_establish_joint_admission=True,
+        next_action='Bind actual evaluator incremental peak and concurrency, or wait for a proven serial AIDS boundary; keep protected owner unchanged')
+    atomic_json(out/'cpu_joint_memory_audit.json', audit)
+    print(json.dumps(audit))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
-    parser.add_argument('--action', required=True, choices=['prepare', 'activate-aids', 'status'])
+    parser.add_argument('--action', required=True, choices=['prepare', 'activate-aids', 'audit-memory', 'status'])
     parser.add_argument('--output-root', required=True, type=Path)
     args = parser.parse_args()
     if not Path(args.config).is_file(): parser.error('existing config required')
@@ -193,8 +210,9 @@ def main():
         parser.error('fresh subdirectory of existing terminal rebind required')
     if args.action == 'prepare': prepare(args.output_root)
     elif args.action == 'activate-aids': activate_aids(args.output_root)
+    elif args.action == 'audit-memory': audit_memory(args.output_root)
     else:
-        for name in ('prepared.json', 'aids_dynamic_rebind.json', 'aids_child_ack.json'):
+        for name in ('prepared.json', 'aids_dynamic_rebind.json', 'aids_child_ack.json', 'cpu_joint_memory_audit.json'):
             path = args.output_root/name
             if path.exists(): print(name, json.dumps(read(path)))
 

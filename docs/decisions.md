@@ -18978,6 +18978,12 @@ native source binding, prior calibration entry and worker source identity before
 activation. Unit tests do not activate the relay or read heldout payloads.
 # 2026-09-08: Global CPU successor resource preparation without owner termination
 
+The former CPU admission's 8 GiB minimum headroom is not a measured evaluator
+incremental peak. Passing that legacy function does not prove joint memory
+admission alongside AIDS's retained 384 GiB concurrent reserve. The fresh audit
+reports the missing peak as unknown (not zero), blocks CPU spec activation, and
+retains the legacy preflight as historical raw evidence rather than a release.
+
 The independent Global CPU owner 447477 is explicitly protected by the recovery
 task book. Its frozen spec binds an obsolete resource SHA and the owner has no
 dynamic reload interface. Prepare a fresh resource-only spec without activating
