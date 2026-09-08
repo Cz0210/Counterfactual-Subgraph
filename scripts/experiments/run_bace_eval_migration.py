@@ -12,6 +12,8 @@ def main():
     p.add_argument('--config',required=True,type=Path)
     p.add_argument('--set',action='append',default=[])
     p.add_argument('--spec',required=True,type=Path)
+    p.add_argument('--raw-reconciliation-root',type=Path,
+        help='LLM-only fresh provenance overlay; reuse unchanged calibration and freeze')
     p.add_argument('--action',choices=('plan','run','resume','freeze','export','status'),required=True)
     a=p.parse_args()
     if not a.config.is_file() or a.set!=['inference.fallback_to_heuristic=false']:
@@ -20,7 +22,7 @@ def main():
     if a.action=='status':
         value={x:json.loads((root/x).read_text()) for x in ('final_audit.json','progress.json') if (root/x).is_file()}
     elif a.action=='plan': value={'scope':spec['scope'],'roles':list(spec['roles']),'science_started':False}
-    elif a.action in ('run','resume'): value=run(spec)
+    elif a.action in ('run','resume'): value=run(spec,raw_reconciliation_root=a.raw_reconciliation_root)
     else: value={'freeze':freeze,'export':export}[a.action](spec)
     print(json.dumps(value,default=str))
 if __name__=='__main__':main()

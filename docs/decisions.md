@@ -19000,3 +19000,15 @@ entrypoint is deliberately not submitted through sbatch; scientific stages use
 the existing CPU Slurm wrappers. A sealed plan must supply real freeze job,
 native source binding, prior calibration entry and worker source identity before
 activation. Unit tests do not activate the relay or read heldout payloads.
+
+## 2026-09-08: LLM-GIN pair-local numerical source reconciliation
+
+The source merger did not bind the historical actual embedding tensors/device
+layout. The opt-in correction preserves both conflicting scalars and rebuilds
+only their raw-pair closure using the existing frozen CPU kernel, never a
+favorable source or relaxed tolerance. A numerical-producer receipt is sealed
+before measurements; complete current graphs/tensor identities and raw arrays
+are retained. Zero calibration conflicts permits byte-preserved264 units and
+freeze; any calibration conflict stops for explicit dependency repair. Existing
+GNN source/cache and prior failure evidence stay immutable. See
+docs/LLM_RAW_RECONCILIATION_20260908.md. This is not a new generation or metric.

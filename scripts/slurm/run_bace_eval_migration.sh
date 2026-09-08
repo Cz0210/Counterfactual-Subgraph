@@ -1,6 +1,7 @@
 #!/bin/bash
 # Explicit user-authorized CPU-only evaluation exception to GPU training defaults.
 # --action resume reuses committed parent/timing units; plan verifies source audit schema.
+# Optional --raw-reconciliation-root uses fresh LLM-only conflict receipts.
 #SBATCH --partition=intel
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

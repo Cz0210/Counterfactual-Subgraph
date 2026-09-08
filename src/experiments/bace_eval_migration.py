@@ -128,12 +128,16 @@ def admission(spec):
         bounded_new_files=spec['max_new_files'])
 
 
-def load_raw(spec, split, delegate, bundle_manifest):
+def load_raw(spec, split, delegate, bundle_manifest, *, conflicts=None, reconciled=None):
     """Only complete graph costs. Current model's logits/masks/minima never reused."""
     from src.ablations.gnn.reach_raw_distance_reuse import (VerifiedRawGraphDistance,
         raw_contract_from_bundle, graph_key)
     if split=='test':
         require_freeze(spec)
+    if reconciled is not None:
+        return VerifiedRawGraphDistance(delegate,index=reconciled,
+            current_raw_contract=raw_contract_from_bundle(bundle_manifest),
+            repo=Path(__file__).resolve().parents[2])
     index = copy.deepcopy(bound(spec['raw_indexes'][split]))
     if index['split'] != split:
         raise ValueError('RAW_SPLIT_CHANGED')
@@ -184,7 +188,14 @@ def load_raw(spec, split, delegate, bundle_manifest):
                 key,p,r=graph_key(row['parent_smiles'],row['residual_smiles'],index['raw_contract_sha256'])
                 prior=index['graph_costs'].get(key)
                 if prior and prior['distance']!=value:
-                    raise ValueError('RAW_GRAPH_DISTANCE_CONFLICT:'+key)
+                    if conflicts is None:
+                        raise ValueError('RAW_GRAPH_DISTANCE_CONFLICT:'+key)
+                    entry=conflicts.setdefault(key,dict(parent=p,residual=r,observations=[
+                        dict(distance=prior['distance'],source_records=copy.deepcopy(prior['source_records']))]))
+                    entry['observations'].append(dict(distance=value,source=path,
+                        source_audit_sha=source['audit']['sha256'],match_sha=stable_sha256(row),
+                        parent_id=row.get('parent_id'),candidate_id=row.get('candidate_id'),
+                        match_atom_indices=row['match_atom_indices']))
                 if not prior:
                     index['graph_costs'][key]=dict(parent=p,residual=r,distance=value,
                         source_records=[dict(source=path, source_audit_sha=source['audit']['sha256'],
@@ -197,7 +208,7 @@ def load_raw(spec, split, delegate, bundle_manifest):
         repo=Path(__file__).resolve().parents[2])
 
 
-def evaluate_role(spec, role, split, *, timing=False):
+def evaluate_role(spec, role, split, *, timing=False, reconciled=None):
     import torch
     from src.experiments.bace_gin_ours import original_bundle, fixed_source_parents
     from src.ablations.gnn.cpu_evaluation import _featurizer,_distance,_predict
@@ -233,7 +244,7 @@ def evaluate_role(spec, role, split, *, timing=False):
     # active SQLite. Preserve newly computed exact costs across roles, too.
     dist=_distance(bundle,manifest,root/'raw_cache')
     install_compact_node_cache(dist)
-    dist=load_raw(spec,split,dist,manifest)
+    dist=load_raw(spec,split,dist,manifest,reconciled=reconciled)
     started=time.monotonic(); total_bytes=0
     try:
         for i,parent in enumerate(parents):
@@ -243,6 +254,8 @@ def evaluate_role(spec, role, split, *, timing=False):
             if path.exists():
                 if reopen(path)['binding']!=binding:
                     raise ValueError('PARENT_RESUME_CONFLICT')
+                if reconciled is not None and reopen(path).get('raw_reconciliation_sha256')!=reconciled['self_sha256']:
+                    raise ValueError('PARENT_RAW_RECONCILIATION_CHANGED')
             else:
                 admission(spec)
                 tick=time.monotonic()
@@ -250,6 +263,7 @@ def evaluate_role(spec, role, split, *, timing=False):
                     distance_provider=dist,split=split,oracle_checkpoint_id=oracle.checkpoint_id,
                     oracle_batch_size=64)
                 seal(path,dict(binding=binding,parent_id=parent.parent_id,pair_rows=pairs,match_rows=matches,
+                    raw_reconciliation_sha256=reconciled['self_sha256'] if reconciled is not None else None,
                     elapsed_seconds=time.monotonic()-tick,old_flip_masks_adopted=False))
             total_bytes+=path.stat().st_size
             atomic_json(root/'progress.json',dict(state='RUNNING',role=role,split=split,completed_units=i+1,
@@ -334,7 +348,7 @@ def export(spec):
         independent_oracle_rerun_claimed=False,completed_roles=list(data)))
 
 
-def run(spec):
+def run(spec, *, raw_reconciliation_root=None):
     root=validate(spec);root.mkdir(parents=True,exist_ok=True)
     if not os.environ.get('SLURM_JOB_ID') or os.environ.get('CUDA_VISIBLE_DEVICES','') not in ('','-1'):
         raise ValueError('HPC_CPU_COMPUTE_NODE_REQUIRED')
@@ -346,5 +360,12 @@ def run(spec):
         evaluate_role(spec,next(iter(spec['roles'])),'train',timing=True)
         for split in ('calibration','test'):
             if split=='test': freeze(spec)
-            for role in spec['roles']: evaluate_role(spec,role,split)
+            reconciled=None
+            if split=='test' and raw_reconciliation_root is not None:
+                from src.experiments.llm_raw_reconciliation import reconcile
+                reconciled=reconcile(spec,Path(raw_reconciliation_root))
+                seal(root/'RAW_RECONCILIATION_BINDING.json',dict(
+                    index_sha256=reconciled['self_sha256'],overlay_root=str(Path(raw_reconciliation_root).resolve()),
+                    spec_sha256=stable_sha256(spec),freeze_sha256=require_freeze(spec)['self_sha256']))
+            for role in spec['roles']: evaluate_role(spec,role,split,reconciled=reconciled)
         return export(spec)
