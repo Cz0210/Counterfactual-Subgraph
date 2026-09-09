@@ -4329,3 +4329,9 @@ Mutagenicity roadmaps.
   501–510 tail; pass the real train-only observer regression and bind the existing
   canonical owner at its natural boundary. Do not call the partial interface a
   dispatchable science chain or full parity PASS.
+- [x] Add an EIO-recovery-only committed500→510 child with DELETE/FULL local
+  index, original owner FD/resource gate, and explicit relocation checks.
+- [ ] Pass actual storage file-fsync/snapshot gates, preserve and validate the
+  real500 joint set, seal the new storage-only source receipt, bind actual owner
+  CAS/FD/provider, then run this single recovery tail. Existing missing scientific
+  raw/parity and fresh-zero activation gates remain separate and are not waived.

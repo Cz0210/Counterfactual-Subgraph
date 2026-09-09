@@ -18616,3 +18616,18 @@ engineering retry. Record the temperature driver and the verifier driver separat
   bindings remain required; full science is currently blocked on the precise raw
   cache/live-state tail interfaces documented in
   `docs/T12_MISSING_LEDGER_RECOVERY_20260908.md`.
+
+### 2026-09-09 — Restore T12 committed500 only after real storage acceptance
+
+- The old500→510 reader exited with SQLite disk I/O error. Its disposable lookup
+  index is not scientific authority; preserve it and all corresponding sidecars
+  as evidence, and reconstruct a fresh local DELETE/FULL index from authenticated
+  history and exact first-seen embedding segments.
+- Add a child-only recovery-segment interface under the existing canonical owner.
+  Require real inherited exclusive FD, UUID, fresh stage resource measurements,
+  explicit source/relocation binding, and two-round file-fsync/snapshot acceptance.
+  Restore501–510 only; no fresh0–500, no 20k terminal materialization, no full-parity
+  or main-matrix claim. Existing four-file source validation is not loosened.
+- The current persistent fsync probe is blocked. Code/CPU tests do not authorize
+  dispatch; fresh storage-only source-delta receipt and actual owner/provider/CAS
+  binding remain deployment requirements. See `docs/T12_EIO_RECOVERY_20260909.md`.

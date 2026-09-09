@@ -1033,6 +1033,7 @@ class T12CompactHistoryJournal:
         resume_snapshot: Mapping[str, Any] | None = None,
         open_writer: bool = True,
         history_read_cache: Any | None = None,
+        durable_recovery_index: bool = False,
     ) -> None:
         if history_read_cache is not None:
             if open_writer or resume_snapshot is None:
@@ -1088,8 +1089,20 @@ class T12CompactHistoryJournal:
         self._connection.execute(
             f"PRAGMA busy_timeout={HISTORY_INDEX_BUSY_TIMEOUT_MILLISECONDS}"
         )
-        self._connection.execute("PRAGMA journal_mode=OFF")
-        self._connection.execute("PRAGMA synchronous=OFF")
+        if durable_recovery_index:
+            # Fresh recovery lookup only. The old database/sidecars remain
+            # forensic evidence, and authenticated segments remain authority.
+            mode = self._connection.execute("PRAGMA journal_mode=DELETE").fetchone()
+            self._connection.execute("PRAGMA synchronous=FULL")
+            sync = self._connection.execute("PRAGMA synchronous").fetchone()
+            if mode != ("delete",) or sync != (2,):
+                self._connection.close()
+                raise TasteT12ProductionStateError(
+                    "T12 recovery index DELETE/FULL readback failed"
+                )
+        else:
+            self._connection.execute("PRAGMA journal_mode=OFF")
+            self._connection.execute("PRAGMA synchronous=OFF")
         self._connection.execute(f"PRAGMA cache_size=-{HISTORY_INDEX_CACHE_KIB}")
         self._connection.execute("PRAGMA temp_store=FILE")
         self._connection.executescript(

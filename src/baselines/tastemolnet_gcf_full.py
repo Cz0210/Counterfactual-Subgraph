@@ -492,11 +492,16 @@ def run_t12_generation_segment(
     materialize_terminal_candidates: bool = True,
     diagnostic_only: bool = False,
     diagnostic_after_checkpoint: Callable[..., Mapping[str, Any]] | None = None,
+    durable_recovery_index: bool = False,
 ) -> dict[str, Any]:
     """Run exactly fresh 1..10k or resumed 10001..20k generation."""
 
     if mode not in {"fresh", "resume"}:
         raise TasteGCFFullResumeError("T12 production mode must be fresh/resume")
+    if durable_recovery_index and (mode != "resume" or disposable_index_root is None):
+        raise TasteGCFFullResumeError(
+            "T12 durable recovery index requires resume and explicit local root"
+        )
     if diagnostic_after_checkpoint is not None and not diagnostic_only:
         raise TasteGCFFullResumeError("T12 live-state tail hook is diagnostic-only")
     if diagnostic_only and (
@@ -852,6 +857,7 @@ def run_t12_generation_segment(
             attempt_id=attempt_id,
             generation_token=generation_token,
             resume_snapshot=history_snapshot,
+            durable_recovery_index=durable_recovery_index,
         )
         coverage_runtime = _BoundedNeuroSEDCoverage(importance)
         bridge = T12StableGCFBridge(

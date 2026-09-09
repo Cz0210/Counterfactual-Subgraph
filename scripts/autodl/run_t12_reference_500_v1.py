@@ -256,7 +256,15 @@ def main(argv: list[str] | None = None) -> int:
     segment.add_argument("--task-spec", type=_absolute, required=True)
     segment.add_argument("--mode", choices=("fresh", "resume"), required=True)
     segment.add_argument("--checkpoint-manifest", type=_absolute)
+    recovery = subparsers.add_parser("recovery-segment")
+    recovery.add_argument("--task-spec", type=_absolute, required=True)
     args = parser.parse_args(argv)
+    if args.action == "recovery-segment":
+        if args.set != ["inference.fallback_to_heuristic=false"]:
+            raise ValueError("T12_RECOVERY_FAIL_CLOSED_INFERENCE_REQUIRED")
+        from src.utils.t12_eio_recovery import run_recovery_segment
+        print(json.dumps(run_recovery_segment(args.task_spec), sort_keys=True), flush=True)
+        return 0
     if args.action == "segment":
         if (args.mode == "resume") != (args.checkpoint_manifest is not None):
             raise ValueError("T12 segment resume/checkpoint arguments disagree")
