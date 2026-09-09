@@ -133,3 +133,72 @@ Install is one bounded1200s Conda stage and600s pinned pip stage, with exact
 actual version/import readback and an immutable terminal. Failed attempts are
 not overwritten or automatically reinstalled. This is environment setup, not
 scientific generation; no ChEMBL database is replaced by its import fixture.
+
+### Deployed environment and bounded transport repair
+
+The first deployment created Python3.11.5 successfully, but its online pip
+stage exited124 at the600s total transport deadline, after the34.9MB RDKit
+download and during NumPy download. `installation_terminal.json` and both
+original logs remain unchanged. The second, explicitly authorized engineering
+attempt did not repeat Conda create. Mac downloaded the same pinned Linux
+cp311 wheels from the official PyPI index, with Pillow12.3.0 (the original
+resolved RDKit dependency). Every wheel passed full ZIP CRC and one content
+SHA at Mac, then one destination transfer SHA. Offline pip installed those
+four wheels into the existing project-only prefix and succeeded.
+
+Actual prefix:
+`/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v1/environment-20260910-v1/python3115-crem0214`.
+Actual readback is Python3.11.5, CReM0.2.14, RDKit2023.9.6,
+NumPy1.26.4, Pillow12.3.0. `-s -B` with PYTHONHASHSEED=0 was read back as
+ignore_environment=0 and hash_randomization=0. This proves dependency imports,
+not ChEMBL22 replacement or scientific pilot success.
+
+The immutable attempt2 records under the environment root are
+`installation_attempt2_intent.json`, `installation_attempt2_terminal.json`,
+`actual_versions-attempt2.json`, and the pilot-spec-compatible derived
+`offline-attempt-2/environment_manifest.json` (binding the actual readback
+path and SHA). `scripts/cm_crem_generator_env.sh` accepts the explicit
+`--offline-repair-attempt2` action only when the unchanged attempt1 terminal
+is FAILED_pinned_pip/124 and no attempt2 intent exists. Its offline install
+has a1800s bound; it rejects repeated repair rather than silently using a
+third attempt. No shared Conda environment was modified.
+
+The author subset is deployed at
+`/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v1/assets/upstream-b5816b502cde00ee24c652a02cbc54664583f773`.
+`reviewed_source_manifest.json` binds the four reviewed source files and MIT
+license extracted from `git archive` of that full commit. All archived members
+were checked; no symlink, unknown file or existing destination was accepted.
+This is explicitly a reviewed source subset, not a claim that DiffLinker or
+the whole author runtime has been installed. ChEMBL22 remains a separate
+required asset; no substitute database has been obtained.
+
+## Pilot repair1: preserve original bond endpoints across V3000
+
+The real oracle pilot2654380 failed during input serialization, before native
+CReM generation: `make_parent_request` / `load_parent_mol` rejected an ordered
+graph mismatch. A bounded HPC-only audit of the frozen386 train parents found
+47 affected parents and51 reversed bonds. The only differing fields were bond
+begin/end atom indices; every canonical chemical identity was unchanged.
+V3000 can orient a bond toward a chiral atom when writing wedge stereochemistry.
+Neither the GINE model nor Grad-CAM caused this transport failure.
+
+The explicit `cm_crem_parent_v2` schema adds the original bond endpoint vector.
+Loading first proves that each same-index bond joins the same two atom indices,
+then restores its original orientation and retains atom/bond order. Reversal
+of direction-sensitive bond types is rejected. Original H flags and bond
+directions are still restored, followed by the unchanged full ordered SHA and
+canonical-isomeric identity checks. No atom or selected-mask index is guessed
+or remapped. Valid legacy v1 records remain accepted under their existing strict
+checks. The CM algorithm, oracle, attribution formula and chemical budget are
+unchanged.
+
+The minimal public synthetic fixture `C[C@@H](O)CC` reproduces the same
+V3000 endpoint reversal without exporting dataset molecules. Eighteen focused
+transport/native tests pass. On HPC, all386 frozen train parents pass the v2
+roundtrip in the original RDKit2025.09.3; the exact same saved requests also
+pass in isolated RDKit2023.09.6, retaining full ordered hashes and canonical
+identity. Test data, GNN inference and OT were not used by this regression.
+The original failed pilot and its four existing attribution-unit files remain
+untouched. Evidence is under the original run's
+`repair1-transport-diagnostic/{redacted_summary,produce_regression,consume_regression}.json`;
+full diagnostic molecule records remain on HPC and were not exported to Mac.

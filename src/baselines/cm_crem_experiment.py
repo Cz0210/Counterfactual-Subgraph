@@ -73,6 +73,11 @@ def resolve_spec(template: Path, bindings: Path, output: Path) -> dict:
     resolved = read_json(bindings)
     for key in ("resolved_oracle", "resolved_wnode", "resolved_parents", "resolved_evaluation", "execution", "source_receipts"):
         spec[key] = resolved[key]
+    spec["resolved_attribution"] = {"source": "REVIEWED_UPSTREAM_FUNCTIONS", "upstream_commit": UPSTREAM,
+        "node_layer": spec["resolved_oracle"]["node_layer"],
+        "score": "calibrated_probability_source_class", "rounding": "max_1_floor_n_div_5",
+        "ring_policy": "one_union_rings_intersecting_initial_mask", "relu": False,
+        "atom_tie_break": "ascending_original_atom_index", "transport_schema": "cm_crem_parent_v2"}
     spec["campaign"]["start_time_utc"] = resolved["start_time_utc"]
     spec["template_sha256"] = file_sha(template)
     spec["bindings_sha256"] = file_sha(bindings)
@@ -148,6 +153,52 @@ def pilot_indices(rows: list[dict], science_hash: str) -> tuple[list[int], dict]
                       "multicomponent_train_parents_available": sum(r[4] > 1 for r in info)}
 
 
+def reusable_attributions(spec: dict) -> dict[str, dict]:
+    """Adopt hash-sealed gradients from one terminal pilot; repair only transport."""
+    reuse = spec["execution"].get("attribution_reuse")
+    if not reuse:
+        return {}
+    source = checked_root(reuse["root"], HPC_SCOPE)
+    old_spec = read_json(source / "spec.json")
+    if old_spec["science_hash"] != spec["science_hash"] or old_spec["execution"]["execution_commit"] != reuse["execution_commit"]:
+        raise ValueError("Attribution reuse source science/execution binding differs")
+    job = str(reuse["job_id"])
+    if not job.isdecimal():
+        raise ValueError("Attribution reuse needs a real numeric Slurm producer")
+    state = subprocess.check_output(["sacct", "-X", "-j", job, "--noheader", "--parsable2", "--format=JobIDRaw,State"], text=True)
+    matches = [line.split("|") for line in state.splitlines() if line.split("|")[0] == job]
+    if len(matches) != 1 or matches[0][1] not in {"FAILED", "COMPLETED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"}:
+        raise ValueError("Old attribution producer is not confirmed terminal; no adoption")
+    receipts = [json.loads(line) for line in (source / "producer_receipts" / (job+".jsonl")).read_text().splitlines()]
+    result = {}
+    from rdkit import Chem
+    from src.baselines.cm_crem_generation import make_parent_request
+    for receipt in receipts:
+        name = receipt.get("path", "")
+        if not name.startswith("attribution_units/"):
+            continue
+        if Path(name).is_absolute() or ".." in Path(name).parts:
+            raise ValueError("Attribution unit escaped its old root")
+        path = source / name
+        if file_sha(path) != receipt["sha256"] or receipt["execution_commit"] != reuse["execution_commit"]:
+            raise ValueError("Attribution unit differs from its original producer receipt")
+        row = read_json(path)
+        if (row.get("science_hash") != spec["science_hash"] or row.get("weights_bn_rng_unchanged") is not True
+                or row.get("oracle_weight_sha256") != spec["resolved_oracle"]["model_sha256"]
+                or row.get("temperature_sha256") != spec["resolved_oracle"]["temperature_sha256"]):
+            raise ValueError("Unsealed/unbound gradient cannot be reused")
+        before = row["generation_request"]
+        after = make_parent_request(row["parent_id"], Chem.MolFromSmiles(row["input_smiles"]), before["selected_atom_indices"])
+        if any(before[k] != after[k] for k in ("atom_order_sha256", "selected_atom_indices", "effective_atom_indices")):
+            raise ValueError("Transport repair altered the original graph/mask")
+        row["generation_request"] = after
+        row["transport_adoption"] = {"source_path": str(path), "source_sha256": receipt["sha256"],
+                                     "source_job_id": job, "new_gradcam_computation": False,
+                                     "only_transport_schema_updated": True}
+        result[row["parent_id"]] = row
+    return result
+
+
 class Experiment:
     def __init__(self, spec_path: Path, root: Path):
         self.spec_path = spec_path.resolve()
@@ -212,13 +263,32 @@ class Experiment:
         eligible = [row for row in predictions if row["predicted_label"] == 1]
         indices, strata = pilot_indices(eligible, self.sha)
         selected = [eligible[i] for i in indices] if pilot_only else eligible
+        self.put("pilot/design.json" if pilot_only else "attribution_design.json",
+                 {"parents": selected, "train_predictions": predictions, "strata": strata,
+                  "train_proposal_count": len(rows), "train_predicted_source_count": len(eligible),
+                  "test_loaded": False, "selection_uses_coverage": False})
         records = []
+        reused = reusable_attributions(self.spec)
+        adopted = 0
         for i, row in enumerate(selected):
             part = f"attribution_units/{digest(row['parent_id'])[:20]}.json"
             if (self.root / part).exists():
                 record = self.get(part)
+            elif row["parent_id"] in reused:
+                old = reused[row["parent_id"]]
+                if old["input_smiles"] != row["smiles"]:
+                    raise ValueError("Reusable attribution has a different original input")
+                record = self.put(part, old)
+                adopted += 1
             else:
-                record = self.put(part, oracle.attribute_train_parent(row))
+                try:
+                    record = self.put(part, oracle.attribute_train_parent(row))
+                except Exception as error:
+                    self.put(f"failures/attribution-{i}-{os.environ['SLURM_JOB_ID']}.json",
+                             {"parent_id": row["parent_id"], "parent_input": row,
+                              "error_type": type(error).__name__, "error": str(error),
+                              "completed_before_failure": len(records), "stage": output})
+                    raise
             records.append(record)
             atomic_json(self.root / "progress.json", {"stage": output, "completed_parent_units": i+1,
                          "total_parent_units": len(selected), "updated_at": utc_now(), "job_id": os.environ.get("SLURM_JOB_ID")})
@@ -227,6 +297,7 @@ class Experiment:
                   "train_proposal_count": len(rows), "train_predicted_source_count": len(eligible),
                   "strata": strata, "seconds": time.monotonic()-started, "test_loaded": False,
                   "job_id": os.environ["SLURM_JOB_ID"], "pid": os.getpid(),
+                  "sealed_attribution_units_reused": adopted,
                   "memory_start": memory_start, "memory_after_attribution": cgroup_memory()}
         if pilot_only:
             # Asset-independent portion only. These are not generated recourses.
@@ -268,8 +339,11 @@ class Experiment:
         db_receipt = read_json(e["database_receipt"])
         if db_receipt.get("url") != self.spec["upstream"]["database"]["url"] or db_receipt.get("status") != "VERIFIED_STATIC_COPY":
             raise ValueError("Official database content provenance missing")
-        if file_sha(e["database_path"]) != db_receipt["uncompressed_sha256"]:
-            raise ValueError("Generator database differs from its one-transfer content proof")
+        from src.baselines.cm_crem_assets import stage_static_database
+        staged = stage_static_database(e["database_path"], e["database_receipt"], reserve_bytes=2*1024**3)
+        self.put(f"assets/database-local-{os.environ['SLURM_JOB_ID']}.json", staged)
+        if staged["status"] != "LOCAL_DATABASE_READY":
+            raise RuntimeError(f"BLOCKED_LOCAL_DATABASE_STAGING: {staged.get('reason')}")
         from src.baselines.cm_crem_generation import generate_parent
         inputs = self.get("pilot/oracle.json" if pilot_only else "attribution.json")
         records = []
@@ -285,8 +359,10 @@ class Experiment:
             else:
                 log = self.root / "logs" / f"parent-{digest(attr['parent_id'])[:20]}.log"
                 log.parent.mkdir(parents=True, exist_ok=True)
-                result = generate_parent(attr["generation_request"], {"database_path": e["database_path"],
+                result = generate_parent(attr["generation_request"], {"database_path": staged["database_path"],
                          "upstream_root": e["upstream_root"], "science_hash": self.sha, "parent_wall_limit_seconds": 900}, log_path=log)
+            result["database_uncompressed_sha256"] = db_receipt["uncompressed_sha256"]
+            result["database_staging_manifest"] = staged["manifest_path"]
             if result["status"] not in TERMINALS:
                 self.put(f"failures/generate-{index}-{os.environ['SLURM_JOB_ID']}.json", result)
                 raise RuntimeError(f"Generation {attr['parent_id']}: {result['status']}: {result.get('error')}")
@@ -454,31 +530,42 @@ class Experiment:
         return self.put("selection_freeze.json", payload)
 
     def stage_audit(self) -> dict:
-        from src.baselines.cm_crem_selection import evaluate_frozen_test, select_calibration, SelectionFreeze
+        from src.baselines.cm_crem_selection import evaluate_frozen_test, SelectionFreeze
+        from src.baselines.cm_crem_audit import audit_bace_run, independent_spotcheck
         self.require_pilot()
-        cv, cs, cp, cc, cm = self.matrix("calibration")
-        replay = select_calibration(cv, pair_status=cs, parent_ids=cp, candidate_ids=cc, source_mask=cm,
-                 theta=self.spec["resolved_evaluation"]["theta"], cap=self.spec["resolved_evaluation"]["cap"],
-                 contract_sha256=self.sha, frozen_pool_sha256=self.get("pool_freeze.json")["pool_sha256"])
-        if replay.freeze_sha256 != SelectionFreeze.from_dict(self.get("selection_freeze.json")).freeze_sha256:
-            raise ValueError("Independent calibration replay differs from pre-test freeze")
+        SelectionFreeze.from_dict(self.get("selection_freeze.json"))
         values, statuses, pids, cids, masks = self.matrix("test")
         freeze = self.get("selection_freeze.json")
         result = evaluate_frozen_test(freeze, values, parent_ids=pids, candidate_ids=cids,
                                      source_mask=masks, pair_status=statuses, contract_sha256=self.sha)
         payload = result.to_dict() if hasattr(result, "to_dict") else dict(result)
         self.put("test_evaluation.json", payload)
-        return self.put("audit/final_audit.json", {"status": "RECORD_RECONCILIATION_COMPLETE", "scientific_scope": METHOD,
+        provenance = audit_bace_run(self.spec, self.root)
+        self.put("audit/provenance_review.json", provenance)
+        spotcheck = independent_spotcheck(self.spec, self.root, provenance)
+        if spotcheck.get("status") != "CM_CREM_INDEPENDENT_SPOTCHECK_PASS" or spotcheck.get("independent") is not True:
+            raise ValueError("Independent real-science verification has not passed")
+        self.put("audit/independent_spotcheck.json", spotcheck)
+        return self.put("audit/final_audit.json", {"status": "BACE_CM_CREM_FINAL_AUDIT_PASS", "scientific_scope": METHOD,
+                        "scientific_pass_claimed": True,
                         "test_base_count": len(pids), "candidate_count": len(cids),
                         "test_result_sha256": digest(payload), "selection_freeze_sha256": digest(freeze),
                         "weights_trained": False, "temperature_refitted": False, "main_matrix_written": False,
-                        "portable_acceptance_state": "PENDING_INDEPENDENT_PROVENANCE_REVIEW"})
+                        "independent_spotcheck": {"path": "audit/independent_spotcheck.json",
+                            "sha256": file_sha(self.root / "audit/independent_spotcheck.json")},
+                        "portable_acceptance_state": "PENDING_SCOPED_PACKAGE_TRANSFER_VERIFICATION"})
 
     def stage_export(self) -> dict:
         from src.baselines.cm_crem_export import export_results
-        self.get("audit/final_audit.json")
+        audit = self.get("audit/final_audit.json")
+        if audit.get("status") != "BACE_CM_CREM_FINAL_AUDIT_PASS":
+            raise ValueError("Final scientific audit has not passed")
         result = export_results(self.get("test_evaluation.json"), self.root, dataset="bace", oracle="gine")
         return {"status": "EXPORTED", "results": result}
+
+    def stage_package(self) -> dict:
+        from src.baselines.cm_crem_release import package_run
+        return package_run(self.root)
 
     def status(self) -> dict:
         present = {}
@@ -496,7 +583,7 @@ def main(argv=None) -> int:
     parser.add_argument("--config", default="configs/hpc.yaml")
     parser.add_argument("--spec", required=True, type=Path)
     parser.add_argument("--run-root", required=True, type=Path)
-    parser.add_argument("--action", required=True, choices=["resolve", "preflight", "pilot-oracle", "pilot-closeout", "attribution", "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export", "status"])
+    parser.add_argument("--action", required=True, choices=["resolve", "preflight", "pilot-oracle", "pilot-closeout", "attribution", "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export", "package", "status"])
     parser.add_argument("--bindings", type=Path)
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
@@ -529,5 +616,5 @@ def main(argv=None) -> int:
         result = experiment.status()
     else:
         result = getattr(experiment, "stage_" + args.action.replace("-", "_"))()
-    print(json.dumps({k: v for k, v in result.items() if k not in {"records", "parents", "encoded_graphs", "nonself_pairs", "candidates", "funnels"}}, allow_nan=False))
+    print(json.dumps({k: v for k, v in result.items() if k not in {"records", "parents", "encoded_graphs", "nonself_pairs", "candidates", "funnels", "train_predictions", "strata"}}, allow_nan=False))
     return 0

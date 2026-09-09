@@ -97,12 +97,13 @@ def make_parent_request(parent_id: str, mol: Any, selected_atom_indices: list[in
     Chem.SanitizeMol(mol)
     block = Chem.MolToMolBlock(mol, kekulize=False, forceV3000=True)
     request = {
-        "schema": "cm_crem_parent_v1", "parent_id": str(parent_id), "split": split,
+        "schema": "cm_crem_parent_v2", "parent_id": str(parent_id), "split": split,
         "smiles": Chem.MolToSmiles(mol, canonical=False, isomericSmiles=True),
         "molblock": block, "atom_order_sha256": atom_order_sha256(mol),
         "atom_no_implicit": [a.GetNoImplicit() for a in mol.GetAtoms()],
         "atom_explicit_hs": [a.GetNumExplicitHs() for a in mol.GetAtoms()],
         "bond_directions": [int(b.GetBondDir()) for b in mol.GetBonds()],
+        "bond_endpoints": [[b.GetBeginAtomIdx(), b.GetEndAtomIdx()] for b in mol.GetBonds()],
         "selected_atom_indices": list(selected_atom_indices),
         "effective_atom_indices": official_ring_mask(mol, list(selected_atom_indices)),
     }
@@ -113,16 +114,22 @@ def make_parent_request(parent_id: str, mol: Any, selected_atom_indices: list[in
 def load_parent_mol(request: Mapping[str, Any]) -> Any:
     """Restore explicitly recorded representational flags omitted by MolBlock.
 
-    V3000 preserves atom order/stereo but not every SMILES H / slash flag.
-    Restore only these flags, then require the entire original ordered digest
+    V3000 preserves atom indices but can reverse bonds for wedge serialization,
+    and does not preserve every SMILES H / slash flag. Restore the explicitly
+    bound original orientation (only after checking the same undirected bond)
+    and flags, then require the entire original ordered digest
     AND canonical isomeric identity. No guessed atom reindexing is permitted.
     """
     from rdkit import Chem
+    if request.get("schema") not in {"cm_crem_parent_v1", "cm_crem_parent_v2"}:
+        raise GenerationContractError("unsupported CM parent transport schema")
     # Restore bracket-H state before sanitization: aromatic [nH] is not safely
     # representable by an aromatic V3000 block alone on every supported RDKit.
     mol = Chem.MolFromMolBlock(request["molblock"], sanitize=False, removeHs=False)
     if mol is None:
         raise GenerationContractError("invalid CM MolBlock")
+    if request.get("schema") == "cm_crem_parent_v2":
+        mol = _restore_ordered_bonds(mol, request.get("bond_endpoints", []))
     atoms = request.get("atom_no_implicit", [])
     hydrogens = request.get("atom_explicit_hs", [])
     bonds = request.get("bond_directions", [])
@@ -143,6 +150,47 @@ def load_parent_mol(request: Mapping[str, Any]) -> Any:
             or Chem.MolToSmiles(mol, isomericSmiles=True) != Chem.MolToSmiles(original, isomericSmiles=True)):
         raise GenerationContractError("CM atom mapping/ordered graph mismatch")
     return mol
+
+
+def _restore_ordered_bonds(mol: Any, endpoints: list[list[int]]) -> Any:
+    """Undo V3000's wedge-oriented endpoints without changing chemical edges.
+
+    Bond indices and atom indices are not remapped. Direction-sensitive dative
+    bonds are never reversed by this adapter. Atom metadata is copied from the
+    parsed block, not reconstructed from a guessed canonical atom mapping.
+    """
+    from rdkit import Chem
+    if len(endpoints) != mol.GetNumBonds():
+        raise GenerationContractError("incomplete ordered bond transport")
+    for bond, pair in zip(mol.GetBonds(), endpoints):
+        if (not isinstance(pair, list) or len(pair) != 2
+                or any(type(x) is not int or not 0 <= x < mol.GetNumAtoms() for x in pair)
+                or pair[0] == pair[1]
+                or set(pair) != {bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()}):
+            raise GenerationContractError("CM bond transport mapping mismatch")
+        actual = [bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()]
+        if pair != actual and str(bond.GetBondType()) not in {"SINGLE", "DOUBLE", "TRIPLE", "AROMATIC", "ZERO"}:
+            raise GenerationContractError("unsupported directional bond transport reversal")
+    restored = Chem.RWMol()
+    for atom in mol.GetAtoms():
+        restored.AddAtom(Chem.Atom(atom))
+    for bond, (begin, end) in zip(mol.GetBonds(), endpoints):
+        restored.AddBond(begin, end, bond.GetBondType())
+        target = restored.GetBondWithIdx(bond.GetIdx())
+        target.SetIsAromatic(bond.GetIsAromatic())
+        target.SetIsConjugated(bond.GetIsConjugated())
+    # Stereo neighbors can only be assigned after every chemical edge exists.
+    for bond, pair in zip(mol.GetBonds(), endpoints):
+        target = restored.GetBondWithIdx(bond.GetIdx())
+        stereo_atoms = list(bond.GetStereoAtoms())
+        if stereo_atoms:
+            if pair != [bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()]:
+                stereo_atoms.reverse()
+            target.SetStereoAtoms(*stereo_atoms)
+        target.SetStereo(bond.GetStereo())
+    for conformer in mol.GetConformers():
+        restored.AddConformer(Chem.Conformer(conformer), assignId=True)
+    return restored.GetMol()
 
 
 def parent_seed(science_hash: str, parent_id: str, campaign_seed: int = 7) -> int:
@@ -240,7 +288,7 @@ def run_native_parent(request: Mapping[str, Any], *, source_path: Path, database
     """One native call. Caller must use isolated worker; injectable CReM is for fixtures."""
     from rdkit import Chem
     import numpy as np
-    if request.get("split") != "train" or request.get("schema") != "cm_crem_parent_v1":
+    if request.get("split") != "train" or request.get("schema") not in {"cm_crem_parent_v1", "cm_crem_parent_v2"}:
         raise GenerationContractError("only explicit train parent records may generate")
     mol = load_parent_mol(request)
     selected = list(request["selected_atom_indices"])

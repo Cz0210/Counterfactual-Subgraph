@@ -15,7 +15,7 @@ from src.baselines.cm_crem_experiment import Experiment, HPC_SCOPE
 from src.baselines.cm_crem_runtime import atomic_json, checked_root, digest, read_json, utc_now
 
 STAGES = ("pilot-oracle", "pilot-generate", "pilot-filter", "pilot-closeout", "attribution",
-          "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export")
+          "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export", "package")
 
 
 def submit(spec_path: Path, root: Path, stage: str, dependency: str | None = None) -> dict:

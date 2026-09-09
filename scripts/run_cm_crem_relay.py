@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 from src.baselines.cm_crem_runtime import atomic_json, utc_now
 
 STAGES = ["pilot-oracle", "pilot-generate", "pilot-filter", "pilot-closeout", "attribution",
-          "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export"]
+          "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export", "package"]
 
 
 def ssh_read(alias: str, argv: list[str], timeout: int = 90) -> str:
@@ -33,10 +33,14 @@ def main():
     parser.add_argument("--hpc-alias", default="tongji-hpc", choices=["tongji-hpc"])
     parser.add_argument("--hpc-run-root", required=True)
     parser.add_argument("--hpc-execution-root", required=True)
+    parser.add_argument("--hpc-spec", help="Fresh immutable successor spec within this run; original pilot spec stays unchanged")
     parser.add_argument("--local-root", type=Path, required=True)
     parser.add_argument("--start-time-utc", required=True)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
+    spec_path = args.hpc_spec or args.hpc_run_root+"/spec.json"
+    if not Path(spec_path).is_absolute() or Path(spec_path).parent != Path(args.hpc_run_root):
+        raise ValueError("Relay spec must be an absolute direct child of the exact run root")
     base = Path("/Volumes/DireRaven/counterfactual-hpc-offload/cm-crem-global-v1")
     local = args.local_root.resolve()
     if local == base or not local.is_relative_to(base) or not Path(args.hpc_run_root).is_relative_to("/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v1"):
@@ -47,6 +51,7 @@ def main():
     t0 = datetime.fromisoformat(args.start_time_utc.replace("Z", "+00:00"))
     atomic_json(local/"relay_identity.json", {"pid": os.getpid(), "created_at": utc_now(),
                 "hpc_run_root": args.hpc_run_root, "execution_root": args.hpc_execution_root,
+                "spec": spec_path,
                 "max_lifetime_hours": 168, "model_api_calls": False, "poll_seconds": 300}, immutable=True)
     failures, blocker_since = 0, None
     python = "/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python"
@@ -81,7 +86,7 @@ def main():
                     snapshot.update(status="EXPORT_COMPLETE_PORTABLE_ACCEPTANCE_AND_TRANSFER_REQUIRED")
                     atomic_json(local/"state.json", snapshot)
                     return 0
-                status_text = ssh_read(args.hpc_alias, [python, "-I", "-B", args.hpc_execution_root+"/scripts/run_cm_crem.py", "--spec", args.hpc_run_root+"/spec.json", "--run-root", args.hpc_run_root, "--action", "status"])
+                status_text = ssh_read(args.hpc_alias, [python, "-I", "-B", args.hpc_execution_root+"/scripts/run_cm_crem.py", "--spec", spec_path, "--run-root", args.hpc_run_root, "--action", "status"])
                 status = json.loads(status_text)
                 if next_stage == "pilot-generate" and status["assets"]["missing_assets"]:
                     snapshot.update(status="WAITING_OFFICIAL_DATABASE_OR_ENV", next_stage=next_stage,
@@ -92,7 +97,7 @@ def main():
                         atomic_json(local/"state.json", snapshot)
                         return 3
                 else:
-                    result = ssh_read(args.hpc_alias, [python, "-I", "-B", args.hpc_execution_root+"/scripts/submit_cm_crem_stage.py", "--spec", args.hpc_run_root+"/spec.json", "--run-root", args.hpc_run_root, "--stage", next_stage], timeout=120)
+                    result = ssh_read(args.hpc_alias, [python, "-I", "-B", args.hpc_execution_root+"/scripts/submit_cm_crem_stage.py", "--spec", spec_path, "--run-root", args.hpc_run_root, "--stage", next_stage], timeout=120)
                     snapshot.update(status="STAGE_SUBMITTED", stage=next_stage, submission=json.loads(result))
                     blocker_since = None
             failures = 0

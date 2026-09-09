@@ -18644,3 +18644,22 @@ engineering retry. Record the temperature driver and the verifier driver separat
   attribution/64-pair CPU pilot may proceed while the official asset is blocked.
 - Existing Taste/AIDs/Mut/GNN/LLM artifacts and processes are outside this change.
   Test data is opened only after authenticated train-pool and calibration freeze.
+
+### 2026-09-10 — First real CM pilot transport repair, not a model change
+
+- Pilot2654380 stopped at the strict parent ordered-graph transport check.
+  RDKit2025.09.3 V3000 serialization reversed51 bond endpoint directions across
+  47/386 train inputs; canonical molecular identity was unchanged. Preserve
+  the FAILED terminal and four already sealed GINE attribution units.
+- Version the transport as `cm_crem_parent_v2`: record original bond endpoints,
+  verify the same undirected chemical bonds, then restore their original order
+  and direction. The complete ordered SHA and canonical identity gates remain.
+  Both the source RDKit and isolated RDKit2023.09.6 passed386/386 transport
+  checks. No Grad-CAM formula, mask, source input or scientific budget changed.
+- A fresh pilot repair may adopt only terminal/hash-bound successful attribution
+  units, keep gradient/activation/importances, and replace only the small v2
+  transport request. It must record the source unit/hash and zero new Grad-CAM
+  for those units. It never rewrites the old execution worktree or results.
+- Add strict job-private readonly DB staging and independent saved-record plus
+  bounded actual scientific spotchecks; final package/import requires the real
+  completed scientific audit. Unit tests are not evidence of CM coverage.

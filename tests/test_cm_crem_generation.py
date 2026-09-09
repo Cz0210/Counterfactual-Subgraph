@@ -56,6 +56,29 @@ def test_wrong_atom_order_rejected():
         cm.load_parent_mol(request)
 
 
+def test_v3000_wedge_reversal_restores_original_endpoints_not_only_chemistry():
+    # Public synthetic fixture: V3000 orients bond0 toward its stereocenter.
+    # This is the same representational failure class as the real train audit.
+    mol = Chem.MolFromSmiles("C[C@@H](O)CC")
+    raw = Chem.MolFromMolBlock(Chem.MolToMolBlock(mol, kekulize=False, forceV3000=True),
+                              sanitize=False, removeHs=False)
+    assert [raw.GetBondWithIdx(0).GetBeginAtomIdx(), raw.GetBondWithIdx(0).GetEndAtomIdx()] == [1, 0]
+    assert [mol.GetBondWithIdx(0).GetBeginAtomIdx(), mol.GetBondWithIdx(0).GetEndAtomIdx()] == [0, 1]
+    request = cm.make_parent_request("synthetic-wedge", mol, [1])
+    assert request["schema"] == "cm_crem_parent_v2"
+    restored = cm.load_parent_mol(request)
+    assert cm.atom_order_sha256(restored) == cm.atom_order_sha256(mol)
+    assert Chem.MolToSmiles(restored) == Chem.MolToSmiles(mol)
+    assert request["selected_atom_indices"] == [1]
+
+
+def test_ordered_transport_does_not_admit_another_chemical_edge():
+    request = cm.make_parent_request("p", Chem.MolFromSmiles("C[C@@H](O)CC"), [1])
+    request["bond_endpoints"][0] = [0, 2]
+    with pytest.raises(cm.GenerationContractError, match="mapping"):
+        cm.load_parent_mol(request)
+
+
 def test_ring_is_one_union_not_transitive():
     mol = Chem.MolFromSmiles("CC1CCC2CCCCC2C1")
     rings = mol.GetRingInfo().AtomRings()
