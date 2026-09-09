@@ -10,7 +10,9 @@ from src.baselines.t13_real_batch_performance import (
 
 
 def plan():
-    result = dict(scope=SCOPE, train_batches=2, validation_batches=1, max_wall_seconds=1800,
+    result = dict(scope=SCOPE, train_batches=5, validation_batches="ALL_WHEN_DUE", max_wall_seconds=1800,
+                  updates_per_arm=2, diagnostic_arm_count=3, diagnostic_optimizer_updates=6,
+                  max_diagnostic_optimizer_updates=8,
                   batch_size=500, num_workers=0, seed=7, epochs=100, source_label=1,
                   target_label=0, synthetic=False, formal_start=False, active_handover=False,
                   remining=False, test_loaded=False, calibration_loaded=False,
@@ -23,7 +25,9 @@ def plan():
 
 
 @pytest.mark.parametrize("key,value", [
-    ("train_batches", 3), ("validation_batches", 2), ("synthetic", True),
+    ("train_batches", 2), ("validation_batches", 1), ("synthetic", True),
+    ("updates_per_arm", 3), ("diagnostic_arm_count", 4),
+    ("diagnostic_optimizer_updates", 9), ("max_diagnostic_optimizer_updates", 9),
     ("batch_size", 1), ("num_workers", 1), ("max_wall_seconds", 1801),
     ("formal_start", True), ("active_handover", True), ("remining", True),
     ("test_loaded", True), ("calibration_loaded", True), ("target_label", 1),
@@ -113,7 +117,7 @@ def test_no_new_platform_no_import_of_actual_science_on_inspect():
     source = (Path(__file__).parents[3] / "src/baselines/t13_real_batch_performance.py").read_text()
     assert "GPUFileLock(" not in source
     assert "matrix" not in source
-    assert "NO_DEPLOYED_SAFE_PAUSE_INTERFACE_IN_ACTIVE_WORKER" in source
+    assert "SAME_RUN_RESTORATION_REQUIRES_STORAGE_PAYLOAD_MEMORY_AND_OWNER_BINDING" in source
 
 
 def test_observation_does_not_invoke_extra_oracle_or_alias_outputs():
@@ -133,4 +137,5 @@ def test_observation_does_not_invoke_extra_oracle_or_alias_outputs():
 def test_each_arm_clones_mutable_native_batch():
     source = (Path(__file__).parents[3] / "src/baselines/t13_real_batch_performance.py").read_text()
     assert "batch = copy.deepcopy(source_batch)" in source
-    assert "[copy.deepcopy(validation_batch)]" in source
+    assert "for source_batch in validation_loader:" in source
+    assert "T13_FULL_VALIDATION_WAS_NOT_FULLY_CONSUMED" in source

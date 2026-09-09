@@ -17,7 +17,10 @@ import types
 
 GIB = 1024 ** 3
 REFERENCE_COMMIT = "c0eb892dd13ef05a5891c4acf1c5f4fef3966f67"
-SCOPE = "T13_REAL_TRAIN_TWO_BATCH_VALIDATION_ONE_BATCH_PERFORMANCE"
+SCOPE = "T13_FIVE_BATCH_ACCUMULATION_FULL_DUE_VALIDATION_PERFORMANCE_V2"
+DIAGNOSTIC_ARMS = ("reference", "optimized", "optimized_reload")
+UPDATES_PER_ARM = 2
+MAX_DIAGNOSTIC_UPDATES = 8
 
 
 class PerformanceComplete(RuntimeError):
@@ -27,7 +30,9 @@ class PerformanceComplete(RuntimeError):
 
 
 def validate_plan(plan):
-    exact = dict(scope=SCOPE, train_batches=2, validation_batches=1,
+    exact = dict(scope=SCOPE, train_batches=5, validation_batches="ALL_WHEN_DUE",
+                 updates_per_arm=UPDATES_PER_ARM, diagnostic_arm_count=len(DIAGNOSTIC_ARMS),
+                 diagnostic_optimizer_updates=6, max_diagnostic_optimizer_updates=MAX_DIAGNOSTIC_UPDATES,
                  max_wall_seconds=1800, batch_size=500, num_workers=0,
                  seed=7, epochs=100, source_label=1, synthetic=False,
                  formal_start=False, active_handover=False, remining=False,
@@ -86,15 +91,124 @@ class ObservedOracle:
     def __init__(self, wrapped, copier):
         self.wrapped, self.copier = wrapped, copier
         self.records = []
+        self.compact = False
+        self.record_count = 0
+        self.record_digest = hashlib.sha256()
+
+    def begin_phase(self, *, compact=False):
+        self.records.clear()
+        self.compact = compact
+        self.record_count = 0
+        self.record_digest = hashlib.sha256()
+
+    def phase_records(self):
+        if not self.compact:
+            return self.copier(self.records)
+        return dict(scope="ALL_ORDERED_ORACLE_OUTPUTS", count=self.record_count,
+                    ordered_state_sha256=self.record_digest.hexdigest(), raw_records_retained=False)
 
     def __getattr__(self, key):
         return getattr(self.wrapped, key)
 
     def __call__(self, *args, **kwargs):
         result = self.wrapped(*args, **kwargs)
-        self.records.append(self.copier({key: result[key] for key in
-                            ("y_pred", "logits", "bridge_audit") if key in result}))
+        record = self.copier({key: result[key] for key in
+                             ("y_pred", "logits", "bridge_audit") if key in result})
+        if self.compact:
+            from src.baselines.t13_indexed_canary import state_digest
+            self.record_digest.update(state_digest(record).encode("ascii"))
+            self.record_count += 1
+        else:
+            self.records.append(record)
         return result
+
+
+def run_formal_diagnostic_update(*, model, fss, train_loader, validation_loader,
+                                pred_model, epoch, optimizer, scheduler, test_globalgce,
+                                best_loss, best_state_seen, observed_oracle=None,
+                                sample=lambda phase: None, optimizer_step_observer=lambda: None):
+    """One pinned formal update, with observation but no alternate mathematics.
+
+    Keep get_rules before loader iteration, five batches sharing that same graph,
+    summed losses, exactly one backward (no retain_graph), and the native
+    optimizer/zero_grad/scheduler order. Due validation consumes the complete
+    original loader with the pre-update rules, as the source implementation does.
+    """
+    import torch
+    from src.baselines.t13_component_diagnostics import cpu_copy
+    from src.baselines.t13_indexed_canary import state_digest
+
+    model.train()
+    model.gt_gnn.eval()
+    loss = loss_kl = loss_sim = loss_cfe = 0.0
+    if observed_oracle is not None:
+        observed_oracle.begin_phase(compact=True)
+    rules = model.get_rules(fss)
+    bindings = []
+    # Deliberately retain the native enumerate/break placement. Its iterator
+    # fetches batch6 before breaking, even though only five enter the objective.
+    for batch_index, source_batch in enumerate(train_loader):
+        if batch_index >= 5:
+            break
+        batch = copy.deepcopy(source_batch)
+        bindings.append(dict(indices=cpu_copy(batch["index"]).tolist(), sha256=state_digest(batch)))
+        values = model.run_one_batch(rules, batch)
+        if not all(bool(torch.isfinite(value).all()) for value in values):
+            raise ValueError("T13_REAL_CANARY_NONFINITE_LOSS")
+        loss += values[0]
+        loss_kl += values[1]
+        loss_sim += values[2]
+        loss_cfe += values[3]
+        sample("train_batch" + str(batch_index + 1))
+    if len(bindings) != 5:
+        raise ValueError("T13_FORMAL_FIVE_FULL_TRAIN_BATCHES_REQUIRED")
+    sample("before_backward")
+    (loss_cfe if epoch < 35 else loss).backward()
+    gradients = {name: cpu_copy(parameter.grad) for name, parameter in model.named_parameters()}
+    sample("after_backward")
+    optimizer.step()
+    optimizer_step_observer()
+    optimizer.zero_grad()
+    scheduler.step()
+    sample("after_optimizer_zero_grad_scheduler")
+    training_oracle = observed_oracle.phase_records() if observed_oracle is not None else None
+    evaluated = None
+    validation_binding = None
+    validation_oracle = None
+    if epoch % 5 == 0:
+        if observed_oracle is not None:
+            observed_oracle.begin_phase(compact=True)
+        seen_batches = seen_examples = 0
+        order_digest = hashlib.sha256()
+
+        def full_validation():
+            nonlocal seen_batches, seen_examples
+            for source_batch in validation_loader:
+                batch = copy.deepcopy(source_batch)
+                ids = cpu_copy(batch["index"]).tolist()
+                seen_batches += 1
+                seen_examples += len(ids)
+                order_digest.update(json.dumps(ids, separators=(",", ":")).encode())
+                yield batch
+
+        sample("before_full_due_validation")
+        with torch.no_grad():
+            model.eval()
+            evaluated = test_globalgce(full_validation(), model, pred_model, rules)
+            val_loss = float(evaluated["loss"].detach().cpu())
+            if val_loss < best_loss:
+                best_loss = val_loss
+                best_state_seen = True
+        if seen_examples != len(validation_loader.dataset) or seen_batches != len(validation_loader):
+            raise ValueError("T13_FULL_VALIDATION_WAS_NOT_FULLY_CONSUMED")
+        validation_binding = dict(batch_count=seen_batches, example_count=seen_examples,
+                                  ordered_parent_indices_sha256=order_digest.hexdigest(), complete=True)
+        validation_oracle = observed_oracle.phase_records() if observed_oracle is not None else None
+        sample("after_full_due_validation")
+    return dict(epoch=epoch, rules=cpu_copy(rules), losses=cpu_copy((loss, loss_kl, loss_sim, loss_cfe)),
+                gradients=gradients, train_batch_bindings=bindings, training_oracle=training_oracle,
+                validation=cpu_copy(evaluated), validation_binding=validation_binding,
+                validation_oracle=validation_oracle, best_loss=best_loss, best_state_seen=best_state_seen)
 
 
 def require_identity(checkpoint, identity, index_manifest, resume_identity):
@@ -144,17 +258,16 @@ def make_interceptor(plan, checkpoint, reference, output, sample):
         _restore_numpy_rng_state(kwargs["numpy_module"], initial["numpy_rng_state"])
         initial_rng["numpy"] = kwargs["numpy_module"].random.get_state()
         restore_rng(initial_rng)
-        train_iter = iter(train)
-        batches = [next(train_iter), next(train_iter)]
-        validation_batch = next(iter(validation))
-        batch_bindings = dict(train=[dict(indices=cpu_copy(b["index"]).tolist(), sha256=state_digest(b)) for b in batches],
-                              validation=dict(indices=cpu_copy(validation_batch["index"]).tolist(),
-                                              sha256=state_digest(validation_batch)))
-        # Materializing the same selected real batches is outside timed model work.
-        # All arms restore the identical post-loader RNG snapshot afterwards.
+        if not any(epoch % 5 == 0 for epoch in range(int(initial["next_epoch"]),
+                                                   int(initial["next_epoch"]) + UPDATES_PER_ARM)):
+            raise ValueError("T13_TWO_UPDATE_DIAGNOSTIC_HAS_NO_DUE_FULL_VALIDATION")
+        # No iterator or batch is created before this snapshot. The source calls
+        # get_rules before iter(train), and DataLoader iterator creation uses RNG.
         arm_rng = cpu_copy(rng_state())
-        atomic_json(output / "actual_batch_binding.json", dict(batch_bindings, dataset_identity=identity,
-                    adopted_patterns=adoption, unique_train_batches=2, unique_validation_batches=1,
+        atomic_json(output / "actual_batch_binding.json", dict(dataset_identity=identity,
+                    adopted_patterns=adoption, train_batches_per_update=5,
+                    validation_policy="FULL_ORIGINAL_LOADER_WHEN_EPOCH_MOD5_EQ0",
+                    materialization="BOUNDED_PER_BATCH_INSIDE_ORIGINAL_ITERATION_ORDER",
                     checkpoint_epoch=int(initial["next_epoch"]) - 1, diagnostic_updates_not_full_epochs=True))
 
         def optimizer_for(target, saved=None):
@@ -164,11 +277,15 @@ def make_interceptor(plan, checkpoint, reference, output, sample):
             scheduler.load_state_dict((saved or initial)["scheduler_state"])
             return optimizer, scheduler
 
-        def snapshot(target, optimizer, scheduler):
+        def snapshot(target, optimizer, scheduler, *, epoch, best_loss, best_state_seen):
             return cpu_copy(dict(model_state=target.state_dict(), optimizer_state=optimizer.state_dict(),
-                                 scheduler_state=scheduler.state_dict(), rng=rng_state()))
+                                 scheduler_state=scheduler.state_dict(), rng=rng_state(),
+                                 next_epoch=epoch + 1, best_loss=best_loss, best_state_seen=best_state_seen,
+                                 augmented_dataset_identity=identity,
+                                 sampler_state=dict(identity["sampler"], next_epoch=epoch + 1)))
 
         records, timings = {}, {}
+        completed_updates = 0
         original_oracle = model.gt_gnn
         original_bridge_class = original_oracle.bridge.__class__
         oracle_weights = state_digest(original_oracle.bridge.model.state_dict())
@@ -177,7 +294,7 @@ def make_interceptor(plan, checkpoint, reference, output, sample):
         observed_oracle = ObservedOracle(original_oracle, cpu_copy)
         model.gt_gnn = observed_oracle
         try:
-            for arm in ("reference", "optimized", "optimized_reload"):
+            for arm in DIAGNOSTIC_ARMS:
                 model.gt_gnn.bridge.__class__ = (reference.FrozenGINEDifferentiableBridge
                     if arm == "reference" else optimized.FrozenGINEDifferentiableBridge)
                 model.load_state_dict(initial["model_state"])
@@ -186,25 +303,37 @@ def make_interceptor(plan, checkpoint, reference, output, sample):
                 restore_rng(arm_rng)
                 current = model
                 rows, times = [], []
-                for step, source_batch in enumerate(batches):
-                    # Native recourse may mutate its collated input. Every arm
-                    # receives an independent real-batch copy with identical layout.
-                    batch = copy.deepcopy(source_batch)
-                    current.train(); current.gt_gnn.eval()
-                    observed_oracle.records.clear()
+                best_loss, best_state_seen = float(initial["best_loss"]), bool(initial["best_state_seen"])
+                for step in range(UPDATES_PER_ARM):
+                    epoch = int(initial["next_epoch"]) + step
+                    if completed_updates >= MAX_DIAGNOSTIC_UPDATES:
+                        raise ValueError("T13_DIAGNOSTIC_OPTIMIZER_BUDGET_EXHAUSTED")
+
+                    def on_optimizer_step():
+                        nonlocal completed_updates
+                        completed_updates += 1
+                        atomic_json(output / "diagnostic_update_ledger.json", dict(
+                            completed_optimizer_updates=completed_updates, maximum_authorized=MAX_DIAGNOSTIC_UPDATES,
+                            planned_optimizer_updates=len(DIAGNOSTIC_ARMS) * UPDATES_PER_ARM,
+                            last_arm=arm, last_epoch=epoch, validation_may_still_be_pending=True,
+                            formal_quota_consumed=0, scientific_resume_validated=False))
+
+                    def observe_phase(phase):
+                        torch.cuda.synchronize()
+                        sample(arm + ":epoch" + str(epoch) + ":" + phase)
+
                     torch.cuda.synchronize(); before = time.perf_counter()
-                    rules = current.get_rules(fss)
-                    losses = current.run_one_batch(rules, batch)
-                    chosen = losses[3] if int(initial["next_epoch"]) + step < 35 else losses[0]
-                    if not all(torch.isfinite(v).all() for v in losses):
-                        raise ValueError("T13_REAL_CANARY_NONFINITE_LOSS")
-                    chosen.backward()
-                    gradients = {name: cpu_copy(p.grad) for name, p in current.named_parameters()}
-                    optimizer.step(); optimizer.zero_grad(); scheduler.step()
+                    row = run_formal_diagnostic_update(model=current, fss=fss, train_loader=train,
+                        validation_loader=validation, pred_model=kwargs["pred_model"], epoch=epoch,
+                        optimizer=optimizer, scheduler=scheduler, test_globalgce=kwargs["test_globalgce"],
+                        best_loss=best_loss, best_state_seen=best_state_seen,
+                        observed_oracle=observed_oracle, sample=observe_phase,
+                        optimizer_step_observer=on_optimizer_step)
+                    best_loss, best_state_seen = row["best_loss"], row["best_state_seen"]
                     torch.cuda.synchronize(); times.append(time.perf_counter() - before)
-                    rows.append(dict(rules=cpu_copy(rules), losses=cpu_copy(losses), gradients=gradients,
-                                     oracle_outputs=cpu_copy(observed_oracle.records),
-                                     after=snapshot(current, optimizer, scheduler)))
+                    row["after"] = snapshot(current, optimizer, scheduler, epoch=epoch,
+                        best_loss=best_loss, best_state_seen=best_state_seen)
+                    rows.append(row)
                     sample(arm + ":update" + str(step + 1))
                     if arm == "optimized_reload" and step == 0:
                         path = output / "diagnostic_checkpoint.pt"
@@ -220,20 +349,10 @@ def make_interceptor(plan, checkpoint, reference, output, sample):
                         current.load_state_dict(saved["model_state"])
                         optimizer, scheduler = optimizer_for(current, saved)
                         restore_rng(saved["rng"])
+                        best_loss, best_state_seen = saved["best_loss"], saved["best_state_seen"]
                         atomic_json(output / "reload_binding.json", dict(
                             state_sha256=state_digest(saved), fresh_model_object=True,
                             fresh_optimizer_object=True, checkpoint_promotable=False))
-                current.eval(); current.gt_gnn.eval()
-                observed_oracle.records.clear()
-                torch.cuda.synchronize(); before = time.perf_counter()
-                with torch.no_grad():
-                    # Same pinned official function and all original validation fields.
-                    evaluated = kwargs["test_globalgce"]([copy.deepcopy(validation_batch)], current,
-                                                        kwargs["pred_model"], rules)
-                torch.cuda.synchronize()
-                times.append(time.perf_counter() - before)
-                rows.append(dict(validation=cpu_copy(evaluated), rng=cpu_copy(rng_state()),
-                                 oracle_outputs=cpu_copy(observed_oracle.records)))
                 records[arm] = rows
                 timings[arm] = times
                 sample(arm + ":validation_complete")
@@ -250,11 +369,17 @@ def make_interceptor(plan, checkpoint, reference, output, sample):
         report = dict(state="T13_REAL_BATCH_COMPONENTS_PASS_PENDING_INDEPENDENT_RELOAD" if forward["exact"] and reload["exact"]
                       else "T13_REAL_BATCH_PERFORMANCE_FAILED", scope=SCOPE,
                       reference_vs_optimized=forward, fresh_model_reload=reload,
-                      timings_seconds=timings, unique_train_batches=2, unique_validation_batches=1,
-                      train_execution_count=6, validation_execution_count=3,
+                      timings_seconds=timings, train_batches_per_update=5,
+                      train_execution_count=completed_updates * 5,
+                      diagnostic_optimizer_updates=completed_updates,
+                      maximum_authorized_optimizer_updates=MAX_DIAGNOSTIC_UPDATES,
+                      full_validation_execution_count=sum(row["validation"] is not None
+                          for rows in records.values() for row in rows),
+                      validation_policy="FULL_ORIGINAL_LOADER_WHEN_EPOCH_MOD5_EQ0",
                       synthetic=False, full_trajectory_proven=False, formal_start=False,
                       diagnostic_checkpoint_promotable=False, active_handover_ready=False,
-                      remaining_handover_gate="NO_DEPLOYED_SAFE_PAUSE_INTERFACE_IN_ACTIVE_WORKER",
+                      scientific_resume_validated=False,
+                      remaining_handover_gate="SAME_RUN_RESTORATION_REQUIRES_STORAGE_PAYLOAD_MEMORY_AND_OWNER_BINDING",
                       independent_process_reload_state="NOT_RUN")
         atomic_json(output / "performance.json", report)
         raise PerformanceComplete(report)

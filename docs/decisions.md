@@ -1,5 +1,35 @@
 # Decisions Log
 
+## [2026-09-09] T13 diagnostic matches the actual five-batch optimizer boundary
+
+The prior real-batch benchmark made an optimizer update after every batch and
+evaluated one validation batch after both updates. That was not the pinned
+formal loop. The v2 diagnostic now computes rules once, accumulates five losses
+over that same autograd graph, calls backward once without retain_graph, then
+optimizer.step, optimizer.zero_grad and scheduler.step in original order. It
+preserves get_rules before DataLoader iteration and the original sixth-batch
+fetch before the five-batch break. No global RNG snapshot is taken after an
+out-of-order pre-materialization.
+
+Only an actually due epoch%5==0 validation runs, consuming the full unchanged
+validation loader and original pre-update rules. Truncation is rejected. Two
+updates per arm across the same three arms is six diagnostic optimizer steps,
+not more than the authorized eight. A small ledger records actual optimizer
+steps even if later validation fails. The v2 scope rejects old sealed specs;
+deployment must prepare a new explicit spec, not overwrite them.
+
+CPU fixtures compare original arithmetic, dropout/loader RNG consumption,
+gradients, optimizer and scheduler tensors, full due validation and fresh
+save/reload; no tolerance is introduced. Full validation oracle observations
+are digested in order during the original calls to bound memory, with no extra
+oracle evaluations. Independent-process checkpoint checking remains container
+verification, not a new GPU inference claim.
+
+This second patch fixes the diagnostic mathematics only. Actual compact-array
+reconstruction, real GPU execution and measured incremental memory/owner
+admission remain unrun because persistent storage durability is blocked.
+Neither diagnostic fixtures nor new scope labels authorize same-run recovery.
+
 ## [2026-09-09] T13 EIO recovery: prove compact-array reconstruction before bounded consumption
 
 The old epoch29/next30 checkpoint remains read-only and formal quota remains

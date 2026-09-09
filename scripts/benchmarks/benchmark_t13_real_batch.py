@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run a real Taste batch canary only as the child of an existing GPU owner."""
+"""Run the five-batch/shared-rules Taste diagnostic through an existing owner.
+
+Only the explicit v2 plan is accepted: two updates per arm (six total), with
+the complete original validation loader whenever its epoch boundary is due.
+Old two-train/one-validation-batch plans are not recovery evidence.
+"""
 from __future__ import annotations
 
 import argparse

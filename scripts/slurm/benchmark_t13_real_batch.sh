@@ -2,6 +2,9 @@
 # The interceptor requires plan.committed_compact_payload and never falls back
 # to full expansion. Historical masks may be reconstructed only after full
 # index/input/mask/split/RNG digest proof; this wrapper does not reconstruct.
+# Its v2 plan binds five accumulated batches per update, two updates per arm,
+# three arms (six total, never above eight), and ALL original validation when due.
+# Old two-train/one-validation-batch plans are rejected, not silently upgraded.
 # The physical Taste canary is AutoDL-owner controlled; this paired HPC wrapper
 # is an input-only inspection entry and is not an authorization to run it on HPC.
 # Actual AutoDL child receives the existing owner pipe/FD; manual FD integers
