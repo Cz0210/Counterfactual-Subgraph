@@ -55,6 +55,7 @@ def _path(root: Path, relative: str) -> Path:
 
 def _record_stages(name: str) -> set[str]:
     exact = {"pilot/oracle.json": {"pilot-oracle"}, "pilot/final_receipt.json": {"pilot-closeout"},
+        "pilot/filter_timing.json": {"pilot-filter"}, "pilot/generation-shard-0.json": {"pilot-generate"},
         "pilot/pool.json": {"pilot-filter"}, "attribution.json": {"attribution"},
         "pool_freeze.json": {"filter"}, "pool_encodings.json": {"encode"},
         "selection_freeze.json": {"select"}}
@@ -273,6 +274,13 @@ def audit_bace_run(spec: Mapping[str, Any], root: str | Path, *, fixture: bool =
              and pilot.get("real_nonself_wnode_pairs", 0) >= 64
              and pilot.get("scientific_parameters_tuned") is False,
              "No complete real 32-parent end-to-end pilot/cost admission")
+    if not fixture:
+        filter_timing = records.get("pilot/filter_timing.json", {"pilot-filter"})
+        generation_timing = records.get("pilot/generation-shard-0.json", {"pilot-generate"})
+        _require(pilot.get("filter_timing") == filter_timing and pilot.get("generation_memory_receipt") == generation_timing,
+                 "Pilot cost/memory is not bound to actual filter/generation producer evidence")
+        _require(pilot.get("memory_admission") is True and pilot.get("per_job_walltime_admission") is True,
+                 "Pilot resource admission has not passed")
     pool = records.get("pool_freeze.json", {"filter"})
     _require(pool.get("pool_sha256") == digest({k: v for k, v in pool.items() if k not in {"science_hash", "pool_sha256"}}),
              "Train pool content identity drift")

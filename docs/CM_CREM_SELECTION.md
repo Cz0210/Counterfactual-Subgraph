@@ -111,13 +111,17 @@ results/figures/figure4_k20.{png,pdf}
 results/figures/table2_k10.tex
 results/figures/table2_k20.tex
 results/figures/replot_inputs.json
+candidate_funnel.csv
+candidate_provenance.csv
+budget_and_timing.json
 ```
 
 The manifest records source CSV byte hashes, parent-ID identity, frozen selection
 and external contract/pool identities. This module deliberately emits only
 `EXPORTED_RECORDS`/`REPLOTTED_RECORDS`, never scientific PASS or `final_audit.json`.
-Funnel/provenance, timing, upstream completion and independent scientific audit
-are driver-owned. A partial CSV export does not mean final experiment completion.
+Funnel/provenance and timing sidecars project the driver's authenticated receipts;
+upstream completion and independent scientific audit remain driver-owned. A
+partial CSV export does not mean final experiment completion.
 Synthetic testing sets `fixture=True`, labels every CSV and figure, and cannot
 be presented as real BACE/Taste results. Unit tests use `make_figures=False`;
 integration owns actual rendering and PDF visual QA before delivery.
@@ -153,6 +157,66 @@ They do not use model/OT outputs and do not establish scientific completion.
 Local focused verification on 2026-09-10: **30 passed** in the existing read-only
 `smiles_local` environment; module CLI help, compileall and diff-check passed.
 Actual plot rendering and PDF visual QA are a separate integration check.
+
+## Receipt-backed diagnostic sidecars (2026-09-10)
+
+Production `export_results` now calls
+`export_diagnostics(run_root, evaluation, fixture=False)` automatically, before
+creating `results`. The function requires one actual `spec.json` or
+`resolved_spec.json` and the completed `audit/provenance_review.json`. It verifies
+the science hash, frozen library/selection, and exact producer-bound bytes of all
+receipts used. Missing, changed, or unresolved generation/filter evidence blocks
+the export; no fake rows or counts are substituted.
+
+The run-root files contain:
+
+- `candidate_funnel.csv`: one row for every original train parent, including
+  non-source parents. Recorded native/raw/chemistry/strict-flip counts are kept
+  distinct, with per-parent counts retained in the frozen library and selected
+  prefix. Unrecorded or inapplicable values use `N/A`, not numeric zero.
+- `candidate_provenance.csv`: one row per actual frozen-candidate origin, bound
+  to its train parent, retained raw index/ID/SMILES and filter receipt. Selected
+  membership and rank are explicit. A genuine empty library writes only the
+  complete CSV header, not a fabricated candidate.
+- `budget_and_timing.json`: the frozen specification's budgets, original receipt
+  timings, observation/missing counts, and exact source hashes. The complete
+  pilot closeout receipt preserves any newly recorded phase timings/resource
+  admission fields. Optional `pilot/filter_timing.json` is included only when
+  present in the provenance-bound inventory. Missing timing stays `null`; sums
+  of measured generation-unit times are not presented as parallel campaign wall
+  time. No final campaign wall-time measurement is currently inferred.
+
+Exact repeated sidecar exports verify and reuse identical bytes; conflicting
+existing files are rejected without overwrite. `export_manifest.json` binds the
+three hashes in `diagnostic_files`, leaving the existing seven plot-source CSVs
+and their `source_files` inventory unchanged. This keeps the existing record-only
+replot and portable reader interfaces compatible. Numeric-only fixtures without
+receipts explicitly report `NOT_AVAILABLE_IN_NUMERIC_ONLY_FIXTURE`.
+
+Focused verification covers empty/nonempty receipt projections, all train-parent
+rows, origin indexing, missing-vs-zero timings, changed source rejection,
+immutable sidecars, fixture isolation, and unchanged seven-file plot inventory.
+No actual generation or final scientific output was produced by these tests.
+
+## Existing four-method comparison: verified input shape, remaining adapter
+
+The supplied local `paper13_audit_plot_kit` has original-GINE BACE rows in
+`inputs/figure3_source_reconciled.csv`, K10 in `inputs/figure4_exact_ecdf.csv`, and
+141-parent K1..20 minima in `audit/parent_prefix_minima.csv`. Exact K20 ECDF can
+be reduced from those saved uncapped minima without another oracle/OT call.
+The oracle table is `audit/oracle_matrix.csv`, not `inputs/oracle_matrix.csv`.
+The excerpts bind the four original methods to GINE weight hash `4edd23cd…`,
+the same MolCLR checkpoint and BACE theta/cap.
+
+The current `replot` remains the CM-only panel. A minimal future optional overlay
+needs an adapter from the old kit's `method/cost/threshold/best_distance` columns
+to the plot inputs, exact parent-ID-set checks at each K, the verified per-method
+temperature/numerical receipts, and input byte hashes. The local offline manifest
+alone lists only two source-JSON hashes, not a four-method CSV/temperature closure.
+Stage the already independently verified source manifests with the small input
+package before enabling that adapter. Preserve the historical hard-graph-validity
+caveat on GlobalGCE; do not replace these rows with GIN/A+ or the 80-parent route.
+No combined plot or availability claim is made in this bounded implementation.
 
 The official database GET403 is an independent generation asset blocker. This
 implementation neither replaces that database nor generates substitute results.

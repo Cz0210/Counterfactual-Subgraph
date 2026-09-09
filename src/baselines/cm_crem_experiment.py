@@ -368,18 +368,32 @@ class Experiment:
                 raise RuntimeError(f"Generation {attr['parent_id']}: {result['status']}: {result.get('error')}")
             records.append(self.put(path, result))
         name = f"{'pilot' if pilot_only else 'full'}/generation-shard-{shard}.json"
+        import resource
+        rss_scale = 1 if sys.platform == "darwin" else 1024
         return self.put(name, {"status": "GENERATION_SHARD_COMPLETE", "shard": shard, "shards": shards,
-                             "parent_count": len(records), "parent_ids": [r["parent_id"] for r in records]})
+                             "parent_count": len(records), "parent_ids": [r["parent_id"] for r in records],
+                             "process_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * rss_scale,
+                             "largest_child_peak_rss_bytes": resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * rss_scale,
+                             "rss_scope": "PARENT_PLUS_LARGEST_SERIAL_WORKER_NOT_CGROUP_TOTAL"})
 
     def stage_filter(self, *, pilot_only: bool = False) -> dict:
         require_compute_node()
+        output = "pilot/pool.json" if pilot_only else "pool_freeze.json"
+        if (self.root / output).exists():
+            return self.get(output)
+        started = time.monotonic()
         oracle = self.oracle()
+        model_load_seconds = time.monotonic() - started
         attrs = self.get("pilot/oracle.json" if pilot_only else "attribution.json")
-        accepted, funnels = {}, []
+        accepted, funnels, reused_units = {}, [], 0
         for parent in attrs["parents"]:
             generation = self.get(f"generation_units/{digest(parent['parent_id'])[:20]}.json")
-            result = oracle.filter_generated(parent, generation)
-            self.put(f"filter_units/{digest(parent['parent_id'])[:20]}.json", result)
+            unit = f"filter_units/{digest(parent['parent_id'])[:20]}.json"
+            if (self.root / unit).exists():
+                result = self.get(unit)
+                reused_units += 1
+            else:
+                result = self.put(unit, oracle.filter_generated(parent, generation))
             funnels.append({k: v for k, v in result.items() if k != "accepted"})
             for graph in result["accepted"]:
                 cid = graph["candidate_id"]
@@ -394,7 +408,15 @@ class Experiment:
                    "retained_count": len(candidates), "funnels": funnels, "test_loaded": False,
                    "calibration_loaded": False, "selection": "DETERMINISTIC_HASH_BEFORE_CALIBRATION"}
         payload["pool_sha256"] = digest(payload)
-        return self.put("pilot/pool.json" if pilot_only else "pool_freeze.json", payload)
+        result = self.put(output, payload)
+        import resource
+        self.put("pilot/filter_timing.json" if pilot_only else "filter_timing.json",
+                 {"status": "FILTER_TIMING_MEASURED", "parent_count": len(attrs["parents"]),
+                  "reused_sealed_parent_units": reused_units, "model_load_seconds": model_load_seconds,
+                  "total_filter_and_durable_io_seconds": time.monotonic() - started,
+                  "process_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss *
+                  (1 if sys.platform == "darwin" else 1024), "test_loaded": False})
+        return result
 
     def require_pilot(self) -> dict:
         receipt = self.get("pilot/final_receipt.json")
@@ -407,15 +429,21 @@ class Experiment:
         import numpy as np
         oracle_result = self.get("pilot/oracle.json")
         pool = self.get("pilot/pool.json")
+        filter_timing = self.get("pilot/filter_timing.json")
+        generation_timing = self.get("pilot/generation-shard-0.json")
+        if filter_timing.get("status") != "FILTER_TIMING_MEASURED" or filter_timing.get("parent_count") != 32:
+            raise ValueError("Complete pilot needs actual32-parent model/filter/durable-I/O timing")
         parents = oracle_result["parents"]
         if len(parents) != 32:
             raise ValueError("Complete pilot must contain exactly32 prespecified train parents")
         generated = [self.get(f"generation_units/{digest(p['parent_id'])[:20]}.json") for p in parents]
         if any(g["status"] not in TERMINALS for g in generated):
             raise ValueError("Unresolved generation error is not a complete pilot")
+        encoding_started = time.monotonic()
         oracle, distance = self.oracle(), self.distance()
         parent_encoded = distance.encode_rows(parents, featurizer=oracle.featurizer)
         prototype_encoded = distance.encode_rows(pool["candidates"], featurizer=oracle.featurizer)
+        encoding_seconds = time.monotonic() - encoding_started
         from src.baselines.cm_crem_oracle import raw_distance_record
         raw_pairs = []
         for left in parent_encoded:
@@ -437,20 +465,54 @@ class Experiment:
         generation_times = [float(g.get("parent_wall_seconds", 0.0)) for g in generated]
         distance_p90 = float(np.quantile([r["seconds"] for r in measured], .9))
         gen_p90 = float(np.quantile(generation_times, .9))
+        measured_io_started = time.monotonic()
+        self.put("pilot/closeout_pair_timing.json", {"raw_pairs": raw_pairs,
+                 "original_nonself_pair_receipt": "pilot/oracle.json",
+                 "encoding_including_load_seconds": encoding_seconds,
+                 "prototype_encoding_count": len(prototype_encoded), "test_loaded": False})
+        measured_durable_io_seconds = time.monotonic() - measured_io_started
         # Worst-case pool=2000, two sequential CPU lanes; never adjust science
         # parameters based on the pilot's coverage, validity or rank.
         full_generation = oracle_result["train_predicted_source_count"] * gen_p90 / 2
         full_pairs = 66 * 2000 + 141 * 20
-        estimated = 2 * (full_generation + full_pairs * distance_p90 / 2 + oracle_result["seconds"]) / 3600 + 12
+        # Include observed filter/model and encoding/serialization rather than
+        # extrapolating only CM generation or OT. These are conservative cost
+        # bounds, never observed complete-campaign wall time or scientific tuning.
+        full_filter = filter_timing["total_filter_and_durable_io_seconds"] * oracle_result["train_predicted_source_count"] / 32
+        full_encoding = encoding_seconds * (2000 + 66 + 141) / max(1, len(parent_encoded) + len(prototype_encoded))
+        full_attribution = oracle_result["seconds"] * oracle_result["train_predicted_source_count"] / 32
+        full_durable_io = measured_durable_io_seconds * full_pairs / max(1, len(raw_pairs))
+        stages = {"generation_per_lane": full_generation, "filter": full_filter,
+                  "encoding": full_encoding, "attribution": full_attribution,
+                  "distance_per_lane": full_pairs * distance_p90 / 2,
+                  "durable_serialization_and_io": full_durable_io}
+        estimated = 2 * sum(stages.values()) / 3600 + 12
         from datetime import datetime, timezone
         elapsed = (datetime.now(timezone.utc)-datetime.fromisoformat(self.spec["campaign"]["start_time_utc"].replace("Z", "+00:00"))).total_seconds()/3600
-        accepted = estimated + elapsed <= self.spec["campaign"]["planning_horizon_hours"]
-        return self.put("pilot/final_receipt.json", {"status": "PILOT_ENGINEERING_PROTOCOL_ACCEPTED" if accepted else "BLOCKED_CAMPAIGN_COST",
+        horizon_ok = estimated + elapsed <= self.spec["campaign"]["planning_horizon_hours"]
+        stage_walltime_ok = 2 * max(stages.values()) <= 12 * 3600
+        import resource
+        gen_peak = int(generation_timing["process_peak_rss_bytes"]) + int(generation_timing["largest_child_peak_rss_bytes"])
+        peak = max(gen_peak, int(filter_timing["process_peak_rss_bytes"]), int(oracle_result["process_peak_rss_bytes"]),
+                   resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == "darwin" else 1024))
+        # Compute-node RSS is observed; unavailable cgroup limits are not invented.
+        memory_ok = 2 * peak + 4 * 1024**3 <= 32 * 1024**3
+        accepted = horizon_ok and stage_walltime_ok and memory_ok
+        blocked = "BLOCKED_CAMPAIGN_COST" if not horizon_ok else (
+            "BLOCKED_STAGE_WALLTIME_NEEDS_BOUNDED_SHARDS" if not stage_walltime_ok else "BLOCKED_PILOT_MEMORY_ADMISSION")
+        return self.put("pilot/final_receipt.json", {"status": "PILOT_ENGINEERING_PROTOCOL_ACCEPTED" if accepted else blocked,
                        "parent_count": 32, "real_nonself_wnode_pairs": len(oracle_result["nonself_pairs"]),
                        "generated_prototype_pairs": raw_pairs, "generation_seconds": generation_times,
                        "generation_p50_seconds": float(np.median(generation_times)), "generation_p90_seconds": gen_p90,
                        "wnode_p90_seconds": distance_p90, "full_campaign_eta_hours_conservative": estimated,
                        "elapsed_hours": elapsed, "complete_end_to_end_pilot": True,
+                       "phase_estimates_seconds_not_actual_full_run": stages,
+                       "filter_timing": filter_timing, "encoding_including_load_seconds": encoding_seconds,
+                       "generation_memory_receipt": generation_timing,
+                       "measured_durable_serialization_io_seconds": measured_durable_io_seconds,
+                       "process_peak_rss_bytes": peak, "slurm_requested_memory_bytes": 32 * 1024**3,
+                       "memory_admission": memory_ok, "per_job_walltime_admission": stage_walltime_ok,
+                       "safety_factor": 2, "additional_campaign_margin_hours": 12,
                        "generation_statuses": [r["status"] for r in generated], "test_loaded": False,
                        "scientific_parameters_tuned": False})
 

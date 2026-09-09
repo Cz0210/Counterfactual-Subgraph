@@ -1,6 +1,7 @@
 """Record-only CM-CReM CSV/LaTeX/figure export and offline replot.
 
-The driver owns scientific saved-record audit, funnel/provenance and publication.
+The driver owns scientific saved-record audit and publication. Diagnostics are
+lossless projections of its authenticated receipts, not new scientific results.
 This module never emits scientific PASS or imports oracle/OT/generator/selector
 entrypoints during a replot. The selection module import provides data types only.
 """
@@ -9,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import math
 from pathlib import Path
@@ -54,6 +56,188 @@ def _metadata(*, dataset: str, oracle: str) -> None:
         raise ValueError("CM-CReM export is restricted to BACE/TasteMolNet original frozen GINE")
 
 
+def _diagnostic_records(run_root: Path, evaluation: PrefixEvaluation, fixture: bool) -> tuple[list[dict], list[dict], dict]:
+    """Read only the actual provenance-closed receipts; missing is never zero."""
+    from src.baselines.cm_crem_experiment import science_identity, validate_contract
+
+    def plain(name: str) -> tuple[dict, str]:
+        path = run_root / name
+        if Path(name).is_absolute() or ".." in Path(name).parts or any(p.is_symlink() for p in (path, *path.parents)):
+            raise ValueError("Unsafe diagnostic receipt path")
+        data = path.read_bytes()
+        row = json.loads(data)
+        # Reject non-standard JSON NaN/Infinity even in unused timing fields.
+        json.dumps(row, allow_nan=False)
+        return row, hashlib.sha256(data).hexdigest()
+
+    provenance, provenance_sha = plain("audit/provenance_review.json")
+    if (provenance.get("provenance_sha256") != canonical_sha256({k: v for k, v in provenance.items() if k != "provenance_sha256"})
+            or provenance.get("science_hash") != evaluation.contract_sha256 or provenance.get("fixture") is not fixture
+            or provenance.get("status") != ("FIXTURE_PROVENANCE_VERIFIED" if fixture else "BACE_SAVED_RECORD_PROVENANCE_VERIFIED")):
+        raise ValueError("Diagnostics require matching completed saved-record provenance")
+    expected = provenance["bound_record_sha256"]
+    if canonical_sha256(expected) != provenance.get("producer_bound_records_sha256"):
+        raise ValueError("Diagnostic producer record inventory changed")
+    sources = {"audit/provenance_review.json": provenance_sha}
+    cache = {}
+    def read(name: str) -> dict:
+        if name not in cache:
+            row, sha = plain(name)
+            if expected.get(name) != sha or row.get("science_hash") != evaluation.contract_sha256:
+                raise ValueError(f"Diagnostic source changed or lacks producer evidence: {name}")
+            sources[name], cache[name] = sha, row
+        return cache[name]
+
+    specs = [name for name in ("spec.json", "resolved_spec.json") if (run_root/name).is_file()]
+    if len(specs) != 1:
+        raise ValueError("Diagnostics require exactly one real spec.json/resolved_spec.json")
+    spec, spec_sha = plain(specs[0])
+    validate_contract(spec)
+    if science_identity(spec) != evaluation.contract_sha256 or spec.get("science_hash") != evaluation.contract_sha256:
+        raise ValueError("Diagnostic budget spec changed the frozen science contract")
+    sources[specs[0]] = spec_sha
+    pool, attrs = read("pool_freeze.json"), read("attribution.json")
+    if (pool.get("pool_sha256") != evaluation.selection.frozen_pool_sha256
+            or pool.get("candidate_ids") != list(evaluation.selection.pool_candidate_ids)
+            or pool.get("pool_sha256") != canonical_sha256({k: v for k, v in pool.items() if k not in {"pool_sha256", "science_hash"}})):
+        raise ValueError("Diagnostic train pool does not match the evaluated freeze")
+    saved_freeze = read("selection_freeze.json")
+    if saved_freeze.get("freeze_sha256") != evaluation.selection.freeze_sha256:
+        raise ValueError("Diagnostic selection differs from the evaluated freeze")
+    predictions = attrs["train_predictions"]
+    if not predictions or len(predictions) != spec["resolved_parents"]["train"]["count"] or len({p["parent_id"] for p in predictions}) != len(predictions):
+        raise ValueError("Diagnostic train-parent ledger incomplete/duplicated")
+    pool_ids = set(pool["candidate_ids"])
+    selected = {cid: index+1 for index, cid in enumerate(evaluation.selection.selected_candidate_ids)}
+    common = {"dataset": spec["campaign"]["primary"]["dataset"], "oracle": "gine", "method": PAPER_LABEL,
+              "fixture": fixture, "contract_sha256": evaluation.contract_sha256,
+              "selection_freeze_sha256": evaluation.selection.freeze_sha256}
+    funnel, origins, generation_by_parent, times = [], [], {}, []
+    count_fields = ("native_return_count", "raw_unique_count", "raw_exact_duplicate_count", "raw_truncated_count")
+    def count(value: Any, role: str) -> Any:
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"Malformed recorded count: {role}")
+        return value
+    for parent in predictions:
+        pid = parent["parent_id"]
+        source = parent["predicted_label"] == 1
+        row = {**common, "parent_id": pid, "predicted_source": source,
+               "generation_status": "BEFORE_NOT_SOURCE", "top_level_calls": None,
+               **{k: None for k in count_fields}, "retained_raw_count": None,
+               "chemically_valid_nonself_count": None, "strict_flip_count": None, "unique_target_count": None,
+               "retained_pool_candidate_count": None, "selected_candidate_count": None,
+               "generation_receipt": None, "generation_sha256": None, "filter_receipt": None, "filter_sha256": None}
+        if source:
+            suffix = canonical_sha256(pid)[:20]+".json"
+            gname, fname = "generation_units/"+suffix, "filter_units/"+suffix
+            generation, filtered = read(gname), read(fname)
+            if (generation.get("parent_id") != pid or filtered.get("parent_id") != pid
+                    or generation.get("status") not in {"GENERATED", "NO_NATIVE_REPLACEMENT", "NO_REPLACEABLE_CONTEXT", "TIMEOUT_BUDGETED"}
+                    or filtered.get("status") != "FILTER_COMPLETE"):
+                raise ValueError("Diagnostic source is not a legal closed generation/filter unit")
+            raw = generation["retained_raw"]
+            if filtered.get("raw_count") != len(raw):
+                raise ValueError("Diagnostic raw/filter counts disagree")
+            accepted_ids = {r["candidate_id"] for r in filtered["accepted"]}
+            row.update(generation_status=generation["status"], top_level_calls=generation.get("top_level_calls"),
+                **{k: generation.get("counts", {}).get(k) for k in count_fields}, retained_raw_count=len(raw),
+                **{k: filtered[k] for k in ("chemically_valid_nonself_count", "strict_flip_count", "unique_target_count")},
+                retained_pool_candidate_count=len(accepted_ids & pool_ids), selected_candidate_count=len(accepted_ids & set(selected)),
+                generation_receipt=gname, generation_sha256=sources[gname], filter_receipt=fname, filter_sha256=sources[fname])
+            wall = generation.get("parent_wall_seconds")
+            if wall is not None and (type(wall) not in (int, float) or not math.isfinite(wall) or wall < 0):
+                raise ValueError("Invalid recorded generation wall time")
+            times.append({"parent_id": pid, "status": generation["status"], "parent_wall_seconds": wall,
+                          "source_receipt": gname, "source_sha256": sources[gname]})
+            generation_by_parent[pid] = (generation, filtered, gname, fname)
+        for key in (*count_fields, "top_level_calls", "retained_raw_count", "chemically_valid_nonself_count",
+                    "strict_flip_count", "unique_target_count", "retained_pool_candidate_count", "selected_candidate_count"):
+            count(row[key], key)
+        funnel.append(row)
+    seen_origins = set()
+    for candidate in pool["candidates"]:
+        cid = candidate["candidate_id"]
+        if not candidate.get("origins"):
+            raise ValueError("Frozen candidate lacks actual generation origin")
+        for origin in candidate["origins"]:
+            pid, index = origin["parent_id"], origin["retained_raw_index"]
+            if pid not in generation_by_parent or type(index) is not int:
+                raise ValueError("Frozen candidate origin is outside the source train ledger")
+            generation, filtered, gname, fname = generation_by_parent[pid]
+            raw = generation["retained_raw"]
+            key = (cid, pid, index)
+            if (not 0 <= index < len(raw) or raw[index]["raw_id"] != origin["raw_id"] or key in seen_origins
+                    or not any(c["candidate_id"] == cid and origin in c["origins"] for c in filtered["accepted"])):
+                raise ValueError("Frozen candidate origin does not bind the recorded raw/filter output")
+            seen_origins.add(key)
+            origins.append({**common, "candidate_id": cid, "canonical_smiles": candidate["canonical_smiles"],
+                "selected": cid in selected, "selection_rank": selected.get(cid), "parent_id": pid,
+                "retained_raw_index": index, "raw_id": origin["raw_id"], "raw_smiles": raw[index]["smiles"],
+                "generation_receipt": gname, "generation_sha256": sources[gname],
+                "filter_receipt": fname, "filter_sha256": sources[fname]})
+    stage_times = []
+    timing_names = ["pilot/oracle.json", "pilot/final_receipt.json", "attribution.json"]
+    if "pilot/filter_timing.json" in expected:
+        timing_names.append("pilot/filter_timing.json")
+    for name in timing_names:
+        receipt = read(name)
+        fields = {k: v for k, v in receipt.items() if k.endswith(("_seconds", "_hours")) or k == "seconds"}
+        stage_times.append({"source_receipt": name, "source_sha256": sources[name], "recorded_fields": fields})
+    observed = [r["parent_wall_seconds"] for r in times if r["parent_wall_seconds"] is not None]
+    budget = {"schema_version": "cm_crem_recorded_budget_timing_v1", "status": "EXPORTED_RECORDED_DIAGNOSTICS",
+        **common, "scientific_pass_claimed": False, "generation_budget": spec["generation"],
+        "pool_budget": spec["pool"], "summary_budget": spec["summary"],
+        "planning_horizon_hours": spec["campaign"]["planning_horizon_hours"],
+        "train_parent_count": len(predictions), "train_source_count": len(times),
+        "pool_candidate_count": len(pool_ids), "selected_candidate_count": len(selected),
+        "observed_generation_unit_wall_seconds_sum": sum(observed) if observed else None,
+        "generation_timing_observed_count": len(observed), "generation_timing_missing_count": len(times)-len(observed),
+        "generation_parent_timings": times, "stage_timing_receipts": stage_times,
+        "pilot_closeout_receipt": read("pilot/final_receipt.json"),
+        "pilot_filter_timing_receipt": read("pilot/filter_timing.json") if "pilot/filter_timing.json" in expected else None,
+        "pilot_filter_timing_status": "RECORDED" if "pilot/filter_timing.json" in expected else "NO_PROVENANCE_BOUND_TIMING_RECEIPT",
+        "final_campaign_wall_seconds": None,
+        "timing_limitations": ["No final campaign wall-time receipt exists; unit-time sums are not parallel campaign elapsed time.",
+                              "Missing timings remain null; pilot estimates are not realized full-run measurements."],
+        "source_receipts": sources}
+    json.dumps(budget, allow_nan=False)
+    return funnel, origins, budget
+
+
+def export_diagnostics(run_root: str | Path, evaluation: PrefixEvaluation | Mapping[str, Any], *,
+                       fixture: bool = False) -> dict[str, Any]:
+    """Write three run-root sidecars from audited receipts; exact reruns are safe."""
+    if not isinstance(evaluation, PrefixEvaluation):
+        evaluation = PrefixEvaluation.from_dict(evaluation)
+    root = Path(run_root).expanduser().resolve(strict=True)
+    funnel, origins, budget = _diagnostic_records(root, evaluation, fixture)
+    common_fields = list(funnel[0])[:6]
+    origin_fields = common_fields + ["candidate_id", "canonical_smiles", "selected", "selection_rank", "parent_id",
+        "retained_raw_index", "raw_id", "raw_smiles", "generation_receipt", "generation_sha256", "filter_receipt", "filter_sha256"]
+    payloads = {}
+    for name, rows, fields in (("candidate_funnel.csv", funnel, list(funnel[0])),
+                               ("candidate_provenance.csv", origins, origin_fields)):
+        stream = io.StringIO(newline="")
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows({k: _csv_value(v) for k, v in row.items()} for row in rows)
+        payloads[name] = stream.getvalue().encode("utf-8")
+    payloads["budget_and_timing.json"] = (json.dumps(budget, sort_keys=True, indent=2, allow_nan=False)+"\n").encode("utf-8")
+    # Validate all existing targets before writing any; never repair by overwrite.
+    for name, data in payloads.items():
+        path = root/name
+        if path.is_symlink() or (path.exists() and path.read_bytes() != data):
+            raise ValueError(f"Existing diagnostic sidecar differs: {name}")
+    for name, data in payloads.items():
+        path = root/name
+        if not path.exists():
+            with path.open("xb") as stream:
+                stream.write(data)
+    return {"status": "EXPORTED_RECORDED_DIAGNOSTICS", "fixture": fixture, "scientific_pass_claimed": False,
+            "files": {name: hashlib.sha256(data).hexdigest() for name, data in payloads.items()},
+            "candidate_funnel_rows": len(funnel), "candidate_provenance_rows": len(origins)}
+
+
 def export_results(evaluation: PrefixEvaluation | Mapping[str, Any], output_root: str | Path, *, dataset: str,
                    oracle: str = "gine", fixture: bool = False, make_figures: bool = True) -> dict[str, Any]:
     """Write new run-root/results records; never overwrite an existing export.
@@ -67,7 +251,12 @@ def export_results(evaluation: PrefixEvaluation | Mapping[str, Any], output_root
     if not isinstance(evaluation, PrefixEvaluation):
         evaluation = PrefixEvaluation.from_dict(evaluation)
     evaluation.selection.validate()
-    root = Path(output_root).expanduser().resolve() / "results"
+    run_root = Path(output_root).expanduser().resolve()
+    root = run_root / "results"
+    if root.exists():
+        raise FileExistsError(root)
+    diagnostics = export_diagnostics(run_root, evaluation, fixture=fixture) if (
+        not fixture or (run_root/"audit/provenance_review.json").exists()) else None
     root.mkdir(parents=True, exist_ok=False)
     source = root / "source_csv"
     source.mkdir()
@@ -92,8 +281,9 @@ def export_results(evaluation: PrefixEvaluation | Mapping[str, Any], output_root
         "base_parent_count": len(evaluation.parent_ids),
         "theta": evaluation.selection.theta, "cap": evaluation.selection.cap,
         "source_files": {filename: _file_sha(source/filename) for filename in sorted(files)},
-        "unavailable_files_owned_by_driver": ["candidate_funnel.csv", "candidate_provenance.csv",
-            "budget_and_timing.json", "final_audit.json"],
+        "diagnostic_files": {} if diagnostics is None else diagnostics["files"],
+        "diagnostic_status": "NOT_AVAILABLE_IN_NUMERIC_ONLY_FIXTURE" if diagnostics is None else diagnostics["status"],
+        "unavailable_files_owned_by_driver": ["final_audit.json"],
         "interpretation": "Generated full-graph endpoint prototypes, not reusable deletion rules."}
     _write_json(root / "export_manifest.json", manifest)
     if make_figures:

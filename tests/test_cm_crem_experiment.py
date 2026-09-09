@@ -118,3 +118,28 @@ def test_cpu_slurm_matches_cli_and_no_gpu_request():
     assert "-s -B scripts/run_cm_crem.py" in script
     assert "unset PYTHONPATH" in script
     assert script.index("source ~/.bashrc") < script.index("set -euo pipefail")
+
+
+def test_filter_reuses_sealed_pilot_units_and_measures_model_io(tmp_path, monkeypatch):
+    from src.baselines import cm_crem_experiment as module
+    monkeypatch.setattr(module, "require_compute_node", lambda: None)
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    experiment = object.__new__(module.Experiment)
+    experiment.root, experiment.sha = tmp_path, "fixture-science"
+    experiment.spec = {"execution": {"execution_commit": "fixture"}}
+    calls = []
+    class Oracle:
+        def filter_generated(self, parent, generation):
+            calls.append(parent["parent_id"])
+            return {"parent_id": parent["parent_id"], "accepted": [], "retained_raw_count": 0}
+    experiment.oracle = lambda: Oracle()
+    parents = [{"parent_id": "public-fixture-parent", "smiles": "CC"}]
+    experiment.put("pilot/oracle.json", {"parents": parents})
+    experiment.put("attribution.json", {"parents": parents})
+    experiment.put(f"generation_units/{digest(parents[0]['parent_id'])[:20]}.json", {"status": "NO_NATIVE_REPLACEMENT"})
+    experiment.stage_filter(pilot_only=True)
+    assert calls == ["public-fixture-parent"]
+    experiment.stage_filter(pilot_only=False)
+    assert calls == ["public-fixture-parent"]
+    assert experiment.get("filter_timing.json")["reused_sealed_parent_units"] == 1
+    assert experiment.get("pilot/filter_timing.json")["total_filter_and_durable_io_seconds"] > 0

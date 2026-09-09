@@ -5,8 +5,8 @@ import json
 import numpy as np
 import pytest
 
-from src.baselines.cm_crem_export import export_results, main, replot, _table
-from src.baselines.cm_crem_selection import evaluate_frozen_test, select_calibration
+from src.baselines.cm_crem_export import export_diagnostics, export_results, main, replot, _table
+from src.baselines.cm_crem_selection import PrefixEvaluation, evaluate_frozen_test, select_calibration
 
 
 def fixture_evaluation(empty=False):
@@ -87,3 +87,83 @@ def test_export_accepts_authenticated_saved_driver_json(tmp_path):
     payload = {"science_hash": "a"*64, **fixture_evaluation().to_dict()}
     result = export_results(payload, tmp_path, dataset="bace", fixture=True, make_figures=False)
     assert result["status"] == "EXPORTED_RECORDS"
+
+
+def diagnostic_fixture(tmp_path, one_target=False):
+    # Reuse the existing explicitly synthetic closed-receipt fixture, not a
+    # final-PASS directory or injected real scientific output.
+    from test_cm_crem_audit import full_zero_fixture, fixture_audit, write_json
+    spec, _ = full_zero_fixture(tmp_path, one_target=one_target)
+    write_json(tmp_path/"spec.json", spec)
+    provenance = fixture_audit(spec, tmp_path)
+    write_json(tmp_path/"audit/provenance_review.json", provenance)
+    return PrefixEvaluation.from_dict(provenance["test_evaluation"])
+
+
+@pytest.mark.parametrize("one_target", [False, True])
+def test_diagnostic_sidecars_use_actual_closed_fixture_receipts(tmp_path, one_target):
+    evaluation = diagnostic_fixture(tmp_path, one_target)
+    report = export_diagnostics(tmp_path, evaluation, fixture=True)
+    funnel = read_csv(tmp_path/"candidate_funnel.csv")
+    provenance = read_csv(tmp_path/"candidate_provenance.csv")
+    budget = json.loads((tmp_path/"budget_and_timing.json").read_text())
+    assert len(funnel) == 386
+    assert sum(r["predicted_source"] == "true" for r in funnel) == 32
+    assert all(r["retained_raw_count"] == "N/A" for r in funnel if r["predicted_source"] == "false")
+    assert len(provenance) == int(one_target)
+    assert report["candidate_provenance_rows"] == int(one_target)
+    if one_target:
+        assert provenance[0]["selected"] == "true" and provenance[0]["selection_rank"] == "1"
+        assert provenance[0]["raw_smiles"] == "FIXTURE-TARGET"
+        assert sum(int(r["retained_raw_count"]) for r in funnel if r["predicted_source"] == "true") == 1
+    else:
+        assert (tmp_path/"candidate_provenance.csv").read_text().startswith("dataset,oracle,method,fixture,")
+    assert budget["generation_timing_missing_count"] == 32
+    assert budget["observed_generation_unit_wall_seconds_sum"] is None
+    assert budget["final_campaign_wall_seconds"] is None
+    assert budget["pilot_filter_timing_receipt"] is None
+    assert budget["generation_budget"]["parent_wall_limit_seconds"] == 900
+    assert budget["pool_budget"]["max_candidates"] == 2000
+    assert budget["summary_budget"]["k_max"] == 20
+    assert budget["scientific_pass_claimed"] is False and budget["fixture"] is True
+    assert report == export_diagnostics(tmp_path, evaluation, fixture=True)
+
+
+def test_production_export_refuses_missing_receipts_before_creating_results(tmp_path):
+    with pytest.raises(FileNotFoundError, match="provenance_review"):
+        export_results(fixture_evaluation(), tmp_path, dataset="bace", make_figures=False)
+    assert not (tmp_path/"results").exists()
+
+
+def test_export_diagnostic_manifest_does_not_change_existing_plot_csv_inventory(tmp_path):
+    evaluation = diagnostic_fixture(tmp_path, True)
+    report = export_results(evaluation, tmp_path, dataset="bace", fixture=True, make_figures=False)
+    assert len(report["source_files"]) == 7
+    assert set(report["diagnostic_files"]) == {"candidate_funnel.csv", "candidate_provenance.csv", "budget_and_timing.json"}
+    assert report["diagnostic_status"] == "EXPORTED_RECORDED_DIAGNOSTICS"
+
+
+def test_diagnostics_reject_source_mutation_and_do_not_write_outputs(tmp_path):
+    evaluation = diagnostic_fixture(tmp_path, True)
+    generation = next((tmp_path/"generation_units").glob("*.json"))
+    row = json.loads(generation.read_text())
+    row["parent_wall_seconds"] = 42
+    generation.write_text(json.dumps(row))
+    with pytest.raises(ValueError, match="Diagnostic source changed"):
+        export_diagnostics(tmp_path, evaluation, fixture=True)
+    assert not (tmp_path/"candidate_funnel.csv").exists()
+
+
+def test_diagnostics_never_overwrite_conflicting_sidecar(tmp_path):
+    evaluation = diagnostic_fixture(tmp_path)
+    (tmp_path/"candidate_provenance.csv").write_text("unrelated existing user file\n")
+    with pytest.raises(ValueError, match="Existing diagnostic sidecar differs"):
+        export_diagnostics(tmp_path, evaluation, fixture=True)
+    assert not (tmp_path/"candidate_funnel.csv").exists()
+    assert (tmp_path/"candidate_provenance.csv").read_text() == "unrelated existing user file\n"
+
+
+def test_diagnostics_refuse_fixture_as_production(tmp_path):
+    evaluation = diagnostic_fixture(tmp_path)
+    with pytest.raises(ValueError, match="matching completed"):
+        export_diagnostics(tmp_path, evaluation)

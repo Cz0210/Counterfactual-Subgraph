@@ -18663,3 +18663,31 @@ engineering retry. Record the temperature driver and the verifier driver separat
 - Add strict job-private readonly DB staging and independent saved-record plus
   bounded actual scientific spotchecks; final package/import requires the real
   completed scientific audit. Unit tests are not evidence of CM coverage.
+
+### 2026-09-10 — Completed component pilot and bounded result transport
+
+- Repair1 job2654442 completed0:0: 32 source-train parents, 64 real nonself
+  original WNode pairs, 4 reused sealed attribution units. Stage time167.559s,
+  process peak RSS679251968B. This is NOT the full generation pilot: the official
+  DB is still unavailable (HTTP403), and full BACE ETA remains unmeasured.
+- The single Mac relay polls only task-scoped receipts every300s, terminates
+  after168h from original T0, after6h of unresolved assets, or after two transport
+  failures. It never calls a model API or starts duplicate uncertain submissions.
+- Completed release transport uses installed Mac rsync2.6.9-compatible options,
+  verifies each new import, and reuses only receipts matching both science and
+  exact package bytes/SHA. AutoDL transfer roots are bound to an immutable
+  package intent before any copy. Existing main authority and results are not
+  touched. An absent external mount blocks rather than filling the local disk.
+- The offline importer is a record-only interface with no model/OT execution.
+  Package and scientific tables remain PENDING until the complete native
+  generation, calibration freeze, test and independent acceptance really finish.
+- The unstarted generation/full successor adds actual model/filter/durable-I/O
+  and generator parent/worker RSS observations to the pilot cost gate. Original
+  pilot2654442 is reused; it is not rerun. Full-filter revisits reuse sealed pilot
+  units. A predicted stage exceeding the actual12h allocation blocks for bounded
+  sharding; it does not silently submit a known-overlong job. RSS estimates are
+  explicitly distinct from cgroup totals or a claim of observed full-run memory.
+- Candidate-funnel/provenance and timing sidecars come from authenticated real
+  records. The old four-method GINE comparison still needs its record-only curve
+  adapter and complete small-file bindings; no missing CM line or legacy
+  GlobalGCE hard-graph failure is replaced by a fabricated zero or GIN/A+ input.

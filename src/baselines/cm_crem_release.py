@@ -30,7 +30,7 @@ ALLOWED_ROOTS = (
 SCHEMA = "cm_crem_portable_result_package_v1"
 METHOD = "CM-CReM-Global-Budgeted-v1"
 TOP_FILES = {
-    "spec.json", "resolved_spec.json", "bindings.json", "runtime_bindings.json", "source_bindings.json",
+    "spec.json", "successor_spec.json", "resolved_spec.json", "bindings.json", "successor_bindings.json", "runtime_bindings.json", "source_bindings.json",
     "source_receipts.json", "reference_contract.json", "run_manifest.json", "source_manifest.json",
     "environment_manifest.json", "authorization.json", "provenance.json", "protocol.json",
     "attribution.json", "pool_freeze.json", "pool_encodings.json", "selection_freeze.json",

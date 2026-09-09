@@ -4335,7 +4335,8 @@ Mutagenicity roadmaps.
 - [x] Pin/review native CReM path and actual Grad-CAM formula; isolate generator.
 - [x] Implement source-bound BACE stages, exact WNode, global selector and export.
 - [x] Add bounded CPU Slurm submission and Mac-only scoped relay interfaces.
-- [ ] Run real32-parent oracle/attribution and64-nonself-distance pilot component.
+- [x] Run real32-parent oracle/attribution and64-nonself-distance pilot component
+  (2654442 completed0:0; NOT complete generation pilot).
 - [ ] Obtain the specified official ChEMBL22 SA2 database (HTTP403 currently),
   establish readonly job-local DB staging, and complete generation pilot/cost gate.
 - [ ] Complete full candidate/filter/calibration/freeze/test independent acceptance,
