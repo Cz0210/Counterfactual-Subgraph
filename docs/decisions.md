@@ -18616,3 +18616,31 @@ engineering retry. Record the temperature driver and the verifier driver separat
   bindings remain required; full science is currently blocked on the precise raw
   cache/live-state tail interfaces documented in
   `docs/T12_MISSING_LEDGER_RECOVERY_20260908.md`.
+
+### 2026-09-10 — Isolated, budgeted CM-CReM BACE full-graph baseline
+
+- Adopt the user-supplied `cm_crem_global_v1.yaml` and author commit
+  `b5816b502cde00ee24c652a02cbc54664583f773`. Reuse original frozen BACE
+  GINE/validation temperature, proposal parent manifest, calibration66/test141,
+  MolCLR exact WNode, theta and capped-cost. This is an independent global
+  prototype baseline, not Ours deletion rules or the GIN/A+ main-table variant.
+- Review actual author function bodies and preserve the 20%-floor/ring mask,
+  component attachments/fallback, one CM call, 64 replacements/component,
+  128 deterministic raw outputs/parent, 900-second budget, and train-only2000
+  pool cap. Infrastructure failures remain failures, not scientific empty pools.
+- Implement thin dataset-specific stages, reuse `exp_sbatch`, and a bounded
+  Mac relay with immutable submission intent. No second GPU lock, generic
+  controller or main-matrix authority. Pilot32 and at least64 real nonself
+  WNode pairs precede any full generation cost admission.
+- User explicitly requires CPU/intel jobs (two concurrent8CPU/32GiB at most),
+  overriding the repository default A800 Slurm template for this baseline.
+  Source site bashrc before nounset. Preserve original GINE environment; use a
+  separately pinned Python3.11.5/CReM0.2.14/RDKit2023.9.6/NumPy1.26.4 generator.
+  Generation uses `-s -B`, trusted bootstrap and actual hash-seed flag checks:
+  Python `-I` would ignore PYTHONHASHSEED. Oracle/OT retains isolated `-I -B`.
+- Official ChEMBL22 SA2 download returned HTTP403 on a normal GET. Do not use
+  an unapproved replacement database, report a full pilot PASS, or infer total
+  campaign time from oracle-only timings. An asset-independent real32-parent
+  attribution/64-pair CPU pilot may proceed while the official asset is blocked.
+- Existing Taste/AIDs/Mut/GNN/LLM artifacts and processes are outside this change.
+  Test data is opened only after authenticated train-pool and calibration freeze.

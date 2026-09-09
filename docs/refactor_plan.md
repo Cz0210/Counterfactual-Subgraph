@@ -4329,3 +4329,15 @@ Mutagenicity roadmaps.
   501–510 tail; pass the real train-only observer regression and bind the existing
   canonical owner at its natural boundary. Do not call the partial interface a
   dispatchable science chain or full parity PASS.
+
+## CM-CReM-Global-Budgeted-v1 — independent BACE baseline (2026-09-10)
+
+- [x] Pin/review native CReM path and actual Grad-CAM formula; isolate generator.
+- [x] Implement source-bound BACE stages, exact WNode, global selector and export.
+- [x] Add bounded CPU Slurm submission and Mac-only scoped relay interfaces.
+- [ ] Run real32-parent oracle/attribution and64-nonself-distance pilot component.
+- [ ] Obtain the specified official ChEMBL22 SA2 database (HTTP403 currently),
+  establish readonly job-local DB staging, and complete generation pilot/cost gate.
+- [ ] Complete full candidate/filter/calibration/freeze/test independent acceptance,
+  scoped portable release/import and real paper outputs; never label stubs PASS.
+- [ ] Consider Taste only after complete BACE delivery and the168-hour cost/license gate.

@@ -1,0 +1,178 @@
+# NEW PROPOSED EXPERIMENT CONTRACT, not an executed run.
+# Runtime paths/hashes must be resolved from current project artifacts before dispatch.
+schema_version: 1
+method_id: CM-CReM-Global-Budgeted-v1
+paper_label: CM-CReM-Global
+representation: generated_full_graph_prototypes
+native_method: Counterfactual Masking, CReM branch
+scope: budgeted_local_generation_with_calibration_global_summary
+upstream:
+  repo: https://github.com/gmum/counterfactual-masking
+  commit: null
+  required_files:
+    - source/linksGenerator.py
+    - source/explainability.py
+    - scripts/counterfactuals_experiment/counterfactuals_generation.py
+    - scripts/counterfactuals_experiment/helpers_counterfactual.py
+  license_source: LICENSE
+  generator_callable: source.linksGenerator.crem_fragment_replacement
+  generator_environment:
+    python: '3.11.5'
+    crem: '0.2.14'
+    rdkit: '2023.9.6'
+    numpy: '1.26.4'
+  database:
+    url: https://www.qsar4u.com/files/cremdb/chembl22_sa2.db.gz
+    name: chembl22_sa2.db
+    compressed_sha256: null
+    uncompressed_sha256: null
+    read_only: true
+    external_prior_disclosed: true
+  download_difflinker: false
+  native_local_final_similarity_diversity_filter: false
+  local_filter_replaced_by_global_summary: true
+campaign:
+  start_time_utc: null
+  planning_horizon_hours: 168
+  phase1_target_hours: 24
+  bace_delivery_target_hours: 96
+  engineering_retries_per_failed_unit: 2
+  retry_successful_science: false
+  seed: 7
+  pythonhashseed: 0
+  per_parent_seed: sha256_of_science_hash_parent_id_campaign_seed
+  write_original_main_matrix: false
+  primary:
+    dataset: bace
+    oracle: original_frozen_gine
+    source_label_expected: 1
+    allowed_destinations_expected: [0]
+    generation_parent_source: existing_train_proposal_manifest_and_frozen_source_predicate
+    calibration_base_count_expected: 66
+    test_base_count_expected: 141
+    theta_expected: 0.008413518173529859
+    cap_expected: 0.02956508038627219
+    metadata_conflict_action: block_affected_scope_without_reselecting_contract
+  conditional_secondary:
+    dataset: tastemolnet
+    oracle: original_frozen_gine
+    source_label_expected: 1
+    allowed_destinations_expected: [0, 2]
+    requires_bace_final_audit: true
+    requires_existing_data_authorization: true
+    latest_start_elapsed_hours: 120
+    eta_multiplier: 2.0
+    finish_margin_hours: 12
+    full_existing_train_source_cohort: true
+    gate_depends_on_test_performance: false
+  excluded:
+    - aids_rf
+    - mut_rf
+    - bace_gin_aplus
+    - difflinker
+    - classifier_training
+    - llm_training
+attribution:
+  method: Grad-CAM
+  target_score: upstream_source_class_direction
+  node_layer: resolve_and_pin_actual_upstream_analogue_in_gine
+  mode: eval_with_autograd
+  mutate_parameters_or_bn: false
+  top_atom_fraction: 0.2
+  rounding: pin_upstream_cf_path_else_declared_ceil
+  atom_index_tie_break: ascending_original_atom_index
+  ring_policy: pin_upstream_cf_generation_path
+  no_prediction_guided_mask_changes: true
+  cross_environment_atom_mapping_required: true
+generation:
+  top_level_calls_per_parent: 1
+  radius: 1
+  min_max_inc: 3
+  max_replacements_per_component: 64
+  component_combinations_cap: 500
+  raw_outputs_retained_per_parent: 128
+  raw_output_truncation: deterministic_hash_before_oracle_and_distance
+  parent_wall_limit_seconds: 900
+  timeout_status: TIMEOUT_BUDGETED
+  timeout_partial_adoption: false
+  infrastructure_error_is_no_candidate: false
+  start_method: spawn
+  preserve_native_fallback_and_context: true
+  worker_threads: 1
+pilot:
+  only_train: true
+  parents: 32
+  heavy_atom_quartiles: 4
+  parents_per_quartile: 8
+  min_nonself_distance_pairs: 64
+  test_based_parameter_changes: false
+  reuse_in_formal_only_if_contract_unchanged: true
+pool:
+  dedup: evaluation_schema_canonical_isomeric_graph_identity
+  max_candidates: 2000
+  selection: deterministic_seeded_hash_before_calibration
+  retain_all_origins: true
+  allow_groundtruth_or_ours_fill: false
+summary:
+  selector: coverage_greedy_with_cost_tie_break
+  primary_objective: marginal_coverage_at_frozen_theta
+  secondary_objective: marginal_decrease_fixed_capped_mean
+  final_tie_break: canonical_candidate_id
+  k_max: 20
+  at_most_k: true
+  choose_once_on_calibration: true
+  use_ours_reach_selector: false
+  zero_gain_action: continue_prespecified_tie_break_until_min_k_pool
+metrics:
+  distance: existing_frozen_molclr_wnode_contract
+  do_not_change_encoder_or_solver: true
+  primary_cost: fixed_denominator_capped_mean
+  secondary_cost: conditional_median_among_finite_strict_flips
+  source_false_retained_in_base_denominator: true
+  failed_computation_is_infinity: false
+  semantic_invalid_or_non_source_is_infinity: true
+  test_only_frozen_prototypes: true
+  k_values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+  figure4_k: [10, 20]
+  table_k: [10, 20]
+  ecdf_source: uncapped_parent_best_valid_distances
+resources:
+  hpc:
+    alias: tongji-hpc
+    partition_expected: intel
+    max_concurrent_jobs: 2
+    cpus_per_job: 8
+    ram_gib_per_job: 32
+    max_spawn_workers_per_generation_job: 4
+    job_walltime_hours_initial: 12
+    persistent_allowroot: /share/home/u20526/czx
+    local_scratch: site_approved_job_private_directory_only
+  autodl:
+    alias: autodl-a800
+    max_new_gpus: 1
+    preempt_main: false
+    use_existing_lease_interface: true
+    cpu_fallback: validated_hpc_original_oracle_environment
+    local_free_margin_gib: 2
+  relay:
+    max_lifetime_hours: 168
+    program_poll_seconds: 300
+    model_api_calls: false
+    bind_caffeinate_to_pid: true
+    no_permanent_daemon: true
+paths:
+  mac_root: /Volumes/DireRaven/counterfactual-hpc-offload/cm-crem-global-v1
+  hpc_root: /share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v1
+  autodl_root: /autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/baselines/cm_crem_global_v1
+  frozen_gine_manifest: null
+  split_manifest: null
+  wnode_contract: null
+  current_campaign_pointer: current_campaign.json
+acceptance:
+  config_only_is_success: false
+  resource_pass_implies_science_pass: false
+  nonzero_coverage_required: false
+  ours_must_win: false
+  source_predicate_and_calibration_freeze_verified: true
+  all_intended_parent_units_accounted_for: true
+  compact_final_report_chinese_chars: 800
