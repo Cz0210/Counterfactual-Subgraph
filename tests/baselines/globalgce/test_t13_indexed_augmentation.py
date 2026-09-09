@@ -121,6 +121,24 @@ def test_complete_official_eager_lazy_samples_split_and_rng_exact(official):
     assert indexed.identity['compact_index_bytes'] < eager.fs_mask_list.numel()*eager.fs_mask_list.element_size()
 
 
+def test_private_rng_reconstruction_keeps_official_fixture_arrays_and_global_rng(official):
+    fsg, parents, graphs = setup(official)
+    random.seed(7); np.random.seed(7); torch.manual_seed(7)
+    historical = lazy(official, fsg, parents, graphs)
+    before = state_digest(rng_state())
+    recovered = build_indexed_dataset(fsg, parents, graphs,
+        get_nx_graph=official['get_nx_graph'],
+        split_fn=official['get_train_val_test_idx'],
+        eager_dataset_class=_eager_without_split(official['AugmentedDataset']),
+        mask_rng=random.Random(7))
+    assert state_digest(rng_state()) == before
+    excluded = {'identity_sha256', 'materialization_rng_sha256'}
+    assert {k:v for k,v in recovered.identity.items() if k not in excluded} == {
+        k:v for k,v in historical.identity.items() if k not in excluded}
+    assert [a.tobytes() for a in recovered._buffers] == [a.tobytes() for a in historical._buffers]
+    assert all(state_digest(recovered[i]) == state_digest(historical[i]) for i in range(len(historical)))
+
+
 def test_repeated_access_never_mutates_parent_or_cached_template(official):
     fsg,parents,graphs=setup(official);random.seed(7)
     indexed=lazy(official,fsg,parents,graphs)

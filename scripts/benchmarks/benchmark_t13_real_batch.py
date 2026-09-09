@@ -65,9 +65,13 @@ def main():
         paths = {key: Path(plan[key]).exists() for key in (
             "source_checkpoint", "source_index_manifest", "source_cohort_manifest", "train_csv",
             "gnn_checkpoint", "official_root", "gspan_adoption_proof", "reference_source")}
+        descriptor = plan.get('committed_compact_payload') or {}
+        paths['committed_compact_payload'] = bool(descriptor.get('path')) and Path(descriptor['path']).is_file()
         print(json.dumps(dict(state="INPUT_PATHS_PRESENT" if all(paths.values()) else "MISSING_INPUT",
             paths=paths, synthetic=False, science_started=False, active_handover_ready=False), sort_keys=True))
         return 0 if all(paths.values()) else 2
+    if not plan.get('committed_compact_payload'):
+        parser.error('COMPACT_MASK_INDEX_PAYLOAD_MISSING_NOT_RESEEDABLE')
     use_owner_pipe = 'AUTODL_LLM_OWNER_BOOTSTRAP_FD' in os.environ
     if use_owner_pipe:
         if args.held_gpu_fd is not None or args.owner_evidence is not None:

@@ -122,7 +122,13 @@ def make_interceptor(plan, checkpoint, reference, output, sample):
         model = kwargs["model"]
         if kwargs["gspan_adoption_proof"] is None:
             raise ValueError("T13_REAL_CANARY_MINING_FORBIDDEN")
-        sample("before_compact_index_reconstruction")
+        descriptor = plan.get('committed_compact_payload')
+        if not descriptor:
+            raise ValueError('COMPACT_MASK_INDEX_PAYLOAD_MISSING_NOT_RESEEDABLE')
+        from src.baselines.t13_bounded_payload import install_committed_expansion
+        install_committed_expansion(model.fsg, descriptor=descriptor,
+                                   expected_identity=checkpoint['augmented_dataset_identity'])
+        sample("before_committed_compact_index_load")
         (fss, train, validation, _unused_test_loader), adoption = _get_fs_expanded_data_from_adoption(
             model=model, train_loader=kwargs["train_loader"], proof_path=kwargs["gspan_adoption_proof"])
         identity = train.dataset.dataset.identity

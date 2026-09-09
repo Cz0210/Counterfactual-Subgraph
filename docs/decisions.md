@@ -1,5 +1,42 @@
 # Decisions Log
 
+## [2026-09-09] T13 EIO recovery: prove compact-array reconstruction before bounded consumption
+
+The old epoch29/next30 checkpoint remains read-only and formal quota remains
+1/1. No persisted mask/index arrays were found in the bounded `target_0`
+inventory; the preserved manifest contains hashes, not those arrays. The recorded Python RNG-before
+digest matches an actual `random.Random(7).getstate()` calculation; this only
+establishes a candidate reconstruction start, not a recovered dataset.
+
+The new data-only reconstruction option binds unchanged official sampling
+function bytecode to a private Random instance without modifying module globals.
+It accepts reconstructed arrays only if all recorded input/index/mask/split,
+before/after sampling RNG, parent order, multiplicity and boundary fields match.
+The old startup materialization process-RNG digest can differ because formal
+training restores its checkpoint RNG afterwards; this sole noncontent change is
+explicit in the reconstruction overlay, alongside the unchanged old identity.
+No missing event, mask, or split is filled from an unverified seed.
+
+The existing real-batch canary now requires the committed compact payload and
+uses its bounded loader. It cannot silently fall back to whole-index expansion;
+its inspect action reports a missing payload. Private sampling and all rejection
+paths have CPU fixture tests, but those tests do not certify reconstruction of
+the 1,273,625 real samples, GPU training parity, resource admission or recovery.
+Persistent fsync remains blocked in this task, so no code was deployed and no
+reconstruction, diagnostic optimizer update or formal recovery was executed.
+
+This is bounded-loader wiring, not a completed recovery validator. The current
+real-batch benchmark updates once per batch, whereas the pinned formal trainer
+accumulates five batches over one shared rules graph before one optimizer
+update. That diagnostic must be aligned with the real update boundary (without
+reducing the full validation cohort), and actual incremental memory/owner
+admission must be completed before it may authorize recovery.
+
+The original epoch loop saves after due validation, not before it. Epoch29 has
+no scheduled validation; an intact epoch29/next30 checkpoint should resume epoch
+30, retaining its full validation. Any uncommitted epoch30 work is replay cost,
+not an extra fresh full or proof of completed epoch30.
+
 ## [2026-09-08] T13 existing-owner held-FD diagnostic adapter
 
 The real Taste performance benchmark is callable through explicit

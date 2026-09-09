@@ -15,6 +15,8 @@ import inspect
 import json
 from pathlib import Path
 import random
+import copy
+import types
 from typing import Any
 
 import numpy as np
@@ -118,19 +120,40 @@ class T13IndexedAugmentedDataset(torch.utils.data.Dataset):
         return graph
 
 
+def _with_independent_mask_rng(fsg, mask_rng):
+    """Bind the unchanged official sampling functions to a private RNG.
+
+    Copy function globals, never mutate the official module or its shared
+    ``random`` module. All native candidate and mapping iteration stays intact.
+    """
+    isolated = copy.copy(fsg)
+    for name in ('get_valid_masks', 'get_graph_masks'):
+        original = getattr(type(fsg), name)
+        namespace = dict(original.__globals__, random=mask_rng)
+        rebound = types.FunctionType(original.__code__, namespace, original.__name__,
+                                     original.__defaults__, original.__closure__)
+        rebound.__kwdefaults__ = original.__kwdefaults__
+        setattr(isolated, name, types.MethodType(rebound, isolated))
+    return isolated
+
+
 def build_indexed_dataset(fsg, dataset, fs_dict, crop_expansion=False, *, output_root=None,
-                          get_nx_graph=None, split_fn=None, eager_dataset_class=None, verify_boundaries=True):
+                          get_nx_graph=None, split_fn=None, eager_dataset_class=None, verify_boundaries=True,
+                          mask_rng=None):
     """Enumerate identical masks once, with at most one parent's dense scratch."""
     if get_nx_graph is None:
         get_nx_graph = importlib.import_module('utils').get_nx_graph
     official_data = importlib.import_module('data.dataset') if split_fn is None or eager_dataset_class is None else None
     split_fn = split_fn or official_data.get_train_val_test_idx
     eager_dataset_class = eager_dataset_class or official_data.AugmentedDataset
+    if mask_rng is not None:
+        fsg = _with_independent_mask_rng(fsg, mask_rng)
+    sampling_rng = mask_rng if mask_rng is not None else random
     graph_idxs = [i for part in (dataset.train_idx, dataset.val_idx, dataset.test_idx) for i in part]
     positions, fs_indices, axes = array('i'), array('i'), array('i')
     _require(positions.itemsize == 4, 'T13_INDEX_REQUIRES_INT32')
     inputs, masks_digest = hashlib.sha256(), hashlib.sha256()
-    rng_before = stable_sha256(random.getstate())
+    rng_before = stable_sha256(sampling_rng.getstate())
     checks = []
     fs_max = int(fsg.fs_max_nodes)
     for position, idx in enumerate(graph_idxs):
@@ -181,7 +204,7 @@ def build_indexed_dataset(fsg, dataset, fs_dict, crop_expansion=False, *, output
     before_materialization=_rng_digest()
     result = T13IndexedAugmentedDataset(dataset=dataset,fsg=fsg,graph_idxs=graph_idxs,positions=positions,
         fs_indices=fs_indices,axes=axes,split_fn=split_fn,input_sha256=inputs.hexdigest(),mask_sha256=masks_digest.hexdigest(),
-        rng_before_sha256=rng_before,rng_after_sha256=stable_sha256(random.getstate()),boundary_checks=len(checks))
+        rng_before_sha256=rng_before,rng_after_sha256=stable_sha256(sampling_rng.getstate()),boundary_checks=len(checks))
     for check in checks:
         for source_index, target_index in enumerate((check['first_sample'],check['last_sample'])):
             observed = result[target_index]
