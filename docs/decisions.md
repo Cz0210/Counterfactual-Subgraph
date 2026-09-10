@@ -18709,3 +18709,26 @@ WNode measurements and original GINE weights/temperature/budgets are reused.
 The existing Mac relay can resume only a verified dead asset-timeout predecessor
 under its original lock, preserving old terminal/identity and original168-hour
 T0. Focused asset/relay regression replaces repetition of185 unchanged tests.
+
+### 2026-09-10 — Postpilot adoption and record-only BACE comparison
+
+- Preserve live relay65163/caffeinate65164 and science execution75966157.
+  Pilot2656940, filter2657081 and closeout2657167 have real terminal receipts;
+  relay submitted attribution2657283 and full generation2657467 without agent
+  resubmission.32 pilot parents match full requests, per-parent seeds, masks,
+  exact budgets and database identity; full generation skips their sealed units.
+- Add only an offline original-GINE record comparison entrypoint and CPU render
+  wrapper. Never modify active worktrees, fit/train/OT, selectors or main matrix.
+  Original141-parent minima reproduce60 old prefix rows and exactK10/K20 ECDFs.
+  Preserve GlobalGCE materialization ambiguity as UNDER_REPAIR, not valid zero.
+  Same oracle/cohort/theta/cap/MolCLR permits source reconciliation, but missing
+  numeric distance producer evidence still blocks adding the CM curve. CM must
+  additionally have the existing accepted import and seven authenticated CSVs.
+- Live relay is not hot-reloaded: current single-method export/acceptance/transfer
+  remains automatic. New combined offline entry is executable, not falsely
+  claimed to be loaded by the running relay. Its precise remaining gap is legacy
+  numerical producer binding. No additional controller or timer is installed.
+- Existing closeout already ran64 CM-prototype timings before this review; keep
+  that history, do not rerun it or mislabel it as at-most16. The26.76h planning
+  envelope adds24h delivery reserve to existing measured projections; it is not
+  a promise and does not reset original2026-09-16T16:27:44Z deadline.

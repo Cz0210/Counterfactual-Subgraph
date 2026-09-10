@@ -4351,3 +4351,12 @@ Mutagenicity roadmaps.
   scheduler environment variables; one static copy shared by a job's workers.
 - [ ] Admit the actual supplied archive and resume pilot-generate through the
   existing relay, retaining2654442 and the original168-hour start time.
+
+### Postpilot continuation (2026-09-10)
+
+- [x] Author asset accepted; actual32-parent generation/filter/closeout completed.
+- [x] Original relay continues full attribution/generation;32 pilot units adopted.
+- [x] Implement/test original-GINE saved-record comparison and PARTIAL rendering.
+- [ ] Bind old numerical WNode producer evidence before adding accepted CM to
+  comparison; original GlobalGCE hard-graph applicability remains unresolved.
+- [ ] Complete ongoing CM science/acceptance/import via the existing relay.
