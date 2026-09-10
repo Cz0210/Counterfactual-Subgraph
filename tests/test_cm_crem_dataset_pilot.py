@@ -49,3 +49,15 @@ def test_actual_three_class_gine_gradcam_keeps_all_class_axes():
     assert len(result['prediction']['probabilities'])==3
     assert result['gradient_nonzero_count']>0 and a.allowed_destinations==[0,2]
     assert all(torch.equal(before[k],v) for k,v in model.state_dict().items())
+
+
+def test_rf_serial_execution_changes_only_reduction_schedule():
+    from types import SimpleNamespace
+    from src.baselines.cm_crem_dataset_pilot import serial_rf_execution
+    trees=[object(),object()]
+    model=SimpleNamespace(n_jobs=7,estimators_=trees,n_features_in_=2048)
+    oracle=SimpleNamespace(model=model)
+    assert serial_rf_execution(oracle) is oracle
+    assert model.n_jobs==1 and model.estimators_ is trees and model.n_features_in_==2048
+    assert oracle.cm_execution_receipt['original_n_jobs']==7
+    assert not oracle.cm_execution_receipt['tolerance_changed']

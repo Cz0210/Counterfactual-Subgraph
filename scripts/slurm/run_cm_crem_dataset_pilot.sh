@@ -1,4 +1,5 @@
 #!/bin/bash
+# RF adapter uses serial tree reduction (job2667864 diagnosed parallel repeat drift).
 #SBATCH --partition=intel
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

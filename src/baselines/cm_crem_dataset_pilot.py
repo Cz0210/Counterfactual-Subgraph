@@ -13,6 +13,22 @@ from .cm_crem_runtime import atomic_json, read_json, file_sha, digest, require_c
 TERMINALS={'GENERATED','GENERATION_COMPLETE','NO_NATIVE_REPLACEMENT','NO_REPLACEABLE_CONTEXT','TIMEOUT_BUDGETED'}
 
 
+def serial_rf_execution(oracle):
+    """Fix only tree-reduction scheduling, never the forest or feature vector.
+
+    Job2667864 reproduced unequal repeated predictions at n_jobs=7 and exact
+    three-repeat attribution at n_jobs=1. Keep strict comparisons, not tolerance.
+    """
+    if not hasattr(oracle.model,'estimators_') or not hasattr(oracle.model,'n_jobs'):
+        raise ValueError('Unsupported RF execution interface')
+    previous=oracle.model.n_jobs
+    oracle.model.n_jobs=1
+    oracle.cm_execution_receipt={'method':'SERIAL_TREE_REDUCTION','original_n_jobs':previous,
+                                 'effective_n_jobs':1,'weights_changed':False,
+                                 'feature_schema_changed':False,'tolerance_changed':False}
+    return oracle
+
+
 def validate(spec):
     expected={'seed':7,'mask_fraction':0.2,'radius':1,'min_max_inc':3,
               'max_replacements_per_component':64,'raw_max_per_parent':128,
@@ -34,6 +50,7 @@ def oracle_for(spec):
         if file_sha(spec['oracle_path'])!=spec['oracle_sha256']:raise ValueError('Actual dataset RF identity differs')
         oracle=LegacyRFOracle(spec['oracle_path'],num_classes=2,source_label=1)
         if tuple(oracle.class_labels)!=(0,1):raise ValueError('RF class axes need explicit mapping')
+        serial_rf_execution(oracle)
         return oracle, MolecularGraphFeaturizer()
     from src.oracles.gnn_oracle import GNNOracle
     from .cm_crem_oracle import FrozenCMOracle
@@ -85,6 +102,8 @@ class DatasetPilot:
         if (self.root/'attribution.json').exists():return self.get('attribution.json')
         from .cm_crem_experiment import pilot_indices
         oracle,_=oracle_for(self.spec);parents,total=read_train(self.spec)
+        if self.spec['oracle_backend']=='rf':
+            self.put('rf_execution_receipt.json',oracle.cm_execution_receipt)
         if self.spec['oracle_backend']=='rf':
             preds=oracle.predict_proba([p['smiles'] for p in parents]);labels=[int(x.argmax()) for x in preds]
         else:

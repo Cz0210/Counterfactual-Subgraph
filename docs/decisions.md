@@ -18837,3 +18837,15 @@ children, retain uid/no-symlink/0700 safety, create next fresh root0700. Bind
 scratch failure details before raising. Enable schema v3 at native entry as
 well as decoding, tested through the actual pinned algorithm with a fixture
 DB. Completed16 attribution records are adopted, not rerun. Old failures stay.
+
+## 2026-09-11 Mut CM pilot: serial RF reduction, not retraining
+
+Pilot2667854 failed before native generation on exact attribution repeat.
+Independent CPU diagnostic2667864 reproduced the n_jobs=7 empty-occlusion
+prediction inconsistency and three identical n_jobs=1 attributions on the
+first unsealed parent. New pilot execution sets only the in-memory forest
+n_jobs to1 and records the old/new scheduling. Forest weights, features,
+class axes, strict equality and all generation budgets remain unchanged.
+The frozen32-parent IDs and completed attribution units must be preserved;
+old failure and diagnostic receipts are not overwritten. This does not claim
+bitwise equivalence of the old parallel reduction to the repaired producer.
