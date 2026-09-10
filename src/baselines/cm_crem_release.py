@@ -26,6 +26,9 @@ ALLOWED_ROOTS = (
     Path("/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v1"),
     Path("/Volumes/DireRaven/counterfactual-hpc-offload/cm-crem-global-v1"),
     Path("/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/baselines/cm_crem_global_v1"),
+    Path("/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v2"),
+    Path("/Volumes/DireRaven/counterfactual-hpc-offload/cm-crem-global-v2"),
+    Path("/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/baselines/cm_crem_global_v2"),
 )
 SCHEMA = "cm_crem_portable_result_package_v1"
 METHOD = "CM-CReM-Global-Budgeted-v1"
@@ -35,9 +38,10 @@ TOP_FILES = {
     "environment_manifest.json", "authorization.json", "provenance.json", "protocol.json",
     "attribution.json", "pool_freeze.json", "pool_encodings.json", "selection_freeze.json",
     "test_evaluation.json", "budget_and_timing.json", "candidate_funnel.csv", "candidate_provenance.csv",
+    "pool.json", "freeze.json", "calibration_comparison.json",
 }
 TREE_DIRS = {"pilot", "full", "calibration", "test", "attribution_units", "generation_units", "filter_units",
-             "producer_receipts", "audit", "results", "diagnostics", "source_bindings", "provenance", "manifests"}
+             "producer_receipts", "audit", "results", "diagnostics", "source_bindings", "provenance", "manifests", "encodings"}
 EXCLUDED_COMPONENTS = {"logs", "log", "tmp", "temp", "cache", "caches", "models", "checkpoints",
                        "downloads", "assets", "environment", "environments", ".git", "__pycache__"}
 SUFFIXES = {".json", ".jsonl", ".csv", ".npy", ".npz", ".md", ".txt", ".tex", ".png", ".pdf", ".sh"}
@@ -132,6 +136,8 @@ def _scan(root: Path) -> dict[str, tuple[int, ...]]:
 
 
 def _audit_gate(read_json: Callable[[str], dict], hash_for: Callable[[str], str], names: set[str]) -> dict:
+    if "audit/k20_audit.json" in names:
+        return _k20_audit_gate(read_json, hash_for, names)
     audit = read_json("audit/final_audit.json")
     _require(audit.get("status") == "BACE_CM_CREM_FINAL_AUDIT_PASS" and
              audit.get("scientific_pass_claimed") is True and audit.get("main_matrix_written") is False,
@@ -174,6 +180,53 @@ def _audit_gate(read_json: Callable[[str], dict], hash_for: Callable[[str], str]
     _require(set(export.get("source_files", {})) == RESULT_FILES, "Export CSV inventory incomplete")
     return {"science_hash": science, "independent_spotcheck": binding,
             "final_audit_sha256": hash_for("audit/final_audit.json")}
+
+
+def _k20_audit_gate(read, hash_for, names):
+    """Adopt the distinct saved-pool v2 audit, never relabel it as v1 science."""
+    from .cm_crem_selection import SelectionFreeze
+    required = {"spec.json", "pool.json", "freeze.json", "calibration_comparison.json",
+                "calibration/complete.json", "test/complete.json", "test_evaluation.json",
+                "audit/k20_audit.json", "results/export_manifest.json"}
+    _require(required <= names, "K20 release lacks completed scientific stages")
+    spec, audit = read("spec.json"), read("audit/k20_audit.json")
+    science = digest({k:v for k,v in spec.items() if k not in
+                     {"execution_root", "execution_commit", "output_root", "source_root", "source_spec"}})
+    _require(spec.get("experiment_id") == "CM-Global-K20-v2" and
+             spec.get("generation_enabled") is False and spec.get("pool_count") == 5474 and
+             spec.get("test_used_for_selection") is False, "Wrong K20 scope/config")
+    _require(audit.get("status") == "K20_RECORDS_AND_INDEPENDENT_PROTOTYPE_CHECKS_PASS" and
+             audit.get("scope_sha256") == science and audit.get("main_matrix_written") is False and
+             audit.get("independent_calibration_replay") is True and
+             audit.get("original_generation_reused") is True and audit.get("new_generation_calls") == 0 and
+             len(audit.get("checked_prototypes", [])) == 2 and
+             len(audit.get("independent_new_ot_checks", [])) == 2,
+             "K20 real independent audit incomplete")
+    freeze_doc = read("freeze.json")
+    freeze = SelectionFreeze.from_dict(freeze_doc["freeze"])
+    _require(freeze_doc.get("test_loaded_by_this_run") is False and
+             freeze.freeze_sha256 == audit.get("selection_freeze_sha") and
+             set(audit["checked_prototypes"]) <= set(freeze.selected_candidate_ids), "K20 freeze/audit conflict")
+    for name in required - {"spec.json", "results/export_manifest.json"}:
+        _require(read(name).get("scope_sha256") == science, "K20 mixed stage scope: " + name)
+    _require(read("calibration/complete.json").get("parents") == 66 and
+             read("test/complete.json").get("parents") == audit.get("test_count") == 141 and
+             read("test/complete.json").get("candidate_count") == len(freeze.selected_candidate_ids) and
+             read("test/complete.json").get("test_reads_after_freeze") is True, "K20 cohort/prefix incomplete")
+    comparison = read("calibration_comparison.json")
+    _require(comparison.get("calibration_only") is True and comparison.get("test_used_for_choice") is False,
+             "K20 selection/test boundary missing")
+    export = read("results/export_manifest.json")
+    _require(export.get("fixture") is False and export.get("dataset") == "bace" and export.get("oracle") == "gine",
+             "K20 export oracle/fixture mismatch")
+    _require(set(export.get("source_files", {})) == RESULT_FILES, "K20 CSV inventory incomplete")
+    for name, sha in export["source_files"].items():
+        path = "results/source_csv/" + _name(name)
+        _require(path in names and hash_for(path) == sha, "K20 export CSV binding conflict")
+    return {"science_hash": science, "final_audit_sha256": hash_for("audit/k20_audit.json"),
+            "independent_spotcheck": {"path": "audit/k20_audit.json", "sha256": hash_for("audit/k20_audit.json")},
+            "variant": "CM-Global-K20-v2", "source_science_hash": spec["source_science_sha"],
+            "scope": "BACE_ORIGINAL_GINE_FULL_TRAIN_POOL_K20_POSTHOC"}
 
 
 def _atomic_directory(source: Path, destination: Path) -> None:

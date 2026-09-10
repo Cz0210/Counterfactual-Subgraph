@@ -1,5 +1,15 @@
 # Decisions Log
 
+## 2026-09-11 — Distinct CM K20-v2 portable acceptance
+
+The completed 2666809 calculation has a v2 scoped independent audit, not the
+v1 final-audit schema. Extend only the existing package/import gate to validate
+its actual calibration comparison, freeze, test cohort, independent prototype/
+new-distance checks and CSV bindings. Preserve v1 behavior and all source files;
+do not manufacture a v1 audit alias. Record source v1 and v2 scope separately.
+The paired CPU-only packaging script is the explicitly authorized exception to
+the generic GPU template. Focused package/gate regressions: 34 passed.
+
 ## [2026-09-08] Adopt explicitly authorized exact four-file diagnostic binding
 
 The user re-authorized the previously declined four-file combination through

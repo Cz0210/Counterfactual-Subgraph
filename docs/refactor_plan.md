@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## 2026-09-11 CM K20 continuation
+
+- [x] Distinct v2 existing-audit package/import adapter and CPU wrapper.
+- [ ] Deploy package-only successor and scoped Mac/AutoDL release.
+- [ ] Complete three dataset pilots and their full successors.
+- [ ] Complete actual T12 adapter restore and T13 bounded continuation checks.
+
 ### 2026-09-08 compact closeout
 
 - Authorized reviewed four-file diagnostic combination implemented and tested;
