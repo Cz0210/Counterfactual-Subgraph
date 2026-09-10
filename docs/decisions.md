@@ -18857,3 +18857,14 @@ coverage/original cost/finite recourse/base N, and from combined-family release
 readiness. A legacy coverage/cost pair without its denominator/recourse count
 is not called fully numeric. CM's accepted standalone result does not close
 the old-method numeric-producer comparison binding. No source CSV is changed.
+
+## 2026-09-11 CM-v2 import-only dependency repair
+
+The minimal AutoDL code transfer omitted cm_crem_selection. Extraction finished
+but the real v2 gate could not import SelectionFreeze. Retain that staging and
+old failure. The existing importer gains --resume-staging: it verifies the
+complete extracted inventory, rejects changes/links/extras, invokes the same
+scientific gate and publishes acceptance last. It does not extract again,
+transfer again or run science. One recovery content verification is necessary
+because the failed call published no acceptance receipt; its hash count is
+explicitly scoped to the recovery call, not hidden as the only historic hash.

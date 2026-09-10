@@ -396,6 +396,66 @@ def package_run(root: str | Path) -> dict[str, Any]:
     return receipt
 
 
+def finalize_interrupted_import(package, manifest, fresh_destination, staging):
+    """Resume a completed extraction after an import-code failure, not science.
+
+    No second extraction/transfer. Because the failed call published no receipt,
+    verify all existing members once before the ordinary scientific audit gate.
+    """
+    package,manifest,destination,staging=map(_scope,(package,manifest,fresh_destination,staging))
+    _require(not destination.exists(), 'Import destination must be fresh')
+    _require(staging.parent==destination.parent and
+             re.fullmatch(re.escape(destination.name)+r'\.import-tmp-[a-f0-9]{32}',staging.name) is not None,
+             'Not an original interrupted import staging directory')
+    _require(staging.is_dir() and not staging.is_symlink(), 'Unsafe import staging')
+    outer=json.loads(manifest.read_text());files=outer.get('files',{})
+    _require(outer.get('schema')==SCHEMA and outer.get('method_id')==METHOD and
+             outer.get('main_matrix_written') is False,'Invalid CM transport manifest')
+    _require(isinstance(files,dict) and 0<len(files)<=MAX_MEMBERS,'Invalid member inventory')
+    before=_stat(package)
+    _require(before[2]==outer.get('package_bytes') and _sha(package)==outer.get('package_sha256'),
+             'Transferred package bytes/SHA conflict')
+    expected=set(files)|{'package_manifest.json'};seen=set();total=0
+    for current,dirs,names in os.walk(staging,followlinks=False):
+        for directory in dirs:
+            _require(not (Path(current)/directory).is_symlink(),'Import directory symlink')
+        for name in names:
+            p=Path(current)/name;relative=p.relative_to(staging).as_posix()
+            _require(relative in expected,'Unexpected extracted member')
+            stat_before=_stat(p)
+            sha=_sha(p)
+            _require(_stat(p)==stat_before,'Extracted member changed during verification')
+            if relative=='package_manifest.json':
+                _require(sha==outer.get('internal_manifest_sha256'),'Internal manifest content conflict')
+                internal=json.loads(p.read_text())
+            else:
+                entry=files[relative]
+                _require(_allowed(relative) and type(entry.get('bytes')) is int and
+                         0<=entry['bytes']<=MAX_MEMBER_BYTES and stat_before[2]==entry['bytes'] and
+                         sha==entry.get('sha256'),'Extracted member identity conflict: '+relative)
+                total+=stat_before[2]
+            seen.add(relative)
+    _require(seen==expected and len(files)==outer.get('member_count') and
+             total==outer.get('total_member_bytes') and total<=MAX_TOTAL_BYTES,'Extracted inventory incomplete')
+    _require(internal.get('manifest_sha256')==digest({k:v for k,v in internal.items() if k!='manifest_sha256'})
+             and all(outer.get(k)==v for k,v in internal.items()),'Inner/outer manifest disagreement')
+    gate=_audit_gate(lambda n:json.loads((staging/n).read_text()),lambda n:files[n]['sha256'],set(files))
+    _require(gate['science_hash']==outer.get('science_hash') and gate['final_audit_sha256']==outer.get('final_audit_sha256'),
+             'Imported scientific gate differs')
+    _require(_stat(package)==before,'Package changed during recovery')
+    receipt=dict(schema='cm_crem_fresh_import_receipt_v1',status='CM_RESULT_IMPORT_VERIFIED',
+        source_package=str(package),package_sha256=outer['package_sha256'],package_bytes=outer['package_bytes'],
+        destination=str(destination),science_hash=gate['science_hash'],verified_member_count=len(files),
+        verified_member_bytes=total,full_package_hash_count=1,hash_count_scope='THIS_RECOVERY_CALL',
+        completed_extraction_reused=True,independent_spotcheck=gate['independent_spotcheck'],created_at=utc_now(),
+        main_matrix_written=False,registry_created=False,models_loaded=False,generation_rerun=False,distance_recomputed=False)
+    atomic_json(staging/'cm_import_receipt.json',receipt,immutable=True)
+    atomic_json(staging/'cm_run_publication.json',{**receipt,'status':'BACE_CM_CREM_RESULT_PUBLISHED',
+        'scope':'INDEPENDENT_CM_BASELINE_NOT_ORIGINAL_MAIN_MATRIX','scientific_pass_claimed':True},immutable=True)
+    _sync_directories(staging);_atomic_directory(staging,destination)
+    return receipt
+
+
 def verify_import(package: str | Path, manifest: str | Path,
                   fresh_destination: str | Path) -> dict[str, Any]:
     """One complete transport hash plus streamed member verification/extraction."""

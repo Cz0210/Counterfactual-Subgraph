@@ -69,6 +69,32 @@ def test_gate_package_import_and_no_model_database_log_copy(run):
         release.package_run(run)
 
 
+@pytest.mark.parametrize('damage',[None,'content','extra','symlink'])
+def test_completed_extraction_recovery_does_not_reextract(run,monkeypatch,damage):
+    record=release.package_run(run)
+    original=release._audit_gate
+    destination=run.parent/'recovered-import'
+    def unavailable(*args):raise ModuleNotFoundError('fixture missing deployment dependency')
+    monkeypatch.setattr(release,'_audit_gate',unavailable)
+    with pytest.raises(ModuleNotFoundError):
+        release.verify_import(record['package_path'],record['manifest_path'],destination)
+    staging=next(destination.parent.glob(destination.name+'.import-tmp-*'))
+    monkeypatch.setattr(release,'_audit_gate',original)
+    if damage=='content':(staging/'spec.json').write_text('{}')
+    if damage=='extra':(staging/'extra.json').write_text('{}')
+    if damage=='symlink':
+        p=staging/'spec.json';p.unlink();p.symlink_to(run/'spec.json')
+    monkeypatch.setattr(release.tarfile,'open',lambda *a,**k:pytest.fail('archive was extracted again'))
+    if damage:
+        with pytest.raises(release.ReleaseRejected):
+            release.finalize_interrupted_import(record['package_path'],record['manifest_path'],destination,staging)
+        assert not destination.exists()
+    else:
+        result=release.finalize_interrupted_import(record['package_path'],record['manifest_path'],destination,staging)
+        assert result['completed_extraction_reused'] and not result['models_loaded']
+        assert (destination/'cm_run_publication.json').exists()
+
+
 @pytest.mark.parametrize("field,value", [("status", "RECORD_RECONCILIATION_COMPLETE"),
     ("scientific_pass_claimed", False), ("main_matrix_written", True)])
 def test_final_audit_flags_not_generic_pass(run, field, value):
