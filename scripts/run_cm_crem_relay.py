@@ -89,7 +89,10 @@ def claim_relay_identity(args, local: Path, spec_path: str, lock) -> datetime:
     diagnostic_resume = (getattr(args, "diagnostic_attempt", None) is not None and
                          state.get("status") == "BLOCKED_FAILED_STAGE" and
                          state.get("failed_stage") == "audit")
-    if state.get("status") != "BLOCKED_ASSET_OVER_6H" and not diagnostic_resume:
+    context_resume = (getattr(args, 'audit_successor_stage', None) == 'audit-context' and
+                      state.get('status') == 'BLOCKED_DIAGNOSTIC_REVIEW_REQUIRED' and
+                      state.get('diagnostic',{}).get('status') == 'DIAGNOSTIC_CAPTURE_COMPLETE_NOT_ACCEPTANCE')
+    if state.get("status") != "BLOCKED_ASSET_OVER_6H" and not diagnostic_resume and not context_resume:
         raise ValueError("Only BLOCKED_ASSET_OVER_6H permits this explicit relay resume")
     if old.get("hpc_run_root") != args.hpc_run_root or state.get("hpc_run_root") != args.hpc_run_root:
         raise ValueError("Terminal identity/state belong to another HPC campaign")
@@ -161,7 +164,7 @@ def claim_relay_identity(args, local: Path, spec_path: str, lock) -> datetime:
                     prior_pid=pid, start_evidence=start_evidence)
     atomic_json(archive/"resume_identity.json", identity, immutable=True)
     atomic_json(identity_path, identity)
-    atomic_json(local/"state.json", {"status": "RESUMING_AUDIT_DIAGNOSTIC" if diagnostic_resume else "RESUMING_AFTER_ASSET_TERMINAL", "updated_at": utc_now(),
+    atomic_json(local/"state.json", {"status": "RESUMING_CONTEXT_AUDIT" if context_resume else "RESUMING_AUDIT_DIAGNOSTIC" if diagnostic_resume else "RESUMING_AFTER_ASSET_TERMINAL", "updated_at": utc_now(),
                 "pid": os.getpid(), "hpc_run_root": args.hpc_run_root,
                 "start_time_utc": identity["start_time_utc"], "prior_terminal_archive": str(archive)})
     return t0
@@ -322,6 +325,7 @@ def main():
                         help="Resume only an exited BLOCKED_ASSET_OVER_6H relay, retaining original T0 and168h horizon")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--diagnostic-attempt", help="Existing audit-recovery submission; same lock/T0, no pilot or inferred PASS")
+    parser.add_argument('--audit-successor-stage', choices=['audit-context'], help='Adopt the explicitly submitted original-batch audit successor; preserve failed audit receipt')
     args = parser.parse_args()
     if any(not re.fullmatch(r"/[A-Za-z0-9_./-]+", p) for p in (args.hpc_run_root, args.hpc_execution_root)):
         raise ValueError("CM relay remote paths must be literal safe absolute paths")
@@ -348,6 +352,10 @@ def main():
             # Read only this task's tiny submission/status documents, not package SHAs.
             code = "import json,pathlib; p=pathlib.Path(__import__('sys').argv[1]); print(json.dumps({f.stem:json.loads(f.read_text()) for f in (p/'submissions').glob('*.json') if not f.name.endswith('.intent.json')}))"
             receipts = json.loads(ssh_read(args.hpc_alias, [python, "-I", "-B", "-c", code, args.hpc_run_root]))
+            if args.audit_successor_stage:
+                if receipts.get('audit',{}).get('job_id') != '2659067' or 'audit-context' not in receipts:
+                    raise ValueError('Missing bound failed audit or actual context successor')
+                receipts['audit'] = receipts.pop('audit-context')
             active, completed = [], set()
             for stage, record in receipts.items():
                 job = record.get("job_id")

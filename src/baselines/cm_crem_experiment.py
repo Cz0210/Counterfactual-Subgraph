@@ -605,8 +605,14 @@ class Experiment:
                                      source_mask=masks, pair_status=statuses, contract_sha256=self.sha)
         payload = result.to_dict() if hasattr(result, "to_dict") else dict(result)
         self.put("test_evaluation.json", payload)
-        provenance = audit_bace_run(self.spec, self.root)
-        self.put("audit/provenance_review.json", provenance)
+        if (self.root / 'audit/provenance_review.json').exists():
+            # Immutable completed provenance contains its original auditor PID;
+            # reuse it, do not overwrite it with a newly timestamped re-audit.
+            # independent_spotcheck validates digest and bound inputs below.
+            provenance = self.get('audit/provenance_review.json')
+        else:
+            provenance = audit_bace_run(self.spec, self.root)
+            self.put("audit/provenance_review.json", provenance)
         spotcheck = independent_spotcheck(self.spec, self.root, provenance)
         if spotcheck.get("status") != "CM_CREM_INDEPENDENT_SPOTCHECK_PASS" or spotcheck.get("independent") is not True:
             raise ValueError("Independent real-science verification has not passed")

@@ -15,7 +15,7 @@ from src.baselines.cm_crem_experiment import Experiment, HPC_SCOPE
 from src.baselines.cm_crem_runtime import atomic_json, checked_root, digest, read_json, utc_now
 
 STAGES = ("pilot-oracle", "pilot-generate", "pilot-filter", "pilot-closeout", "attribution",
-          "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export", "package")
+          "generate", "filter", "encode", "calibrate", "select", "test", "audit", "audit-context", "export", "package")
 
 
 def submit(spec_path: Path, root: Path, stage: str, dependency: str | None = None) -> dict:
@@ -26,6 +26,18 @@ def submit(spec_path: Path, root: Path, stage: str, dependency: str | None = Non
     if code_commit != spec["execution"]["execution_commit"]:
         raise ValueError("Submission worktree is not the immutable configured execution commit")
     action = stage.replace("pilot-generate", "generate").replace("pilot-filter", "filter")
+    if stage == 'audit-context':
+        action = 'audit'
+        old = read_json(root/'submissions/audit.json')
+        if old.get('job_id') != '2659067':
+            raise ValueError('Context repair bound only to failed CM audit2659067')
+        proof = read_json(root/'audit-recovery-20260910T103000Z-attempt2/evidence/diagnostic.json')
+        same = proof.get('controlled_same_tensor', {})
+        if (proof.get('status') != 'DIAGNOSTIC_CAPTURE_COMPLETE_NOT_ACCEPTANCE' or
+                same.get('saved_vs_reconstructed_batch',{}).get('exact') is not True or
+                same.get('repeats_exact') is not True or
+                not all(same.get('refeaturized_tensors_exact',{}).values())):
+            raise ValueError('Actual batch-context diagnosis is not closed')
     if stage in {"generate", "attribution"}:
         experiment.require_pilot()
     if "generate" in stage and experiment.stage_preflight()["missing_assets"]:

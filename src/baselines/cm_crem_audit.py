@@ -542,7 +542,15 @@ def independent_spotcheck(spec: Mapping[str, Any], root: str | Path, provenance:
         oracle = FrozenCMOracle.from_resolved(spec)
         wnode = FrozenCMWNode.from_resolved(spec)
         class Backend:
+            contexts = []
             def predict(self, rows):
+                if len(rows) == 1 and rows[0].get('candidate_id') in prototypes:
+                    saved = prototypes[rows[0]['candidate_id']]
+                    context, position, origin = original_filter_context(oracle, read, saved)
+                    self.contexts.append({'candidate_id':saved['candidate_id'], 'origin':origin,
+                        'batch_candidate_ids':[r['candidate_id'] for r in context], 'position':position,
+                        'condition':'ORIGINAL_FILTER_BATCH_RECONSTRUCTED_FROM_AUTHENTICATED_RAW'})
+                    return [oracle.predict_rows(context, split='train_generated')[position]]
                 return oracle.predict_rows(rows, split="independent_audit")
             def encode(self, rows):
                 return wnode.encode_rows(rows, featurizer=oracle.featurizer)
@@ -632,7 +640,36 @@ def independent_spotcheck(spec: Mapping[str, Any], root: str | Path, provenance:
         "encoding_graph_recomputations": encoding_count, "cache_production_reuse_claimed": False,
         "new_generation_calls": 0, "new_test_parents_loaded": 0, "zero_evidence": zero_evidence,
         "oracle_atol": atol, "oracle_rtol": rtol, "encoding_and_distance_comparison": "EXACT",
+        "oracle_batch_contexts": getattr(backend, 'contexts', []),
+        "production_predictions_modified": False,
         "portable_acceptance_state": "PENDING_EXPORT_VISUAL_QA_AND_PORTABLE_TRANSFER_VALIDATION",
         "scientific_pass_claimed": False, "auditor_pid": os.getpid(), "auditor_host": socket.gethostname()}
     receipt["spotcheck_sha256"] = digest(receipt)
     return receipt
+
+
+def original_filter_context(oracle, read, saved):
+    """Replay only the original filter's pre-inference construction, not CM."""
+    origin = saved['origins'][0]
+    parent = next(p for p in read('attribution.json')['parents'] if p['parent_id'] == origin['parent_id'])
+    generated = read(f"generation_units/{digest(parent['parent_id'])[:20]}.json")
+    captured = []
+    original = oracle.predict_rows
+    class CaptureComplete(Exception):
+        pass
+    def capture(rows, *, split):
+        if split == 'train_generated':
+            captured.extend(deepcopy(rows))
+            raise CaptureComplete()
+        return original(rows, split=split)
+    oracle.predict_rows = capture
+    try:
+        oracle.filter_generated(parent, generated)
+    except CaptureComplete:
+        pass
+    finally:
+        oracle.predict_rows = original
+    position = next(i for i, row in enumerate(captured) if row['candidate_id'] == saved['candidate_id'])
+    size = oracle.oracle.default_batch_size
+    start = position // size * size
+    return captured[start:start+size], position-start, origin

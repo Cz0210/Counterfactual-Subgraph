@@ -18744,3 +18744,12 @@ same-tensor execution and independent weight reload before refeaturization.
 Historical per-call tensors/backend were not saved; controlled reconstruction is
 explicitly not historical recovery. No generation, Grad-CAM, database or OT call,
 no tolerance change, and no final scientific PASS is emitted by this diagnostic.
+
+CM diagnostic2665415 captured prototype424117fe...d910a: singleton logits differ
+by1.1920928955078125e-7; the original32-graph context (position24), repeated three
+times and independently weight/buffer-reloaded three times, exactly reproduces
+saved logits. Refeaturized tensors and probabilities also match exactly. This
+supports restoring the auditor's producer batch context, not changing epsilon
+or producer values. Audit reconstructs each sampled prototype's authentic raw
+filter context including oracle-rejected companions; existing independent
+encoding/distance spotchecks remain, and production distances are not replaced.

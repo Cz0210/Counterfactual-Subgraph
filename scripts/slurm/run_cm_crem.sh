@@ -2,6 +2,8 @@
 # Pilot closeout measures model/filter/I/O plus generator RSS; full stages require
 # both the 168h horizon and this job's 12h/32GiB resource admission. No GPU used.
 # Task-authorized CPU exception to the repository A800 template; no GPU request.
+# Audit successor restores authenticated producer batch context; no pool/mask,
+# temperature, model or tolerance change. Existing independent spotchecks remain.
 #SBATCH --partition=intel
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
