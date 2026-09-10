@@ -18777,3 +18777,15 @@ Independent process replays calibration selection, new-pair checks and original
 prototype batch context. Post-hoc scope is explicit and original v1 untouched.
 Paired Slurm wrapper uses the user's explicit8CPU/32GiB CPU exception, no GPU.
 Focused selection/export and source-reuse/resume regressions:43 passed.
+
+## 2026-09-10 — CM original-RF feature-occlusion adapter
+
+Reuse the actual legacy RF Morgan vector and classifier. RDKit bit-environment
+membership maps atoms to actual feature indices; only those features are zeroed.
+Signed probability differences and stable atom-ID ties determine the original
+floor(n/5) mask. Bit collisions and the feature-perturbation interpretation are
+explicit. Original/empty features and prediction must exactly match, otherwise
+the RF adapter fails without a proxy GNN/random-mask fallback. The finite16-train
+entrypoint includes isolated real CReM calls and original RF molecule verification;
+it is NOT the required32-parent full pilot or a final result. Two focused mapping,
+collision, exact-original-vector and attribution-repeat tests passed.
