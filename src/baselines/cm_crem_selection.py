@@ -135,7 +135,8 @@ class SelectionFreeze:
         claimed = raw.pop("freeze_sha256")
         if _sha(claimed, "freeze_sha256") != canonical_sha256(raw):
             raise ValueError("Selection freeze content hash mismatch")
-        if self.schema_version != "cm_crem_selection_freeze_v1" or self.method_id != METHOD_ID:
+        v2 = self.method_id == "CM-Global-K20-v2" and self.schema_version == "cm_crem_selection_freeze_k20_v2"
+        if not v2 and (self.schema_version != "cm_crem_selection_freeze_v1" or self.method_id != METHOD_ID):
             raise ValueError("Unknown CM-CReM selection contract")
         for name in ("contract_sha256", "frozen_pool_sha256", "calibration_matrix_sha256"):
             _sha(getattr(self, name), name)
@@ -143,7 +144,7 @@ class SelectionFreeze:
         pool = _ids(self.pool_candidate_ids, "pool_candidate_ids", allow_empty=True)
         _ids(self.calibration_parent_ids, "calibration_parent_ids")
         chosen = _ids(self.selected_candidate_ids, "selected_candidate_ids", allow_empty=True)
-        if len(pool) > POOL_MAX or len(chosen) != min(K_MAX, len(pool)) or not set(chosen) <= set(pool):
+        if len(pool) > (6000 if v2 else POOL_MAX) or len(chosen) != min(K_MAX, len(pool)) or not set(chosen) <= set(pool):
             raise ValueError("Frozen selection must contain min(20,M) unique train-pool prototypes")
         if len(self.calibration_source_mask) != len(self.calibration_parent_ids) or any(
             type(x) is not bool for x in self.calibration_source_mask

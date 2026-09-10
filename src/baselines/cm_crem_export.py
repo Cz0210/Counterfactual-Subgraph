@@ -239,7 +239,8 @@ def export_diagnostics(run_root: str | Path, evaluation: PrefixEvaluation | Mapp
 
 
 def export_results(evaluation: PrefixEvaluation | Mapping[str, Any], output_root: str | Path, *, dataset: str,
-                   oracle: str = "gine", fixture: bool = False, make_figures: bool = True) -> dict[str, Any]:
+                   oracle: str = "gine", fixture: bool = False, make_figures: bool = True,
+                   k20_reuse_audit: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Write new run-root/results records; never overwrite an existing export.
 
     Synthetic fixture outputs are explicitly labelled in every CSV/figure.
@@ -255,7 +256,15 @@ def export_results(evaluation: PrefixEvaluation | Mapping[str, Any], output_root
     root = run_root / "results"
     if root.exists():
         raise FileExistsError(root)
-    diagnostics = export_diagnostics(run_root, evaluation, fixture=fixture) if (
+    if k20_reuse_audit is not None:
+        if (evaluation.selection.method_id!='CM-Global-K20-v2' or
+                k20_reuse_audit.get('status')!='K20_RECORDS_AND_INDEPENDENT_PROTOTYPE_CHECKS_PASS' or
+                k20_reuse_audit.get('selection_freeze_sha')!=evaluation.selection.freeze_sha256):
+            raise ValueError('Explicit K20 reuse audit does not bind this new variant')
+        diagnostics={'files':{'audit/k20_audit.json':_file_sha(run_root/'audit/k20_audit.json')},
+                     'status':'K20_FIXED_GENERATION_REUSE_SOURCE_BOUND'}
+    else:
+        diagnostics = export_diagnostics(run_root, evaluation, fixture=fixture) if (
         not fixture or (run_root/"audit/provenance_review.json").exists()) else None
     root.mkdir(parents=True, exist_ok=False)
     source = root / "source_csv"
@@ -263,6 +272,7 @@ def export_results(evaluation: PrefixEvaluation | Mapping[str, Any], output_root
     common = {"dataset": dataset, "oracle": oracle, "method": PAPER_LABEL,
         "fixture": fixture, "contract_sha256": evaluation.contract_sha256,
         "selection_freeze_sha256": evaluation.selection.freeze_sha256}
+    if k20_reuse_audit is not None:common['variant']='CM-Global-K20-v2'
     def tagged(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         return [{**common, **row} for row in rows]
     metrics = evaluation.prefix_metrics()

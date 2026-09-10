@@ -18764,3 +18764,16 @@ directory exclusively, makes content durable, then atomically publishes receipts
 It is not claimed to be an atomic whole-directory rename. Old failures remain.
 Focused release/relay51 tests passed, including no replacement and no acceptance
 receipt after injected data-fsync failure. No model/audit science replay.
+
+## 2026-09-10 — Authorized CM K20 saved-pool continuation
+
+Add BACE-specific saved5474 evaluation driver. It never invokes CM generation,
+Grad-CAM, temperature fitting or training. Original367 filter outputs are source
+bound; P2000 is an exact prefix of the stable train-derived full pool. Only
+missing graph encodings and numerical-producer-bound raw pairs are computed.
+One full calibration precedes greedy plus at most two best-improvement swaps;
+old2000 incumbent remains eligible. Test sees exactly one frozen at-most20 set.
+Independent process replays calibration selection, new-pair checks and original
+prototype batch context. Post-hoc scope is explicit and original v1 untouched.
+Paired Slurm wrapper uses the user's explicit8CPU/32GiB CPU exception, no GPU.
+Focused selection/export and source-reuse/resume regressions:43 passed.
