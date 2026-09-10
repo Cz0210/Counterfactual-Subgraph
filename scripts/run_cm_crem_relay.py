@@ -252,6 +252,15 @@ def transfer_completed(args, local: Path, python: str) -> dict:
     else:
         local_receipt = verify_import(local_package, local_manifest, imported)
     require_import_identity(local_receipt, expected)
+    # Accepted Mac results remain deliverable even if the later AutoDL import
+    # fails. Actually execute the already installed record-only replot once.
+    mac_receipt_path = local/'mac_delivery_receipt.json'
+    if not mac_receipt_path.exists():
+        command = ['bash', str(local/'run_replot_cm_crem.sh'), str(local/'replot-accepted-context-audit')]
+        rendered = subprocess.run(command, check=True, capture_output=True, text=True, timeout=600)
+        atomic_json(mac_receipt_path, {'status':'MAC_DELIVERY_PASS', 'local_import':local_receipt,
+            'replot_command':command, 'replot_stdout':rendered.stdout,
+            'autodl_import_state':'PENDING_SEPARATE_TRANSFER', 'created_at':utc_now()}, immutable=True)
     # A tiny source-pinned importer, not an entire runtime or a new controller.
     tools_root = local/"delivery_tools"
     copied = {}
