@@ -18796,3 +18796,22 @@ unspecified imine STEREONONE to STEREOANY. New RF requests explicitly bind
 original ordered atom chirality, bond stereo and stereo neighbors (schema v3).
 Canonical isomeric identity and full ordered digest remain mandatory. Old
 BACE v2 requests and active worktree are unchanged; no mask or budget change.
+# 2026-09-10 Read-only main20 K20 paper projection
+
+Added offline source-only view over original16 authority and accepted CM-BACE
+publication. No publisher/authority is created. Old frozen numeric exceptions
+remain distinct from raw-parent reconciliation. Missing K20 raw minima forbid
+exact ECDF reconstruction; unresolved original-GINE GlobalGCE and current AIDS
+repair are not rendered as valid zero. CM standalone figures are accepted;
+its combined panel still needs actual old-method numerical WNode producer
+binding. K10/K20 costs retain dataset definitions; no model/OT/selector calls.
+Paired Slurm entry is an explicit CPU-only offline export exception.
+# 2026-09-10 CM-v2 scratch scope compatibility
+
+The16 RF attribution/repeat checks completed in job2666897. Generation did not
+start: the reused scratch validator allowed only v1 roots, and the new root
+also had default group-write permissions. Admit only explicit v1/v2 project
+children, retain uid/no-symlink/0700 safety, create next fresh root0700. Bind
+scratch failure details before raising. Enable schema v3 at native entry as
+well as decoding, tested through the actual pinned algorithm with a fixture
+DB. Completed16 attribution records are adopted, not rerun. Old failures stay.

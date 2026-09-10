@@ -36,3 +36,12 @@ def test_explicit_stereo_transport_retains_unknown_and_known(smi):
     assert r['schema']=='cm_crem_parent_v3'
     assert atom_order_sha256(restored)==atom_order_sha256(m)
     assert Chem.MolToSmiles(restored)==Chem.MolToSmiles(m)
+
+def test_v2_scratch_scope_is_explicit_and_permissions_not_relaxed(tmp_path,monkeypatch):
+    from src.baselines import cm_crem_assets as assets
+    monkeypatch.setattr(assets,'HPC_SCOPE',tmp_path)
+    root=tmp_path/'counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v2/rf16'
+    root.mkdir(parents=True,mode=0o700)
+    assert assets._cm_run_root(root)==root
+    root.chmod(0o775)
+    with pytest.raises(Exception,match='OWNERSHIP_UNSAFE'):assets._cm_run_root(root)

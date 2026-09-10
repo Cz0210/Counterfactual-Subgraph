@@ -52,10 +52,12 @@ def run(spec_path,action):
         from src.baselines.cm_crem_generation import generate_parent
         receipt=read_json(e['database_receipt']);source=validate_database_source(original,receipt)
         scratch=prepare_job_scratch(root,required_bytes=receipt['uncompressed_bytes'],reserve_bytes=2*1024**3)
+        put('scratch-'+os.environ['SLURM_JOB_ID']+'.json',scratch)
+        if scratch['status']!='JOB_SCRATCH_READY':raise RuntimeError(scratch)
         staged=stage_static_database(e['database_path'],e['database_receipt'],reserve_bytes=2*1024**3,
             expected_url=source['actual_source_url'],scratch_receipt=scratch)
-        if staged['status']!='LOCAL_DATABASE_READY':raise ValueError('Actual read-only job database not ready')
         put('database-'+os.environ['SLURM_JOB_ID']+'.json',staged)
+        if staged['status']!='LOCAL_DATABASE_READY':raise RuntimeError(staged)
         for a in read_json(root/'attribution.json')['records']:
             name='generated/'+a['parent_id']+'.json'
             if (root/name).exists():continue
@@ -77,7 +79,7 @@ def run(spec_path,action):
                 if mol is None or len(Chem.GetMolFrags(mol))!=1:invalid.append(r['raw_id']);continue
                 pred=oracle.predict_proba([r['smiles']])[0]
                 valid.append({**r,'probabilities':pred.tolist(),'predicted_label':int(pred.argmax()),'strict_flip':int(pred.argmax())==0})
-            rows.append({'parent_id':a['parent_id'],'generation_status':g['status'],'elapsed_seconds':g['elapsed_seconds'],
+            rows.append({'parent_id':a['parent_id'],'generation_status':g['status'],'elapsed_seconds':g.get('elapsed_seconds',g.get('parent_wall_seconds')),
                 'raw_count':len(g['retained_raw']),'valid':valid,'invalid_raw_ids':invalid})
         put('rf_adapter_receipt.json',{'state':'RF_FEATURE_OCCLUSION_16_REAL_GENERATION_CHECKED',
             'parents':16,'rows':rows,'test_read':False,'full_pilot_and_distance_timing':False,

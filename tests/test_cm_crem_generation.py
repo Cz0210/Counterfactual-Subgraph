@@ -96,6 +96,12 @@ def test_no_context_does_not_query_database(official_source):
     assert result["top_level_calls"] == 0
     assert result["retained_raw"] == []
 
+def test_v3_requests_reach_native_algorithm(official_source):
+    req=cm.make_parent_request('rf_train',Chem.MolFromSmiles('CC=NNC(=O)c1ccccc1'),[0],explicit_stereo_transport=True)
+    result=cm.run_native_parent(req,source_path=official_source,database_path=Path('/fixture.db'),
+        science_hash=SCIENCE,mutate_function=lambda *a,**kw:iter(()))
+    assert result['top_level_calls']==1 and result['status'] in ('GENERATED','NO_NATIVE_REPLACEMENT')
+
 
 def test_single_atom_source_is_no_context_not_input_error(official_source):
     result = invoke(official_source, "C", (0,))

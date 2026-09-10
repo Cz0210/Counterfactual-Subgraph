@@ -267,8 +267,9 @@ def _compute_identity() -> dict[str, Any]:
 def _cm_run_root(run_root: str | Path) -> Path:
     root = Path(run_root)
     _no_symlinks(root)
-    scope = HPC_SCOPE / "counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v1"
-    if root == scope or not root.is_relative_to(scope) or not root.is_dir():
+    scopes = [HPC_SCOPE / ("counterfactual-subgraph-hpc-runtime/baselines/"+name)
+              for name in ("cm_crem_global_v1", "cm_crem_global_v2")]
+    if not any(root != scope and root.is_relative_to(scope) for scope in scopes) or not root.is_dir():
         raise _Blocked("CM_RUN_ROOT_NOT_EXISTING_AUTHORIZED_CHILD", path=str(root))
     info = root.stat()
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:

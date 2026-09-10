@@ -308,7 +308,7 @@ def run_native_parent(request: Mapping[str, Any], *, source_path: Path, database
     """One native call. Caller must use isolated worker; injectable CReM is for fixtures."""
     from rdkit import Chem
     import numpy as np
-    if request.get("split") != "train" or request.get("schema") not in {"cm_crem_parent_v1", "cm_crem_parent_v2"}:
+    if request.get("split") != "train" or request.get("schema") not in {"cm_crem_parent_v1", "cm_crem_parent_v2", "cm_crem_parent_v3"}:
         raise GenerationContractError("only explicit train parent records may generate")
     mol = load_parent_mol(request)
     selected = list(request["selected_atom_indices"])
