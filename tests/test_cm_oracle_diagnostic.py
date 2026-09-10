@@ -13,3 +13,15 @@ def test_capture_scope():
     assert "'scientific_pass_claimed':False" in s
     assert "'historical_saved_tensors':False" in s
     assert 'filter_generated(parent,generation)' in s
+
+def test_actual_portable_batch_roundtrip(tmp_path):
+    import torch
+    from src.data.molecular_graph_dataset import MolecularGraphBatch
+    from src.baselines.cm_crem_oracle_diagnostic import tensor_fields
+    b=MolecularGraphBatch(torch.ones((2,3),dtype=torch.long),torch.tensor([[0,1],[1,0]]),
+       torch.ones((2,2),dtype=torch.long),torch.zeros(2,dtype=torch.long),torch.tensor([1]),
+       ('a',),('CC',),('train',),('x',))
+    torch.save(b.to('cpu'),tmp_path/'batch.pt')
+    r=torch.load(tmp_path/'batch.pt',weights_only=False)
+    assert all(torch.equal(v,getattr(r,k)) for k,v in tensor_fields(b).items())
+    assert 'default_batch_size' in inspect.getsource(diagnostic)

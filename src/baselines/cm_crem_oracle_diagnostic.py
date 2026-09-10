@@ -21,6 +21,11 @@ def difference(a,b):
 def input_only(row):
     return {k:row[k] for k in ('parent_id','candidate_id','smiles') if k in row}
 
+def tensor_fields(batch):
+    import torch
+    from dataclasses import fields
+    return {f.name:getattr(batch,f.name) for f in fields(batch) if torch.is_tensor(getattr(batch,f.name))}
+
 def diagnostic(spec_path,source_root,output_root):
     require_compute_node()
     import torch
@@ -81,11 +86,12 @@ def diagnostic(spec_path,source_root,output_root):
         except Captured:pass
         finally:oracle.predict_rows=original
         idx=next(i for i,r in enumerate(inputs) if r['candidate_id']==saved['candidate_id'])
-        size=oracle.oracle.batch_size;start=idx//size*size;context=inputs[start:start+size];pos=idx-start
+        size=oracle.oracle.default_batch_size;start=idx//size*size;context=inputs[start:start+size];pos=idx-start
         graphs=[oracle._graph(r['smiles'],r['candidate_id'],'train_generated') for r in context]
         batch=next(iter(oracle.oracle._batches(graphs,size))).to(oracle.oracle.device)
         state={k:v.detach().cpu().clone() for k,v in oracle.oracle.model.state_dict().items()}
-        torch.save({'batch':batch.cpu(),'model_and_buffers':state,'rng':torch.get_rng_state(),'context':context,'position':pos,
+        torch.save({'batch':batch.to('cpu'),'model_and_buffers':state,'rng':torch.get_rng_state(),'context':context,'position':pos,
+          'ptr_is_derived_not_model_input':True,'derived_ptr':torch.cat([torch.zeros(1,dtype=torch.long),torch.bincount(batch.batch.cpu()).cumsum(0)]),
           'historical_saved_tensors':False},out/'controlled_snapshot.pt')
         def forward(model,b):
             with torch.no_grad():
@@ -105,7 +111,7 @@ def diagnostic(spec_path,source_root,output_root):
           'repeats_exact':all(np.array_equal(repeats[0],v) for v in repeats+reloads),
           'saved_vs_reconstructed_batch':difference(repeats[0],saved['logits']),
           'refeaturized_prediction':refeaturized,
-          'refeaturized_tensors_exact':{k:torch.equal(v.cpu(),b2[k].cpu()) for k,v in batch.to_dict().items() if torch.is_tensor(v)},
+          'refeaturized_tensors_exact':{k:torch.equal(v.cpu(),getattr(b2,k).cpu()) for k,v in tensor_fields(batch).items()},
           'independent_weights_buffers_exact':True,
           'after_weights_buffers_exact':all(torch.equal(state[k],oracle.oracle.model.state_dict()[k].cpu()) for k in state)}
         report['status']='DIAGNOSTIC_CAPTURE_COMPLETE_NOT_ACCEPTANCE'
