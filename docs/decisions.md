@@ -18732,3 +18732,15 @@ T0. Focused asset/relay regression replaces repetition of185 unchanged tests.
   that history, do not rerun it or mislabel it as at-most16. The26.76h planning
   envelope adds24h delivery reserve to existing measured projections; it is not
   a promise and does not reset original2026-09-16T16:27:44Z deadline.
+
+### 2026-09-10 — CM2659067 bounded oracle mismatch capture
+
+Preserve generated products, pool, selection, test, and historical audit failure.
+Capture the original identity-ordered oracle sample (at most16 focal graphs),
+then reconstruct the failed prototype's exact producer insertion-order batch
+from saved raw products using the unchanged filter function. Save actual tensors,
+model and buffers, raw logits, temperature-scaled values, probabilities, repeated
+same-tensor execution and independent weight reload before refeaturization.
+Historical per-call tensors/backend were not saved; controlled reconstruction is
+explicitly not historical recovery. No generation, Grad-CAM, database or OT call,
+no tolerance change, and no final scientific PASS is emitted by this diagnostic.
