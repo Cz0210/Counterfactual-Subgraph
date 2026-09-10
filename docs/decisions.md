@@ -18789,3 +18789,10 @@ the RF adapter fails without a proxy GNN/random-mask fallback. The finite16-trai
 entrypoint includes isolated real CReM calls and original RF molecule verification;
 it is NOT the required32-parent full pilot or a final result. Two focused mapping,
 collision, exact-original-vector and attribution-repeat tests passed.
+# 2026-09-10 RF CM transport correction
+
+RF adapter job2666875 stopped before generation because V3000 changed an
+unspecified imine STEREONONE to STEREOANY. New RF requests explicitly bind
+original ordered atom chirality, bond stereo and stereo neighbors (schema v3).
+Canonical isomeric identity and full ordered digest remain mandatory. Old
+BACE v2 requests and active worktree are unchanged; no mask or budget change.

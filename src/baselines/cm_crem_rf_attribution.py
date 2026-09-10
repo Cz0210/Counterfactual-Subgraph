@@ -53,5 +53,5 @@ def attribute(oracle, parent):
         'atom_feature_indices':mapping,'environments':environments,
         'collision_bits':[bit for bit,rows in environments.items() if len(rows)>1],
         'scores':scores.tolist(),'occluded_source_probabilities':proba[:,oracle.source_label].tolist(),
-        'generation_request':make_parent_request(parent['parent_id'],mol,selected),
+        'generation_request':make_parent_request(parent['parent_id'],mol,selected,explicit_stereo_transport=True),
         'interpretation':'Feature occlusion is mask guidance, not atom-level causal attribution; verify generated molecules with original RF.'}

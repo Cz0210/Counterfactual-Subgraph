@@ -88,7 +88,7 @@ def official_ring_mask(mol: Any, selected: list[int]) -> list[int]:
 
 
 def make_parent_request(parent_id: str, mol: Any, selected_atom_indices: list[int],
-                        split: str = "train") -> dict[str, Any]:
+                        split: str = "train", *, explicit_stereo_transport: bool = False) -> dict[str, Any]:
     from rdkit import Chem
     if split != "train":
         raise GenerationContractError("generation is train-only")
@@ -107,6 +107,13 @@ def make_parent_request(parent_id: str, mol: Any, selected_atom_indices: list[in
         "selected_atom_indices": list(selected_atom_indices),
         "effective_atom_indices": official_ring_mask(mol, list(selected_atom_indices)),
     }
+    if explicit_stereo_transport:
+        # RF datasets include unspecified imines: MolBlock changes NONE to
+        # ANY. Bind the original flags, never infer a favorable stereoisomer.
+        request.update(schema="cm_crem_parent_v3",
+            atom_chiral_tags=[int(a.GetChiralTag()) for a in mol.GetAtoms()],
+            bond_stereo=[int(b.GetStereo()) for b in mol.GetBonds()],
+            bond_stereo_atoms=[list(b.GetStereoAtoms()) for b in mol.GetBonds()])
     load_parent_mol(request)
     return request
 
@@ -121,14 +128,14 @@ def load_parent_mol(request: Mapping[str, Any]) -> Any:
     AND canonical isomeric identity. No guessed atom reindexing is permitted.
     """
     from rdkit import Chem
-    if request.get("schema") not in {"cm_crem_parent_v1", "cm_crem_parent_v2"}:
+    if request.get("schema") not in {"cm_crem_parent_v1", "cm_crem_parent_v2", "cm_crem_parent_v3"}:
         raise GenerationContractError("unsupported CM parent transport schema")
     # Restore bracket-H state before sanitization: aromatic [nH] is not safely
     # representable by an aromatic V3000 block alone on every supported RDKit.
     mol = Chem.MolFromMolBlock(request["molblock"], sanitize=False, removeHs=False)
     if mol is None:
         raise GenerationContractError("invalid CM MolBlock")
-    if request.get("schema") == "cm_crem_parent_v2":
+    if request.get("schema") in {"cm_crem_parent_v2", "cm_crem_parent_v3"}:
         mol = _restore_ordered_bonds(mol, request.get("bond_endpoints", []))
     atoms = request.get("atom_no_implicit", [])
     hydrogens = request.get("atom_explicit_hs", [])
@@ -145,6 +152,19 @@ def load_parent_mol(request: Mapping[str, Any]) -> Any:
     mol.UpdatePropertyCache(strict=True)
     Chem.SanitizeMol(mol)
     Chem.AssignStereochemistry(mol, cleanIt=False, force=True)
+    if request.get("schema") == "cm_crem_parent_v3":
+        tags, stereo, neighbors = (request[k] for k in
+            ("atom_chiral_tags", "bond_stereo", "bond_stereo_atoms"))
+        if len(tags) != mol.GetNumAtoms() or len(stereo) != mol.GetNumBonds() or len(neighbors) != len(stereo):
+            raise GenerationContractError("incomplete explicit stereo transport")
+        for atom, tag in zip(mol.GetAtoms(), tags):
+            atom.SetChiralTag(Chem.ChiralType(int(tag)))
+        for bond, flag, ids in zip(mol.GetBonds(), stereo, neighbors):
+            if ids:
+                if len(ids) != 2:
+                    raise GenerationContractError("invalid stereo atom mapping")
+                bond.SetStereoAtoms(*ids)
+            bond.SetStereo(Chem.BondStereo(int(flag)))
     original = Chem.MolFromSmiles(request["smiles"])
     if (atom_order_sha256(mol) != request["atom_order_sha256"] or original is None
             or Chem.MolToSmiles(mol, isomericSmiles=True) != Chem.MolToSmiles(original, isomericSmiles=True)):
