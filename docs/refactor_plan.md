@@ -4359,7 +4359,8 @@ Mutagenicity roadmaps.
 - [x] Implement/test original-GINE saved-record comparison and PARTIAL rendering.
 - [ ] Bind old numerical WNode producer evidence before adding accepted CM to
   comparison; original GlobalGCE hard-graph applicability remains unresolved.
-- [ ] Complete ongoing CM science/acceptance/import via the existing relay.
+- [x] Complete original CM v1 science/acceptance/import via existing relay;
+  package-only recovery2666779 and relay9123 delivered both endpoints.
 
 ### Main20/K20 scope amendment (2026-09-10)
 
@@ -4367,5 +4368,9 @@ Mutagenicity roadmaps.
   package finalization without regenerating the archive or rerunning science.
 - [ ] Full5474 BACE calibration and bounded K20v2 selection, original v1 retained.
 - [ ] Original-oracle CM adapters/pilots for Taste and RF datasets.
-- [ ] Read-only20-cell K20 view, distinct registration/science/paper-ready counts.
+- [x] Read-only20-cell K20 view, distinct registration/science/paper-ready counts;
+  missing exact legacy K20 distances and CM numeric producer bindings disclosed.
 - [ ] Finish T12joint500 and same-run T13 recovery; no extra fresh training quota.
+- [x] T12preserved24/24; authenticated history/first-seen/transition joint500.
+- [ ] T12 complete model-adapter restore and real owner/FD/provider501–510.
+- [ ] T13 explicit IndexRebuilt continuation plus bounded2+1batch/reload adapter.
