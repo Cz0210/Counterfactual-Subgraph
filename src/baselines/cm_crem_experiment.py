@@ -337,10 +337,13 @@ class Experiment:
         if sys.executable != e["generator_python"] and Path(sys.executable).resolve() != Path(e["generator_python"]).resolve():
             raise ValueError("generate must use its isolated fixed-version Python, never original GINE environment")
         db_receipt = read_json(e["database_receipt"])
-        if db_receipt.get("url") != self.spec["upstream"]["database"]["url"] or db_receipt.get("status") != "VERIFIED_STATIC_COPY":
-            raise ValueError("Official database content provenance missing")
-        from src.baselines.cm_crem_assets import stage_static_database
-        staged = stage_static_database(e["database_path"], e["database_receipt"], reserve_bytes=2*1024**3)
+        from src.baselines.cm_crem_assets import stage_static_database, validate_database_source, prepare_job_scratch
+        source = validate_database_source(self.spec, db_receipt)
+        scratch = prepare_job_scratch(self.root, required_bytes=db_receipt['uncompressed_bytes'], reserve_bytes=2*1024**3)
+        if scratch['status'] != 'JOB_SCRATCH_READY':
+            raise RuntimeError(scratch)
+        staged = stage_static_database(e["database_path"], e["database_receipt"], reserve_bytes=2*1024**3,
+                                       expected_url=source['actual_source_url'], scratch_receipt=scratch)
         self.put(f"assets/database-local-{os.environ['SLURM_JOB_ID']}.json", staged)
         if staged["status"] != "LOCAL_DATABASE_READY":
             raise RuntimeError(f"BLOCKED_LOCAL_DATABASE_STAGING: {staged.get('reason')}")

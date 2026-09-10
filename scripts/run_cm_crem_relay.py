@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,8 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -20,6 +22,146 @@ from src.baselines.cm_crem_runtime import atomic_json, utc_now, read_json, file_
 
 STAGES = ["pilot-oracle", "pilot-generate", "pilot-filter", "pilot-closeout", "attribution",
           "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export", "package"]
+
+
+def _utc_start(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Relay campaign start must include an explicit timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _argv_value(argv: list[str], flag: str) -> str | None:
+    values = []
+    for index, value in enumerate(argv):
+        if value == flag:
+            if index + 1 == len(argv) or argv[index + 1].startswith("--"):
+                raise ValueError(f"Original launch intent has no value for {flag}")
+            values.append(argv[index + 1])
+        elif value.startswith(flag + "="):
+            values.append(value.split("=", 1)[1])
+    if len(values) > 1:
+        raise ValueError(f"Original launch intent repeats {flag}")
+    return values[0] if values else None
+
+
+def claim_relay_identity(args, local: Path, spec_path: str, lock) -> datetime:
+    """Claim the current identity under the existing campaign flock only.
+
+    A terminal asset wait can resume; a live/reused PID or any other terminal
+    cannot. Preserve exact old bytes before changing the derived current view.
+    Submission receipts and the stage DAG are not changed by this operation.
+    """
+    if (local/"relay.lock").is_symlink():
+        raise ValueError("Relay lock must not be replaced by a symlink")
+    lock_stat, path_stat = os.fstat(lock.fileno()), (local/"relay.lock").stat()
+    if (lock_stat.st_dev, lock_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+        raise ValueError("Relay lock FD is not the original campaign lock file")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    t0 = _utc_start(args.start_time_utc)
+    now = datetime.now(timezone.utc)
+    identity_path = local/"relay_identity.json"
+    identity = {"pid": os.getpid(), "created_at": utc_now(),
+                "hpc_run_root": args.hpc_run_root, "execution_root": args.hpc_execution_root,
+                "spec": spec_path, "start_time_utc": t0.isoformat().replace("+00:00", "Z"),
+                "planning_deadline_utc": (t0+timedelta(hours=168)).isoformat().replace("+00:00", "Z"),
+                "max_lifetime_hours": 168, "model_api_calls": False, "poll_seconds": 300}
+    if not getattr(args, "resume_after_terminal", False):
+        if identity_path.exists():
+            raise ValueError("Existing relay identity; only explicit terminal-resume may replace it")
+        atomic_json(identity_path, identity, immutable=True)
+        return t0
+
+    snapshots = {}
+    source_names = ["relay_identity.json", "state.json", "launch_intent.json"]
+    if (local/"launch_receipt.json").exists():
+        source_names.append("launch_receipt.json")
+    for name in source_names:
+        source = local/name
+        if source.is_symlink() or not source.is_file():
+            raise ValueError(f"Terminal resume requires the original regular {name}")
+        snapshots[name] = source.read_bytes()
+    old = json.loads(snapshots["relay_identity.json"])
+    state = json.loads(snapshots["state.json"])
+    launch = json.loads(snapshots["launch_intent.json"])
+    if launch.get("max_hours", 168) != 168:
+        raise ValueError("Original launch intent lifetime differs from168h")
+    if state.get("status") != "BLOCKED_ASSET_OVER_6H":
+        raise ValueError("Only BLOCKED_ASSET_OVER_6H permits this explicit relay resume")
+    if old.get("hpc_run_root") != args.hpc_run_root or state.get("hpc_run_root") != args.hpc_run_root:
+        raise ValueError("Terminal identity/state belong to another HPC campaign")
+    if old.get("max_lifetime_hours") != 168:
+        raise ValueError("Original relay lifetime contract is not the fixed168h")
+    pid = old.get("pid")
+    if type(pid) is not int or pid <= 1 or state.get("pid") != pid:
+        raise ValueError("Terminal relay PID identities are incomplete or inconsistent")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    except PermissionError as error:
+        raise ValueError("Old relay PID still exists or is inaccessible; no takeover") from error
+    else:
+        raise ValueError("Old relay PID still exists; no takeover or signal is permitted")
+
+    argv = launch.get("argv")
+    if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
+        raise ValueError("Original launch intent argv is not an explicit argument vector")
+    if _argv_value(argv, "--hpc-run-root") != args.hpc_run_root:
+        raise ValueError("Original launch intent belongs to another HPC campaign")
+    old_local = _argv_value(argv, "--local-root")
+    if old_local is None or Path(old_local).resolve() != local.resolve():
+        raise ValueError("Original launch intent belongs to another local campaign")
+    launch_t0 = _argv_value(argv, "--start-time-utc")
+    start_evidence = {"source": "launch_intent.json:argv", "start_time_utc": launch_t0}
+    if launch_t0 is None:
+        # Legacy argv may lack T0; inspect only this bound spec's small campaign
+        # field. A freshly supplied CLI timestamp alone is never enough.
+        python = "/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python"
+        code = "import json,sys; s=json.load(open(sys.argv[1])); print(json.dumps({'spec':sys.argv[1], 'start_time_utc':s['campaign']['start_time_utc'], 'planning_horizon_hours':s['campaign']['planning_horizon_hours']}))"
+        bound_spec = old.get("spec") or args.hpc_run_root+"/spec.json"
+        if Path(bound_spec).parent != Path(args.hpc_run_root):
+            raise ValueError("Original spec evidence is not a direct child of this campaign")
+        start_evidence = json.loads(ssh_read(args.hpc_alias, [python, "-I", "-B", "-c", code, bound_spec]))
+        if start_evidence.get("spec") != bound_spec or start_evidence.get("planning_horizon_hours") != 168:
+            raise ValueError("Original spec start/lifetime evidence is not bound")
+        launch_t0 = start_evidence.get("start_time_utc")
+    if not isinstance(launch_t0, str) or _utc_start(launch_t0) != t0:
+        raise ValueError("Resume cannot reset the original campaign start time")
+    if old.get("start_time_utc") is not None and _utc_start(old["start_time_utc"]) != t0:
+        raise ValueError("Original identity and launch/spec T0 disagree")
+    if not 0 <= (now-t0).total_seconds() < 168*3600:
+        raise ValueError("Original168h campaign horizon is expired or has a future start")
+
+    attempts = local/"relay_attempts"
+    if attempts.is_symlink() or (attempts.exists() and not attempts.is_dir()):
+        raise ValueError("Relay attempt archive is not a local regular directory")
+    archive = attempts/("terminal-"+uuid.uuid4().hex)
+    archive.mkdir(parents=True, exist_ok=False)
+    archived = {}
+    for name, body in snapshots.items():
+        target = archive/name
+        with target.open("xb") as stream:
+            stream.write(body); stream.flush(); os.fsync(stream.fileno())
+        target.chmod(0o444)
+        archived[name] = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    atomic_json(archive/"preservation_receipt.json", {
+        "schema": "cm_relay_terminal_preservation_v1", "files": archived,
+        "old_pid": pid, "old_pid_absent": True, "preserved_at": utc_now(),
+        "start_evidence": start_evidence, "start_time_utc": identity["start_time_utc"],
+        "planning_deadline_utc": identity["planning_deadline_utc"],
+        "submission_receipts_modified": False, "science_resubmitted": False}, immutable=True)
+    for name, body in snapshots.items():
+        if (local/name).read_bytes() != body:
+            raise ValueError("Prior relay evidence changed during preservation; no current-view update")
+    identity.update(resume_after_terminal=True, prior_terminal_archive=str(archive),
+                    prior_pid=pid, start_evidence=start_evidence)
+    atomic_json(archive/"resume_identity.json", identity, immutable=True)
+    atomic_json(identity_path, identity)
+    atomic_json(local/"state.json", {"status": "RESUMING_AFTER_ASSET_TERMINAL", "updated_at": utc_now(),
+                "pid": os.getpid(), "hpc_run_root": args.hpc_run_root,
+                "start_time_utc": identity["start_time_utc"], "prior_terminal_archive": str(archive)})
+    return t0
 
 
 def ssh_read(alias: str, argv: list[str], timeout: int = 90) -> str:
@@ -129,6 +271,8 @@ def main():
     parser.add_argument("--hpc-spec", help="Fresh immutable successor spec within this run; original pilot spec stays unchanged")
     parser.add_argument("--local-root", type=Path, required=True)
     parser.add_argument("--start-time-utc", required=True)
+    parser.add_argument("--resume-after-terminal", action="store_true",
+                        help="Resume only an exited BLOCKED_ASSET_OVER_6H relay, retaining original T0 and168h horizon")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     if any(not re.fullmatch(r"/[A-Za-z0-9_./-]+", p) for p in (args.hpc_run_root, args.hpc_execution_root)):
@@ -145,11 +289,7 @@ def main():
     local.mkdir(parents=True, exist_ok=True)
     lock = (local/"relay.lock").open("a")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    t0 = datetime.fromisoformat(args.start_time_utc.replace("Z", "+00:00"))
-    atomic_json(local/"relay_identity.json", {"pid": os.getpid(), "created_at": utc_now(),
-                "hpc_run_root": args.hpc_run_root, "execution_root": args.hpc_execution_root,
-                "spec": spec_path,
-                "max_lifetime_hours": 168, "model_api_calls": False, "poll_seconds": 300}, immutable=True)
+    t0 = claim_relay_identity(args, local, spec_path, lock)
     failures, blocker_since = 0, None
     python = "/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python"
     while (datetime.now(timezone.utc)-t0).total_seconds() < 168*3600:

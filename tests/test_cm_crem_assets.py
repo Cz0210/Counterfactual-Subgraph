@@ -190,3 +190,184 @@ def test_actual_mount_parser_picks_deepest_local_mount(monkeypatch):
         "31 20 8:5 / /site rw - xfs /dev/nvme0n1 rw\n"))
     result = assets._filesystem_identity(Path("/site/job-12345"))
     assert result["source"] == "/dev/nvme0n1" and result["filesystem_type"] == "xfs"
+
+
+def prepared_fixture(sandbox, monkeypatch):
+    source, receipt, scratch = sandbox
+    run = assets.HPC_SCOPE / "counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v1/test-run"
+    run.mkdir(parents=True)
+    monkeypatch.setenv("SLURMD_NODENAME", assets.socket.gethostname())
+    return source, receipt, scratch, run
+
+
+def test_explicit_preparation_records_real_env_and_stages_once(sandbox, monkeypatch):
+    source, receipt, base, run = prepared_fixture(sandbox, monkeypatch)
+    before_env = dict(os.environ)
+    prepared = assets.prepare_job_scratch(run, required_bytes=source.stat().st_size, reserve_bytes=1024)
+    assert prepared["status"] == "JOB_SCRATCH_READY"
+    assert prepared["base_selection"] == "SLURM_TMPDIR"
+    assert prepared["raw_environment"]["SLURM_TMPDIR"] == str(base)
+    assert Path(prepared["root"]).parent == base
+    assert Path(prepared["root"]).stat().st_mode & 0o777 == 0o700
+    assert dict(os.environ) == before_env
+    assert assets.prepare_job_scratch(run, required_bytes=100, reserve_bytes=1024) == prepared
+    staged = assets.stage_static_database(source, receipt, reserve_bytes=1024, scratch_receipt=prepared)
+    assert staged["status"] == "LOCAL_DATABASE_READY"
+    assert assets.stage_static_database(source, receipt, reserve_bytes=1024,
+        scratch_receipt=prepared["receipt_path"])["reused"] is True
+
+
+def test_authorized_tmp_fallback_is_explicit_not_fake_site_env(sandbox, monkeypatch):
+    source, receipt, base, run = prepared_fixture(sandbox, monkeypatch)
+    monkeypatch.delenv("SLURM_TMPDIR")
+    monkeypatch.setattr(assets, "_PROJECT_SCRATCH_FALLBACK", base)
+    prepared = assets.prepare_job_scratch(run, required_bytes=100, reserve_bytes=1024)
+    assert prepared["status"] == "JOB_SCRATCH_READY"
+    assert prepared["base_selection"] == "AUTHORIZED_PROJECT_TMP_FALLBACK"
+    assert prepared["raw_environment"]["SLURM_TMPDIR"] is None
+    assert assets.stage_static_database(source, receipt, reserve_bytes=1024)["reason"] == "NO_SCHEDULER_SCRATCH_ENVIRONMENT"
+    assert assets.stage_static_database(source, receipt, reserve_bytes=1024, scratch_receipt=prepared)["status"] == "LOCAL_DATABASE_READY"
+
+
+def test_prepared_scratch_rejects_login_and_changed_environment(sandbox, monkeypatch):
+    source, receipt, base, run = prepared_fixture(sandbox, monkeypatch)
+    monkeypatch.setenv("SLURMD_NODENAME", "unrelated-compute-node")
+    assert assets.prepare_job_scratch(run, required_bytes=100)["reason"] == "COMPUTE_NODE_IDENTITY_UNPROVEN"
+    monkeypatch.setenv("SLURMD_NODENAME", assets.socket.gethostname())
+    prepared = assets.prepare_job_scratch(run, required_bytes=100)
+    monkeypatch.setenv("SLURM_JOB_ID", "12346")
+    assert assets.stage_static_database(source, receipt, reserve_bytes=1024, scratch_receipt=prepared)["reason"] == "PREPARED_SCRATCH_JOB_OR_ENVIRONMENT_CONFLICT"
+
+
+def test_prepared_receipt_cannot_be_forged_or_root_changed(sandbox, monkeypatch):
+    source, receipt, base, run = prepared_fixture(sandbox, monkeypatch)
+    prepared = assets.prepare_job_scratch(run, required_bytes=100)
+    assert assets.stage_static_database(source, receipt, reserve_bytes=1024,
+        scratch_receipt={**prepared, "root": str(base)})["reason"] == "SCRATCH_RECEIPT_MEMORY_DISK_CONFLICT"
+    Path(prepared["root"]).chmod(0o777)
+    assert assets.stage_static_database(source, receipt, reserve_bytes=1024,
+        scratch_receipt=prepared)["reason"] == "PREPARED_SCRATCH_ROOT_CHANGED"
+
+
+def test_invalid_explicit_base_is_not_replaced_by_fallback(sandbox, monkeypatch):
+    _, _, base, run = prepared_fixture(sandbox, monkeypatch)
+    monkeypatch.setenv("SLURM_TMPDIR", "/share/not-local")
+    monkeypatch.setattr(assets, "_PROJECT_SCRATCH_FALLBACK", base)
+    result = assets.prepare_job_scratch(run, required_bytes=100)
+    assert result["status"] == "BLOCKED_LOCAL_DATABASE_STAGING"
+    assert not list(base.glob("cm-crem-job-*"))
+
+
+def test_preparation_capacity_is_checked_before_mkdir(sandbox, monkeypatch):
+    _, _, base, run = prepared_fixture(sandbox, monkeypatch)
+    monkeypatch.setattr(assets.os, "statvfs", lambda p: SimpleNamespace(f_bavail=10, f_frsize=1024, f_favail=100))
+    assert assets.prepare_job_scratch(run, required_bytes=100, reserve_bytes=100000)["reason"] == "LOCAL_CAPACITY_RESERVE_NOT_MET"
+    assert not list(base.glob("cm-crem-job-*"))
+
+
+def official_source_fixture(tmp_path):
+    # Metadata/compatibility structure fixtures, not actual official DB proof.
+    metadata = tmp_path.resolve() / "datacite.json"
+    metadata.write_text(json.dumps({"data": {"attributes": {"doi": assets.ZENODO_DOI,
+        "creators": [{"name": "Polishchuk, Pavel"}],
+        "rightsList": [{"rightsUri": "https://creativecommons.org/licenses/by/4.0/", "rightsIdentifier": "cc-by-4.0"}]}}}))
+    url = "https://zenodo.org/records/16909329/files/chembl22_sa2.db.gz?download=1"
+    overlay = {"record_doi": assets.ZENODO_DOI, "record_url": assets.ZENODO_RECORD_URL,
+        "download_url": url, "filename": assets.ZENODO_FILENAME,
+        "published_md5": assets.ZENODO_COMPRESSED_MD5, "compressed_bytes": assets.ZENODO_COMPRESSED_BYTES,
+        "compressed_sha256": assets.ZENODO_COMPRESSED_SHA256, "historical_url": assets.OFFICIAL_DATABASE_URL,
+        "old_file_bytes_compared": False, "license": {"identifier": "CC-BY-4.0",
+            "rights_uri": "https://creativecommons.org/licenses/by/4.0/", "scope": "database",
+            "metadata_path": str(metadata), "metadata_sha256": hashlib.sha256(metadata.read_bytes()).hexdigest()}}
+    spec = {"upstream": {"database": {"url": assets.OFFICIAL_DATABASE_URL}}, "asset_source_overlay": overlay}
+    body_stat = {"bytes": 12345, "device": 1, "inode": 2, "mtime_ns": 3, "ctime_ns": 4}
+    compatibility = {"schema": "cm_crem_static_database_compatibility_v1", "status": "STATIC_DATABASE_COMPATIBILITY_PASS",
+        "versions": {"crem": "0.2.14", "rdkit": "2023.9.6", "numpy": "1.26.4", "python": "3.11.5"},
+        "radius": 1, "connection_mode": "mode=ro&immutable=1", "query_only": True,
+        "journal_mode_changed": False, "durability_changed": False, "unchanged_static_source": True,
+        "stat_before": body_stat, "stat_after": body_stat, "sidecars_before": [], "sidecars_after": [],
+        "columns": [{"name": n} for n in ("env", "freq", "core_num_atoms", "core_smi", "core_sma")],
+        "first_row_fields_valid": True, "radius1_rowid_supported": True, "fixture_smiles": "CCO",
+        "fixture_settings": {"radius": 1, "min_inc": 0, "max_inc": 0, "max_replacements": 4,
+            "replace_ids": [0], "ncores": 1, "symmetry_fixes": True},
+        "fixture_mutate_calls": 1, "fixture_select_count": 1, "actual_select_count": 3,
+        "public_fixture_products": ["NCO"], "public_fixture_product_count": 1,
+        "experiment_generation_performed": False, "oracle_calls": 0}
+    receipt = {"status": "VERIFIED_STATIC_COPY", "url": url, "uncompressed_sha256": "a" * 64,
+        "uncompressed_bytes": 12345, "compressed_bytes": assets.ZENODO_COMPRESSED_BYTES,
+        "compressed_md5": assets.ZENODO_COMPRESSED_MD5, "compressed_sha256": assets.ZENODO_COMPRESSED_SHA256,
+        "compatibility": compatibility, "compatibility_database_sha256": "a" * 64}
+    return spec, receipt
+
+
+def test_author_source_overlay_preserves_original_science_identity(tmp_path):
+    spec, receipt = official_source_fixture(tmp_path)
+    before = json.dumps(spec, sort_keys=True)
+    result = assets.validate_database_source(spec, receipt)
+    assert result["actual_source_url"] == spec["asset_source_overlay"]["download_url"]
+    assert result["original_requested_url"] == assets.OFFICIAL_DATABASE_URL
+    assert result["old_file_bytes_compared"] is False
+    assert before == json.dumps(spec, sort_keys=True)
+
+
+@pytest.mark.parametrize("field,value", [("record_doi", "10.5281/zenodo.1"),
+    ("compressed_sha256", "b" * 64), ("published_md5", "0" * 32),
+    ("old_file_bytes_compared", True), ("download_url", "https://other.org/chembl22_sa2.db.gz")])
+def test_unapproved_author_overlay_rejected(tmp_path, field, value):
+    spec, receipt = official_source_fixture(tmp_path)
+    spec["asset_source_overlay"][field] = value
+    with pytest.raises(ValueError):
+        assets.validate_database_source(spec, receipt)
+
+
+def test_license_metadata_requires_actual_author_record_and_hash(tmp_path):
+    spec, receipt = official_source_fixture(tmp_path)
+    metadata = Path(spec["asset_source_overlay"]["license"]["metadata_path"])
+    metadata.write_text("{}")
+    with pytest.raises(ValueError, match="DATABASE_LICENSE_METADATA_SHA_CONFLICT"):
+        assets.validate_database_source(spec, receipt)
+
+
+def test_missing_native_query_not_hidden_by_metadata_pass(tmp_path):
+    spec, receipt = official_source_fixture(tmp_path)
+    receipt["compatibility"]["fixture_select_count"] = 0
+    with pytest.raises(ValueError, match="DATABASE_NATIVE_QUERY_OR_REPLACEMENT_EVIDENCE_MISSING"):
+        assets.validate_database_source(spec, receipt)
+    assert assets.validate_database_source(spec, receipt, require_compatibility=False)["compatibility_validated"] is False
+
+
+def test_compatibility_must_bind_same_uncompressed_content(tmp_path):
+    spec, receipt = official_source_fixture(tmp_path)
+    receipt["compatibility_database_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="DATABASE_COMPATIBILITY_CONTENT_BINDING_CONFLICT"):
+        assets.validate_database_source(spec, receipt)
+
+
+def test_legacy_source_is_explicit_not_silently_rebound(tmp_path):
+    spec, receipt = official_source_fixture(tmp_path)
+    spec.pop("asset_source_overlay")
+    with pytest.raises(ValueError, match="DATABASE_STATIC_COPY_SOURCE_URL_CONFLICT"):
+        assets.validate_database_source(spec, receipt)
+    receipt["url"] = assets.OFFICIAL_DATABASE_URL
+    assert assets.validate_database_source(spec, receipt)["source_mode"] == "HISTORICAL_AUTHOR_URL"
+
+
+def test_actual_datacite_legalcode_uri_and_predecompression_source_binding(tmp_path):
+    spec, receipt = official_source_fixture(tmp_path)
+    license_info = spec["asset_source_overlay"]["license"]
+    license_info["rights_uri"] = "https://creativecommons.org/licenses/by/4.0/legalcode"
+    metadata = Path(license_info["metadata_path"])
+    data = json.loads(metadata.read_text())
+    data["data"]["attributes"]["rightsList"][0]["rightsUri"] = license_info["rights_uri"]
+    metadata.write_text(json.dumps(data))
+    license_info["metadata_sha256"] = hashlib.sha256(metadata.read_bytes()).hexdigest()
+    receipt["status"] = "VERIFIED_COMPRESSED_COPY"
+    for key in ("uncompressed_sha256", "uncompressed_bytes", "compatibility", "compatibility_database_sha256"):
+        receipt.pop(key)
+    result = assets.validate_database_source(spec, receipt, require_compatibility=False, require_content=False)
+    assert result["content_validated"] is False and result["uncompressed_sha256"] is None
+    assert result["compatibility_validated"] is False
+    with pytest.raises(ValueError, match="DATABASE_STATIC_COPY_NOT_VERIFIED"):
+        assets.validate_database_source(spec, receipt)
+    with pytest.raises(ValueError, match="DATABASE_COMPATIBILITY_REQUIRES_CONTENT_BINDING"):
+        assets.validate_database_source(spec, receipt, require_content=False)

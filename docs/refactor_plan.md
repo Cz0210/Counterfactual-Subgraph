@@ -4342,3 +4342,12 @@ Mutagenicity roadmaps.
 - [ ] Complete full candidate/filter/calibration/freeze/test independent acceptance,
   scoped portable release/import and real paper outputs; never label stubs PASS.
 - [ ] Consider Taste only after complete BACE delivery and the168-hour cost/license gate.
+
+### Author archive continuation (2026-09-10)
+
+- [x] Add separately checked author Zenodo ChEMBL22 SA2 source/license overlay,
+  compute-only bounded decompression and real pinned CReM read-only compatibility.
+- [x] Reuse the established node-private scratch convention without forging
+  scheduler environment variables; one static copy shared by a job's workers.
+- [ ] Admit the actual supplied archive and resume pilot-generate through the
+  existing relay, retaining2654442 and the original168-hour start time.

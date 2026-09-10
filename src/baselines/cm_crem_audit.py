@@ -263,8 +263,15 @@ def audit_bace_run(spec: Mapping[str, Any], root: str | Path, *, fixture: bool =
     db_path = spec["execution"].get("database_receipt")
     _require(bool(db_path) and Path(db_path).is_file(), "Official database receipt missing; generation is ASSET_BLOCKED")
     db = json.loads(Path(db_path).read_text())
-    _require(db.get("status") == ("FIXTURE_STATIC_COPY" if fixture else "VERIFIED_STATIC_COPY")
-             and db.get("url") == spec["upstream"]["database"]["url"], "Official database provenance is not verified")
+    if fixture:
+        _require(db.get('status') == 'FIXTURE_STATIC_COPY' and db.get('url') == spec['upstream']['database']['url'],
+                 'Fixture database provenance invalid')
+    else:
+        from src.baselines.cm_crem_assets import validate_database_source
+        try:
+            validate_database_source(spec, db)
+        except ValueError as exc:
+            raise ProvenanceAuditError(f'Official database provenance is not verified: {exc}') from exc
     for key in ("compressed_sha256", "uncompressed_sha256"):
         _sha(db.get(key), key)
     records = _Records(root, spec, fixture)

@@ -18691,3 +18691,21 @@ engineering retry. Record the temperature driver and the verifier driver separat
   records. The old four-method GINE comparison still needs its record-only curve
   adapter and complete small-file bindings; no missing CM line or legacy
   GlobalGCE hard-graph failure is replaced by a fabricated zero or GIN/A+ input.
+
+## 2026-09-10 — CM author Zenodo archive and bounded asset-only continuation
+
+The user authorizes DOI10.5281/zenodo.16909329 chembl22_sa2.db.gz after the
+historical qsar4u HTTP403. The author's DOI metadata supplies database CC-BY-4.0;
+code licenses are not substituted. Preserve the original requested URL and
+science identity, and bind actual generation to an explicit source/content/license
+overlay. No byte comparison with the unobtained historical file is claimed.
+Compressed integrity, read-only schema/native-query compatibility and scientific
+pilot completion are separate states. Decode only on a Slurm compute node with
+bounded capacity. Use actual SLURM_TMPDIR/TMPDIR or the already documented
+job-private mktemp convention, never login /tmp as a science scratch.
+
+The source change affects unstarted generation only:2654442 attribution/64 real
+WNode measurements and original GINE weights/temperature/budgets are reused.
+The existing Mac relay can resume only a verified dead asset-timeout predecessor
+under its original lock, preserving old terminal/identity and original168-hour
+T0. Focused asset/relay regression replaces repetition of185 unchanged tests.

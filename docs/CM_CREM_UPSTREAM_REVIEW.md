@@ -202,3 +202,41 @@ The original failed pilot and its four existing attribution-unit files remain
 untouched. Evidence is under the original run's
 `repair1-transport-diagnostic/{redacted_summary,produce_regression,consume_regression}.json`;
 full diagnostic molecule records remain on HPC and were not exported to Mac.
+
+## Static database compatibility helper
+
+`src/baselines/cm_crem_database_compat.py` exposes
+`verify_static_database_compatibility(database: Path) -> dict` for the dedicated
+computation-node asset preparation process. The caller owns the job timeout
+and durable receipt. It is not an additional CM pilot parent or oracle call.
+
+Review of actual CReM0.2.14 `__get_replacements_rowids` and `_get_replacements`
+establishes `radius1`, `rowid`, `env`, `freq`, `core_num_atoms`, `core_smi`, and
+`core_sma` as the required mutation SQL interface. `dist2` is only consumed
+when a link/distance argument is supplied; the radius1 mutation probe does not
+silently require that unrelated column. The installed `crem/crem.py` must
+match reviewed wheel source SHA
+`e47fb661e318378e370e12507370f2576c28e7e6ebcf83dd7355a75763568d89`.
+
+The helper checks the SQLite header, rejects existing WAL/journal/shm, opens
+`mode=ro&immutable=1`, enables connection-only `query_only`, checks the actual
+table/columns, and performs a real nonempty SELECT. It then calls the actual
+`mutate_mol` once on the fixed public molecule CCO, radius1, same-size fragment,
+replace_ids=[0], symmetry_fixes=true, max_replacements=4 and ncores=1. This is
+a narrowly bounded asset compatibility fixture, not altered scientific CM
+budget. At least one different valid connected complete molecule and actual
+SELECT activity during that native call are required. A query with no output
+does not become a false replacement PASS.
+
+All connections are closed, the CReM-only SQLite namespace and Python RNG are
+restored, and inode/size/mtime/ctime plus sidecars must be unchanged. There is
+no VACUUM, journal-mode change, database recovery or database full rehash; the
+outer static asset receipt supplies the once-verified complete content digest.
+EIO/SQLite failures remain explicit infrastructure failures. Exceptions expose
+`DatabaseCompatibilityError.stage` and `.receipt` to the outer task.
+
+Twelve focused tests pass, including real CReM0.2.14 code performing CCO→NCO
+against a synthetic radius1 fixture, denied writes, source-change detection,
+missing schema, empty table, empty replacement, and EIO propagation. This is
+not yet a claim that the official ChEMBL asset passed its computation-node
+check; only that job's real receipt can establish that status.
