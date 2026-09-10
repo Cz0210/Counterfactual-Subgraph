@@ -43,6 +43,24 @@ def exact_curve(vals,theta):
 
 def close(a,b):return a is not None and b is not None and math.isclose(float(a),float(b),abs_tol=1e-12,rel_tol=1e-12)
 
+def k20_numeric_complete(row):
+    """Cov/cost/recourse/base N are recorded, not merely a registered cell.
+
+    A truly empty finite cohort may have undefined conditional cost. Missing
+    recourse counts are not inferred from a plotted coverage fraction.
+    """
+    if row.get('stage') in ('UNDER_REPAIR','SOURCE_CONFLICT'):
+        return False
+    try:
+        cov=number(row.get('coverage'));cost=number(row.get('cost'))
+        finite=number(row.get('finite_recourse_count'));n=number(row.get('N'))
+    except (ValueError,TypeError):return False
+    return bool(cov is not None and math.isfinite(cov) and 0<=cov<=1
+        and n is not None and n>0 and n==int(n)
+        and finite is not None and 0<=finite<=n and finite==int(finite)
+        and ((cost is not None and math.isfinite(cost) and cost>=0)
+             or (finite==0 and row.get('cost_definition')=='ORIGINAL_CONDITIONAL')))
+
 def build(input_root,output_dir,allow_partial=False):
     source=Path(input_root);out=Path(output_dir)
     index=json.loads((source/'source_index.json').read_text())
@@ -146,6 +164,9 @@ def build(input_root,output_dir,allow_partial=False):
             table.append(row)
         write_csv(out/('table2_k20.csv' if k==20 else 'table2_k10_aux.csv'),table)
     counts=dict(registered_count=sum(s['registered'] for s in states),
+        k20_numeric_complete_count=sum(k20_numeric_complete(r) for r in prefix if r['k']==20),
+        k20_numeric_complete_definition='Recorded K20 coverage, original cost (or truly undefined conditional cost), finite recourse count and base N; not renewed scientific acceptance',
+        combined_family_release_ready_count=sum(s['paper_release'] and not (s['dataset']=='BACE' and s['method_family']=='CM-CReM') for s in states),
         scientific_results_with_scope_count=sum(s['scientific_result_with_scope'] for s in states),
         paper_release_count=sum(s['paper_release'] for s in states),total_cells=20,
         paper_release_count_definition='per-cell saved-prefix/raw-minima consistency with retained scope; not complete combined20 release',

@@ -18849,3 +18849,11 @@ class axes, strict equality and all generation budgets remain unchanged.
 The frozen32-parent IDs and completed attribution units must be preserved;
 old failure and diagnostic receipts are not overwritten. This does not claim
 bitwise equivalence of the old parallel reduction to the repaired producer.
+
+## 2026-09-11 Main20 count definitions
+
+The read-only projection now separates registration from presence of K20
+coverage/original cost/finite recourse/base N, and from combined-family release
+readiness. A legacy coverage/cost pair without its denominator/recourse count
+is not called fully numeric. CM's accepted standalone result does not close
+the old-method numeric-producer comparison binding. No source CSV is changed.

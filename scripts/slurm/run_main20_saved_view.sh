@@ -1,4 +1,5 @@
 #!/bin/bash
+# Reports registered, K20 numeric completeness and combined-family release separately.
 # Offline CPU-only export exception: no models or GPU are loaded.
 #SBATCH --partition=intel
 #SBATCH --cpus-per-task=1
