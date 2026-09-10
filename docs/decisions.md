@@ -18753,3 +18753,14 @@ supports restoring the auditor's producer batch context, not changing epsilon
 or producer values. Audit reconstructs each sampled prototype's authentic raw
 filter context including oracle-rejected companions; existing independent
 encoding/distance spotchecks remain, and production distances are not replaced.
+
+### 2026-09-10 main20/K20 authorization and receipt-gated packaging
+
+See docs/main20_k20_scope.md for the new read-only20-cell paper family and
+calibration-only K20v2 contract. Original13/16 authority is not rewritten.
+Package2666271 failed at filesystem unsupported renameat2 flags after completing
+the archive. Reuse the prepared archive; fallback publication claims a fresh
+directory exclusively, makes content durable, then atomically publishes receipts.
+It is not claimed to be an atomic whole-directory rename. Old failures remain.
+Focused release/relay51 tests passed, including no replacement and no acceptance
+receipt after injected data-fsync failure. No model/audit science replay.

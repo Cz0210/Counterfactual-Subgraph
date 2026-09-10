@@ -177,7 +177,13 @@ def _audit_gate(read_json: Callable[[str], dict], hash_for: Callable[[str], str]
 
 
 def _atomic_directory(source: Path, destination: Path) -> None:
-    """No-replace rename, including an empty pre-existing destination race."""
+    """No-replace rename, or receipt-gated exclusive publication on older FS.
+
+    The fallback is NOT an atomic directory rename: mkdir claims an unused name,
+    data is made durable first, and acceptance receipts are atomically linked last.
+    Readers must require these receipts, never directory existence. No overwrite
+    fallback is permitted, including an already existing empty destination.
+    """
     libc = ctypes.CDLL(None, use_errno=True)
     if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
         result = libc.renamex_np(os.fsencode(source), os.fsencode(destination), 4)  # RENAME_EXCL
@@ -189,12 +195,71 @@ def _atomic_directory(source: Path, destination: Path) -> None:
         code = ctypes.get_errno()
         if code == errno.EEXIST:
             raise FileExistsError(str(destination))
+        if code in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+            _receipt_directory(source, destination)
+            return
         raise OSError(code, os.strerror(code), str(destination))
     fd = os.open(destination.parent, os.O_RDONLY)
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _receipt_directory(source: Path, destination: Path) -> None:
+    markers = [n for n in ("package_receipt.json", "cm_run_publication.json", "cm_import_receipt.json")
+               if (source/n).is_file()]
+    _require(markers == ["package_receipt.json"] or
+             markers == ["cm_run_publication.json", "cm_import_receipt.json"],
+             "Receipt-gated publication requires complete known commit markers")
+    _require(not source.is_symlink() and source.parent == destination.parent,
+             "Receipt publication must remain within one parent directory")
+    destination.mkdir(mode=0o700)  # atomic exclusive claim, never exist_ok
+    for child in sorted(source.iterdir()):
+        if child.name not in markers:
+            _require(not child.is_symlink(), "Publication symlink rejected")
+            target = destination/child.name
+            if target.exists():
+                raise FileExistsError(str(target))
+            os.rename(child, target)
+    _sync_directories(destination)
+    for name in markers:
+        os.link(source/name, destination/name)  # atomic no-replace acceptance
+        (source/name).unlink()
+        fd = os.open(destination, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    source.rmdir()  # only the newly created, now-empty staging directory
+    fd = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def finalize_prepared_package(root: str | Path, staging: str | Path) -> dict:
+    """Finish the failed directory commit; never rebuild the prepared archive."""
+    root, staging = _scope(root), _scope(staging)
+    _require(staging.parent == root and re.fullmatch(r"release\.tmp-[0-9a-f]{32}", staging.name),
+             "Prepared package staging identity invalid")
+    _require({p.name for p in staging.iterdir()} ==
+             {"cm_crem_results.tar.gz", "package_manifest.json", "package_receipt.json"},
+             "Prepared package is incomplete or has unexpected members")
+    outer = json.loads((staging/"package_manifest.json").read_text())
+    receipt = json.loads((staging/"package_receipt.json").read_text())
+    package = staging/"cm_crem_results.tar.gz"
+    _require(_stat(package)[2] == outer["package_bytes"] and _sha(package) == outer["package_sha256"],
+             "Prepared package bytes/hash changed")
+    gate = _audit_gate(lambda n: json.loads((root/n).read_text()), lambda n: _sha(root/n), set(outer["files"]))
+    _require(gate["science_hash"] == receipt["science_hash"] == outer["science_hash"] and
+             gate["final_audit_sha256"] == outer["final_audit_sha256"] and
+             receipt["package_sha256"] == outer["package_sha256"] and
+             receipt["package_path"] == str(root/"release"/package.name),
+             "Prepared package does not bind the accepted original run")
+    _atomic_directory(staging, root/"release")
+    return receipt
 
 
 def _sync_directories(root: Path) -> None:

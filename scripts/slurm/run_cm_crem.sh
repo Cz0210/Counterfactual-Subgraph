@@ -5,6 +5,7 @@
 # Audit successor restores authenticated producer batch context; no pool/mask,
 # temperature, model or tolerance change. Existing independent spotchecks remain.
 #SBATCH --partition=intel
+# package-finalize uses the same record-only entrypoint; no science replay.
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

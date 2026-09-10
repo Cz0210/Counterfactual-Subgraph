@@ -92,7 +92,10 @@ def claim_relay_identity(args, local: Path, spec_path: str, lock) -> datetime:
     context_resume = (getattr(args, 'audit_successor_stage', None) == 'audit-context' and
                       state.get('status') == 'BLOCKED_DIAGNOSTIC_REVIEW_REQUIRED' and
                       state.get('diagnostic',{}).get('status') == 'DIAGNOSTIC_CAPTURE_COMPLETE_NOT_ACCEPTANCE')
-    if state.get("status") != "BLOCKED_ASSET_OVER_6H" and not diagnostic_resume and not context_resume:
+    package_resume = (getattr(args, 'package_successor_stage', None) == 'package-finalize' and
+                      state.get('status') == 'BLOCKED_FAILED_STAGE' and state.get('failed_stage') == 'package' and
+                      state.get('accounting', '').startswith('2666271|FAILED|'))
+    if state.get("status") != "BLOCKED_ASSET_OVER_6H" and not diagnostic_resume and not context_resume and not package_resume:
         raise ValueError("Only BLOCKED_ASSET_OVER_6H permits this explicit relay resume")
     if old.get("hpc_run_root") != args.hpc_run_root or state.get("hpc_run_root") != args.hpc_run_root:
         raise ValueError("Terminal identity/state belong to another HPC campaign")
@@ -335,6 +338,7 @@ def main():
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--diagnostic-attempt", help="Existing audit-recovery submission; same lock/T0, no pilot or inferred PASS")
     parser.add_argument('--audit-successor-stage', choices=['audit-context'], help='Adopt the explicitly submitted original-batch audit successor; preserve failed audit receipt')
+    parser.add_argument('--package-successor-stage', choices=['package-finalize'], help='Adopt prepared archive finalization without rebuilding science/package')
     args = parser.parse_args()
     if any(not re.fullmatch(r"/[A-Za-z0-9_./-]+", p) for p in (args.hpc_run_root, args.hpc_execution_root)):
         raise ValueError("CM relay remote paths must be literal safe absolute paths")
@@ -365,6 +369,10 @@ def main():
                 if receipts.get('audit',{}).get('job_id') != '2659067' or 'audit-context' not in receipts:
                     raise ValueError('Missing bound failed audit or actual context successor')
                 receipts['audit'] = receipts.pop('audit-context')
+            if args.package_successor_stage:
+                if receipts.get('package',{}).get('job_id') != '2666271' or 'package-finalize' not in receipts:
+                    raise ValueError('Missing failed package or actual finalization successor')
+                receipts['package'] = receipts.pop('package-finalize')
             active, completed = [], set()
             for stage, record in receipts.items():
                 job = record.get("job_id")

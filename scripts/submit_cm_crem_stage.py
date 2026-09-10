@@ -15,7 +15,7 @@ from src.baselines.cm_crem_experiment import Experiment, HPC_SCOPE
 from src.baselines.cm_crem_runtime import atomic_json, checked_root, digest, read_json, utc_now
 
 STAGES = ("pilot-oracle", "pilot-generate", "pilot-filter", "pilot-closeout", "attribution",
-          "generate", "filter", "encode", "calibrate", "select", "test", "audit", "audit-context", "export", "package")
+          "generate", "filter", "encode", "calibrate", "select", "test", "audit", "audit-context", "export", "package", "package-finalize")
 
 
 def submit(spec_path: Path, root: Path, stage: str, dependency: str | None = None) -> dict:
@@ -26,6 +26,10 @@ def submit(spec_path: Path, root: Path, stage: str, dependency: str | None = Non
     if code_commit != spec["execution"]["execution_commit"]:
         raise ValueError("Submission worktree is not the immutable configured execution commit")
     action = stage.replace("pilot-generate", "generate").replace("pilot-filter", "filter")
+    if stage == 'package-finalize':
+        old = read_json(root/'submissions/package.json')
+        if old.get('job_id') != '2666271' or not spec['execution'].get('prepared_package_staging'):
+            raise ValueError('Package repair must bind the actual failed2666271 and prepared archive')
     if stage == 'audit-context':
         action = 'audit'
         old = read_json(root/'submissions/audit.json')

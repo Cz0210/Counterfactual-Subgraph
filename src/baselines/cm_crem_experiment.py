@@ -638,6 +638,10 @@ class Experiment:
         from src.baselines.cm_crem_release import package_run
         return package_run(self.root)
 
+    def stage_package_finalize(self) -> dict:
+        from src.baselines.cm_crem_release import finalize_prepared_package
+        return finalize_prepared_package(self.root, self.spec["execution"]["prepared_package_staging"])
+
     def status(self) -> dict:
         present = {}
         for name in ("pilot/oracle.json", "attribution.json", "pilot/pool.json", "pool_freeze.json", "pool_encodings.json", "selection_freeze.json", "audit/final_audit.json"):
@@ -654,7 +658,7 @@ def main(argv=None) -> int:
     parser.add_argument("--config", default="configs/hpc.yaml")
     parser.add_argument("--spec", required=True, type=Path)
     parser.add_argument("--run-root", required=True, type=Path)
-    parser.add_argument("--action", required=True, choices=["resolve", "preflight", "pilot-oracle", "pilot-closeout", "attribution", "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export", "package", "status"])
+    parser.add_argument("--action", required=True, choices=["resolve", "preflight", "pilot-oracle", "pilot-closeout", "attribution", "generate", "filter", "encode", "calibrate", "select", "test", "audit", "export", "package", "package-finalize", "status"])
     parser.add_argument("--bindings", type=Path)
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)

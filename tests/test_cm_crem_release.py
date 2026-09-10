@@ -212,3 +212,37 @@ def test_members_streamed_sha_rejects_repacked_changed_content(run):
     with pytest.raises(release.ReleaseRejected, match="Member content SHA"):
         release.verify_import(package, manifest_path, destination)
     assert not destination.exists()
+
+
+def test_prepared_archive_finalize_without_repacking(run, monkeypatch):
+    def unsupported(source, destination):
+        raise OSError(22, 'filesystem does not support renameat2 flags')
+    monkeypatch.setattr(release, '_atomic_directory', unsupported)
+    with pytest.raises(OSError):
+        release.package_run(run)
+    staging, = run.glob('release.tmp-*')
+    package = staging/'cm_crem_results.tar.gz'
+    original = package.read_bytes()
+    monkeypatch.setattr(release, '_atomic_directory', release._receipt_directory)
+    result = release.finalize_prepared_package(run, staging)
+    assert Path(result['package_path']).read_bytes() == original
+    assert not staging.exists()
+    assert (run/'release/package_receipt.json').exists()
+
+
+def test_receipt_fallback_never_overwrites_or_accepts_partial(run, monkeypatch):
+    source, destination = run/'pending', run/'existing'
+    source.mkdir(); destination.mkdir()
+    _write(source/'package_receipt.json', {'fixture': True})
+    with pytest.raises(FileExistsError):
+        release._receipt_directory(source, destination)
+    assert not (destination/'package_receipt.json').exists()
+    fresh=run/'fresh'
+    _write(source/'data.json', {'fixture': 'body'})
+    def fail_sync(root):
+        raise OSError(5, 'fixture fsync failure')
+    monkeypatch.setattr(release, '_sync_directories', fail_sync)
+    with pytest.raises(OSError):
+        release._receipt_directory(source, fresh)
+    assert not (fresh/'package_receipt.json').exists()
+    assert (source/'package_receipt.json').exists()

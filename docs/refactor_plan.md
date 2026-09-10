@@ -4360,3 +4360,12 @@ Mutagenicity roadmaps.
 - [ ] Bind old numerical WNode producer evidence before adding accepted CM to
   comparison; original GlobalGCE hard-graph applicability remains unresolved.
 - [ ] Complete ongoing CM science/acceptance/import via the existing relay.
+
+### Main20/K20 scope amendment (2026-09-10)
+
+- [x] Original CM independent scientific audit/export completed; fix prepared
+  package finalization without regenerating the archive or rerunning science.
+- [ ] Full5474 BACE calibration and bounded K20v2 selection, original v1 retained.
+- [ ] Original-oracle CM adapters/pilots for Taste and RF datasets.
+- [ ] Read-only20-cell K20 view, distinct registration/science/paper-ready counts.
+- [ ] Finish T12joint500 and same-run T13 recovery; no extra fresh training quota.
