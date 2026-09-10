@@ -83,11 +83,16 @@ def build(input_root,output_dir,allow_partial=False):
                     stage='RF_TRAIN_ADAPTER_IN_PROGRESS' if d=='AIDS' else 'PENDING_DATASET_PILOT')
                 states.append(base);continue
             if cm:
-                root=source/'cm_bace_v1';receipt=json.loads((root/'cm_import_receipt.json').read_text())
+                active=index.get('cm_bace_active',dict(relative_root='cm_bace_v1',variant='CM-CReM-Global-Budgeted-v1'))
+                if active['relative_root'] not in ('cm_bace_v1','cm_bace_v2'):
+                    raise ValueError('CM projection must reference one explicitly selected source version')
+                if active['relative_root']=='cm_bace_v2' and active.get('selection_basis')!='TASK_AUTHORIZED_V2_CALIBRATION_ONLY_FREEZE':
+                    raise ValueError('CM v2 requires explicit pre-test version policy')
+                root=source/active['relative_root'];receipt=json.loads((root/'cm_import_receipt.json').read_text())
                 publication=json.loads((root/'cm_run_publication.json').read_text())
                 if receipt['status']!='CM_RESULT_IMPORT_VERIFIED' or publication['status']!='BACE_CM_CREM_RESULT_PUBLISHED':
                     raise ValueError('CM import/publication not accepted')
-                base.update(registered=True,variant='CM-CReM-Global-Budgeted-v1',oracle='gine',
+                base.update(registered=True,variant=active['variant'],oracle='gine',
                     source_root=publication.get('import_root',str(root)),package_import='IMPORTED_PUBLISHED',
                     scope='POST_HOC_BACE_ORIGINAL_GINE_FULL_GRAPH_PROTOTYPES; NUMERIC_PRODUCER_BINDING_PENDING_FOR_COMBINED_PLOT')
                 summary=json.loads((root/'export_manifest.json').read_text())

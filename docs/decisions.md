@@ -18868,3 +18868,8 @@ scientific gate and publishes acceptance last. It does not extract again,
 transfer again or run science. One recovery content verification is necessary
 because the failed call published no acceptance receipt; its hash count is
 explicitly scoped to the recovery call, not hidden as the only historic hash.
+
+The saved paper projection may explicitly reference accepted CM-v2 through
+cm_bace_active with TASK_AUTHORIZED_V2_CALIBRATION_ONLY_FREEZE. It remains one
+CM-BACE cell, not a data-dependent choice of the better test version. Original
+v1 stays in its immutable source directory and version comparison.
