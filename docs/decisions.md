@@ -18816,6 +18816,18 @@ repair are not rendered as valid zero. CM standalone figures are accepted;
 its combined panel still needs actual old-method numerical WNode producer
 binding. K10/K20 costs retain dataset definitions; no model/OT/selector calls.
 Paired Slurm entry is an explicit CPU-only offline export exception.
+# 2026-09-11 CM original-oracle dataset pilots
+
+Add one bounded train-only pilot adapter: Taste retains the original three-class
+GINE and Sweet -> {Bitter,Tasteless}; Mut retains its actual main-table RF and
+Morgan feature occlusion. Neither retrains, changes temperature, reads test,
+or pretends RF attribution is Grad-CAM. Freeze 32 structural train-source IDs
+before generation, use the existing isolated CReM worker and job-local database,
+then real filtering and 64 nonself WNode measurements. A pilot receipt is not
+a full-run gate: full calibration/test bindings and measured admission remain
+explicit requirements. The original deadline and all generation budgets stay.
+The paired Slurm script is a user-authorized CPU-only exception (8 CPU/32 GiB).
+
 # 2026-09-10 CM-v2 scratch scope compatibility
 
 The16 RF attribution/repeat checks completed in job2666897. Generation did not

@@ -172,8 +172,12 @@ class FrozenCMOracle:
         self.binding = dict(binding)
         self.forward_atol = float(forward_atol)
         self.forward_rtol = float(forward_rtol)
-        if str(oracle.backbone).lower() != "gine" or int(oracle.num_classes) != 2:
+        taste = self.binding.get("dataset") == "tastemolnet"
+        if str(oracle.backbone).lower() != "gine" or int(oracle.num_classes) != (3 if taste else 2):
             raise ValueError("CM-CReM primary route requires original BACE GINE, not GIN/A+")
+        self.allowed_destinations = [0, 2] if taste else [0]
+        if taste and self.binding.get("allowed_destinations") != self.allowed_destinations:
+            raise ValueError("Taste must retain both original non-Sweet destinations")
         if oracle.source_label != 1 or not math.isfinite(oracle.temperature) or oracle.temperature <= 0:
             raise ValueError("Original BACE source/temperature contract mismatch")
         if not hasattr(oracle.model, "layers") or not oracle.model.layers:
@@ -313,7 +317,8 @@ class FrozenCMOracle:
                 handle.remove()
         selected = upstream_top_atoms(scores)
         request = make_parent_request(parent_id=parent_id, mol=molecule,
-                                      selected_atom_indices=selected, split="train")
+                                      selected_atom_indices=selected, split="train",
+                                      explicit_stereo_transport=self.binding.get("dataset") == "tastemolnet")
         generation_allowed = len(request["effective_atom_indices"]) < graph.num_nodes
         return {**base, "status": "ATTRIBUTION_COMPLETE" if generation_allowed else "NO_REPLACEABLE_CONTEXT",
                 "generation_allowed": generation_allowed, "generation_request": request,
@@ -364,7 +369,7 @@ class FrozenCMOracle:
         evaluated = self.predict_rows(list(unique.values()), split="train_generated")
         accepted: dict[str, dict[str, Any]] = {}
         for row in evaluated:
-            if row["predicted_label"] != 0:
+            if row["predicted_label"] not in self.allowed_destinations:
                 rejected.append({"candidate_id": row["candidate_id"], "reason": "NOT_DESTINATION",
                                  "prediction": row["predicted_label"], "origins": row["origins"]})
                 continue
