@@ -86,7 +86,10 @@ def claim_relay_identity(args, local: Path, spec_path: str, lock) -> datetime:
     launch = json.loads(snapshots["launch_intent.json"])
     if launch.get("max_hours", 168) != 168:
         raise ValueError("Original launch intent lifetime differs from168h")
-    if state.get("status") != "BLOCKED_ASSET_OVER_6H":
+    diagnostic_resume = (getattr(args, "diagnostic_attempt", None) is not None and
+                         state.get("status") == "BLOCKED_FAILED_STAGE" and
+                         state.get("failed_stage") == "audit")
+    if state.get("status") != "BLOCKED_ASSET_OVER_6H" and not diagnostic_resume:
         raise ValueError("Only BLOCKED_ASSET_OVER_6H permits this explicit relay resume")
     if old.get("hpc_run_root") != args.hpc_run_root or state.get("hpc_run_root") != args.hpc_run_root:
         raise ValueError("Terminal identity/state belong to another HPC campaign")
@@ -158,7 +161,7 @@ def claim_relay_identity(args, local: Path, spec_path: str, lock) -> datetime:
                     prior_pid=pid, start_evidence=start_evidence)
     atomic_json(archive/"resume_identity.json", identity, immutable=True)
     atomic_json(identity_path, identity)
-    atomic_json(local/"state.json", {"status": "RESUMING_AFTER_ASSET_TERMINAL", "updated_at": utc_now(),
+    atomic_json(local/"state.json", {"status": "RESUMING_AUDIT_DIAGNOSTIC" if diagnostic_resume else "RESUMING_AFTER_ASSET_TERMINAL", "updated_at": utc_now(),
                 "pid": os.getpid(), "hpc_run_root": args.hpc_run_root,
                 "start_time_utc": identity["start_time_utc"], "prior_terminal_archive": str(archive)})
     return t0
@@ -179,6 +182,50 @@ def require_import_identity(receipt: dict, manifest: dict) -> None:
         for key in ("science_hash", "package_sha256", "package_bytes")
     ) or not manifest.get("package_sha256") or not isinstance(manifest.get("package_bytes"), int):
         raise ValueError("Completed import identity does not match this exact CM package")
+
+
+def collect_diagnostic(args, local, t0, python):
+    """Finite same-lock consumer; cannot infer acceptance or resubmit science."""
+    attempt = Path(args.diagnostic_attempt)
+    if attempt.parent != Path(args.hpc_run_root) or not attempt.name.startswith('audit-recovery-'):
+        raise ValueError('Diagnostic must be an explicit direct child of this campaign')
+    failures = 0
+    while (datetime.now(timezone.utc)-t0).total_seconds() < 168*3600:
+        state = {'updated_at':utc_now(), 'pid':os.getpid(), 'hpc_run_root':args.hpc_run_root,
+                 'diagnostic_attempt':str(attempt), 'scientific_pass_claimed':False,
+                 'planning_deadline_utc':(t0+timedelta(hours=168)).isoformat()}
+        try:
+            code = "import pathlib,sys; p=pathlib.Path(sys.argv[1]); print((p/'submission.json').read_text())"
+            submission = json.loads(ssh_read(args.hpc_alias,[python,'-I','-B','-c',code,str(attempt)]))
+            jobs = submission.get('job_ids',[])
+            if submission.get('status') != 'SUBMITTED_NOT_SCIENCE_PASS' or len(jobs)!=1 or not jobs[0].isdigit():
+                raise ValueError('Diagnostic submission uncertain; no resubmit')
+            job=jobs[0]; state['job_id']=job
+            accounting=ssh_read(args.hpc_alias,['sacct','-X','-j',job,'--noheader','--parsable2','--format=JobID,State,ExitCode'])
+            rows=[r.split('|') for r in accounting.splitlines() if r.strip()]
+            terminal=bool(rows) and all(r[1].split()[0] in ('COMPLETED','FAILED','CANCELLED','TIMEOUT','OUT_OF_MEMORY','NODE_FAIL') for r in rows)
+            state.update(status='WAITING_DIAGNOSTIC_SLURM',accounting=accounting)
+            if terminal:
+                evidence_code="import pathlib,sys; p=pathlib.Path(sys.argv[1])/'evidence/diagnostic.json'; print(p.read_text() if p.exists() else 'null')"
+                evidence=json.loads(ssh_read(args.hpc_alias,[python,'-I','-B','-c',evidence_code,str(attempt)]))
+                dest=local/'audit-recovery'/attempt.name
+                dest.mkdir(parents=True,exist_ok=True)
+                atomic_json(dest/'submission.json',submission,immutable=True)
+                atomic_json(dest/'diagnostic.json',evidence,immutable=True)
+                state.update(status='BLOCKED_DIAGNOSTIC_REVIEW_REQUIRED',diagnostic=evidence,
+                             next_action='REVIEW_CAPTURE_THEN_NARROW_AUDITOR_OR_PRODUCER_REPAIR_NO_GENERATION',
+                             diagnostic_local_root=str(dest))
+                atomic_json(local/'state.json',state)
+                return 2
+            atomic_json(local/'state.json',state); failures=0
+        except (OSError,RuntimeError,subprocess.TimeoutExpired) as exc:
+            failures+=1;state.update(status='WAITING_TRANSPORT',error=str(exc),transport_failures=failures)
+            atomic_json(local/'state.json',state)
+            if failures>=2:return 4
+        if args.once:return 0
+        time.sleep(300)
+    atomic_json(local/'state.json',{'status':'PLANNING_HORIZON_EXPIRED','pid':os.getpid(),'updated_at':utc_now()})
+    return 5
 
 
 def transfer_completed(args, local: Path, python: str) -> dict:
@@ -274,6 +321,7 @@ def main():
     parser.add_argument("--resume-after-terminal", action="store_true",
                         help="Resume only an exited BLOCKED_ASSET_OVER_6H relay, retaining original T0 and168h horizon")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--diagnostic-attempt", help="Existing audit-recovery submission; same lock/T0, no pilot or inferred PASS")
     args = parser.parse_args()
     if any(not re.fullmatch(r"/[A-Za-z0-9_./-]+", p) for p in (args.hpc_run_root, args.hpc_execution_root)):
         raise ValueError("CM relay remote paths must be literal safe absolute paths")
@@ -292,6 +340,8 @@ def main():
     t0 = claim_relay_identity(args, local, spec_path, lock)
     failures, blocker_since = 0, None
     python = "/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python"
+    if args.diagnostic_attempt:
+        return collect_diagnostic(args, local, t0, python)
     while (datetime.now(timezone.utc)-t0).total_seconds() < 168*3600:
         snapshot = {"updated_at": utc_now(), "pid": os.getpid(), "hpc_run_root": args.hpc_run_root}
         try:

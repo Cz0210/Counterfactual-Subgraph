@@ -103,6 +103,25 @@ def _claim(campaign):
         return relay.claim_relay_identity(args,local,spec_path,lock)
 
 
+def test_audit_diagnostic_resume_keeps_original_deadline(terminal_campaign):
+    local,args,_=terminal_campaign
+    state=json.loads((local/'state.json').read_text())
+    state.update(status='BLOCKED_FAILED_STAGE',failed_stage='audit')
+    (local/'state.json').write_text(json.dumps(state))
+    args.diagnostic_attempt=args.hpc_run_root+'/audit-recovery-fixture'
+    _claim(terminal_campaign)
+    assert json.loads((local/'state.json').read_text())['status']=='RESUMING_AUDIT_DIAGNOSTIC'
+    assert json.loads((local/'relay_identity.json').read_text())['planning_deadline_utc']=='2026-09-16T16:27:44Z'
+
+
+def test_diagnostic_collector_does_not_submit_or_accept():
+    import inspect
+    text=inspect.getsource(relay.collect_diagnostic)
+    assert 'submit_cm_crem_stage' not in text
+    assert 'BLOCKED_DIAGNOSTIC_REVIEW_REQUIRED' in text
+    assert "'scientific_pass_claimed':False" in text
+
+
 def test_resume_preserves_exact_terminal_evidence_and_original_t0(terminal_campaign):
     local,args,spec_path=terminal_campaign
     originals={name:(local/name).read_bytes() for name in
