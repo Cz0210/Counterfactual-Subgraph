@@ -10,7 +10,7 @@ def main():
  root=Path(a.output_root)
  if root.exists():raise ValueError('FRESH_CONTROL_ROOT_REQUIRED')
  if not root.is_relative_to('/share/home/u20526/czx'):raise ValueError('HPC_SCOPE')
- root.mkdir(parents=True);source=Path(a.source_root);spec=read_json(source/'spec.json');old=read_json(spec['original_cm_spec']);e=old['execution']
+ root.mkdir(parents=True,mode=0o700);source=Path(a.source_root);spec=read_json(source/'spec.json');old=read_json(spec['original_cm_spec']);e=old['execution']
  from datetime import datetime,timezone
  if datetime.now(timezone.utc)>=datetime.fromisoformat(spec['deadline_utc'].replace('Z','+00:00')):raise RuntimeError('Original deadline')
  if Path(sys.executable).resolve()!=Path(e['generator_python']).resolve():raise ValueError('Original generation environment required')

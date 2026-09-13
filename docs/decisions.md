@@ -18956,3 +18956,9 @@ the already-submitted Taste/Mut package jobs, verifies small transfers and
 renders saved CSVs. It never submits science or resets T0. Original BACE final
 state is retained, and AutoDL publication remains pending its own file-slot
 admission instead of being silently bypassed by the delivery script.
+# 2026-09-14: CM AIDS native controls scratch-root ownership
+
+Job2688737 stopped before database staging because its fresh run directory used
+default permissions, rejected by the existing private-scratch root contract.
+Create only the fresh control directory with mode0700; preserve the failed root
+and retain the original ownership/permission guard. No scientific input changed.

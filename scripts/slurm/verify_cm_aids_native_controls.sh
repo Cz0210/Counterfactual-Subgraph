@@ -5,7 +5,8 @@
 #SBATCH --time=00:40:00
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
-# Explicit native CPU controls; no oracle, OT, training or new candidate budget.
+# Explicit native CPU controls; fresh output is private0700 for scratch binding.
+# No oracle, OT, training or new candidate budget.
 set -eo pipefail
 source ~/.bashrc
 conda activate smiles_pip118
