@@ -64,6 +64,9 @@ class DatasetFull:
         return value
 
     def put(self, name, value):
+        space = os.statvfs(self.root)
+        if space.f_bavail * space.f_frsize < self.spec['global_reserved_bytes']:
+            raise RuntimeError('HPC project reserve reached; preserve completed units, do not start next stage')
         atomic_json(self.root/name, {'full_contract_sha256': self.contract, **value}, immutable=True)
 
     def get(self, name):
@@ -76,6 +79,9 @@ class DatasetFull:
         from datetime import datetime, timezone
         if datetime.now(timezone.utc) >= datetime.fromisoformat(self.p['deadline_utc'].replace('Z', '+00:00')):
             raise RuntimeError('Original campaign deadline reached; stop before next parent')
+        space = os.statvfs(self.root)
+        if space.f_bavail * space.f_frsize < self.spec['global_reserved_bytes']:
+            raise RuntimeError('HPC free-byte reserve reached at parent boundary')
 
     def plan(self):
         records = self.old('attribution.json')['records']
