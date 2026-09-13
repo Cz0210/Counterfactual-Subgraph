@@ -18944,3 +18944,8 @@ GINE" for the new RF Mut result. Use the validated oracle argument in titles;
 CSV values, export manifest and signed source package remain unchanged. Fresh
 Mac derived plots correct only this label. Dataset transport now labels its
 Mac import as CM_DATASET_RESULT_IMPORTED_NOT_MAIN_AUTHORITY, not BACE release.
+
+CM-AIDS next bounded control reuses the recorded CCO public-positive recipe,
+compares original/patched native replacement plus fragmentation of two actual
+saved successful inputs, and binds the existing corrected empty terminal. It
+does not regenerate those scientific units or label the incomplete pilot PASS.
