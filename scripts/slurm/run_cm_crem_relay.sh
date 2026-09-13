@@ -8,6 +8,8 @@
 # --audit-successor-stage audit-context binds the actually submitted reviewed
 # original-batch audit, then existing export/package/import, under the same lock.
 # Accepted Mac import triggers real offline replot before the separate AutoDL copy.
+# --postfilter-delivery-plan collects actual Taste/Mut package jobs using the same
+# original campaign lock/deadline. AutoDL import remains a separate storage gate.
 set -euo pipefail
 echo "run_cm_crem_relay.py is a bounded Mac-only relay, not an HPC job." >&2
 exit 2

@@ -18949,3 +18949,10 @@ CM-AIDS next bounded control reuses the recorded CCO public-positive recipe,
 compares original/patched native replacement plus fragmentation of two actual
 saved successful inputs, and binds the existing corrected empty terminal. It
 does not regenerate those scientific units or label the incomplete pilot PASS.
+
+The original completed BACE Mac relay gains a record-only postfilter collection
+mode, retaining its original lock and September17 deadline. It waits only on
+the already-submitted Taste/Mut package jobs, verifies small transfers and
+renders saved CSVs. It never submits science or resets T0. Original BACE final
+state is retained, and AutoDL publication remains pending its own file-slot
+admission instead of being silently bypassed by the delivery script.

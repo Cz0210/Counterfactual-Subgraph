@@ -325,6 +325,92 @@ for name in ('transfer','delivery_tools'):
     return result
 
 
+def validate_postfilter_delivery(plan, original_identity):
+    if (plan.get('schema') != 'cm_postfilter_existing_relay_delivery_v1'
+            or plan.get('deadline_utc') != '2026-09-16T16:27:44Z'
+            or original_identity.get('planning_deadline_utc') != plan['deadline_utc']
+            or plan.get('start_time_utc') != original_identity.get('start_time_utc')):
+        raise ValueError('Postfilter relay may not reset original campaign deadline')
+    seen=set()
+    for row in plan['datasets']:
+        if row['dataset'] not in {'mutagenicity','tastemolnet'} or row['dataset'] in seen:
+            raise ValueError('Only unique completed/submitted postfilter dataset chains')
+        seen.add(row['dataset'])
+        if not re.fullmatch(r'[0-9]+',row['package_job_id']):raise ValueError('Real existing package job required')
+        for key,base in [('hpc_root','/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v2/postfilter-20260914'),('local_root','/Volumes/DireRaven/counterfactual-hpc-offload/cm-crem-global-v2')]:
+            value=Path(row[key])
+            if not value.is_absolute() or '..' in value.parts or value==Path(base) or not value.is_relative_to(base):
+                raise ValueError('Postfilter delivery path outside current campaign')
+    if not seen:raise ValueError('No actual postfilter successors')
+    return plan
+
+
+def collect_postfilter_delivery(args,local,lock):
+    """Existing relay/lock, bounded collection only; no science dispatch."""
+    from src.baselines.cm_crem_release import verify_import
+    from src.baselines.cm_crem_export import replot
+    original=read_json(local/'relay_identity.json');old=read_json(local/'state.json')
+    plan=validate_postfilter_delivery(read_json(args.postfilter_delivery_plan),original)
+    if old.get('status')!='BACE_CM_RESULT_DELIVERED' or old.get('pid')!=original.get('pid'):
+        raise ValueError('Original BACE terminal must be retained and complete')
+    try:os.kill(original['pid'],0)
+    except ProcessLookupError:pass
+    else:raise ValueError('Original relay PID still exists; no duplicate collector')
+    identity_path=local/'postfilter_delivery_identity.json'
+    if identity_path.exists():raise ValueError('Existing postfilter collector intent; inspect, do not duplicate')
+    atomic_json(identity_path,dict(pid=os.getpid(),plan=str(args.postfilter_delivery_plan),
+        original_identity=original,deadline_utc=plan['deadline_utc'],same_campaign_lock=str(local/'relay.lock'),
+        created_at=utc_now(),science_submissions=0,model_api_calls=False),immutable=True)
+    python='/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python'
+    completed={};failures=0
+    while datetime.now(timezone.utc)<_utc_start(plan['deadline_utc']):
+        snapshot=dict(pid=os.getpid(),updated_at=utc_now(),deadline_utc=plan['deadline_utc'],datasets=dict(completed),
+            status='WAITING_EXISTING_SLURM_PACKAGES',main_matrix_written=False)
+        try:
+            for row in plan['datasets']:
+                dataset=row['dataset']
+                if dataset in completed:continue
+                dest=Path(row['local_root']);dest.mkdir(parents=True,exist_ok=True)
+                verified=dest/'verified';receipt_path=verified/'cm_import_receipt.json'
+                if not receipt_path.exists():
+                    acct=ssh_read(args.hpc_alias,['sacct','-X','-j',row['package_job_id'],'--noheader','--parsable2','--format=JobID,State,ExitCode'])
+                    records=[v.split('|') for v in acct.splitlines() if v.strip()]
+                    match=[v for v in records if v[0]==row['package_job_id']]
+                    if len(match)!=1 or match[0][1] in {'PENDING','RUNNING','COMPLETING','CONFIGURING'}:continue
+                    if match[0][1:3]!=['COMPLETED','0:0']:
+                        completed[dataset]=dict(status='BLOCKED_PACKAGE_JOB',accounting=acct);continue
+                    code="import pathlib,sys;print((pathlib.Path(sys.argv[1])/'release/package_receipt.json').read_text())"
+                    pkg=json.loads(ssh_read(args.hpc_alias,[python,'-I','-B','-c',code,row['hpc_root']]))
+                    if pkg.get('status')!='CM_RESULT_PACKAGE_SEALED':raise ValueError('Unaccepted package receipt')
+                    paths=[pkg['package_path'],pkg['manifest_path']]
+                    if any(Path(p).parent!=Path(row['hpc_root'])/'release' for p in paths):raise ValueError('Package path escaped bound source')
+                    transfer=dest/'transfer';transfer.mkdir(exist_ok=True)
+                    for p in paths:
+                        subprocess.run(['rsync','-t','--partial','-e','ssh -o BatchMode=yes -o ConnectTimeout=20',args.hpc_alias+':'+p,str(transfer/Path(p).name)],check=True,timeout=3600)
+                    receipt=verify_import(transfer/Path(paths[0]).name,transfer/Path(paths[1]).name,verified)
+                else:receipt=read_json(receipt_path)
+                if receipt.get('status')!='CM_RESULT_IMPORT_VERIFIED':raise ValueError('Existing Mac import not verified')
+                manifest=read_json(verified/'results/export_manifest.json')
+                if manifest['dataset']!=dataset or manifest['oracle']!=row['oracle']:raise ValueError('Dataset import scope conflict')
+                plots=dest/row['plot_directory']
+                if not (plots/'replot_inputs.json').exists():replot(verified/'results/source_csv',plots,dataset=dataset,oracle=row['oracle'])
+                completed[dataset]=dict(status='MAC_RESULT_DELIVERED',receipt=str(receipt_path),plots=str(plots),
+                    autodl_import='PENDING_STAGE_STORAGE_ADMISSION',registered_in_autodl=False)
+            snapshot['datasets']=dict(completed);failures=0
+            if len(completed)==len(plan['datasets']):
+                snapshot['status']='MAC_COLLECTION_TERMINAL_AUTODL_IMPORT_SEPARATE'
+                atomic_json(local/'postfilter_delivery_state.json',snapshot);return 0
+        except (OSError,RuntimeError,ValueError,subprocess.SubprocessError) as exc:
+            failures+=1;snapshot.update(error=str(exc),transport_failures=failures)
+            if failures>=2:
+                snapshot['status']='BLOCKED_TRANSPORT_OR_PACKAGE_CONTENT'
+                atomic_json(local/'postfilter_delivery_state.json',snapshot);return 4
+        atomic_json(local/'postfilter_delivery_state.json',snapshot)
+        if args.once:return 0
+        time.sleep(300)
+    atomic_json(local/'postfilter_delivery_state.json',dict(status='ORIGINAL_DEADLINE_REACHED',datasets=completed,pid=os.getpid(),updated_at=utc_now()));return 5
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hpc-alias", default="tongji-hpc", choices=["tongji-hpc"])
@@ -339,6 +425,7 @@ def main():
     parser.add_argument("--diagnostic-attempt", help="Existing audit-recovery submission; same lock/T0, no pilot or inferred PASS")
     parser.add_argument('--audit-successor-stage', choices=['audit-context'], help='Adopt the explicitly submitted original-batch audit successor; preserve failed audit receipt')
     parser.add_argument('--package-successor-stage', choices=['package-finalize'], help='Adopt prepared archive finalization without rebuilding science/package')
+    parser.add_argument('--postfilter-delivery-plan',type=Path,help='Collect actual Taste/Mut package successors under the original campaign lock; never resubmit science')
     args = parser.parse_args()
     if any(not re.fullmatch(r"/[A-Za-z0-9_./-]+", p) for p in (args.hpc_run_root, args.hpc_execution_root)):
         raise ValueError("CM relay remote paths must be literal safe absolute paths")
@@ -354,6 +441,8 @@ def main():
     local.mkdir(parents=True, exist_ok=True)
     lock = (local/"relay.lock").open("a")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    if args.postfilter_delivery_plan:
+        return collect_postfilter_delivery(args,local,lock)
     t0 = claim_relay_identity(args, local, spec_path, lock)
     failures, blocker_since = 0, None
     python = "/share/home/u20526/anaconda3/envs/smiles_pip118/bin/python"
