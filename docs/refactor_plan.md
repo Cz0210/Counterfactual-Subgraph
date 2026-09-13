@@ -4366,3 +4366,9 @@ Mutagenicity roadmaps.
   calibration adoption and binding afterok test/aggregate/audit/export.
 - [ ] Actual GCF continuation activation after the real freeze job and immutable
   native/calibration manifests are supplied; no duplicate ComRec migration.
+
+### September14 T13 IndexRebuilt authorized continuation
+- [x] Typed non-layout invariant check and honest fresh working-checkpoint overlay.
+- [x] Actual bounded CPU checkpoint/model/index preparation entry and paired shell.
+- [ ] Execute source preparation, then GPU 2-train/1-validation/reload through existing owner.
+- [ ] Verify compact durable backup and resume same formal1/1 without skipping validation30.

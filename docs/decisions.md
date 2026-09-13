@@ -19144,3 +19144,18 @@ the old full-expansion performance interceptor until a true historical payload
 or an independently bound deterministic reconstruction exists. No GPU test or
 same-run resume is claimed. Remaining autograd/validation/checkpoint increments
 must have evidence; existing RSS is not charged twice.
+
+## 2026-09-14: explicitly authorized IndexRebuilt CPU preparation
+
+The September13 23:12 task permits a new independently seeded compact layout
+when only the old random mask/index payload is lost. Added a separate typed
+IndexRebuilt adapter: base tensors, parent order, multiplicity, pattern shape,
+official producer and sampler must remain identical. Original epoch29 model,
+optimizer, scheduler, best state and RNG remain unchanged in a new working copy;
+the old checkpoint/identity is never overwritten or relabeled exact parity.
+`prepare_t13_indexrebuilt.py --config configs/hpc.yaml --plan ABS` performs
+bounded CPU preparation on the separately admitted NVMe mount, with no mining,
+test, GPU or optimizer updates. It must stop before training. GPU 2-train/1-val
+and reload, actual owner/FD/provider, and durable backup are still separate gates.
+The paired Slurm script explicitly uses CPU intel rather than the generic A800
+template because this stage must not acquire or consume any GPU.
