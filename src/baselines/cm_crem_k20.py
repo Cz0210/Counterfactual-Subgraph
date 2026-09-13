@@ -58,8 +58,8 @@ def optimize(matrix, ids, theta, cap, grid, incumbent=()):
             chosen=old
     final=greedy(matrix,ids,theta,cap,grid,chosen)
     return final,{'objective':score(final),'swaps':swaps,'accepted_swap_count':len(swaps),
-                 'pool_objective':objective(matrix.min(axis=1),theta,cap,grid),
-                 'pool_finite_reach_count':int(np.isfinite(matrix.min(axis=1)).sum()),
+                 'pool_objective':objective(matrix.min(axis=1) if len(ids) else np.full(matrix.shape[0],np.inf),theta,cap,grid),
+                 'pool_finite_reach_count':int(np.isfinite(matrix.min(axis=1)).sum()) if len(ids) else 0,
                  'selection_used_test':False,'maximum_swap_rounds':2}
 
 

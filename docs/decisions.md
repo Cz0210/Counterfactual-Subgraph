@@ -1,5 +1,17 @@
 # Decisions Log
 
+## 2026-09-14 — CM postfilter dataset adapter
+
+Reuse original RF/Taste GINE batch32, MolCLR node encoder, exact EMD and the
+accepted calibration-only K20 selector. A fresh full-roster/pilot union closure
+precedes candidate sealing. Shared batch caches and bounded NPZ parent blocks
+replace per-pair files; unknown/error slots cannot become zero or infinity.
+Test opens only after the global freeze. Independent-process oracle replay uses
+the complete original batch32/last-batch, then fixed exact-distance spotchecks,
+selection replay and lossless export. Train-only4x8 fixture is explicitly not a
+production test. CPU intel Slurm is the authorized exception to A800 defaults.
+No old generation, accepted BACE, main authority or active worktree is changed.
+
 ## 2026-09-13 — CReM repair source representation pin
 
 Repair-test2687474 stopped before generation because the expected hash had

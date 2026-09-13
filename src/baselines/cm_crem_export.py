@@ -52,8 +52,8 @@ def _file_sha(path: Path) -> str:
 
 
 def _metadata(*, dataset: str, oracle: str) -> None:
-    if dataset not in {"bace", "tastemolnet"} or oracle != "gine":
-        raise ValueError("CM-CReM export is restricted to BACE/TasteMolNet original frozen GINE")
+    if (dataset, oracle) not in {('bace','gine'),('tastemolnet','gine'),('mutagenicity','rf'),('aids','rf')}:
+        raise ValueError("CM-CReM requires original frozen GINE for BACE/Taste or dataset-specific original RF for AIDS/Mut")
 
 
 def _diagnostic_records(run_root: Path, evaluation: PrefixEvaluation, fixture: bool) -> tuple[list[dict], list[dict], dict]:
@@ -240,7 +240,8 @@ def export_diagnostics(run_root: str | Path, evaluation: PrefixEvaluation | Mapp
 
 def export_results(evaluation: PrefixEvaluation | Mapping[str, Any], output_root: str | Path, *, dataset: str,
                    oracle: str = "gine", fixture: bool = False, make_figures: bool = True,
-                   k20_reuse_audit: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                   k20_reuse_audit: Mapping[str, Any] | None = None,
+                   dataset_audit: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Write new run-root/results records; never overwrite an existing export.
 
     Synthetic fixture outputs are explicitly labelled in every CSV/figure.
@@ -256,7 +257,16 @@ def export_results(evaluation: PrefixEvaluation | Mapping[str, Any], output_root
     root = run_root / "results"
     if root.exists():
         raise FileExistsError(root)
-    if k20_reuse_audit is not None:
+    if dataset_audit is not None:
+        expected = 'TRAIN_FIXTURE_AUDIT_PASS' if fixture else 'CM_DATASET_POSTFILTER_AUDIT_PASS'
+        if (dataset_audit.get('status') != expected or dataset_audit.get('fixture') is not fixture
+                or dataset_audit.get('contract_sha256') != evaluation.contract_sha256
+                or dataset_audit.get('selection_freeze_sha') != evaluation.selection.freeze_sha256
+                or dataset_audit.get('test_result_sha256') != canonical_sha256(evaluation.to_dict())):
+            raise ValueError('Dataset independent audit does not bind exported result')
+        diagnostics={'files':{'audit/final_audit.json':_file_sha(run_root/'audit/final_audit.json')},
+                     'status':'DATASET_POSTFILTER_INDEPENDENT_AUDIT_BOUND'}
+    elif k20_reuse_audit is not None:
         if (evaluation.selection.method_id!='CM-Global-K20-v2' or
                 k20_reuse_audit.get('status')!='K20_RECORDS_AND_INDEPENDENT_PROTOTYPE_CHECKS_PASS' or
                 k20_reuse_audit.get('selection_freeze_sha')!=evaluation.selection.freeze_sha256):
@@ -272,7 +282,7 @@ def export_results(evaluation: PrefixEvaluation | Mapping[str, Any], output_root
     common = {"dataset": dataset, "oracle": oracle, "method": PAPER_LABEL,
         "fixture": fixture, "contract_sha256": evaluation.contract_sha256,
         "selection_freeze_sha256": evaluation.selection.freeze_sha256}
-    if k20_reuse_audit is not None:common['variant']='CM-Global-K20-v2'
+    if k20_reuse_audit is not None or dataset_audit is not None:common['variant']='CM-Global-K20-v2'
     def tagged(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         return [{**common, **row} for row in rows]
     metrics = evaluation.prefix_metrics()
@@ -451,8 +461,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     plot = commands.add_parser("replot", help="Render authenticated saved result CSVs")
     plot.add_argument("--source-csv", type=Path, required=True)
     plot.add_argument("--output-dir", type=Path, required=True)
-    plot.add_argument("--dataset", choices=("bace", "tastemolnet"), required=True)
-    plot.add_argument("--oracle", choices=("gine",), default="gine")
+    plot.add_argument("--dataset", choices=("bace", "tastemolnet", "mutagenicity", "aids"), required=True)
+    plot.add_argument("--oracle", choices=("gine","rf"), default="gine")
     args = parser.parse_args(argv)
     print(json.dumps(replot(args.source_csv, args.output_dir, dataset=args.dataset, oracle=args.oracle), indent=2))
     return 0

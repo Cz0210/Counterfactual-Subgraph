@@ -1,5 +1,13 @@
 # Refactor Plan
 
+## 2026-09-14 postfilter continuation
+
+- Implement shared Taste/Mut full-roster seal, compact calibration blocks,
+  global K20 freeze, selected test, separate-process audit and export/package.
+- Run real train-only4x8 fixtures before formal dependent evaluation; bind
+  original dataset cohort/threshold sources, not pilot placeholder thresholds.
+- Keep transfer/import separate from scientific package completion.
+
 ## 2026-09-13 closeout increment
 
 CM Taste/Mut full remaining-parent generation and global pool stages extend the
