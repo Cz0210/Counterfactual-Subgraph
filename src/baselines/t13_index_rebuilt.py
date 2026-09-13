@@ -79,7 +79,7 @@ def adapted_checkpoint(original, rebuilt_identity, *, original_identity, formal_
     required = {'model_state','optimizer_state','scheduler_state','python_rng_state',
         'numpy_rng_state','torch_rng_state','cuda_rng_state','resume_identity',
         'resume_identity_sha256','sampler_state','augmented_dataset_identity',
-        'epoch','next_epoch','best_loss','config'}
+        'next_epoch','best_loss','config'}
     if not required <= set(original):
         raise ValueError('T13_INCOMPLETE_TRAINING_STATE:' + ','.join(sorted(required-set(original))))
     if original['augmented_dataset_identity'] != original_identity:
@@ -87,7 +87,8 @@ def adapted_checkpoint(original, rebuilt_identity, *, original_identity, formal_
     identity = original['resume_identity']
     if identity.get('dataset') != 'TasteMolNet' or identity.get('source_label') != 1 or identity.get('target_label') != 0:
         raise ValueError('T13_INDEX_REBUILT_WRONG_DATASET_OR_TARGET')
-    if original['epoch'] != 29 or original['next_epoch'] != 30 or original['config']['epochs'] != 100:
+    # The actual v2 producer stores next_epoch=epoch+1, not an epoch field.
+    if original['next_epoch'] != 30 or original['config']['epochs'] != 100 or original['scheduler_state'].get('last_epoch') != 30:
         raise ValueError('T13_INDEX_REBUILT_NOT_AUTHORIZED_EPOCH29_BOUNDARY')
     if not original['model_state'] or not original['optimizer_state'].get('state'):
         raise ValueError('T13_MODEL_OR_OPTIMIZER_EMPTY')

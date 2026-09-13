@@ -29,7 +29,7 @@ def test_working_copy_preserves_state_and_owed_validation():
       python_rng_state=[1],numpy_rng_state=[2],torch_rng_state=[3],cuda_rng_state=[4],
       resume_identity={'dataset':'TasteMolNet','source_label':1,'target_label':0},resume_identity_sha256='source',
       sampler_state=dict(old['sampler'],next_epoch=30),augmented_dataset_identity=old,
-      epoch=29,next_epoch=30,best_loss=1.0,config={'epochs':100})
+      next_epoch=30,best_loss=1.0,config={'epochs':100})
     before=copy.deepcopy(c);out,r=adapted_checkpoint(c,new,original_identity=old,formal_ledger={'max_full_starts':1,'attempt_id':'original'})
     assert c==before and r['validation_epoch30_required'] and not r['persistent_committed']
     for key in c:

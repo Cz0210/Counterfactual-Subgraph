@@ -19159,3 +19159,9 @@ test, GPU or optimizer updates. It must stop before training. GPU 2-train/1-val
 and reload, actual owner/FD/provider, and durable backup are still separate gates.
 The paired Slurm script explicitly uses CPU intel rather than the generic A800
 template because this stage must not acquire or consume any GPU.
+
+First CPU launch loaded the original checkpoint but stopped on a consumer
+KeyError('epoch'). The pinned v2 producer has only next_epoch=epoch+1, written
+after optimizer and due validation. Read that actual schema together with
+scheduler.last_epoch=30; do not invent an epoch field or skip owed validation30.
+The failed preparation and source snapshot are retained; zero optimizer updates.

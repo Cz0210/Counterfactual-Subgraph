@@ -48,7 +48,7 @@ def main():
         from src.baselines.globalgce_resumable import validate_globalgce_epoch_checkpoint_identity, _get_fs_expanded_data_from_adoption, _atomic_torch_save
         validate_globalgce_epoch_checkpoint_identity(checkpoint,checkpoint['resume_identity'])
         if old!=checkpoint['augmented_dataset_identity']:raise ValueError('SOURCE_INDEX_NOT_BOUND_TO_CHECKPOINT')
-        atomic_json(out/'source_checkpoint_receipt.json',dict(snap,epoch=checkpoint['epoch'],next_epoch=checkpoint['next_epoch'],model_tensor_count=len(checkpoint['model_state']),optimizer_state_count=len(checkpoint['optimizer_state']['state']),formal_quota_used='1/1',old_checkpoint_unchanged=True))
+        atomic_json(out/'source_checkpoint_receipt.json',dict(snap,completed_epoch=checkpoint['next_epoch']-1,epoch_source='globalgce_epoch_checkpoint_v2 producer stores next_epoch=epoch+1 after optimizer and due validation',next_epoch=checkpoint['next_epoch'],model_tensor_count=len(checkpoint['model_state']),optimizer_state_count=len(checkpoint['optimizer_state']['state']),formal_quota_used='1/1',old_checkpoint_unchanged=True))
         sample('source_checkpoint_loaded')
         from src.baselines.tastemolnet_globalgce_full import _checkpoint_payloads,load_full_train_split,select_full_sweet_train_cohort,FrozenTasteGINEScorer
         from src.baselines.globalgce_bace_native_rules import validate_official_globalgce_root
