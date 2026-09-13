@@ -388,7 +388,7 @@ def replot(source_csv: str | Path, output_dir: str | Path, *, dataset: str,
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
     fixture = manifest["fixture"]
-    label = f"{dataset.upper()} | original frozen GINE"
+    label = f"{dataset.upper()} | original frozen {oracle.upper()}"
     annotation = "SYNTHETIC FIXTURE - NOT SCIENTIFIC RESULTS" if fixture else "CM-CReM-Global | generated full-graph prototypes"
     outputs: list[str] = []
     style = {"color": "#167D9A", "linestyle": (0, (6, 2, 1, 2)), "linewidth": 2.0}

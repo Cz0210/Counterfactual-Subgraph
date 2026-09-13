@@ -18938,3 +18938,9 @@ renaming it to BACE v1 PASS. Require original batch32 replay, full ordered
 calibration/test block closure, global pool/freeze binding and unchanged CSV
 hashes. Package compact matrices and receipts, not models or generation trees.
 This is record-only transport and does not change the 007e6893 science producer.
+
+Visual QA found the shared offline renderer still printed "original frozen
+GINE" for the new RF Mut result. Use the validated oracle argument in titles;
+CSV values, export manifest and signed source package remain unchanged. Fresh
+Mac derived plots correct only this label. Dataset transport now labels its
+Mac import as CM_DATASET_RESULT_IMPORTED_NOT_MAIN_AUTHORITY, not BACE release.

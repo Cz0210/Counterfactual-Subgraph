@@ -597,7 +597,10 @@ def verify_import(package: str | Path, manifest: str | Path,
                "main_matrix_written": False, "registry_created": False,
                "models_loaded": False, "generation_rerun": False, "distance_recomputed": False}
     atomic_json(staging / "cm_import_receipt.json", receipt, immutable=True)
-    atomic_json(staging / "cm_run_publication.json", {**receipt, "status": "BACE_CM_CREM_RESULT_PUBLISHED",
+    publication_status = ("CM_DATASET_RESULT_IMPORTED_NOT_MAIN_AUTHORITY" if gate.get("dataset")
+                          else "BACE_CM_CREM_RESULT_PUBLISHED")
+    atomic_json(staging / "cm_run_publication.json", {**receipt, "status": publication_status,
+                "dataset": gate.get("dataset", "bace"), "oracle": gate.get("oracle", "gine"),
                 "scope": "INDEPENDENT_CM_BASELINE_NOT_ORIGINAL_MAIN_MATRIX", "scientific_pass_claimed": True}, immutable=True)
     _sync_directories(staging)
     _atomic_directory(staging, destination)
