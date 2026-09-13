@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## 2026-09-13 closeout increment
+
+CM Taste/Mut full remaining-parent generation and global pool stages extend the
+accepted pilot via the shared native worker. Next bind compact full calibration,
+single K20 selection and test/audit/export to original dataset parent contracts.
+These are separate completion gates; a generated pool is not a released cell.
+
 ## 2026-09-11 CM K20 continuation
 
 - [x] Distinct v2 existing-audit package/import adapter and CPU wrapper.

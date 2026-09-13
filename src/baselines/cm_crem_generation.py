@@ -340,8 +340,13 @@ def run_native_parent(request: Mapping[str, Any], *, source_path: Path, database
             row.update(status="INFRASTRUCTURE_FAILED", error_type=type(error).__name__, error=str(error))
             raise InfrastructureFailure(error) from error
         except Exception as error:
+            import traceback
             row.update(status="UPSTREAM_INNER_TIMEOUT" if type(error).__name__ == "TimeoutException"
                        else "ENGINEERING_FAILED", error_type=type(error).__name__, error=str(error))
+            row['traceback'] = traceback.format_exc()
+            row['query_molecule_smiles'] = Chem.MolToSmiles(molecule, canonical=False, isomericSmiles=True)
+            row['query_atom_maps'] = [atom.GetAtomMapNum() for atom in molecule.GetAtoms()]
+            row['query_parameters'] = {k: v for k, v in kwargs.items() if k != 'db_name'}
             raise
         finally:
             row["elapsed_seconds"] = time.monotonic()-query_started
@@ -374,7 +379,9 @@ def run_native_parent(request: Mapping[str, Any], *, source_path: Path, database
         error.generation_context = base
         raise
     if any(row["status"] == "ENGINEERING_FAILED" for row in queries):
-        raise GenerationContractError(f"upstream suppressed a CReM exception: {queries[-1]}")
+        error = GenerationContractError(f"upstream suppressed a CReM exception: {queries[-1]}")
+        error.generation_context = base
+        raise error
     retained, counts = retain_raw_outputs(outputs, seed)
     return {**base, "status": "GENERATED" if outputs else "NO_NATIVE_REPLACEMENT",
             "retained_raw": retained, "counts": counts}

@@ -1,5 +1,17 @@
 # Decisions Log
 
+## 2026-09-13 — CM remaining-parent continuation, not a second pilot
+
+Adopt each accepted dataset pilot's exact train-source roster, 32 parent units,
+requests and original per-parent RNG namespace. New immutable execution shards
+process only the roster difference. Reuse original oracle/Grad-CAM/RF/native CM,
+retain full per-parent failures, globally deduplicate and freeze <=6000 before
+calibration. Full generation and pool freeze do not imply evaluation acceptance.
+User-authorized CPU Slurm exception remains intel/8CPU/32GiB, with original
+deadline unchanged. No GPU0 allocation, main authority change or new controller.
+For the single failed AIDS request, preserve the pinned native traceback and
+query molecule/maps/parameters; observation does not convert an error to empty.
+
 ## 2026-09-11 — Distinct CM K20-v2 portable acceptance
 
 The completed 2666809 calculation has a v2 scoped independent audit, not the
