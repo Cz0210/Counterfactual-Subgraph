@@ -5,6 +5,8 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
+# A fresh spec may adopt EXPLICIT_H_IDENTITY_TRANSPORT after focused tests;
+# the same full root and completed parent units remain bound and unchanged.
 # User-authorized CM CPU exception to the repository A800 template.
 set -eo pipefail
 source ~/.bashrc

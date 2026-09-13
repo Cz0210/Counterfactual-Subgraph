@@ -6,6 +6,8 @@
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
 # Authorized CPU-only diagnostic, not default GPU training.
+# CM_SINGLE_CUT_REPAIR=1 opts into the reviewed task-local salt fix and its
+# connected-graph exact regression before the single failed-parent replay.
 set -eo pipefail
 source ~/.bashrc
 conda activate smiles_pip118

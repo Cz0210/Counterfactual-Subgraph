@@ -88,11 +88,12 @@ def official_ring_mask(mol: Any, selected: list[int]) -> list[int]:
 
 
 def make_parent_request(parent_id: str, mol: Any, selected_atom_indices: list[int],
-                        split: str = "train", *, explicit_stereo_transport: bool = False) -> dict[str, Any]:
+                        split: str = "train", *, explicit_stereo_transport: bool = False,
+                        allow_explicit_hydrogens: bool = False) -> dict[str, Any]:
     from rdkit import Chem
     if split != "train":
         raise GenerationContractError("generation is train-only")
-    if mol is None or mol.GetNumAtoms() < 1 or mol.GetNumAtoms() != mol.GetNumHeavyAtoms():
+    if mol is None or mol.GetNumAtoms() < 1 or (mol.GetNumAtoms() != mol.GetNumHeavyAtoms() and not allow_explicit_hydrogens):
         raise GenerationContractError("CM input must contain non-hydrogen atoms only")
     Chem.SanitizeMol(mol)
     block = Chem.MolToMolBlock(mol, kekulize=False, forceV3000=True)
@@ -411,6 +412,11 @@ def _worker(request: dict, config: dict, connection: Any, log_path: str) -> None
             db = Path(config["database_path"])
             before = db.stat()
             function = _readonly_crem(db, counters)
+            repair = None
+            if config.get('single_cut_spectator_repair'):
+                import crem.crem as native_crem
+                from .cm_crem_fragment_repair import install
+                repair = install(native_crem)
             result = run_native_parent(request, source_path=Path(config["upstream_root"]) / "source/linksGenerator.py",
                                        database_path=db, science_hash=config["science_hash"],
                                        mutate_function=function, counters=counters)
@@ -419,6 +425,8 @@ def _worker(request: dict, config: dict, connection: Any, log_path: str) -> None
                     after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
                 raise GenerationContractError("static CReM database changed during worker")
             result["environment"] = environment
+            if repair is not None:
+                result['fragmentation_repair'] = repair
     except (Exception, InfrastructureFailure) as error:
         result = _error_record(error)
     result.update(parent_id=request.get("parent_id"), elapsed_seconds=time.monotonic()-started,

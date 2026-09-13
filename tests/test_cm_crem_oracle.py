@@ -75,6 +75,20 @@ def test_attribution_repeat_is_exact_and_no_double_scaling(adapter):
     np.testing.assert_array_equal(expected, a["prediction"]["probabilities"])
 
 
+def test_explicit_isotope_h_preserved_only_with_identity_adapter(adapter):
+    from src.baselines.cm_crem_generation import load_parent_mol, atom_order_sha256
+    parent={'parent_id':'explicit-h','smiles':'[2H]C(C)O','split':'train'}
+    with pytest.raises(ValueError,match='hydrogen-node'): adapter.attribute_train_parent(parent)
+    adapter.binding.update(dataset='tastemolnet',explicit_hydrogen_identity_transport=True)
+    a=adapter.attribute_train_parent(parent)
+    b=adapter.attribute_train_parent(parent)
+    mol=Chem.MolFromSmiles(parent['smiles'])
+    assert a['atom_mapping']==list(range(mol.GetNumAtoms()))
+    assert a['importances']==b['importances']
+    assert atom_order_sha256(load_parent_mol(a['generation_request']))==atom_order_sha256(mol)
+    assert len(a['importances'])==mol.GetNumAtoms()
+
+
 def test_author_formula_is_node_channel_mean_not_standard_gradcam():
     activations = torch.tensor([[1., 2.], [3., 4.], [5., 6.]])
     gradients = torch.tensor([[1., 3.], [-2., 0.], [1., 1.]])

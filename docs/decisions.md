@@ -1,5 +1,21 @@
 # Decisions Log
 
+## 2026-09-13 — Observed salt and explicit-H continuation failures
+
+Job2687411 captured AIDS KeyError('') before any database SELECT: CReM0.2.14
+single-cut code assumes two disconnected fragments, but spectator chloride
+occupies one slot. An exact-source-pinned, task-local repair keeps the two
+attachment-bearing fragments. The original full molecule still enters the
+replacement reaction; no spectator stripping or shared package change occurs.
+Connected-fragmentation exact regression precedes the single failed-parent
+repair. This does not label a caught engineering exception as scientific zero.
+
+Taste shard2687407 stopped at the explicit-H guard. The opt-in identity
+transport preserves isotope/H nodes, original features and atom order, and
+the same20% Grad-CAM formula. Small-GINE repeat and roundtrip tests precede
+a fresh execution spec for the same root/shard. Completed units and running
+shards remain unchanged. No fresh parent budget or source cohort is added.
+
 ## 2026-09-13 — CM remaining-parent continuation, not a second pilot
 
 Adopt each accepted dataset pilot's exact train-source roster, 32 parent units,

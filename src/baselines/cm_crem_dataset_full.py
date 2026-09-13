@@ -115,6 +115,9 @@ class DatasetFull:
 
     def attribute(self, shard):
         oracle, _ = oracle_for(self.p)
+        if self.spec.get('repair') == 'EXPLICIT_H_IDENTITY_TRANSPORT':
+            if self.p['dataset'] != 'tastemolnet': raise ValueError('Taste-only atom identity repair')
+            oracle.binding['explicit_hydrogen_identity_transport'] = True
         rows = self.assigned(shard)
         for parent in rows:
             name = 'attribution_units/' + digest(parent['parent_id'])[:20] + '.json'
@@ -126,7 +129,7 @@ class DatasetFull:
                 a = attribute(oracle, parent)
             else:
                 a = oracle.attribute_train_parent(parent)
-            if a.get('before_label', a.get('before', {}).get('predicted_label', 1)) != 1:
+            if a.get('before_label', a.get('prediction', {}).get('predicted_label', 1)) != 1:
                 raise ValueError('Frozen full train-source predicate changed')
             self.put(name, {'record': a})
         self.put(f'attribution-shard-{shard}.json', {'parent_ids': [p['parent_id'] for p in rows], 'new_count': len(rows)})

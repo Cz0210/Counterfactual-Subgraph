@@ -30,8 +30,25 @@ def main():
         expected_url=dbsource['actual_source_url'],scratch_receipt=scratch)
     if staged['status']!='LOCAL_DATABASE_READY': raise RuntimeError(staged)
     atomic_json(root/'scratch.json',staged,immutable=True)
+    repair=os.environ.get('CM_SINGLE_CUT_REPAIR') == '1'
+    if repair:
+        from src.baselines.cm_crem_fragment_repair import install
+        import crem.crem as native
+        from rdkit import Chem
+        original=native.__fragment_mol
+        fixtures=['CCOCC','c1ccccc1CCO','N[C@@H](C)C(=O)O']
+        before=[set(original(Chem.MolFromSmiles(s),radius=1,symmetry_fixes=True)) for s in fixtures]
+        patch=install(native)
+        after=[set(native.__fragment_mol(Chem.MolFromSmiles(s),radius=1,symmetry_fixes=True)) for s in fixtures]
+        if before!=after: raise ValueError('Connected fragmentation changed')
+        original_mol=Chem.MolFromSmiles('[Cl-].CCOCC')
+        fragments=native.__fragment_mol(original_mol,radius=1,symmetry_fixes=True)
+        if not fragments or any('[Cl-]' in core for _,core,_ in fragments): raise ValueError('Spectator was treated as replacement core')
+        atomic_json(root/'repair_test.json',dict(status='CONNECTED_FRAGMENTATION_EXACT_AND_SPECTATOR_MAPPING_PASS',
+            repair=patch,fixtures=fixtures,fragment_count=len(fragments)),immutable=True)
     result=generate_parent(records[0]['generation_request'],dict(database_path=staged['database_path'],
-        upstream_root=e['upstream_root'],science_hash=expected,parent_wall_limit_seconds=900), log_path=root/'native.log')
+        upstream_root=e['upstream_root'],science_hash=expected,parent_wall_limit_seconds=900,
+        single_cut_spectator_repair=repair), log_path=root/'native.log')
     atomic_json(root/'diagnosis.json',dict(result=result,source_root=str(source),parent_id=a.parent_id,
         source_request_sha256=digest(records[0]['generation_request']),new_parent_count=1,
         successful_generation_units_replayed=0,scientific_pass_claimed=False),immutable=True)

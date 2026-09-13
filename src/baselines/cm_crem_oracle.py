@@ -259,7 +259,7 @@ class FrozenCMOracle:
         molecule = Chem.MolFromSmiles(smiles)
         if molecule is None or molecule.GetNumAtoms() == 0:
             raise ValueError("Invalid train parent")
-        if any(atom.GetAtomicNum() == 1 for atom in molecule.GetAtoms()):
+        if any(atom.GetAtomicNum() == 1 for atom in molecule.GetAtoms()) and not self.binding.get('explicit_hydrogen_identity_transport'):
             raise ValueError("Explicit hydrogen-node parent requires an audited atom mapping")
         graph = self._graph(smiles, parent_id, "train")
         if graph.num_nodes != molecule.GetNumAtoms():
@@ -318,7 +318,8 @@ class FrozenCMOracle:
         selected = upstream_top_atoms(scores)
         request = make_parent_request(parent_id=parent_id, mol=molecule,
                                       selected_atom_indices=selected, split="train",
-                                      explicit_stereo_transport=self.binding.get("dataset") == "tastemolnet")
+                                      explicit_stereo_transport=self.binding.get("dataset") == "tastemolnet",
+                                      allow_explicit_hydrogens=bool(self.binding.get('explicit_hydrogen_identity_transport')))
         generation_allowed = len(request["effective_atom_indices"]) < graph.num_nodes
         return {**base, "status": "ATTRIBUTION_COMPLETE" if generation_allowed else "NO_REPLACEABLE_CONTEXT",
                 "generation_allowed": generation_allowed, "generation_request": request,
