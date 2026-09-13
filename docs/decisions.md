@@ -1,5 +1,15 @@
 # Decisions Log
 
+## 2026-09-13 — Located original Mut K20 inputs
+
+The Sept7 rootcause receipt resolves original GCF/Global pair CSV and their
+pre-test20 orders. A CPU-only reducer exports exact prefixes, K20ECDF and both
+conditional-median/fixed-capped-mean cost from these records. It does not run
+oracle/OT, reconstruct a selector, or claim renewed model review. The current
+matrix's Mut threshold JSON is MISSING_NOT_INFERRED, while the original source
+contains a calibration-frozen grid. Numeric recovery is therefore separate
+from current-paper-family reconciliation and does not append the authority.
+
 ## 2026-09-13 — Observed salt and explicit-H continuation failures
 
 Job2687411 captured AIDS KeyError('') before any database SELECT: CReM0.2.14
