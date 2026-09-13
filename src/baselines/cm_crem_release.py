@@ -39,6 +39,7 @@ TOP_FILES = {
     "attribution.json", "pool_freeze.json", "pool_encodings.json", "selection_freeze.json",
     "test_evaluation.json", "budget_and_timing.json", "candidate_funnel.csv", "candidate_provenance.csv",
     "pool.json", "freeze.json", "calibration_comparison.json",
+    "pool_binding.json", "selection_report.json", "calibration_prepared.json", "test_prepared.json",
 }
 TREE_DIRS = {"pilot", "full", "calibration", "test", "attribution_units", "generation_units", "filter_units",
              "producer_receipts", "audit", "results", "diagnostics", "source_bindings", "provenance", "manifests", "encodings"}
@@ -136,6 +137,8 @@ def _scan(root: Path) -> dict[str, tuple[int, ...]]:
 
 
 def _audit_gate(read_json: Callable[[str], dict], hash_for: Callable[[str], str], names: set[str]) -> dict:
+    if 'pool_binding.json' in names:
+        return _postfilter_audit_gate(read_json, hash_for, names)
     if "audit/k20_audit.json" in names:
         return _k20_audit_gate(read_json, hash_for, names)
     audit = read_json("audit/final_audit.json")
@@ -180,6 +183,64 @@ def _audit_gate(read_json: Callable[[str], dict], hash_for: Callable[[str], str]
     _require(set(export.get("source_files", {})) == RESULT_FILES, "Export CSV inventory incomplete")
     return {"science_hash": science, "independent_spotcheck": binding,
             "final_audit_sha256": hash_for("audit/final_audit.json")}
+
+
+def _postfilter_audit_gate(read, hash_for, names):
+    """Typed Taste/Mut audit, without pretending it is the old BACE audit."""
+    from .cm_crem_selection import SelectionFreeze
+    required={'spec.json','pool_binding.json','selection_report.json','selection_freeze.json',
+              'calibration_prepared.json','test_prepared.json','test_evaluation.json',
+              'audit/final_audit.json','results/export_manifest.json'}
+    _require(required <= names,'Postfilter package missing actual stage receipts')
+    spec,audit,pool=read('spec.json'),read('audit/final_audit.json'),read('pool_binding.json')
+    science=digest({k:v for k,v in spec.items() if k not in {'execution_commit','output_root'}})
+    _require(spec.get('fixture') is False and spec.get('batch_size')==32,
+             'Train fixture / wrong batch cannot publish')
+    for n in required-{'spec.json','results/export_manifest.json'}:
+        _require(read(n).get('contract_sha256')==science,'Postfilter mixed contract: '+n)
+    _require(audit.get('status')=='CM_DATASET_POSTFILTER_AUDIT_PASS' and audit.get('scientific_pass_claimed') is True
+             and audit.get('main_authority_written') is False and audit.get('fixture') is False,
+             'Postfilter independent final audit not accepted')
+    _require(pool.get('fixture') is False and pool.get('test_read') is False and pool.get('pilot_adopted')==32
+             and isinstance(pool.get('full_contract_sha256'),str),'Missing full/pilot generation binding')
+    frozen=SelectionFreeze.from_dict(read('selection_freeze.json'))
+    _require(frozen.freeze_sha256==audit.get('selection_freeze_sha') and frozen.frozen_pool_sha256==pool.get('pool_sha256')
+             and list(frozen.pool_candidate_ids)==pool['candidate_ids'],'Postfilter pool/freeze mismatch')
+    _require(read('selection_report.json').get('selection_used_test') is False,'Test entered selection')
+    producer_pids=set();counts={}
+    for split in ['calibration','test']:
+        prep=read(split+'_prepared.json');ids=prep['parent_ids'];cids=prep['candidate_ids']
+        _require(len(ids)==len(set(ids))==spec['parents'][split]['count'],'Postfilter base count changed')
+        _require(cids==(pool['candidate_ids'] if split=='calibration' else list(frozen.selected_candidate_ids)),
+                 'Postfilter selected-test / full-calibration order differs')
+        covered=[]
+        blocks=sorted(n for n in names if n.startswith(split+'/block-') and n.endswith('.json'))
+        for n in blocks:
+            b=read(n);producer_pids.add(b['producer_pid'])
+            npz=n[:-5]+'.npz'
+            _require(npz in names and hash_for(npz)==b['npz_sha256'] and b['contract_sha256']==science,
+                     'Postfilter raw block binding differs')
+            _require(b['candidate_ids']==cids and b['logical_pair_count']==len(b['parent_ids'])*len(cids),
+                     'Postfilter logical matrix incomplete')
+            covered.extend(b['parent_ids'])
+        _require(covered==ids,'Postfilter full parent blocks not closed')
+        counts[split]=len(ids)
+    _require(audit.get('auditor_pid') not in producer_pids and audit.get('oracle_rows_replayed')==len(pool['candidate_ids'])+sum(counts.values()),
+             'Postfilter independent original-batch replay missing')
+    result=read('test_evaluation.json')
+    _require(digest({k:v for k,v in result.items() if k!='contract_sha256'} | {'contract_sha256':science})==audit['test_result_sha256'],
+             'Postfilter test digest differs')
+    export=read('results/export_manifest.json')
+    _require((export.get('dataset'),export.get('oracle')) in {('mutagenicity','rf'),('tastemolnet','gine')}
+             and export.get('fixture') is False,'Postfilter wrong dataset/oracle')
+    _require(set(export.get('source_files',{}))==RESULT_FILES,'Postfilter CSV inventory incomplete')
+    for n,sha in export['source_files'].items():
+        name='results/source_csv/'+_name(n)
+        _require(name in names and hash_for(name)==sha,'Postfilter CSV changed')
+    return {'science_hash':science,'final_audit_sha256':hash_for('audit/final_audit.json'),
+            'variant':'CM-Global-K20-Postfilter-v2','dataset':export['dataset'],'oracle':export['oracle'],
+            'scope':'ORIGINAL_DATASET_ORACLE_TRAIN_POOL_GLOBAL_K20',
+            'independent_spotcheck':{'path':'audit/final_audit.json','sha256':hash_for('audit/final_audit.json')}}
 
 
 def _k20_audit_gate(read, hash_for, names):

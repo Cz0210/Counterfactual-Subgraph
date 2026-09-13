@@ -18931,3 +18931,10 @@ The saved paper projection may explicitly reference accepted CM-v2 through
 cm_bace_active with TASK_AUTHORIZED_V2_CALIBRATION_ONLY_FREEZE. It remains one
 CM-BACE cell, not a data-dependent choice of the better test version. Original
 v1 stays in its immutable source directory and version comparison.
+# 2026-09-14: typed CM Taste/Mut portable acceptance
+
+Extend the existing CM release gate for the distinct postfilter audit, without
+renaming it to BACE v1 PASS. Require original batch32 replay, full ordered
+calibration/test block closure, global pool/freeze binding and unchanged CSV
+hashes. Package compact matrices and receipts, not models or generation trees.
+This is record-only transport and does not change the 007e6893 science producer.
