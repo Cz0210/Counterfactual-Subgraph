@@ -8,7 +8,9 @@ import hashlib
 import inspect
 import textwrap
 
-SOURCE_SHA = 'b0c1f68a1946a8e45161e924438526a9a01d15f726b4bfb7edd1a9d56fd94454'
+# inspect.getsource includes the reviewed last-line comment; AST source-segment
+# excludes that comment. Bind the actual inspected representation, not AST text.
+SOURCE_SHA = 'cfddc826faacc42f05dde44fdeb1dc5830f04dc92640c224eff815c6200efce0'
 OLD = 'components = list(Chem.GetMolFrags(chains, asMols=True))'
 NEW = '''components = list(Chem.GetMolFrags(chains, asMols=True))
             components = [part for part in components if any(

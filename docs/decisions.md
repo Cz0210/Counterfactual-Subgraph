@@ -1,5 +1,13 @@
 # Decisions Log
 
+## 2026-09-13 — CReM repair source representation pin
+
+Repair-test2687474 stopped before generation because the expected hash had
+been calculated with ast.get_source_segment, excluding the final inline
+comment, while runtime inspect.getsource included it. Recomputed the pin
+from the same reviewed function's full lines, including that comment. No
+algorithm, acceptance tolerance, database or input changed. Keep failedjob.
+
 ## 2026-09-13 — Located original Mut K20 inputs
 
 The Sept7 rootcause receipt resolves original GCF/Global pair CSV and their
