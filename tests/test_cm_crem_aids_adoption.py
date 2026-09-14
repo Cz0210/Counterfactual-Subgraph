@@ -20,3 +20,12 @@ class AdoptionTests(unittest.TestCase):
 
     def test_not_sixteen_rejected(self):
         with self.assertRaises(ValueError): fixed32(self.parents, self.attrs[:12])
+
+    def test_parent_salt_not_dropped_and_candidate_still_rejected(self):
+        from src.data.molecular_graph_featurizer import MolecularGraphFeaturizer
+        from src.baselines.cm_crem_oracle import graph_identity
+        f=MolecularGraphFeaturizer(require_single_component=False)
+        parent=graph_identity('CCO.[Na+]',f,require_connected=False)
+        self.assertEqual(parent['num_atoms'],4)
+        with self.assertRaisesRegex(ValueError,'DISCONNECTED'):
+            graph_identity('CCO.[Na+]',f)

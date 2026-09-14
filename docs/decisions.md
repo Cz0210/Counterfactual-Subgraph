@@ -18979,3 +18979,10 @@ high-write guard. Unknown peaks reject admission. A sealed small release keeps
 the complete verified archive, streams every member digest, and runs the same
 typed scientific gate, but expands only source CSV and key receipts. No raw
 matrix expansion, model load or scientific re-evaluation is performed.
+
+CM-AIDS2691989 completed the adopted/missing32 generation and RF filtering,
+then failed WNode parent encoding on an authoritative salt. The full-graph
+identity already explicitly permits disconnected parents, but its featurizer
+still required one component. Set that constructor flag for AIDS RF only;
+retain every parent atom/component and keep prototype connectedness strict.
+Resume the affected verification/encoding, not generation or attribution.

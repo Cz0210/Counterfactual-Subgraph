@@ -51,7 +51,10 @@ def oracle_for(spec):
         oracle=LegacyRFOracle(spec['oracle_path'],num_classes=2,source_label=1)
         if tuple(oracle.class_labels)!=(0,1):raise ValueError('RF class axes need explicit mapping')
         serial_rf_execution(oracle)
-        return oracle, MolecularGraphFeaturizer()
+        # AIDS authoritative parent SMILES include salts. Parent encoding must
+        # retain all components; generated prototypes still pass the explicit
+        # connectedness filter in graph_identity before entering the pool.
+        return oracle, MolecularGraphFeaturizer(require_single_component=spec['dataset']!='aids')
     from src.oracles.gnn_oracle import GNNOracle
     from .cm_crem_oracle import FrozenCMOracle
     root=Path(spec['oracle_path'])
