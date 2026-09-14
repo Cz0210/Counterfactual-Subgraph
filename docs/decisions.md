@@ -1,5 +1,18 @@
 # Decisions Log
 
+## 2026-09-14 — authorized CM-AIDS source-descriptive evaluation
+
+The original AIDS source-base has no recoverable independent calibration IDs.
+The user authorizes one fixed SHA256-selected 20% generated-source subset,
+evaluated on the complete original source base, with explicit overlap and
+heldout=false. The existing 56d49efc scientific evaluator, RF, 6000 pool and
+WNode are unchanged. New code only validates portable scope and extends the
+existing finite relay collection after its previous terminal. No main-cell
+registration is authorized by this non-heldout portable gate. Existing native
+generation and all completed CM results are retained. The private transport
+commit is distinct from the scientific execution commit. Pair scripts remain
+CPU-only explicit user-authorized exceptions to the generic GPU Slurm template.
+
 ## 2026-09-14 — CM postfilter dataset adapter
 
 Reuse original RF/Taste GINE batch32, MolCLR node encoder, exact EMD and the

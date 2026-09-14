@@ -349,7 +349,7 @@ def _table(path: Path, row: Mapping[str, str], *, fixture: bool) -> None:
 
 
 def replot(source_csv: str | Path, output_dir: str | Path, *, dataset: str,
-           oracle: str = "gine") -> dict[str, Any]:
+           oracle: str = "gine", scope_label: str | None = None) -> dict[str, Any]:
     """Offline, hash-bound CSV-only replot; no selection/OT/model execution."""
     _metadata(dataset=dataset, oracle=oracle)
     source = Path(source_csv).expanduser().resolve(strict=True)
@@ -390,6 +390,10 @@ def replot(source_csv: str | Path, output_dir: str | Path, *, dataset: str,
     fixture = manifest["fixture"]
     label = f"{dataset.upper()} | original frozen {oracle.upper()}"
     annotation = "SYNTHETIC FIXTURE - NOT SCIENTIFIC RESULTS" if fixture else "CM-CReM-Global | generated full-graph prototypes"
+    if scope_label is not None:
+        if (dataset,oracle)!=('aids','rf') or scope_label!='CM-AIDS-SOURCE-DESCRIPTIVE-v1':
+            raise ValueError('Unsupported scope annotation')
+        annotation = 'SOURCE-DESCRIPTIVE | heldout=false | selection overlaps evaluation'
     outputs: list[str] = []
     style = {"color": "#167D9A", "linestyle": (0, (6, 2, 1, 2)), "linewidth": 2.0}
     with plt.rc_context({"font.size": 10, "axes.spines.top": False, "axes.spines.right": False,

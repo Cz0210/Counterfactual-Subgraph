@@ -333,11 +333,16 @@ def validate_postfilter_delivery(plan, original_identity):
         raise ValueError('Postfilter relay may not reset original campaign deadline')
     seen=set()
     for row in plan['datasets']:
-        if row['dataset'] not in {'mutagenicity','tastemolnet'} or row['dataset'] in seen:
+        if row['dataset'] not in {'mutagenicity','tastemolnet','aids'} or row['dataset'] in seen:
             raise ValueError('Only unique completed/submitted postfilter dataset chains')
         seen.add(row['dataset'])
         if not re.fullmatch(r'[0-9]+',row['package_job_id']):raise ValueError('Real existing package job required')
-        for key,base in [('hpc_root','/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v2/postfilter-20260914'),('local_root','/Volumes/DireRaven/counterfactual-hpc-offload/cm-crem-global-v2')]:
+        bases=[('hpc_root','/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v2/postfilter-20260914'),('local_root','/Volumes/DireRaven/counterfactual-hpc-offload/cm-crem-global-v2')]
+        if row['dataset']=='aids':
+            if row.get('scope')!='CM-AIDS-SOURCE-DESCRIPTIVE-v1' or row.get('heldout') is not False:
+                raise ValueError('AIDS delivery needs the explicit non-heldout scope')
+            bases=[('hpc_root','/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v2/aids-gap-first-20260914'),('local_root','/Volumes/DireRaven/counterfactual-hpc-offload/cm-aids-k20-closeout-20260914')]
+        for key,base in bases:
             value=Path(row[key])
             if not value.is_absolute() or '..' in value.parts or value==Path(base) or not value.is_relative_to(base):
                 raise ValueError('Postfilter delivery path outside current campaign')
@@ -357,7 +362,17 @@ def collect_postfilter_delivery(args,local,lock):
     except ProcessLookupError:pass
     else:raise ValueError('Original relay PID still exists; no duplicate collector')
     identity_path=local/'postfilter_delivery_identity.json'
-    if identity_path.exists():raise ValueError('Existing postfilter collector intent; inspect, do not duplicate')
+    if identity_path.exists():
+        prior=read_json(identity_path); terminal=read_json(local/'postfilter_delivery_state.json')
+        if not args.resume_postfilter_after_terminal or terminal.get('status')!='MAC_COLLECTION_TERMINAL_AUTODL_IMPORT_SEPARATE':
+            raise ValueError('Existing postfilter collector intent; inspect, do not duplicate')
+        try:os.kill(prior['pid'],0)
+        except ProcessLookupError:pass
+        else:raise ValueError('Prior collector PID exists; no handoff')
+        archived=local/'relay_attempts'/('postfilter-'+uuid.uuid4().hex);archived.mkdir()
+        for name in ('postfilter_delivery_identity.json','postfilter_delivery_state.json'):
+            shutil.copyfile(local/name,archived/name)
+        identity_path.unlink()  # only exited derived identity, never the campaign lock
     atomic_json(identity_path,dict(pid=os.getpid(),plan=str(args.postfilter_delivery_plan),
         original_identity=original,deadline_utc=plan['deadline_utc'],same_campaign_lock=str(local/'relay.lock'),
         created_at=utc_now(),science_submissions=0,model_api_calls=False),immutable=True)
@@ -393,7 +408,7 @@ def collect_postfilter_delivery(args,local,lock):
                 manifest=read_json(verified/'results/export_manifest.json')
                 if manifest['dataset']!=dataset or manifest['oracle']!=row['oracle']:raise ValueError('Dataset import scope conflict')
                 plots=dest/row['plot_directory']
-                if not (plots/'replot_inputs.json').exists():replot(verified/'results/source_csv',plots,dataset=dataset,oracle=row['oracle'])
+                if not (plots/'replot_inputs.json').exists():replot(verified/'results/source_csv',plots,dataset=dataset,oracle=row['oracle'],scope_label=row.get('scope'))
                 completed[dataset]=dict(status='MAC_RESULT_DELIVERED',receipt=str(receipt_path),plots=str(plots),
                     autodl_import='PENDING_STAGE_STORAGE_ADMISSION',registered_in_autodl=False)
             snapshot['datasets']=dict(completed);failures=0
@@ -426,6 +441,7 @@ def main():
     parser.add_argument('--audit-successor-stage', choices=['audit-context'], help='Adopt the explicitly submitted original-batch audit successor; preserve failed audit receipt')
     parser.add_argument('--package-successor-stage', choices=['package-finalize'], help='Adopt prepared archive finalization without rebuilding science/package')
     parser.add_argument('--postfilter-delivery-plan',type=Path,help='Collect actual Taste/Mut package successors under the original campaign lock; never resubmit science')
+    parser.add_argument('--resume-postfilter-after-terminal',action='store_true',help='Reuse the same flock after an observed dead, completed collector; archive prior identity/state')
     args = parser.parse_args()
     if any(not re.fullmatch(r"/[A-Za-z0-9_./-]+", p) for p in (args.hpc_run_root, args.hpc_execution_root)):
         raise ValueError("CM relay remote paths must be literal safe absolute paths")

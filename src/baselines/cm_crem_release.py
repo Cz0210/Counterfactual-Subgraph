@@ -28,6 +28,7 @@ ALLOWED_ROOTS = (
     Path("/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/baselines/cm_crem_global_v1"),
     Path("/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v2"),
     Path("/Volumes/DireRaven/counterfactual-hpc-offload/cm-crem-global-v2"),
+    Path("/Volumes/DireRaven/counterfactual-hpc-offload/cm-aids-k20-closeout-20260914"),
     Path("/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/baselines/cm_crem_global_v2"),
 )
 SCHEMA = "cm_crem_portable_result_package_v1"
@@ -40,6 +41,7 @@ TOP_FILES = {
     "test_evaluation.json", "budget_and_timing.json", "candidate_funnel.csv", "candidate_provenance.csv",
     "pool.json", "freeze.json", "calibration_comparison.json",
     "pool_binding.json", "selection_report.json", "calibration_prepared.json", "test_prepared.json",
+    "scope_contract.json", "scope_provenance.json",
 }
 TREE_DIRS = {"pilot", "full", "calibration", "test", "attribution_units", "generation_units", "filter_units",
              "producer_receipts", "audit", "results", "diagnostics", "source_bindings", "provenance", "manifests", "encodings"}
@@ -231,7 +233,15 @@ def _postfilter_audit_gate(read, hash_for, names):
     _require(digest({k:v for k,v in result.items() if k!='contract_sha256'} | {'contract_sha256':science})==audit['test_result_sha256'],
              'Postfilter test digest differs')
     export=read('results/export_manifest.json')
-    _require((export.get('dataset'),export.get('oracle')) in {('mutagenicity','rf'),('tastemolnet','gine')}
+    descriptive={}
+    if (export.get('dataset'),export.get('oracle'))==('aids','rf'):
+        from .cm_crem_descriptive import validate_scope
+        _require({'scope_contract.json','scope_provenance.json'}<=names,'AIDS descriptive scope proof missing')
+        _require(read('scope_contract.json')==spec.get('study_scope') and hash_for('scope_contract.json')==spec.get('scope_contract_sha256'),
+                 'AIDS scope was not frozen in the actual science spec')
+        descriptive=validate_scope(spec['study_scope'],read('scope_provenance.json'),
+                                   read('calibration_prepared.json')['parent_ids'],read('test_prepared.json')['parent_ids'])
+    _require(((export.get('dataset'),export.get('oracle')) in {('mutagenicity','rf'),('tastemolnet','gine')} or bool(descriptive))
              and export.get('fixture') is False,'Postfilter wrong dataset/oracle')
     _require(set(export.get('source_files',{}))==RESULT_FILES,'Postfilter CSV inventory incomplete')
     for n,sha in export['source_files'].items():
@@ -240,6 +250,7 @@ def _postfilter_audit_gate(read, hash_for, names):
     return {'science_hash':science,'final_audit_sha256':hash_for('audit/final_audit.json'),
             'variant':'CM-Global-K20-Postfilter-v2','dataset':export['dataset'],'oracle':export['oracle'],
             'scope':'ORIGINAL_DATASET_ORACLE_TRAIN_POOL_GLOBAL_K20',
+            **descriptive,
             'independent_spotcheck':{'path':'audit/final_audit.json','sha256':hash_for('audit/final_audit.json')}}
 
 

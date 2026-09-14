@@ -6,6 +6,7 @@
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
 # Record-only CPU packaging: no GPU, inference, OT or heuristic fallback.
+# AIDS SOURCE-DESCRIPTIVE requires scope/overlap binding; never main authority.
 set -eo pipefail
 source ~/.bashrc
 conda activate smiles_pip118

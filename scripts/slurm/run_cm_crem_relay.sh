@@ -1,4 +1,6 @@
 #!/bin/bash
+# Source-descriptive AIDS collection is Mac-only through the existing relay;
+# --resume-postfilter-after-terminal requires the old collector to be dead.
 # Mac-scoped relay is deliberately NOT a schedulable HPC science process.
 # Paired entrypoint documents the platform boundary; run the Python entry on Mac.
 # Requires the mounted authorized external drive; 300s program polling, bounded

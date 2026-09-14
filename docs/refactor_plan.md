@@ -4403,3 +4403,7 @@ Mutagenicity roadmaps.
 - [x] CM-AIDS pilot32 accepted; full two-shard component-native repair deployed.
 - [ ] Bind AIDS calibration IDs before production selection/test; original
  1283-source evaluation does not itself prove a held-out split.
+- [x] Bind the newly authorized CM-AIDS-SOURCE-DESCRIPTIVE-v1 220-ID selection
+ subset and full1283 source evaluation; preserve non-heldout scope and old runs.
+- [ ] Complete its already submitted calibration/evaluation and typed portable
+ release. Main20 compatibility remains unproven, not an automatic extra cell.
