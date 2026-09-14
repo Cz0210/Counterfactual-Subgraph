@@ -15,3 +15,13 @@ def test_unknown_source_is_rejected():
     def unknown(): return []
     native=types.SimpleNamespace(__fragment_mol=unknown)
     with pytest.raises(ValueError,match='Unreviewed'): install(native)
+
+
+def test_component_remapping_is_explicit_and_does_not_strip_original():
+    import inspect
+    source=inspect.getsource(install)
+    assert 'fragsMolAtomMapping=maps' in source
+    assert 'mapping[i] for i in ids' in source
+    assert 'old in set(protected_ids or [])' in source
+    assert 'return original(mol,' in source
+    assert 'except' not in source

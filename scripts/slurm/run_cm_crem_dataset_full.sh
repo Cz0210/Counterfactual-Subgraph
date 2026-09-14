@@ -1,4 +1,5 @@
 #!/bin/bash
+# AIDS worker pins component-local native fragmentation with global atom IDs.
 #SBATCH --partition=intel
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

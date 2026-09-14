@@ -18986,3 +18986,12 @@ identity already explicitly permits disconnected parents, but its featurizer
 still required one component. Set that constructor flag for AIDS RF only;
 retain every parent atom/component and keep prototype connectedness strict.
 Resume the affected verification/encoding, not generation or attribution.
+
+CM-AIDS full shard2692161 exposed a distinct RDKit MMPA assumption: on a salt,
+core=None can represent simultaneous cuts in independent components, producing
+four attachment-bearing pieces. Compute-node2692340 records the exact pieces.
+The replacement wrapper now invokes unchanged native fragmentation separately
+on connected components and remaps local indices to original atom IDs. The full
+parent remains the replacement substrate. No exceptions become empty results;
+no mask, seed, replacement budget, RF oracle or database is changed. Connected
+inputs still call the exact original function. Retain prior failed receipts.
