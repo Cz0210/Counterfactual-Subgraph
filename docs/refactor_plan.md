@@ -4397,3 +4397,9 @@ Mutagenicity roadmaps.
 - [x] T12preserved24/24; authenticated history/first-seen/transition joint500.
 - [ ] T12 complete model-adapter restore and real owner/FD/provider501–510.
 - [ ] T13 explicit IndexRebuilt continuation plus bounded2+1batch/reload adapter.
+- [x] CM-Mut/Taste compact imports, registered16/numeric10/combined-ready5.
+- [x] Gap-first saved-raw K20 numerical view; finite median and capped columns
+  remain separate; unresolved historical contracts are not silently merged.
+- [x] CM-AIDS pilot32 accepted; full two-shard component-native repair deployed.
+- [ ] Bind AIDS calibration IDs before production selection/test; original
+ 1283-source evaluation does not itself prove a held-out split.

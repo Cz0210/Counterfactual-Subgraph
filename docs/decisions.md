@@ -18995,3 +18995,13 @@ on connected components and remaps local indices to original atom IDs. The full
 parent remains the replacement substrate. No exceptions become empty results;
 no mask, seed, replacement budget, RF oracle or database is changed. Connected
 inputs still call the exact original function. Retain prior failed receipts.
+
+### 2026-09-14 — versioned gap-first K20 paper view
+
+Use accepted CM-Mut/Taste release receipts without incrementing numeric10 twice.
+CM-Mut primary cost is finite uncapped median without theta filtering; retain
+capped mean separately. Derive K1–20 and exact K10/K20 ECDF from saved minima.
+Read original BACE/Taste sealed sources rather than legacy presentation CSVs;
+report any derived-export mismatch explicitly. Different Mut theta versions and
+unresolved source rows remain PENDING, not zero. Rendering is an offline Mac
+projection, not another scientific authority or a final cross-producer audit.
