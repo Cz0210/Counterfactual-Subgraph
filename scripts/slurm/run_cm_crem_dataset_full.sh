@@ -8,6 +8,7 @@
 # A fresh spec may adopt EXPLICIT_H_IDENTITY_TRANSPORT after focused tests;
 # the same full root and completed parent units remain bound and unchanged.
 # User-authorized CM CPU exception to the repository A800 template.
+# AIDS continuation keeps the adopted pilot's legacy per-parent RNG namespace.
 set -eo pipefail
 source ~/.bashrc
 conda activate smiles_pip118

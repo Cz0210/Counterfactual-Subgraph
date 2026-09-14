@@ -1,4 +1,5 @@
 #!/bin/bash
+# AIDS uses its explicitly scoped original RF/cohort binding, never Taste/GINE.
 #SBATCH --partition=intel
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

@@ -77,7 +77,7 @@ class Postfilter:
         self.p = read_json(self.s['pilot_spec'])
         if file_sha(self.s['pilot_spec']) != self.s['pilot_spec_sha256']:
             raise ValueError('Pilot source changed')
-        if self.p['dataset'] not in {'tastemolnet', 'mutagenicity'}:
+        if self.p['dataset'] not in {'tastemolnet', 'mutagenicity', 'aids'}:
             raise ValueError('Dataset adapter scope')
         actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).parents[2], text=True).strip()
         if actual != self.s['execution_commit']: raise ValueError('Immutable execution commit differs')

@@ -18962,3 +18962,14 @@ Job2688737 stopped before database staging because its fresh run directory used
 default permissions, rejected by the existing private-scratch root contract.
 Create only the fresh control directory with mode0700; preserve the failed root
 and retain the original ownership/permission guard. No scientific input changed.
+
+# 2026-09-14: explicit AIDS16 to pilot32 continuation
+
+Adopt original train requests and successful/budget-timeout generation records,
+plus the diagnosed legal-empty parent after native positive controls. Preserve
+the old generation scope/seed namespace separately from new artifact scope.
+Freeze the next sorted train-source IDs before generating the missing pilot
+units; do not retrospectively resample the completed16 for favorable outcomes.
+Apply only the reviewed single-cut spectator repair to future AIDS native calls.
+The shared full/postfilter driver uses AIDS RF and explicit scoped cohorts;
+this is not an unseen held-out AIDS claim. No old result is modified.

@@ -43,6 +43,8 @@ class DatasetFull:
             raise ValueError('Pilot spec identity changed')
         self.p = read_json(self.pilot_path); validate(self.p)
         self.pilot = Path(self.p['output_root']); self.seed_scope = pilot_scope(self.p)
+        from .cm_crem_aids_adoption import generation_scope
+        self.generation_scope = generation_scope(self.p)
         self.root = checked_root(self.spec['output_root'], '/share/home/u20526/czx/counterfactual-subgraph-hpc-runtime/baselines/cm_crem_global_v2')
         actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).parents[2], text=True).strip()
         if actual != self.spec['execution_commit']:
@@ -93,9 +95,9 @@ class DatasetFull:
             g = self.old('generated/' + digest(parent['parent_id'])[:20] + '.json')
             if g['status'] not in TERMINALS or g['parent_id'] != parent['parent_id']:
                 raise ValueError('Incomplete pilot generation')
-            if g.get('science_hash', self.seed_scope) != self.seed_scope:
+            if g.get('science_hash', self.generation_scope) != self.generation_scope:
                 raise ValueError('Pilot generation RNG namespace differs')
-            if g.get('seed', parent_seed(self.seed_scope, parent['parent_id'])) != parent_seed(self.seed_scope, parent['parent_id']):
+            if g.get('seed', parent_seed(self.generation_scope, parent['parent_id'])) != parent_seed(self.generation_scope, parent['parent_id']):
                 raise ValueError('Pilot parent RNG differs')
             if a['generation_request']['parent_id'] != parent['parent_id']:
                 raise ValueError('Pilot attribution identity differs')
@@ -103,7 +105,7 @@ class DatasetFull:
                             'request_sha256': digest(a['generation_request']), 'generation_sha256': digest(g)})
         result = {'status': 'TRAIN_ROSTER_FROZEN', 'parents': self.roster, 'pilot_adopted': adopted,
                   'remaining_count': len(self.roster)-32, 'pilot_count': 32,
-                  'generation_science_hash': self.seed_scope,
+                  'generation_science_hash': self.generation_scope,
                   'rng_scope': 'EXACT_PILOT_PER_PARENT_NAMESPACE_NOT_GLOBAL_TRAJECTORY',
                   'test_read': False, 'deadline_utc': self.p['deadline_utc']}
         self.put('full_roster.json', result)
@@ -161,7 +163,8 @@ class DatasetFull:
                 # An unfinished log is preserved under its original attempt; never overwritten.
                 if log.exists(): log = log.with_name(log.name+'.job-'+os.environ['SLURM_JOB_ID'])
                 g = generate_parent(a['generation_request'], {'database_path': staged['database_path'],
-                      'upstream_root': e['upstream_root'], 'science_hash': self.seed_scope,
+                      'upstream_root': e['upstream_root'], 'science_hash': self.generation_scope,
+                      'single_cut_spectator_repair':bool(self.p.get('aids_legacy_adoption')),
                       'parent_wall_limit_seconds': 900}, log_path=log)
                 self.put(name, g)
             if g['status'] not in TERMINALS: raise RuntimeError('Native parent failed: '+parent['parent_id']+' '+str(g.get('error')))

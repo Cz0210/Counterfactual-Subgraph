@@ -74,7 +74,8 @@ def read_train(spec):
     rows=list(csv.DictReader(path.open()));binding=spec['train'];out=[]
     for i,row in enumerate(rows):
         if int(row[binding['label_field']])!=spec['source_label']:continue
-        identity=str(row[binding['id_field']]) if binding.get('id_field') else spec['dataset']+'_CM_train_'+digest([i,row[binding['smiles_field']]])[:16]
+        prefix = 'AIDS' if spec.get('aids_legacy_adoption') else spec['dataset']
+        identity=str(row[binding['id_field']]) if binding.get('id_field') else prefix+'_CM_train_'+digest([i,row[binding['smiles_field']]])[:16]
         out.append({'parent_id':identity,'smiles':row[binding['smiles_field']],'split':'train','label':1,'source_row':i})
     if len({r['parent_id'] for r in out})!=len(out):raise ValueError('Duplicate authoritative train IDs')
     return out,len(rows)
@@ -111,8 +112,12 @@ class DatasetPilot:
         eligible=[p for p,label in zip(parents,labels,strict=True) if label==1]
         self.put('train_source_manifest.json',{'parents':eligible,'all_train_count':total,'label_source_count':len(parents),
                   'predicted_source_count':len(eligible),'test_read':False,'train_file_sha256':self.spec['train']['sha256']})
-        indices,structure=pilot_indices(eligible,self.sha);selected=[eligible[i] for i in indices]
-        self.put('pilot_manifest.json',{'parents':selected,'structure':structure,'selected_before_generation':True,'outcome_used_for_sampling':False})
+        if self.spec.get('aids_legacy_adoption'):
+            from .cm_crem_aids_adoption import adopt
+            selected = adopt(self, eligible)
+        else:
+            indices,structure=pilot_indices(eligible,self.sha);selected=[eligible[i] for i in indices]
+            self.put('pilot_manifest.json',{'parents':selected,'structure':structure,'selected_before_generation':True,'outcome_used_for_sampling':False})
         records=[]
         for parent in selected:
             name='attribution_units/'+digest(parent['parent_id'])[:20]+'.json'
@@ -145,8 +150,11 @@ class DatasetPilot:
                 value=self.get(name)
             else:
                 self.deadline()
+                from .cm_crem_aids_adoption import generation_scope
+                (self.root/'logs').mkdir(exist_ok=True)
                 value=generate_parent(a['generation_request'],{'database_path':staged['database_path'],'upstream_root':e['upstream_root'],
-                    'science_hash':self.sha,'parent_wall_limit_seconds':900},log_path=self.root/'logs'/('native-'+a['parent_id']+'.log'))
+                    'science_hash':generation_scope(self.spec),'parent_wall_limit_seconds':900,
+                    'single_cut_spectator_repair':bool(self.spec.get('aids_legacy_adoption'))},log_path=self.root/'logs'/('native-'+a['parent_id']+'.log'))
                 self.put(name,value)
             if value['status'] not in TERMINALS:raise RuntimeError('Native generation failed: '+str(value))
         self.put('generation_complete.json',{'count':32,'generation_budget_unchanged':True})
