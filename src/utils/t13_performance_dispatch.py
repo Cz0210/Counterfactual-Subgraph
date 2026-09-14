@@ -64,6 +64,9 @@ def validate_dispatch(spec, *, project_root, gpu_index, gpu_uuid, lock_root):
 
 
 def decision(spec, observation):
+    if spec.get('schema') == 'T13_GAP_FIRST_COMPACT_GPU_PROBE_20260914':
+        from src.utils.t13_gap_recovery_owner import decision as recovery_decision
+        return recovery_decision(spec, observation)
     blockers = list(observation.get("source_blockers", []))
     if not observation.get("memory_safe"):
         blockers.append("JOINT_HEADROOM_BELOW_BOUND_OTHER_RESERVE_PLUS_CANARY64_GIB")

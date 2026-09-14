@@ -19165,3 +19165,14 @@ KeyError('epoch'). The pinned v2 producer has only next_epoch=epoch+1, written
 after optimizer and due validation. Read that actual schema together with
 scheduler.last_epoch=30; do not invent an epoch field or skip owed validation30.
 The failed preparation and source snapshot are retained; zero optimizer updates.
+
+# 2026-09-14: T13 existing-owner compact GPU1 recovery probe
+
+Reuse completed compact arrays, epoch29 model/optimizer and original backend.
+The new two-train/one-validation probe is capacity/checkpoint evidence only,
+not a five-batch trajectory test or formal progress. Existing run_owned_child
+transports the real lock FDs; GPU0 is excluded and the canonical T13 GPU1
+reservation is preserved. The host probe is capped16GiB, retaining384GiB
+other-task headroom; a larger observed demand blocks, never lowers the reserve.
+No old native failure is relabeled. Formal continuation must still close its
+full due-validation and original five-batch update contract.
