@@ -9,10 +9,11 @@ from pathlib import Path
 
 GIB=1024**3
 SCHEMA='T13_GAP_FIRST_COMPACT_GPU_PROBE_20260914'
+FORMAL_SCHEMA='T13_GAP_FIRST_SAME_RUN_CONTINUATION_20260914'
 
 def decision(spec, evidence):
     blockers=list(evidence.get('source_blockers', []))
-    if spec.get('schema')!=SCHEMA or spec.get('gpu_index')!=1:
+    if spec.get('schema') not in {SCHEMA,FORMAL_SCHEMA} or spec.get('gpu_index')!=1:
         blockers.append('WRONG_T13_GPU1_SCOPE')
     if not evidence.get('memory_safe'): blockers.append('T13_INCREMENTAL_MEMORY_RESERVE')
     if not evidence.get('storage_safe'): blockers.append('T13_COMPACT_STORAGE_BOUND')
@@ -22,7 +23,7 @@ def decision(spec, evidence):
 class RecoverySampler:
     task_family='t13_performance_diagnostic'
     def __init__(self,spec):
-        if spec['schema']!=SCHEMA or spec['gpu_index']!=1 or spec['formal_quota_used']!='1/1':
+        if spec['schema'] not in {SCHEMA,FORMAL_SCHEMA} or spec['gpu_index']!=1 or spec['formal_quota_used']!='1/1':
             raise ValueError('T13_RECOVERY_SCOPE')
         if spec['process_peak_bound_bytes']!=16*GIB or spec['other_remaining_reserve_bytes']!=384*GIB:
             raise ValueError('T13_BOUNDED_PROBE_MEMORY_CONTRACT')

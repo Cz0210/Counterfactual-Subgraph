@@ -19176,3 +19176,13 @@ reservation is preserved. The host probe is capped16GiB, retaining384GiB
 other-task headroom; a larger observed demand blocks, never lowers the reserve.
 No old native failure is relabeled. Formal continuation must still close its
 full due-validation and original five-batch update contract.
+
+# 2026-09-14: T13 compact same-run continuation
+
+GPU two-batch/validation/reload evidence is now separate from formal state.
+The continuation adopts only the prepared original next_epoch30 checkpoint,
+calls the unchanged official five-batch training loop (including full epoch30
+validation), then runs the original target2 branch sequentially. No diagnostic
+updates or extra formal start are adopted. Durable epoch callbacks enforce the
+existing resource owner and deadline. The two-branch terminal is not a cell
+PASS; merge/evaluation requires its own quantified storage admission.

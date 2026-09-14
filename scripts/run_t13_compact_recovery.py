@@ -13,7 +13,7 @@ class Complete(Exception):pass
 
 def main():
     p=argparse.ArgumentParser(__doc__);p.add_argument('--config',required=True);p.add_argument('--spec');p.add_argument('--plan')
-    p.add_argument('--action',choices=['owner','probe','reload'],required=True);p.add_argument('--checkpoint');p.add_argument('--expected')
+    p.add_argument('--action',choices=['owner','probe','continue','reload'],required=True);p.add_argument('--checkpoint');p.add_argument('--expected')
     a=p.parse_args()
     if not sys.flags.isolated or not sys.dont_write_bytecode:raise ValueError('ISOLATED_EXECUTION_REQUIRED')
     if a.action=='owner':
@@ -47,7 +47,8 @@ def main():
         if row.get('VmHWM_bytes',0)>16*1024**3:raise ValueError('BOUNDED_HOST_PROBE_16GIB_EXCEEDED')
         samples.append(row);atomic_json(out/'memory_boundaries.json',dict(samples=samples))
     def timeout(*_):raise TimeoutError('T13_PROBE_3600_SECOND_BOUND')
-    signal.signal(signal.SIGALRM,timeout);signal.alarm(3600)
+    signal.signal(signal.SIGALRM,timeout)
+    if a.action=='probe':signal.alarm(3600)
     updates=0
     try:
         sample('before_cuda')
@@ -80,6 +81,10 @@ def main():
         del scorer;sample('source_cohort_loaded_no_index_rebuild')
         generator=adapter.OfficialGlobalGCEMutagenicityGenerator(Path(plan['official_root']),native_train_csv=Path(plan['train_csv']),dataset_name='TasteMolNet',min_freq=2,frozen_gine_checkpoint=Path(plan['gnn_checkpoint']),source_label=1,target_label=0,num_classes=3,official_source_authority=official['runtime_source_authority'],require_isolated_imports=True,rules_only_min_valid_native_rules=0)
         generator.t13_indexed_options=dict(storage='t13_indexed_augmentation_v1',diagnostic_profile='deterministic')
+        if a.action=='continue':
+            from src.baselines.t13_compact_continuation import continue_branches
+            return continue_branches(plan=plan,out=out,checkpoint=checkpoint,selected=selected,
+                cohort=cohort,official=official,adapter=adapter,sample=sample,torch=torch)
         def intercept(**kw):
             nonlocal updates
             model=kw['model'];install_committed_expansion(model.fsg,descriptor=plan['committed_compact_payload'],expected_identity=checkpoint['augmented_dataset_identity'])

@@ -1,4 +1,5 @@
 #!/bin/bash
+# --action continue is a same-run AutoDL owner stage, never a fresh Slurm start.
 # AutoDL-only GPU1 owner/FD probe. Never sbatch on a mismatched HPC GPU.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
