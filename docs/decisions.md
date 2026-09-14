@@ -18973,3 +18973,9 @@ units; do not retrospectively resample the completed16 for favorable outcomes.
 Apply only the reviewed single-cut spectator repair to future AIDS native calls.
 The shared full/postfilter driver uses AIDS RF and explicit scoped cohorts;
 this is not an unseen held-out AIDS claim. No old result is modified.
+
+The September14 narrow resource overlay is separate from the existing20000
+high-write guard. Unknown peaks reject admission. A sealed small release keeps
+the complete verified archive, streams every member digest, and runs the same
+typed scientific gate, but expands only source CSV and key receipts. No raw
+matrix expansion, model load or scientific re-evaluation is performed.

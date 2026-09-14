@@ -518,7 +518,7 @@ def finalize_interrupted_import(package, manifest, fresh_destination, staging):
 
 
 def verify_import(package: str | Path, manifest: str | Path,
-                  fresh_destination: str | Path) -> dict[str, Any]:
+                  fresh_destination: str | Path, *, sealed_small_release: bool = False) -> dict[str, Any]:
     """One complete transport hash plus streamed member verification/extraction."""
     package, manifest, destination = _scope(package), _scope(manifest), _scope(fresh_destination)
     _stat(package)
@@ -549,6 +549,10 @@ def verify_import(package: str | Path, manifest: str | Path,
     staging = destination.with_name(destination.name + ".import-tmp-" + uuid.uuid4().hex)
     staging.mkdir(mode=0o700)
     seen, internal = set(), None
+    json_records = {}
+    retained = {'package_manifest.json','spec.json','audit/final_audit.json','results/export_manifest.json',
+                'selection_freeze.json','selection_report.json','test_evaluation.json'}
+    retained.update('results/source_csv/'+n for n in RESULT_FILES)
     with tarfile.open(package, "r|gz") as archive:
         for member in archive:
             name = _name(member.name)
@@ -561,30 +565,36 @@ def verify_import(package: str | Path, manifest: str | Path,
             _require(0 <= member.size <= expected_size and (name == "package_manifest.json" or member.size == expected_size),
                      "Archive member size conflict")
             target = staging / name
-            target.parent.mkdir(parents=True, exist_ok=True)
+            keep = not sealed_small_release or name in retained
+            if keep: target.parent.mkdir(parents=True, exist_ok=True)
             h = hashlib.sha256()
             count = 0
             source = archive.extractfile(member)
             _require(source is not None, "Unreadable regular archive member")
-            with source, target.open("xb") as output:
+            from contextlib import nullcontext
+            payload = bytearray() if name.endswith('.json') else None
+            with source, (target.open("xb") if keep else nullcontext()) as output:
                 for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                    output.write(chunk)
+                    if output is not None: output.write(chunk)
+                    if payload is not None: payload.extend(chunk)
                     h.update(chunk)
                     count += len(chunk)
-                output.flush()
-                os.fsync(output.fileno())
+                if output is not None:
+                    output.flush()
+                    os.fsync(output.fileno())
             _require(count == member.size, "Short archive member")
             if name == "package_manifest.json":
                 _require(h.hexdigest() == outer.get("internal_manifest_sha256"), "Internal manifest content conflict")
                 internal = json.loads(target.read_text())
             else:
                 _require(h.hexdigest() == files[name]["sha256"], f"Member content SHA conflict: {name}")
+            if payload is not None: json_records[name] = json.loads(payload)
     _require(seen == set(files) | {"package_manifest.json"}, "Missing archive members")
     _require(_stat(package) == package_before, "Package changed during import")
     _require(internal is not None and internal.get("manifest_sha256") == digest({k: v for k, v in internal.items() if k != "manifest_sha256"}),
              "Internal manifest identity conflict")
     _require(all(outer.get(k) == v for k, v in internal.items()), "Inner/outer manifest disagreement")
-    gate = _audit_gate(lambda name: json.loads((staging / name).read_text()),
+    gate = _audit_gate(lambda name: json_records[name],
                        lambda name: files[name]["sha256"], set(files))
     _require(gate["science_hash"] == outer.get("science_hash") and gate["final_audit_sha256"] == outer.get("final_audit_sha256"),
              "Imported scientific gate differs from package manifest")
@@ -596,6 +606,11 @@ def verify_import(package: str | Path, manifest: str | Path,
                "independent_spotcheck": gate["independent_spotcheck"], "created_at": utc_now(),
                "main_matrix_written": False, "registry_created": False,
                "models_loaded": False, "generation_rerun": False, "distance_recomputed": False}
+    if sealed_small_release:
+        _require(gate.get('dataset') in {'mutagenicity','tastemolnet'}, 'Small release restricted to completed CM Mut/Taste')
+        receipt.update(storage_mode='SEALED_SMALL_RELEASE', raw_access='SOURCE_ARCHIVE_MEMBERS',
+                       unexpanded_members=sorted(set(files)-retained),
+                       retained_members=sorted(seen & retained), original_guard_unchanged=True)
     atomic_json(staging / "cm_import_receipt.json", receipt, immutable=True)
     publication_status = ("CM_DATASET_RESULT_IMPORTED_NOT_MAIN_AUTHORITY" if gate.get("dataset")
                           else "BACE_CM_CREM_RESULT_PUBLISHED")

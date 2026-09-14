@@ -15,7 +15,9 @@ if __name__ == "__main__":
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--resume-staging", type=Path)
+    parser.add_argument("--sealed-small-release", action="store_true")
     args = parser.parse_args()
     result=(finalize_interrupted_import(args.package,args.manifest,args.destination,args.resume_staging)
-            if args.resume_staging else verify_import(args.package,args.manifest,args.destination))
+            if args.resume_staging else verify_import(args.package,args.manifest,args.destination,
+                sealed_small_release=args.sealed_small_release))
     print(json.dumps(result,sort_keys=True))

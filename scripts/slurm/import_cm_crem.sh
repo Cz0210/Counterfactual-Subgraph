@@ -1,5 +1,6 @@
 #!/bin/bash
 # import_cm_crem.py also accepts --resume-staging for verified extraction recovery.
+# --sealed-small-release streams all members but retains only small paper inputs.
 # User-authorized CPU/record-only exception to the default A800 template.
 #SBATCH --partition=intel
 #SBATCH --ntasks=1

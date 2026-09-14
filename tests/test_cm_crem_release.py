@@ -69,6 +69,25 @@ def test_gate_package_import_and_no_model_database_log_copy(run):
         release.package_run(run)
 
 
+def test_compact_stream_retains_only_paper_inputs(run, monkeypatch):
+    record=release.package_run(run)
+    original=release._audit_gate
+    def typed(*args):
+        return dict(original(*args),dataset='mutagenicity',oracle='rf')
+    monkeypatch.setattr(release,'_audit_gate',typed)
+    dest=run.parent/'compact-import'
+    result=release.verify_import(record['package_path'],record['manifest_path'],dest,sealed_small_release=True)
+    assert result['storage_mode']=='SEALED_SMALL_RELEASE'
+    assert not (dest/'test/parents/fixture-parent.json').exists()
+    assert (dest/'results/source_csv/table2_k20.csv').exists()
+
+
+def test_compact_still_rejects_bad_members(run):
+    package,manifest=_malicious_archive(run,'traversal')
+    with pytest.raises(release.ReleaseRejected):
+        release.verify_import(package,manifest,run.parent/'bad-small',sealed_small_release=True)
+
+
 @pytest.mark.parametrize('damage',[None,'content','extra','symlink'])
 def test_completed_extraction_recovery_does_not_reextract(run,monkeypatch,damage):
     record=release.package_run(run)
