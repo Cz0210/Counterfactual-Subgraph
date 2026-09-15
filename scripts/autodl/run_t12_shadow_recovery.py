@@ -3,12 +3,33 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))  # -I deliberately ignores PYTHONPATH.
+# Optional compact owner-interface deployment: reuse the physically available
+# reviewed scientific sources. This changes neither their paths nor their bytes.
+BASE_BINDING = ROOT / 'reviewed_source_base.json'
+if BASE_BINDING.is_file():
+    base_binding = json.loads(BASE_BINDING.read_text())
+    from_path = Path(base_binding['base_root'])
+    expected = {
+        'src/baselines/tastemolnet_gcf_full.py',
+        'src/baselines/tastemolnet_gcf_production_state.py',
+        'src/baselines/tastemolnet_gcf_full_verify.py',
+        'src/baselines/tastemolnet_gcf_full_postprocess.py',
+    }
+    if not from_path.is_absolute() or set(base_binding['reviewed_files']) != expected:
+        raise ValueError('T12_APPROVED_FOUR_SOURCE_BASE_REQUIRED')
+    for relative, digest in base_binding['reviewed_files'].items():
+        if hashlib.sha256((from_path/relative).read_bytes()).hexdigest() != digest:
+            raise ValueError('T12_APPROVED_BASE_SOURCE_CHANGED:' + relative)
+    sys.path.insert(0, str(from_path))
+    import src.utils
+    src.utils.__path__.insert(0, str(ROOT/'src/utils'))
 # Low-inode immutable deployment: the pinned source archive and this thin
 # physical entrypoint live together. No PYTHONPATH dependency under -I.
 BUNDLE = Path(__file__).resolve().with_name("source.zip")
