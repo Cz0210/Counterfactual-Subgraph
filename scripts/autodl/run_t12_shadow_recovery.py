@@ -54,6 +54,10 @@ def main(argv=None):
     shadow.add_argument("--task-spec", required=True, type=Path)
     shadow.add_argument("--stage-id", required=True)
     shadow.add_argument("--raw-input", type=Path)
+    restore = sub.add_parser("restore500-preflight")
+    restore.add_argument("--plan", required=True, type=Path)
+    restore.add_argument("--task-spec", required=True, type=Path)
+    restore.add_argument("--stage-id", required=True)
     args = parser.parse_args(argv)
     if not args.config.is_file():
         raise ValueError("T12_CONFIG_ABSENT")
@@ -87,6 +91,15 @@ def main(argv=None):
         right = read_ledger(args.right, binding_sha=args.binding_sha, start=args.start, end=args.end)
         result = compare_ledgers(left, right)
         atomic_json(args.output, result)
+    elif args.action == "restore500-preflight":
+        from src.utils.main_ready_task_specs import load_spec
+        from src.utils.t12_shadow_execution import require_restore500_admission
+        plan = _read(args.plan)
+        spec = load_spec(args.task_spec)
+        stage = next(s for s in plan['stages'] if s['stage_id'] == args.stage_id)
+        result = require_restore500_admission(plan=plan, stage=stage,
+            binding=spec['science_contract']['shadow_binding'], contract=spec['science_contract'],
+            process_alive=lambda pid, ticks: process_start_ticks('/proc', pid) == ticks)
     elif args.action == "shadow-segment":
         from src.utils.t12_shadow_execution import run_shadow_segment
         result = run_shadow_segment(plan=_read(args.plan), task_spec=args.task_spec,

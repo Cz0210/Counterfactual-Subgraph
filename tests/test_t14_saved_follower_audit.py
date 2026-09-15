@@ -2,6 +2,11 @@ import unittest
 from src.utils.t14_saved_follower_audit import analyze_after,first_difference
 
 class SavedFollowerTests(unittest.TestCase):
+    def test_null_importance_stays_missing_not_zero(self):
+        value = analyze_after({'step':251, 'native_observation':{'next_importance':None}})
+        self.assertIsNone(value['selected_only_importance_count'])
+        self.assertTrue(value['selected_only_importance_missing'])
+
     def row(self):
         return {'step':335,'compact_candidate_actions':[{'source_hash':'leader','target_hashes':['x'],'ordered_actions':[('NLC',28,15)]}],
                 'native_observation':{'selected_transitions':[{'source_graph_hash':'follower','target_graph_hash':'y','action_records':[{'action':['NLC',28,12]}],'valid_fullgraph':True}], 'next_importance':[[.3,.2]]}}

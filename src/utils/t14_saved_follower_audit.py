@@ -66,10 +66,12 @@ def analyze_after(row):
         item["complete_follower_scores_captured"] = False
         item["score_capture_keys"] = sorted(k for k in row if any(s in k.lower() for s in ("follower", "argmin", "score")))
         checks.append(item)
+    importance = observation.get("next_importance")
     return {"step": row["step"], "selected_heads": len(transitions),
             "compact_sources": len(compact), "checks": checks,
             "saved_sampling_events": len(row.get("actual_sampling_events", [])),
-            "selected_only_importance_count": len(observation.get("next_importance", []))}
+            "selected_only_importance_count": None if importance is None else len(importance),
+            "selected_only_importance_missing": importance is None}
 
 
 def first_difference(left, right, path="$"):

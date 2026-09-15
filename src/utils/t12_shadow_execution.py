@@ -6,6 +6,7 @@ exclusive descriptor and bind the source-equivalence/regression receipts.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -16,6 +17,59 @@ from typing import Any
 from src.utils.main_ready_task_specs import atomic_json, load_spec, stable_sha256
 from src.utils.t12_shadow_recovery import JointLedger, require_natural_510, validate_plan
 from src.utils.t12_raw_evidence import BoundSelectedStepObserver, RawEvidenceResolver
+
+
+def require_restore500_admission(*, plan: dict, stage: dict, binding: dict,
+                                contract: dict, process_alive) -> dict:
+    """Admit loading authenticated500, never certify the not-yet-loaded state.
+
+    This bounded exception only removes the circular natural510 prerequisite
+    for the existing ten-step independent reload. Full model/algorithm restore,
+    observer, source, lease, resource and final parity gates remain in place.
+    """
+    validate_plan(plan)
+    if (stage not in plan['stages'] or stage['kind'] != 'INDEPENDENT_RELOAD'
+            or (stage['restore_cursor'], stage['start'], stage['end'], stage['transitions'])
+            != (500, 501, 510, 10)):
+        raise ValueError('T12_RESTORE500_SCOPE_MISMATCH')
+    identity = plan['source_bindings']['active_reader']
+    if process_alive(identity['pid'], identity['start_ticks']):
+        raise ValueError('T12_LIVE_PREDECESSOR_REJECTED')
+    adopted = binding['restore500_admission']
+    if (adopted.get('schema') != 't12_external_joint500_load_admission_v1'
+            or adopted.get('plan_sha256') != plan['plan_sha256']
+            or adopted.get('stage_id') != stage['stage_id']
+            or adopted.get('checkpoint_promotable') is not False):
+        raise ValueError('T12_RESTORE500_ADMISSION_BINDING')
+    docs = {}
+    for name in ('joint_receipt', 'checkpoint_manifest'):
+        path = Path(adopted[name])
+        if not path.is_absolute() or path.stat().st_size > 1 << 20:
+            raise ValueError('T12_RESTORE500_SMALL_ABSOLUTE_RECEIPT_REQUIRED')
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != adopted[name + '_sha256']:
+            raise ValueError('T12_RESTORE500_RECEIPT_CHANGED:' + name)
+        docs[name] = json.loads(raw)
+    joint, manifest = docs['joint_receipt'], docs['checkpoint_manifest']
+    cp = Path(adopted['checkpoint_manifest'])
+    if (str(cp) != binding['fork_source_checkpoint']
+            or cp.parent.parent != Path(binding['fork_source_root'])
+            or joint.get('checkpoint') != str(cp.parent / manifest['payload_file'])
+            or manifest.get('checkpoint_cursor') != 500
+            or manifest.get('status') != 'COMMITTED'
+            or manifest.get('attempt_id') != contract['source_science_attempt_id']
+            or manifest.get('generation_token') != contract['generation_token']):
+        raise ValueError('T12_RESTORE500_CHECKPOINT_BINDING')
+    if (joint.get('state') != 'EXTERNAL_JOURNAL_JOINT500_PASS_PENDING_REAL_ADAPTER_RESTORE'
+            or joint.get('preserved') != 24
+            or joint.get('original_databases_opened') is not False
+            or joint.get('source_paths_only_relocated') is not True
+            or any(joint.get(k) != manifest.get(k) or not manifest.get(k)
+                   for k in ('state_sha256', 'rng_sha256'))):
+        raise ValueError('T12_RESTORE500_EXTERNAL_BOUNDARY_INCOMPLETE')
+    return {'state': 'METADATA_BOUND_PENDING_COMPLETE_RUNTIME_RESTORE',
+            'natural510_required_before_load': False, 'checkpoint_promotable': False,
+            'new_scientific_steps': 0, 'plan_sha256': plan['plan_sha256']}
 
 
 def run_live_tail(*, plan: dict, arm: str, observer: Any, resolver: RawEvidenceResolver,
@@ -64,7 +118,7 @@ def run_shadow_segment(*, plan: dict, task_spec: Path, stage_id: str,
                        process_alive, raw_input: Path | None = None) -> dict:
     """Execute one already bound 251..500(+tail) or independent 501..510 segment."""
     import fcntl
-    require_natural_510(plan, process_alive=process_alive)
+    validate_plan(plan)
     stages = [s for s in plan["stages"] if s["stage_id"] == stage_id]
     if len(stages) != 1 or stages[0]["kind"] not in {"SHADOW", "INDEPENDENT_RELOAD"}:
         raise ValueError("T12_STAGE_NOT_AN_INDEPENDENT_EXECUTION")
@@ -73,6 +127,11 @@ def run_shadow_segment(*, plan: dict, task_spec: Path, stage_id: str,
     binding = spec["science_contract"].get("shadow_binding", {})
     if binding.get("plan_sha256") != plan["plan_sha256"] or binding.get("stage_id") != stage_id:
         raise ValueError("T12_SHADOW_SPEC_BINDING_MISSING")
+    if 'restore500_admission' in binding:
+        require_restore500_admission(plan=plan, stage=stage, binding=binding,
+            contract=spec['science_contract'], process_alive=process_alive)
+    else:
+        require_natural_510(plan, process_alive=process_alive)
     # No implicit GPU claim. This is the actual descriptor inherited from the
     # existing owner; checking a JSON integer alone is insufficient.
     fd = int(os.environ.get("T12_OWNER_HELD_GPU_FD", "-1"))

@@ -1,5 +1,20 @@
 # Decisions Log
 
+## [2026-09-15] T12 restore500 admission is not formal promotion
+
+The reference501–510 reload previously required natural510 before loading500,
+creating a circular prerequisite. A fresh binding can adopt the existing
+external joint500 receipt (24 preserved inputs, matching state/RNG/attempt/token)
+solely to admit the existing ten-step independent reload. The unchanged kernel
+must still load all model/algorithm state. Source, observer, held-FD, resources,
+parity and production-promotion guards remain. The original 520+conditional20
+budget and four reviewed scientific files are unchanged. The paired HPC wrapper
+now accepts CPU metadata/comparison only, per this turn's no-HPC-GPU instruction.
+
+T14 job2699627 exposed a nullable selected-only importance field. Preserve it as
+missing rather than zero; the saved-record CPU audit still executes zero new
+transitions and cannot certify mechanism/one-edit from incomplete capture.
+
 ## [2026-09-15] CPU-only saved T14 follower evidence audit
 
 The current user authorization withdraws HPC GPU fallback. The new
