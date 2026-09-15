@@ -1,5 +1,28 @@
 # Decisions Log
 
+## [2026-09-15] Exclusive Ours–Taste fixed-contract reach development
+
+The user pauses all other project experiments and successors, preserving their
+terminal evidence and recovery inputs. No other user's task is affected. The
+existing canonical registry is changed under its publish lock and SHA CAS; no
+second authority or lock is introduced. Completed main-table values are kept.
+
+`ours_taste_focus_v1.yaml` authorizes a separate post-hoc Taste-only experiment:
+the published three-class GINE, source1→(0 OR2), cohorts, hard deletion, WNode,
+theta/cap remain fixed. This explicitly supersedes old binary task notes for
+this experiment, not the general connected-fragment objective. Saved complete
+matrices are compacted without fresh inference/OT; NaN means unknown and infinity
+retains the accepted producer's completed no-finite-WNode-recourse meaning.
+The latter is not proof over all possible deletions or all strict flips.
+
+The new CoverageFirstMultiBudget-v1 selector has actual 1-out/1-in changes and
+same-set reordering. Bounded negative-objective MILP reports a recounted feasible
+incumbent and a correctly negated dual upper bound; timeout is not optimal.
+Calibration-only diagnostics/selection cannot claim final A/B/C/D completion.
+HPC wrapper is CPU-only (8CPU/32GiB), an explicit user exception to the repository
+GPU Slurm template. No old model, generator, active execution code or table is
+modified. The absolute deadline remains 2026-09-17 00:27:44 CST.
+
 ## [2026-09-15] T12 restore500 admission is not formal promotion
 
 The reference501–510 reload previously required natural510 before loading500,

@@ -1,5 +1,15 @@
 # Refactor Plan
 
+## 2026-09-15 exclusive Ours–Taste override
+
+- Pause other project successors until a later explicit direction change.
+- Adopt P0 and saved calibration matrix; compute honest finite-pool bounds and
+  the new coverage-first selector in a compact CPU stage.
+- Complete the train-only development matrix before classifying unknown
+  parents or driving bounded expansion; do not infer a full-space ceiling.
+- Freeze calibration A/B/C/D and recommendation before the selected-union test;
+  keep this version independent of the original main authority and ablations.
+
 ## 2026-09-14 postfilter continuation
 
 - Implement shared Taste/Mut full-roster seal, compact calibration blocks,
