@@ -9,6 +9,13 @@ import numpy as np
 from .ours_taste_focus_matrix import dump_json
 
 
+def validate_gpu_reservation(registry,index,uuid,observed_uuid):
+    assert observed_uuid.strip()==uuid, 'GPU_INDEX_UUID_CHANGED'
+    for row in registry['gpu_leases']:
+        if row['gpu']==index:
+            assert row['state']=='RELEASED', 'PROJECT_FUTURE_GPU_RESERVED'
+
+
 def stratified_development(rows, limit=256, seed=7):
     from rdkit import Chem
     from rdkit.Chem.Scaffolds import MurckoScaffold

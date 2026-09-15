@@ -68,6 +68,15 @@ def test_train_scaffold_margin_cohort_is_stable_and_test_free():
     assert all(r['margin_band'] in range(4) for r in a)
 
 
+def test_actual_registry_schema_and_gpu_uuid_binding():
+    from src.eval.ours_taste_development import validate_gpu_reservation
+    r={'gpu_leases':[{'gpu':1,'state':'RELEASED','lease_path':'existing'}]}
+    validate_gpu_reservation(r,1,'GPU-fixed','GPU-fixed\n')
+    with pytest.raises(AssertionError,match='UUID_CHANGED'):validate_gpu_reservation(r,1,'GPU-fixed','GPU-wrong')
+    r['gpu_leases'][0]['state']='PREDEPLOYED'
+    with pytest.raises(AssertionError,match='RESERVED'):validate_gpu_reservation(r,1,'GPU-fixed','GPU-fixed')
+
+
 def test_compact_node_cache_reload_exact_no_per_graph_files(tmp_path,monkeypatch):
     from types import SimpleNamespace
     from src.eval.ours_taste_development import compact_embedder_class

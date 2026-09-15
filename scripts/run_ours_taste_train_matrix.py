@@ -47,8 +47,10 @@ def main():
     assert fs.f_bavail*fs.f_frsize>=spec['minimum_free_bytes'], 'OWN_STAGE_BYTES_ADMISSION'
     rows=subprocess.check_output(['nvidia-smi','--query-compute-apps=gpu_uuid,pid','--format=csv,noheader,nounits'],text=True)
     assert spec['gpu_uuid'] not in rows, 'GPU_HAS_EXISTING_SCIENCE'
-    for item in read_json(Path(spec['registry']))['gpu_leases']:
-        if item['gpu_uuid']==spec['gpu_uuid']: assert item['state']=='RELEASED'
+    from src.eval.ours_taste_development import validate_gpu_reservation
+    observed_uuid=subprocess.check_output(['nvidia-smi',f'--id={spec["gpu_index"]}',
+                   '--query-gpu=uuid','--format=csv,noheader,nounits'],text=True)
+    validate_gpu_reservation(read_json(Path(spec['registry'])),spec['gpu_index'],spec['gpu_uuid'],observed_uuid)
     pause=[False]
     signal.signal(signal.SIGTERM,lambda *_:pause.__setitem__(0,True))
     signal.signal(signal.SIGINT,lambda *_:pause.__setitem__(0,True))
