@@ -2,6 +2,12 @@
 
 ## [2026-09-15] Exclusive Ours–Taste fixed-contract reach development
 
+Independent export audit uses the actual producer schema (`p_after=[]` for
+unselected negatives). It replays single-delete graph evidence and saved
+probabilities/distances, without claiming fresh oracle inference. Keep the
+first auditor-schema failure distinct from successful scientific generation.
+Offline CSV-only plotting is separate from audit and scientific computation.
+
 After the complete P0 train matrix, one authorized bounded search round is
 implemented (128 train parents, <=64 new residual oracle queries each, beam8).
 It starts from saved LM rules and BRICS/boundary components; it produces zero new

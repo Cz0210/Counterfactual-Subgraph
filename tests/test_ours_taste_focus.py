@@ -118,3 +118,21 @@ def test_augmented_pool_retains_all_old_and_caps_only_new():
     pool,r=augment(old,added)
     assert pool[0]['candidate_id']=='old' and len(pool)==2049
     assert r['new_unique_seen']==2050 and r['new_unique_retained']==2048
+
+
+@pytest.mark.parametrize('destination,after',[(0,[.7,.2,.1]),(2,[.1,.2,.7])])
+def test_finalizer_probability_evidence_uses_three_class_or(destination,after):
+    import importlib.util
+    from pathlib import Path
+    path=Path(__file__).parents[1]/'scripts/finalize_ours_taste_focus.py'
+    spec=importlib.util.spec_from_file_location('taste_finalizer',path)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    row={'p_before':[.1,.8,.1],'pred_before':1,'pair_strict_flip':True,
+         'p_after':after,'pred_after':destination,'destination_label':destination,'cf_drop':.6}
+    module.verify_probability_semantics(row)
+    row['pred_after']=1
+    with pytest.raises(AssertionError):module.verify_probability_semantics(row)
+    row.update(pair_strict_flip=False,p_after=[],pred_after=None,destination_label=None,cf_drop=None)
+    module.verify_probability_semantics(row)
+    row['p_after']=None
+    with pytest.raises(AssertionError):module.verify_probability_semantics(row)

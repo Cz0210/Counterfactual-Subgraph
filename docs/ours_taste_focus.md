@@ -43,3 +43,16 @@ bounded train search round, then the entire delta-evaluation/freeze/test chain.
 It does not call a language model or PPO training. New C/D exist only when a
 genuinely new rule pool exists. The caller must wait for the prior owner to exit
 and acquire the original UUID lease; no simultaneous restore/science copies.
+
+`finalize_ours_taste_focus.py` independently checks the saved 3-class probability
+semantics, operation/mapping/connected-residual replay, tensor-to-raw matrix
+values, complete selected-rule union, old-A preservation and metric reduction.
+It does not claim a fresh oracle re-inference audit. A relocated test CSV must
+match its original bound SHA. Absence of a selected after-prediction is encoded
+as `p_after=[]`, exactly as the existing producer, not null. The finalizer writes
+four-way figures, K20 table, exact K10/K20 ECDF, candidate provenance, paired
+scaffold intervals and an explicit audit scope. No main matrix is changed.
+
+`replot_ours_taste_release.py --source-dir ABS --out-dir ABS` is a standalone
+offline renderer with explicit view-limit options; it requires only matplotlib
+and the small exported CSVs. It does not read models or remote files.
