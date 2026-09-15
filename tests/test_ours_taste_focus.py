@@ -92,3 +92,29 @@ def test_compact_node_cache_reload_exact_no_per_graph_files(tmp_path,monkeypatch
     cache=cls(**args);y=cache.get('CC');cache.close()
     assert np.array_equal(x.H,y.H) and np.array_equal(y.H,expected)
     assert not list((tmp_path/'old_nodes').glob('*.npz'))
+
+
+def test_connected_search_budget_true_single_deletion_and_provenance():
+    from src.eval.ours_taste_search import search_parent
+    class Oracle:
+        count=0
+        def score_smiles(self,values):
+            self.count+=len(values)
+            return [{'logits':[2.,0.,1.],'probabilities':[.66,.09,.25],'predicted_label':0} for _ in values]
+    o=Oracle();parent={'parent_id':'p','smiles':'CCCCO','pred_before':1}
+    pool=[{'candidate_id':'seed','canonical_fragment':'O','source_parent_ids':['p']}]
+    candidates,events,ledger=search_parent(parent,pool,o,query_budget=6)
+    assert o.count==ledger['oracle_queries']<=6
+    assert events and candidates and all(e['original_parent_used'] and e['one_connected_deletion'] for e in events)
+    assert ledger['exhaustive'] is False and ledger['lm_new_outputs']==0
+    assert {e['source'] for e in events} <= {'LLM_SEEDED_SEARCH','STRUCTURE_SEARCH'}
+
+
+def test_augmented_pool_retains_all_old_and_caps_only_new():
+    from src.eval.ours_taste_search_chain import augment
+    old=[{'candidate_id':'old','canonical_fragment':'C','source_parent_ids':[],'source_modes':[]}]
+    added=[{'candidate_id':str(i),'canonical_fragment':'O','source_parent_ids':['p'],
+            'source_modes':['STRUCTURE_SEARCH'],'train_strict_flip_witnesses':0,'train_deletion_size':1} for i in range(2050)]
+    pool,r=augment(old,added)
+    assert pool[0]['candidate_id']=='old' and len(pool)==2049
+    assert r['new_unique_seen']==2050 and r['new_unique_retained']==2048

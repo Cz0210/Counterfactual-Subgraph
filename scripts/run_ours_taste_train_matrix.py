@@ -71,6 +71,13 @@ def main():
                    'strategy':'seed7_scaffold_margin_quartile_round_robin','test_read':False})
         scorer=TasteGINEScorer({n:(Path(contract['checkpoint'])/n).read_bytes() for n in GINE_PAYLOAD_FILES},device='cuda:0',batch_size=256)
         assert scorer.checkpoint_id==contract['checkpoint_id']
+        if spec.get('seed_node_database'):
+            import sqlite3
+            # Completed prior Ours train stage only; no active DB/WAL is copied.
+            prior=Path(spec['seed_node_database'])
+            assert read_json(prior.parent/'terminal.json')['state']=='TRAIN_P0_MATRIX_COMPLETE'
+            with sqlite3.connect('file:'+str(prior)+'?mode=ro',uri=True) as source_db:
+                with sqlite3.connect(str(out/'nodes.sqlite')) as target_db:source_db.backup(target_db)
         embedder=compact_embedder_class()(compact_db=out/'nodes.sqlite',molclr_root=spec['molclr_root'],
                     molclr_ckpt=spec['molclr_checkpoint'],node_emb_cache_dir=spec['existing_node_cache'],device='cuda:0')
         class StrictDistance(MolCLRNodeWassersteinDistance):
@@ -82,6 +89,18 @@ def main():
                     cache_db=out/'distances.sqlite',node_emb_cache_dir=spec['existing_node_cache'],device='cuda:0',
                     distance_namespace='tastemolnet_ours_full_wnode_v1'),embedder=embedder)
         identity=read_json(compact/'calibration_adoption.json')['input_identity']
+        if spec['stage']=='SEARCH_CALIBRATE_TEST':
+            try:
+                from src.eval.ours_taste_search_chain import run
+                dump_json(out/'owner.json',{'pid':os.getpid(),'start_ticks':int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19]),
+                   'stage':spec['stage'],'gpu_uuid':spec['gpu_uuid'],'existing_lock_path':str(lease.path),'spec_sha256':stage_sha,'cwd':str(ROOT)})
+                run(spec,out,compact,contract,scorer,provider,identity,pause)
+            except Exception as exc:
+                dump_json(out/'failure.json',{'state':'FAILED','type':type(exc).__name__,'error':str(exc),'old_results_preserved':True})
+                raise
+            finally:
+                provider.close();embedder.close()
+            return 0
         d=np.full((len(parents),len(pool)),np.nan)
         predictions=np.full(len(parents),-1,dtype=np.int8)
         started=time.monotonic();funnel=Counter();completed=0

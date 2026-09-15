@@ -34,3 +34,12 @@ and a compact matrix; NaNs remain for unfinished rows. SIGTERM/SIGINT request a
 stop after the current parent, preserving its durable result. This initial
 entrypoint refuses an existing output root (no hidden restart/recomputation).
 The paired Slurm file is **CPU CLI validation only**, never GPU science on HPC.
+
+The same AutoDL entrypoint now accepts a sealed `stage=SEARCH_CALIBRATE_TEST`
+spec bound to `train_matrix_root` (a completed P0 train stage), `selection_B_path`
+(the already computed P0/B freeze), and optional `seed_node_database` (a closed,
+completed prior node cache, adopted through SQLite backup). It performs one
+bounded train search round, then the entire delta-evaluation/freeze/test chain.
+It does not call a language model or PPO training. New C/D exist only when a
+genuinely new rule pool exists. The caller must wait for the prior owner to exit
+and acquire the original UUID lease; no simultaneous restore/science copies.

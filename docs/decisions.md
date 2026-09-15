@@ -2,6 +2,17 @@
 
 ## [2026-09-15] Exclusive Ours–Taste fixed-contract reach development
 
+After the complete P0 train matrix, one authorized bounded search round is
+implemented (128 train parents, <=64 new residual oracle queries each, beam8).
+It starts from saved LM rules and BRICS/boundary components; it produces zero new
+LM outputs and is explicitly search-assisted, not a new PPO/LM generation run.
+The 2048 cap applies only to novel canonical rules. Old P0 remains complete.
+Fresh train witnesses and source tags are retained. No second round is silently
+started. C/D are absent if no new P1 rule exists. Otherwise the same finite owner
+executes delta train/calibration matrices, original C and coverage-first D,
+pre-test recommendation, and one selected-union test. Numeric export audit is
+a separate stage and is not implied by a science terminal alone.
+
 The next train-only stage uses the original scorer batch256 and original
 hard-deletion evaluator. A compact MolCLR cache subclasses storage only; its
 unchanged node-compute function and exact WNode solver remain the numerical
