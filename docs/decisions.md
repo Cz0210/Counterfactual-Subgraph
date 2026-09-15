@@ -1,5 +1,17 @@
 # Decisions Log
 
+## [2026-09-15] CPU-only saved T14 follower evidence audit
+
+The current user authorization withdraws HPC GPU fallback. The new
+`audit_t14_saved_followers` command reads existing append-only raw captures on
+an intel CPU allocation, with CUDA hidden, and verifies the final Slurm TRES.
+It counts captured follower source universes and reports selected-action/RNG
+differences without restoring RNG, running transitions, or declaring that a
+selected-only score proves the full follower argmin or graph one-edit property.
+This changes no model, numerical tolerance, science budget, or historical receipt.
+The paired CPU Slurm script intentionally overrides the generic A800 template.
+
+
 ## 2026-09-14 — authorized CM-AIDS source-descriptive evaluation
 
 The original AIDS source-base has no recoverable independent calibration IDs.
