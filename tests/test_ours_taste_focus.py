@@ -57,3 +57,29 @@ def test_multiclass_or_and_pair_identity(tmp_path,destination):
     assert d[0,0]==.1 and pred[0]==1 and ev['unknown_pairs']==0
     row['pred_before']=0;path.write_text(json.dumps(row)+'\n')
     with pytest.raises(AssertionError): compact_pairs(path,['p'],['c'],'calibration',identity)
+
+
+def test_train_scaffold_margin_cohort_is_stable_and_test_free():
+    from src.eval.ours_taste_development import stratified_development
+    rows=[{'parent_id':str(i),'smiles':'C'*(i+1),'pred_before':1,'p_before':[.1,.8,.1]} for i in range(8)]
+    a=stratified_development(rows,limit=4)
+    b=stratified_development(list(reversed(rows)),limit=4)
+    assert a==b and len({r['parent_id'] for r in a})==4
+    assert all(r['margin_band'] in range(4) for r in a)
+
+
+def test_compact_node_cache_reload_exact_no_per_graph_files(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from src.eval.ours_taste_development import compact_embedder_class
+    cls=compact_embedder_class()
+    ckpt=tmp_path/'weights';ckpt.write_bytes(b'fixed fixture')
+    loaded=SimpleNamespace(model=SimpleNamespace(num_layer=5,emb_dim=3),checkpoint_path=ckpt)
+    expected=np.arange(6,dtype=np.float32).reshape(2,3)
+    monkeypatch.setattr(cls,'_compute_node_embeddings',lambda self,s:expected.copy())
+    args={'compact_db':tmp_path/'nodes.sqlite','molclr_root':tmp_path,'molclr_ckpt':ckpt,
+          'node_emb_cache_dir':tmp_path/'old_nodes','loaded_model':loaded}
+    cache=cls(**args); x=cache.get('CC');cache.commit();cache.close()
+    monkeypatch.setattr(cls,'_compute_node_embeddings',lambda *_:pytest.fail('RECOMPUTED'))
+    cache=cls(**args);y=cache.get('CC');cache.close()
+    assert np.array_equal(x.H,y.H) and np.array_equal(y.H,expected)
+    assert not list((tmp_path/'old_nodes').glob('*.npz'))

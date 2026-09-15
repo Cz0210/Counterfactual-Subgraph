@@ -24,3 +24,13 @@ not missing work. Source predictions retain all base-cohort denominator rows.
 Calibration B is a provisional development freeze, not the final recommendation
 among A/B/C/D. Train development requires scaffold/margin-stratified source IDs;
 generation may not begin by interpreting unknown matrix rows as uncovered.
+
+`run_ours_taste_train_matrix.py --config configs/hpc.yaml --spec ABSOLUTE_SPEC`
+is an AutoDL-only finite GPU stage. It uses the existing UUID GPUFileLock in the
+science process itself, checks real headroom/storage/GPU occupation, loads the
+original frozen GINE and MolCLR and evaluates all P0 rules on the 256 frozen
+train-development IDs. Completed parent units are written to one gzip segment
+and a compact matrix; NaNs remain for unfinished rows. SIGTERM/SIGINT request a
+stop after the current parent, preserving its durable result. This initial
+entrypoint refuses an existing output root (no hidden restart/recomputation).
+The paired Slurm file is **CPU CLI validation only**, never GPU science on HPC.

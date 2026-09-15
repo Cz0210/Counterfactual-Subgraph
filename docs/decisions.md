@@ -2,6 +2,14 @@
 
 ## [2026-09-15] Exclusive Ours–Taste fixed-contract reach development
 
+The next train-only stage uses the original scorer batch256 and original
+hard-deletion evaluator. A compact MolCLR cache subclasses storage only; its
+unchanged node-compute function and exact WNode solver remain the numerical
+producer. New WNode errors raise and stop at the last completed parent instead
+of being mapped to negative recourse. The existing UUID lock is held by the
+science process itself, with no child-FD lifetime gap and no new lock. Train
+source IDs are chosen by seed7/scaffold/margin strata; no test IDs enter it.
+
 The user pauses all other project experiments and successors, preserving their
 terminal evidence and recovery inputs. No other user's task is affected. The
 existing canonical registry is changed under its publish lock and SHA CAS; no
