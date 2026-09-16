@@ -11,6 +11,9 @@ The same-run compact continuation can call the original full evaluator and
 canonical publisher through a separately hashed final-evaluation binding.
 Post-training requires its own fresh resource admission, not the training
 probe's 32GiB/256-file envelope. Scientific training implementation unchanged.
+The native callback exposes epochs but no optimizer-update count. Continuation
+progress now reports completed_new_epochs separately and leaves optimizer steps
+unknown instead of mislabelling an epoch delta as scientific optimizer updates.
 
 
 ## [2026-09-16] V5 T13 stage RAM overlay, original formal1/1 preserved

@@ -20,3 +20,5 @@ def test_no_new_optimizer_loop_or_validation_skip():
     assert 'for target in [0,2]' in source
     assert 'optimizer.step(' not in source
     assert 'EXISTING_TASTE_FULL_MERGE_CALIBRATION_TEST' in source
+    assert 'new_optimizer_steps=None' in source
+    assert "completed_new_epochs=receipt['epoch']-29" in source
