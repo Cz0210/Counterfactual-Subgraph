@@ -1,5 +1,14 @@
 # Refactor Plan
 
+## 2026-09-16 Taste final V5 closeout
+
+- Adopt R3, seal common K20/theta0.1 contract from actual ordered IDs and pins.
+- Run CM calibration reselect / missing selected test / independent audit and
+  export through `run_taste_final_v5_cm.py` and its paired CPU Slurm script.
+- Keep unrelated tasks paused; wire only lawful same-run Taste recoveries.
+- Export partial panels from accepted rows; PENDING is never a synthetic zero.
+
+
 ## 2026-09-16 Taste theta0.1 independent protocol
 
 - Resolve original oracle/cap/cohort and explicit theta roles; adopt raw matrices.

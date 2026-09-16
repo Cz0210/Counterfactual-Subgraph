@@ -1,5 +1,19 @@
 # Decisions Log
 
+## [2026-09-16] Taste V5 same-contract baseline closeout
+
+Adopt accepted Ours R3 (R2 alias), without new generation or test-driven choice.
+CM reuses its independently accepted complete calibration blocks and batch32
+oracle/encoder artifacts, then runs its own existing K20 selector at absolute
+WNode theta 0.1, preserving cap, source predicates, native full-graph operation
+and ordered base IDs. Only missing selected-test pairs are computed. Original
+receipts are immutable; a new adoption overlay binds old and V5 identities.
+The auditor is a separate process and replays selection and a bounded sample of
+new distances, not the already accepted original model/OT audit. UNKNOWN slots
+block completion. CPU Slurm explicitly overrides the repository GPU template
+under this user's V5 CPU-only HPC authorization. No main-authority writes.
+
+
 ## [2026-09-16] Explicit Taste K20 absolute-theta0.1 protocol revision
 
 User replaces the prior theta restriction, not the original GINE, cost cap,
