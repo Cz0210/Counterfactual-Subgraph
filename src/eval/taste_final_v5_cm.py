@@ -183,7 +183,7 @@ class TasteCM:
             self.put(name+'.json',dict(parent_ids=p[start:stop],candidate_ids=chosen,source_mask=mask[start:stop].tolist(),
                 contract_sha256=self.sha,freeze_sha256=f.freeze_sha256,npz_sha256=file_sha(self.root/(name+'.npz')),
                 computed=computed,reused=reused,raw_pair_identity_sha256=digest(keys),producer_pid=os.getpid()))
-            atomic_json(self.root/'progress.json',dict(stage='SELECTED_TEST',completed_blocks=block+1,total_blocks=59,at=utc_now()))
+            atomic_json(self.root/'progress.json',dict(stage='SELECTED_TEST',completed_blocks=block+1,total_blocks=(len(p)+7)//8,at=utc_now()))
         print('SELECTED_TEST_COMPLETE',len(chosen),'missing columns',len(missing),flush=True)
 
     def result(self):

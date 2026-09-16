@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## 2026-09-16 CM4 V6 closeout
+
+- Reuse V5 evaluator with thin RF/BACE archive adapters and CPU-only paired CLI.
+- Audit eight first-prototype Taste pairs, preserve source-ceiling saturation.
+- Deliver versioned raw CSV, vector PDF and 320dpi PNG; never relabel diagnostics.
+
+
 ## 2026-09-16 Taste final V5 closeout
 
 - Adopt R3, seal common K20/theta0.1 contract from actual ordered IDs and pins.

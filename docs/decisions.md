@@ -1,5 +1,20 @@
 # Decisions Log
 
+## [2026-09-16] V6 CM4 raw-prefix closeout
+
+V6 adopts Taste CM2707876 and Ours R3. Raw 468x20 columns, not capped
+distances or broadcast K20 masks, drive the flat-coverage audit. The first
+prototype is not in V5's 16-new-pair schedule: add only eight deterministic
+first-column checks against accepted full-graph encodings on a CPU node.
+CM AIDS/Mut/BACE replay the original two-swap selector on complete accepted
+calibration pools at theta0.1. Only missing selected-test pairs are computed.
+AIDS remains SOURCE-DESCRIPTIVE (220/1283); old-order theta0.1 diagnostics are
+not final V6 reselection. No generation/model/DB/old full-OT repeats. Two CPU
+Slurm chains, independent dataset failures, fixed original deadline. Figure2
+and Figure3 map old Figure3/4; exact ECDF, all K, no smoothing. V6 partial
+release contains accepted Taste rows only until the other three audits finish.
+
+
 ## [2026-09-16] Taste V5 same-contract baseline closeout
 
 Adopt accepted Ours R3 (R2 alias), without new generation or test-driven choice.
