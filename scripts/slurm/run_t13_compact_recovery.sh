@@ -1,8 +1,10 @@
 #!/bin/bash
 # --action continue is a same-run AutoDL owner stage, never a fresh Slurm start.
 # AutoDL-only GPU1 owner/FD probe. Never sbatch on a mismatched HPC GPU.
-#SBATCH --partition=A800
-#SBATCH --gres=gpu:a800:1
+# V5 user override: HPC CPU only. This AutoDL-only launcher is not submitted.
+#SBATCH --partition=intel
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=1G
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
 source ~/.bashrc

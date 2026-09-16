@@ -1,5 +1,14 @@
 # Refactor Plan
 
+## 2026-09-16 V5 Taste recovery binding
+
+- Implement opt-in T13 next-boundary policy and child SHA readback; reuse the
+  accepted compact index and GPU short probe. No new fresh formal start.
+- Before dispatch, close lawful GPU/RAM window, branch-completion adoption,
+  theta0.1/cap-independent evaluation and the existing publisher locator.
+- Preserve T12 joint500 binding and T14 semantic evidence gates independently.
+
+
 ## 2026-09-08: T13 held-FD diagnostic follow-up
 
 - [x] Extend the existing owner/terminal provider with the T13 real-batch

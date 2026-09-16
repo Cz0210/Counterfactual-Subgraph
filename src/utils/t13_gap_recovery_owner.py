@@ -11,6 +11,30 @@ GIB=1024**3
 SCHEMA='T13_GAP_FIRST_COMPACT_GPU_PROBE_20260914'
 FORMAL_SCHEMA='T13_GAP_FIRST_SAME_RUN_CONTINUATION_20260914'
 
+def stage_memory_policy(spec):
+    """V5 replaces the unidentified old 384GiB constant, not real reservations."""
+    if 'stage_resource_policy' not in spec:
+        if spec['process_peak_bound_bytes']!=16*GIB or spec['other_remaining_reserve_bytes']!=384*GIB:
+            raise ValueError('T13_BOUNDED_PROBE_MEMORY_CONTRACT')
+        return None
+    from src.utils.t13_performance_dispatch import bound_json
+    p=bound_json(spec['stage_resource_policy'])
+    if (spec['schema']!=FORMAL_SCHEMA or p.get('schema')!='T13_V5_STAGE_INCREMENT_V1'
+            or p.get('formal_quota')!='1/1' or p.get('gpu_uuid')!=spec['gpu_uuid']
+            or p.get('safety_margin_bytes')!=64*GIB or p.get('process_peak_bound_bytes')!=32*GIB
+            or p.get('maximum_retained_train_batches')!=5):
+        raise ValueError('T13_V5_POLICY_SCOPE')
+    memory=bound_json(p['adopted_probe_memory'])['samples']
+    peak=max(int(r['VmHWM_bytes']) for r in memory)
+    if peak!=p['observed_probe_host_peak_bytes'] or 5*peak>p['process_peak_bound_bytes']:
+        raise ValueError('T13_V5_BOUNDED_FIVE_BATCH_ENVELOPE_UNSUPPORTED')
+    if p.get('retired_default_reason')!='UNIDENTIFIED_FIXED_HEADROOM_NOT_EXTERNAL_TASK_INCREMENT':
+        raise ValueError('T13_384_RETIREMENT_REASON_REQUIRED')
+    for row in p['concurrent_future_increments']:
+        if type(row.get('additional_bytes')) is not int or row['additional_bytes']<0 or not row.get('evidence'):
+            raise ValueError('UNKNOWN_CONCURRENT_INCREMENT:'+str(row.get('task_id')))
+    return p
+
 def decision(spec, evidence):
     blockers=list(evidence.get('source_blockers', []))
     if spec.get('schema') not in {SCHEMA,FORMAL_SCHEMA} or spec.get('gpu_index')!=1:
@@ -25,8 +49,7 @@ class RecoverySampler:
     def __init__(self,spec):
         if spec['schema'] not in {SCHEMA,FORMAL_SCHEMA} or spec['gpu_index']!=1 or spec['formal_quota_used']!='1/1':
             raise ValueError('T13_RECOVERY_SCOPE')
-        if spec['process_peak_bound_bytes']!=16*GIB or spec['other_remaining_reserve_bytes']!=384*GIB:
-            raise ValueError('T13_BOUNDED_PROBE_MEMORY_CONTRACT')
+        self.stage_policy=stage_memory_policy(spec)
         self.t13_dispatch=spec;self.config={'proc_root':'/proc'};self.uuid=spec['gpu_uuid'];self.index=1
         self.idle_since=None;self.admitted_idle_seconds=None
     def bind_t13_held_lease(self,fd,run_id):
@@ -56,14 +79,36 @@ class RecoverySampler:
             if process_start_ticks('/proc',child_pid)!=child_start_ticks:raise ValueError('CHILD_IDENTITY_CHANGED')
             lines=Path(f'/proc/{child_pid}/status').read_text().splitlines()
             rss=next(int(s.split()[1])*1024 for s in lines if s.startswith('VmRSS:'))
-        need=spec['other_remaining_reserve_bytes']+max(0,spec['process_peak_bound_bytes']-rss)
-        memory=limit-usage>=need and rss<=spec['process_peak_bound_bytes']
+        policy=self.stage_policy
+        if policy:
+            from src.utils.t13_performance_dispatch import bound_json
+            # Actual window evidence is separate from occupancy and cannot be a
+            # renewed timestamp on the old snapshot. Missing confirmation blocks.
+            window=bound_json(policy['resource_window'])
+            now=datetime.now(timezone.utc)
+            if (window.get('state')!='CONFIRMED_EXCLUSIVE_WINDOW'
+                    or window.get('gpu_uuid')!=self.uuid or not window.get('authority_evidence')
+                    or now>=datetime.fromisoformat(window['ends_at'])
+                    or window.get('future_reservations_complete') is not True):
+                block.append('LAWFUL_GPU_AND_FUTURE_RESOURCE_WINDOW_UNCONFIRMED')
+            bound=policy['process_peak_bound_bytes']
+            other=sum(r['additional_bytes'] for r in policy['concurrent_future_increments'])
+            safety=policy['safety_margin_bytes']
+            need=max(0,bound-rss)+other+safety
+            from src.ablations.llm.existing_gpu_owner import memory_headroom
+            effective=memory_headroom(Path('/proc'),cg)
+        else:
+            bound=spec['process_peak_bound_bytes'];other=spec['other_remaining_reserve_bytes'];safety=0
+            need=other+max(0,bound-rss);effective=limit-usage
+        memory=effective>=need and rss<=bound
         p=os.statvfs(spec['persistent_root']);n=os.statvfs(spec['nvme_root'])
         storage=(p.f_favail-spec['persistent_uncreated_peak']-spec['other_uncreated_peak']>=8192+spec['dynamic_buffer']
             and p.f_bavail*p.f_frsize>=100*GIB and n.f_bavail*n.f_frsize>=2*GIB+spec['nvme_uncreated_peak'])
         e=dict(task_family=self.task_family,observed_at=datetime.now(timezone.utc).isoformat(),source_blockers=block,
             memory_safe=memory,storage_safe=storage,physical_gpu_safe=physical,
-            memory_headroom_bytes=limit-usage,required_headroom_bytes=need,cgroup_usage_bytes=usage,
+            memory_headroom_bytes=effective,required_headroom_bytes=need,cgroup_usage_bytes=usage,
+            stage_process_bound_bytes=bound,other_future_increment_bytes=other,safety_margin_bytes=safety,
+            stage_policy_sha256=spec.get('stage_resource_policy',{}).get('sha256'),
             child_rss_bytes=rss,gpu_index=1,gpu_uuid=self.uuid,target_gpu_uuid=self.uuid,logical_device='cuda:0',
             actual_gpu_observation=gpu.as_json(),gpu_idle_seconds=0,
             persistent_free_entries=p.f_favail,nvme_free_bytes=n.f_bavail*n.f_frsize,

@@ -1,5 +1,21 @@
 # Decisions Log
 
+## [2026-09-16] V5 T13 stage RAM overlay, original formal1/1 preserved
+
+The old recovery sampler hard-coded 16+384 GiB; the 384 component had no
+task/reservation identity. V5 supports a separately hashed, opt-in next-stage
+policy: 32 GiB conservative five-batch host envelope (5 x the existing observed
+5,310,369,792-byte probe high-water mark fits), plus 64 GiB safety, plus every
+evidence-bound real concurrent future increment. This is an engineering bound,
+not a newly measured full-epoch peak. Current RSS is already in cgroup usage and
+is not charged twice. Host MemAvailable and cgroup headroom are both enforced.
+Unknown concurrent increments or an unconfirmed external GPU/resource window
+block admission. The actual child compares the policy SHA and reports the read
+back bound. No backend/model/loss/data/RNG change or diagnostic rerun. Old specs
+retain their old gate. Postprocessing/publication binding is separate and must
+be complete before this continuation is dispatched.
+
+
 ## [2026-09-09] T13 diagnostic matches the actual five-batch optimizer boundary
 
 The prior real-batch benchmark made an optimizer update after every batch and

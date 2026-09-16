@@ -44,7 +44,17 @@ def main():
         if lock['gpu_child_pid']!=os.getpid() or lock['gpu_uuid']!=plan['gpu_uuid']:raise ValueError('LEASE_CHILD_BINDING')
         from src.baselines.t13_indexed_canary import memory_snapshot
         row=memory_snapshot(phase);row.update(elapsed_seconds=time.monotonic()-start)
-        if row.get('VmHWM_bytes',0)>16*1024**3:raise ValueError('BOUNDED_HOST_PROBE_16GIB_EXCEEDED')
+        if plan.get('stage_resource_policy'):
+            if e.get('stage_policy_sha256')!=plan['stage_resource_policy']['sha256']:
+                raise ValueError('ACTUAL_CHILD_POLICY_SHA_DIFFERS')
+            from src.utils.t13_performance_dispatch import bound_json
+            policy=bound_json(plan['stage_resource_policy'])
+            limit=policy['process_peak_bound_bytes']
+            atomic_json(out/'actual_resource_policy.json',dict(policy_sha256=e['stage_policy_sha256'],
+                process_peak_bound_bytes=limit,required_headroom_bytes=e['required_headroom_bytes'],
+                observed_headroom_bytes=e['memory_headroom_bytes'],pid=os.getpid()))
+        else:limit=16*1024**3
+        if row.get('VmHWM_bytes',0)>limit:raise ValueError('BOUNDED_HOST_STAGE_ENVELOPE_EXCEEDED')
         samples.append(row);atomic_json(out/'memory_boundaries.json',dict(samples=samples))
     def timeout(*_):raise TimeoutError('T13_PROBE_3600_SECOND_BOUND')
     signal.signal(signal.SIGALRM,timeout)
