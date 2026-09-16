@@ -2,6 +2,9 @@
 
 ## 2026-09-16 CM4 V6 closeout
 
+- Completed: four accepted CM results and separate descriptive AIDS panel;
+  offline raw-to-prefix check, exact ECDF, and copyable Mac replot entry.
+
 - Reuse V5 evaluator with thin RF/BACE archive adapters and CPU-only paired CLI.
 - Audit eight first-prototype Taste pairs, preserve source-ceiling saturation.
 - Deliver versioned raw CSV, vector PDF and 320dpi PNG; never relabel diagnostics.

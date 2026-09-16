@@ -1,5 +1,17 @@
 # Decisions Log
 
+## [2026-09-16] V6 four-CM accepted-data publication
+
+CPU jobs 2710116/2710117 completed the bounded first-prototype audit and
+three-dataset theta0.1 reselection/missing-pair evaluation. Publication checks
+transferred compact blocks and recomputes true prefix reductions, without new
+oracle/OT or selector calls. Four CM datasets have separate dataset panels;
+AIDS remains SOURCE-DESCRIPTIVE and absent compatible baselines are not drawn
+as zeros. Taste adopts accepted R3 and CM; no main-authority mutation.
+The offline release CLI has a matching CPU-only Slurm entry; all K values and
+unsmoothed exact ECDF survive. Partial applies to cross-method completeness,
+not to the four accepted CM cells.
+
 ## [2026-09-16] V6 CM4 raw-prefix closeout
 
 V6 adopts Taste CM2707876 and Ours R3. Raw 468x20 columns, not capped
