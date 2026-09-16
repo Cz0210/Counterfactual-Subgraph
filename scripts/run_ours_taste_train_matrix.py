@@ -29,7 +29,7 @@ def main():
     a=p.parse_args()
     assert a.config.resolve()==(ROOT/'configs/hpc.yaml').resolve()
     spec=read_json(a.spec);out=Path(spec['output_root']);compact=Path(spec['compact_root'])
-    assert spec['campaign']=='OURS_TASTEMOLNET_REACH_V1' and spec['split']=='train'
+    assert spec['campaign'] in ('OURS_TASTEMOLNET_REACH_V1','OURS_TASTE_K20_THETA010_V3') and spec['split']=='train'
     assert os.environ['CUDA_VISIBLE_DEVICES']==spec['gpu_uuid']
     assert len(spec['gpu_uuid'])>20 and spec['matrix_parent_limit']==256
     assert datetime.now(timezone.utc)<datetime.fromisoformat(spec['search_stop_at'])
@@ -55,7 +55,7 @@ def main():
     signal.signal(signal.SIGTERM,lambda *_:pause.__setitem__(0,True))
     signal.signal(signal.SIGINT,lambda *_:pause.__setitem__(0,True))
     with GPUFileLock(Path(spec['lock_root']),gpu_index=spec['gpu_index'],gpu_uuid=spec['gpu_uuid'],
-                     owner={'run_id':spec['campaign'],'spec_sha256':stage_sha,'stage':'TRAIN_P0_MATRIX','root':str(out)}) as lease:
+                     owner={'run_id':spec['campaign'],'spec_sha256':stage_sha,'stage':spec['stage'],'root':str(out)}) as lease:
         rows=subprocess.check_output(['nvidia-smi','--query-compute-apps=gpu_uuid,pid','--format=csv,noheader,nounits'],text=True)
         assert spec['gpu_uuid'] not in rows
         import numpy as np
@@ -89,9 +89,12 @@ def main():
                     cache_db=out/'distances.sqlite',node_emb_cache_dir=spec['existing_node_cache'],device='cuda:0',
                     distance_namespace='tastemolnet_ours_full_wnode_v1'),embedder=embedder)
         identity=read_json(compact/'calibration_adoption.json')['input_identity']
-        if spec['stage']=='SEARCH_CALIBRATE_TEST':
+        if spec['stage'] in ('SEARCH_CALIBRATE_TEST','THETA010_SELECTED_TEST'):
             try:
-                from src.eval.ours_taste_search_chain import run
+                if spec['stage']=='THETA010_SELECTED_TEST':
+                    from src.eval.ours_taste_theta010 import evaluate_selected as run
+                else:
+                    from src.eval.ours_taste_search_chain import run
                 dump_json(out/'owner.json',{'pid':os.getpid(),'start_ticks':int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19]),
                    'stage':spec['stage'],'gpu_uuid':spec['gpu_uuid'],'existing_lock_path':str(lease.path),'spec_sha256':stage_sha,'cwd':str(ROOT)})
                 run(spec,out,compact,contract,scorer,provider,identity,pause)

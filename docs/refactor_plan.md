@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## 2026-09-16 Taste theta0.1 independent protocol
+
+- Resolve original oracle/cap/cohort and explicit theta roles; adopt raw matrices.
+- R0/R1 threshold-only reduction; prior-D R2 calibration selection and bounded ceiling.
+- Predeclare R3 branch, freeze R2, evaluate missing test columns, independent export.
+- Keep optional cost-targeted discovery and Taste GIN below completed R2 delivery.
+
 ## 2026-09-15 exclusive Ours–Taste override
 
 - Pause other project successors until a later explicit direction change.

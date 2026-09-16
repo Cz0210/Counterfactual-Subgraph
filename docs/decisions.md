@@ -1,5 +1,17 @@
 # Decisions Log
 
+## [2026-09-16] Explicit Taste K20 absolute-theta0.1 protocol revision
+
+User replaces the prior theta restriction, not the original GINE, cost cap,
+base cohort, operation or WNode. New root/campaign only. Preserve original D's
+selector and auxiliary grid; explicitly route primary theta0.1 through original
+C initialization, D scoring, evaluator and export. Coverage reads uncapped raw
+valid strict-flip distances; cost retains the original cap. Parent source masks
+are explicit. R0/R1 are threshold-only, R2 is calibration-only reselection.
+Freeze the conditional R3 decision before new R2 test. Test evaluates only the
+selected union's missing columns. Other project stages remain paused; HPC is
+CPU-only. No old package/model audit or science is repeated.
+
 ## [2026-09-15] Exclusive Ours–Taste fixed-contract reach development
 
 Independent export audit uses the actual producer schema (`p_after=[]` for
