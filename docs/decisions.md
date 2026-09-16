@@ -19131,3 +19131,12 @@ The task-specific finite Mac receiver only receives, audits and renders this
 stage; it cannot dispatch/restart science or extend the original deadline.
 GPU workers remain AutoDL-only. Companion Slurm scripts explicitly request CPU
 resources under the latest user override, not the repository GPU default.
+# 2026-09-16 — V5 accepted-row offline publication
+
+Seal the shared Taste K20/absolute-theta0.1 contract from actual immutable Ours
+bindings. Add a CPU-only metadata CLI and an offline accepted-CSV renderer,
+with paired Slurm scripts. The renderer refuses unknown raw values and cohort,
+oracle, cap or prefix inconsistencies. It exports exact K20 ECDF, fixed-base
+capped mean and all-finite median; missing baseline rows remain PENDING.
+The original matrix authority, old thresholds and generator contracts are not
+modified. Scope is a post-hoc final-evaluation revision with native operations.
