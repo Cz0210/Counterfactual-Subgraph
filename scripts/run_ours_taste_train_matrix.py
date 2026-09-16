@@ -89,10 +89,12 @@ def main():
                     cache_db=out/'distances.sqlite',node_emb_cache_dir=spec['existing_node_cache'],device='cuda:0',
                     distance_namespace='tastemolnet_ours_full_wnode_v1'),embedder=embedder)
         identity=read_json(compact/'calibration_adoption.json')['input_identity']
-        if spec['stage'] in ('SEARCH_CALIBRATE_TEST','THETA010_SELECTED_TEST'):
+        if spec['stage'] in ('SEARCH_CALIBRATE_TEST','THETA010_SELECTED_TEST','THETA010_BOUNDED_SEARCH'):
             try:
                 if spec['stage']=='THETA010_SELECTED_TEST':
                     from src.eval.ours_taste_theta010 import evaluate_selected as run
+                elif spec['stage']=='THETA010_BOUNDED_SEARCH':
+                    from src.eval.ours_taste_theta010_search import run
                 else:
                     from src.eval.ours_taste_search_chain import run
                 dump_json(out/'owner.json',{'pid':os.getpid(),'start_ticks':int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19]),

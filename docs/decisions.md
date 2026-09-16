@@ -19105,3 +19105,15 @@ Read original BACE/Taste sealed sources rather than legacy presentation CSVs;
 report any derived-export mismatch explicitly. Different Mut theta versions and
 unresolved source rows remain PENDING, not zero. Rendering is an offline Mac
 projection, not another scientific authority or a final cross-producer audit.
+# 2026-09-16: R2 delivery and bounded theta0.1 R3 continuation
+
+The mandatory R2 release audits saved original-oracle pair evidence and exports
+uncapped-distance metrics independently. R2 test need not improve over R1; no
+post-test version selection is allowed. The optional R3 branch was declared
+from calibration before R2 test. Its single train-only search uses saved policy
+seeds (zero fresh LM calls), the authorized size subset/beam and actual V2 graph
+query caps, preserving all P1 rules. R3 outputs use a separate release directory.
+The task-specific finite Mac receiver only receives, audits and renders this
+stage; it cannot dispatch/restart science or extend the original deadline.
+GPU workers remain AutoDL-only. Companion Slurm scripts explicitly request CPU
+resources under the latest user override, not the repository GPU default.

@@ -13,6 +13,7 @@ cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES="" PYTHONDONTWRITEBYTECODE=1
 echo "CPU-only CLI validation python=$(command -v python)"
 python -V
-# TRAIN_P0_MATRIX, SEARCH_CALIBRATE_TEST and THETA010_SELECTED_TEST stay
+# TRAIN_P0_MATRIX, SEARCH_CALIBRATE_TEST, THETA010_SELECTED_TEST and
+# THETA010_BOUNDED_SEARCH stay
 # AutoDL-only. No HPC scientific GPU fallback and no model loaded by --help.
 python -I -B scripts/run_ours_taste_train_matrix.py --help

@@ -8,12 +8,15 @@ from src.eval.ours_taste_theta010 import prepare,select
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config',type=Path,required=True)
-    p.add_argument('--action',choices=['prepare','select','status'],required=True)
+    p.add_argument('--action',choices=['prepare','select','export','export-r3','status'],required=True)
     p.add_argument('--root',type=Path,required=True);p.add_argument('--prior',type=Path)
     p.add_argument('--protocol-config',type=Path)
     a=p.parse_args();assert a.config.resolve()==(ROOT/'configs/hpc.yaml').resolve()
     if a.action=='prepare':result=prepare(a.prior,a.protocol_config,a.root)
     elif a.action=='select':result=select(a.root)
+    elif a.action in ('export','export-r3'):
+        from src.eval.ours_taste_theta010_export import export
+        result=export(a.root,include_r3=a.action=='export-r3')
     else:result={p.name:json.loads(p.read_text()) for p in a.root.glob('*receipt.json')}
     print(json.dumps({'state':'EXECUTED','action':a.action,'root':str(a.root)}))
 
