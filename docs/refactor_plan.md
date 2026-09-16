@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## 2026-09-16 V6 final-eval recovery bridge
+
+- Wire cap/theta separation, K20, at-most-K through producer/verifier/publisher.
+- Bind post-training stage independently; no new formal quota or native changes.
+- Remote deployment and real owner/provider bindings remain required before launch.
+
+
 ## 2026-09-16 V5 Taste recovery binding
 
 - Implement opt-in T13 next-boundary policy and child SHA readback; reuse the

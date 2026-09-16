@@ -79,6 +79,7 @@ SEED = 7
 K_MAX = 20
 MIN_RULES = 10
 TABLE2_K = 10
+FINAL_EVAL_V6 = "CM4_TASTE_K20_THETA010_CLOSEOUT_V6"
 DISTANCE_LINE = "MolCLR-Node-Wasserstein"
 CF_MODE = "strict_flip"
 DISTANCE_NAMESPACE = "tastemolnet_globalgce_full_wnode_v1"
@@ -202,9 +203,18 @@ class ThresholdContract:
     source: str
     source_split: str
     file_sha256: str
+    final_eval_protocol: str = "LEGACY_T13"
+
+    @property
+    def minimum_final_rules(self) -> int:
+        return 0 if self.final_eval_protocol == FINAL_EVAL_V6 else MIN_RULES
+
+    @property
+    def primary_report_k(self) -> int:
+        return 20 if self.final_eval_protocol == FINAL_EVAL_V6 else TABLE2_K
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "thresholds": list(self.values),
             "theta_star": self.theta_star,
             "cost_cap": self.cost_cap,
@@ -215,6 +225,10 @@ class ThresholdContract:
             "test_used_for_selection": False,
             "threshold_fitted_on_test": False,
         }
+        if self.final_eval_protocol == FINAL_EVAL_V6:
+            result.update(final_eval_protocol=FINAL_EVAL_V6, primary_report_k=20,
+                          k_mode="AT_MOST_K_NO_PADDING", minimum_final_rules=0)
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +408,12 @@ def _is_sha256(value: Any) -> bool:
 def load_threshold_contract(path_like: str | Path) -> ThresholdContract:
     path = Path(path_like).expanduser().resolve(strict=True)
     payload = read_json(path)
+    protocol = payload.get("final_eval_protocol", "LEGACY_T13")
+    if protocol not in {"LEGACY_T13", FINAL_EVAL_V6}:
+        raise TasteGlobalGCEFullError("Unknown final evaluation protocol")
+    if protocol == FINAL_EVAL_V6 and (payload.get("primary_report_k") != 20
+            or payload.get("k_mode") != "AT_MOST_K_NO_PADDING"):
+        raise TasteGlobalGCEFullError("V6 requires an explicit K20 at-most contract")
     if str(payload.get("dataset") or "").strip().lower() not in {
         "taste",
         "tastemolnet",
@@ -415,7 +435,8 @@ def load_threshold_contract(path_like: str | Path) -> ThresholdContract:
         or theta_star < 0.0
         or theta_star not in values
         or not math.isfinite(cost_cap)
-        or cost_cap < theta_star
+        or cost_cap <= 0.0
+        or (protocol == "LEGACY_T13" and cost_cap < theta_star)
     ):
         raise TasteGlobalGCEFullError("threshold contract numeric gate failed")
     source_split = str(
@@ -446,6 +467,7 @@ def load_threshold_contract(path_like: str | Path) -> ThresholdContract:
         source=source,
         source_split=source_split,
         file_sha256=sha256_file(path),
+        final_eval_protocol=protocol,
     )
 
 
@@ -1174,7 +1196,7 @@ def run_native_branch(
     )
 
 
-def merge_branch_rules(branch_roots: Mapping[int, Path]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def merge_branch_rules(branch_roots: Mapping[int, Path], *, minimum_final_rules: int = MIN_RULES) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if set(branch_roots) != set(TARGET_BRANCHES):
         raise TasteGlobalGCEFullError("T13 merge requires target branches 0 and 2")
     merged: dict[str, dict[str, Any]] = {}
@@ -1226,7 +1248,7 @@ def merge_branch_rules(branch_roots: Mapping[int, Path]) -> tuple[list[dict[str,
             row["candidate_id"],
         ),
     )
-    if len(result) < MIN_RULES or len({row["candidate_id"] for row in result}) != len(result):
+    if len(result) < minimum_final_rules or len({row["candidate_id"] for row in result}) != len(result):
         raise TasteGlobalGCEFullError("T13 canonical merge has insufficient/duplicate rules")
     return result, {
         "target_0_rule_count": branch_counts[0],
@@ -1417,6 +1439,7 @@ def evaluate_split_resumable(
     output: Path,
     checkpoint_callback: Callable[[int], None],
     evaluation_identity: Mapping[str, Any],
+    minimum_final_rules: int = MIN_RULES,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     chunks = output / "raw" / f"{split}_pair_chunks"
     chunks.mkdir(parents=True, exist_ok=True)
@@ -1434,7 +1457,7 @@ def evaluate_split_resumable(
         raise TasteGlobalGCEFullError("T13 split evaluation identity changed")
     evaluation_identity_sha256 = stable_sha256(identity)
     candidate_ids = [str(row["candidate_id"]) for row in rules]
-    if len(candidate_ids) < MIN_RULES or len(candidate_ids) != len(set(candidate_ids)):
+    if len(candidate_ids) < minimum_final_rules or len(candidate_ids) != len(set(candidate_ids)):
         raise TasteGlobalGCEFullError("T13 evaluation rule identity is invalid")
     all_rows: list[dict[str, Any]] = []
     chunk_inventory: list[dict[str, Any]] = []
@@ -1659,7 +1682,15 @@ def select_rules_on_calibration(
     pair_rows: Sequence[Mapping[str, Any]],
     *,
     theta_star: float,
+    minimum_final_rules: int = MIN_RULES,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not rules and minimum_final_rules == 0:
+        if pair_rows:
+            raise TasteGlobalGCEFullError("Zero-rule selection has unexpected pair rows")
+        return [], dict(selector="calibration_greedy_marginal_theta_then_strict_then_total_coverage_then_mean_wnode_then_rule_id_v1",
+            theta_star=theta_star,candidate_count=0,selected_count=0,ordered_rule_ids=[],
+            ordered_rule_ids_sha256=stable_sha256([]),trace=[],selector_fitted_on_calibration=True,
+            test_loaded=False,test_used_for_selection=False)
     by_candidate: dict[str, list[Mapping[str, Any]]] = {
         str(row["candidate_id"]): [] for row in rules
     }
@@ -1756,8 +1787,8 @@ def select_rules_on_calibration(
                 "cumulative_strict_coverage": len(covered_strict),
             }
         )
-    if len(selected) < MIN_RULES:
-        raise TasteGlobalGCEFullError("T13 calibration selected fewer than ten rules")
+    if len(selected) < minimum_final_rules:
+        raise TasteGlobalGCEFullError("T13 final rule count below protocol minimum")
     ordered = [rule_by_id[candidate] for candidate in selected]
     return ordered, {
         "selector": (
@@ -1816,11 +1847,19 @@ def compute_standardized_metrics(
     pair_rows: Sequence[Mapping[str, Any]],
     ordered_rule_ids: Sequence[str],
     threshold: ThresholdContract,
+    *, parent_ids: Sequence[str] | None = None, complete_scientific_run: bool = False,
 ) -> dict[str, Any]:
-    if not MIN_RULES <= len(ordered_rule_ids) <= K_MAX:
-        raise TasteGlobalGCEFullError("T13 frozen rule count must be 10..20")
+    if not threshold.minimum_final_rules <= len(ordered_rule_ids) <= K_MAX:
+        raise TasteGlobalGCEFullError("T13 frozen rule count violates final protocol")
+    if not ordered_rule_ids:
+        if pair_rows or not complete_scientific_run or not parent_ids or len(set(parent_ids)) != len(parent_ids):
+            raise TasteGlobalGCEFullError("Zero rules require complete scientific branches and explicit full base")
+        from src.baselines.t13_final_eval_v6 import complete_zero_metrics
+        return complete_zero_metrics(parent_ids, threshold)
     by_parent: dict[str, dict[str, Mapping[str, Any]]] = {}
     for row in pair_rows:
+        if type(row.get("pair_strict_flip")) is not bool or str(row.get("status", "")).upper() in {"UNKNOWN", "UNCOMPUTED", "ERROR"}:
+            raise TasteGlobalGCEFullError("Unresolved pair cannot be published as failure")
         if row.get("split") != "test" or row.get("rf_oracle_used") is not False:
             raise TasteGlobalGCEFullError("T13 test pair provenance changed")
         parent = str(row.get("parent_id") or "")
@@ -1846,6 +1885,8 @@ def compute_standardized_metrics(
     if not by_parent or any(set(rows) != set(ordered_rule_ids) for rows in by_parent.values()):
         raise TasteGlobalGCEFullError("T13 test matrix is not a complete Cartesian product")
     parents = sorted(by_parent)
+    if parent_ids is not None and (len(set(parent_ids)) != len(parent_ids) or set(parents) != set(parent_ids)):
+        raise TasteGlobalGCEFullError("Final evaluation must retain the complete base cohort")
     best: dict[str, tuple[float, float, str, int, bool] | None] = {
         parent: None for parent in parents
     }
@@ -1944,7 +1985,7 @@ def compute_standardized_metrics(
                 }
             )
     k10 = {
-        row["parent_id"]: row for row in parent_best if int(row["k"]) == TABLE2_K
+        row["parent_id"]: row for row in parent_best if int(row["k"]) == threshold.primary_report_k
     }
     figure4 = []
     for value in threshold.values:
@@ -1956,7 +1997,7 @@ def compute_standardized_metrics(
             {
                 "dataset": DATASET,
                 "method": METHOD,
-                "k": TABLE2_K,
+                "k": threshold.primary_report_k,
                 "threshold": value,
                 "coverage": coverage,
                 "CCRCov": coverage,
@@ -1991,7 +2032,7 @@ def compute_standardized_metrics(
             for row in prefix
         ],
         "figure4": figure4,
-        "table2": [dict(prefix[TABLE2_K - 1])],
+        "table2": [dict(prefix[threshold.primary_report_k - 1])],
         "destination": destination_rows,
         "parent_count": len(parents),
         "pair_count": len(pair_rows),
@@ -2000,6 +2041,9 @@ def compute_standardized_metrics(
 
 
 def _immutable_artifact_inventory(output: Path) -> dict[str, dict[str, Any]]:
+    summary = read_json(output / "summary.json")
+    v6 = summary.get("threshold_contract", {}).get("final_eval_protocol") == FINAL_EVAL_V6
+    primary_k = 20 if v6 else TABLE2_K
     required_names = (
         "figure3_coverage_vs_k.csv",
         "figure4_coverage_vs_threshold.csv",
@@ -2007,7 +2051,7 @@ def _immutable_artifact_inventory(output: Path) -> dict[str, dict[str, Any]]:
         "prefix_metrics.json",
         "parent_best_distances.csv",
         "destination_distribution.csv",
-        "table2_globalgce_k10.csv",
+        f"table2_globalgce_k{primary_k}.csv",
         "summary.json",
         "oracle_manifest.json",
         "evaluation_manifest.json",
@@ -2038,6 +2082,7 @@ def _immutable_artifact_inventory(output: Path) -> dict[str, dict[str, Any]]:
         path = output / name
         if not path.is_file() or (
             name in required_names and path.stat().st_size <= 0
+            and not (v6 and summary.get("effective_rule_count") == 0 and name.endswith(".jsonl"))
         ):
             raise TasteGlobalGCEFullError(f"T13 immutable artifact is absent: {name}")
         inventory[name] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
@@ -2194,7 +2239,7 @@ def run_t13_full(
                     "branch_manifest_sha256": sha256_file(_branch_manifest(branch_roots[target])),
                 },
             )
-    merged_rules, merge_manifest = merge_branch_rules(branch_roots)
+    merged_rules, merge_manifest = merge_branch_rules(branch_roots, minimum_final_rules=authority.threshold.minimum_final_rules)
     atomic_jsonl(output / "raw" / "merged_rules.jsonl", merged_rules)
     merge_manifest.update(
         {
@@ -2242,7 +2287,7 @@ def run_t13_full(
                 or selection_manifest.get("molclr_checkpoint_hash")
                 != authority.molclr_checkpoint_sha256
                 or ordered_ids != list(selection_manifest.get("ordered_rule_ids") or [])
-                or not MIN_RULES <= len(ordered_ids) <= K_MAX
+                or not authority.threshold.minimum_final_rules <= len(ordered_ids) <= K_MAX
                 or selection_manifest.get("selected_rules_sha256")
                 != sha256_file(selected_rules_path)
             ):
@@ -2254,6 +2299,7 @@ def run_t13_full(
                 expected_sha256=authority.calibration_sha256,
             )
             calibration_rows, calibration_manifest = evaluate_split_resumable(
+                minimum_final_rules=authority.threshold.minimum_final_rules,
                 split="calibration",
                 parents=calibration_parents,
                 rules=merged_rules,
@@ -2279,6 +2325,7 @@ def run_t13_full(
                 merged_rules,
                 calibration_rows,
                 theta_star=authority.threshold.theta_star,
+                minimum_final_rules=authority.threshold.minimum_final_rules,
             )
             atomic_jsonl(selected_rules_path, selected_rules)
             frozen_at = utc_now()
@@ -2315,6 +2362,7 @@ def run_t13_full(
             selection_manifest_path=output / "raw" / "selection_manifest.json",
         )
         test_rows, test_manifest = evaluate_split_resumable(
+            minimum_final_rules=authority.threshold.minimum_final_rules,
             split="test",
             parents=test_parents,
             rules=selected_rules,
@@ -2353,6 +2401,7 @@ def run_t13_full(
         test_rows,
         [str(row["candidate_id"]) for row in selected_rules],
         authority.threshold,
+        parent_ids=[row.parent_id for row in test_parents], complete_scientific_run=True,
     )
     atomic_csv(output / "figure3_coverage_vs_k.csv", metrics["figure3"])
     atomic_csv(output / "figure4_coverage_vs_threshold.csv", metrics["figure4"])
@@ -2360,7 +2409,7 @@ def run_t13_full(
     atomic_json(output / "prefix_metrics.json", metrics["prefix"])
     atomic_csv(output / "parent_best_distances.csv", metrics["parent_best"])
     atomic_csv(output / "destination_distribution.csv", metrics["destination"])
-    atomic_csv(output / "table2_globalgce_k10.csv", metrics["table2"])
+    atomic_csv(output / f"table2_globalgce_k{authority.threshold.primary_report_k}.csv", metrics["table2"])
     test_parent_hash = stable_sha256(sorted(row.parent_id for row in test_parents))
     common = _common_manifest(
         authority=authority, output=output, test_parent_ids_sha256=test_parent_hash
@@ -2387,7 +2436,7 @@ def run_t13_full(
         "M_configured_max": None,
         "M_effective": None,
         "K_MAX": K_MAX,
-        "MIN_RULES_FOR_MAIN_TABLE": MIN_RULES,
+        "MIN_RULES_FOR_MAIN_TABLE": authority.threshold.minimum_final_rules,
         "distance_provider_stats": provider_stats,
         "threshold_contract": authority.threshold.to_dict(),
         "branch_manifests": {
@@ -2577,7 +2626,11 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
             raise TasteGlobalGCEFullError(
                 f"T13 target branches differ in {identity_key}"
             )
-    replayed_merged, replayed_merge = merge_branch_rules(branch_roots)
+    protocol = summary.get("threshold_contract", {}).get("final_eval_protocol", "LEGACY_T13")
+    if protocol not in {"LEGACY_T13", FINAL_EVAL_V6}:
+        raise TasteGlobalGCEFullError("Unknown final protocol")
+    minimum_final_rules = 0 if protocol == FINAL_EVAL_V6 else MIN_RULES
+    replayed_merged, replayed_merge = merge_branch_rules(branch_roots, minimum_final_rules=minimum_final_rules)
     merged_rules = read_jsonl(output / "raw" / "merged_rules.jsonl")
     merge_manifest = read_json(output / "raw" / "merge_manifest.json")
     if (
@@ -2649,11 +2702,15 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
         source=str(selection["threshold_source"]),
         source_split=str(selection["threshold_source_split"]),
         file_sha256=str(selection["threshold_contract_file_sha256"]),
+        final_eval_protocol=protocol,
     )
+    if ((protocol == FINAL_EVAL_V6 or "threshold_contract" in summary)
+            and threshold.to_dict() != summary.get("threshold_contract")) or any(selection.get(k) != v for k, v in threshold.to_dict().items()):
+        raise TasteGlobalGCEFullError("Selection/summary final protocol differs")
     if threshold.config_hash != stable_json_sha256(list(threshold.values)):
         raise TasteGlobalGCEFullError("T13 verifier threshold grid hash changed")
     replayed_selected, replayed_selection = select_rules_on_calibration(
-        merged_rules, calibration_rows, theta_star=threshold.theta_star
+        merged_rules, calibration_rows, theta_star=threshold.theta_star, minimum_final_rules=threshold.minimum_final_rules
     )
     if (
         replayed_selected != selected_rules
@@ -2693,18 +2750,19 @@ def verify_t13_output(output_dir: str | Path) -> dict[str, Any]:
                 f"T13 {expected_split} evaluation identity changed"
             )
     observed_test_parent_hash = stable_sha256(
-        sorted({str(row.get("parent_id") or "") for row in test_rows})
+        sorted(str(row["parent_id"]) for row in test_chunks["chunks"])
     )
     if observed_test_parent_hash != run_manifest.get("test_parent_ids_sha256"):
         raise TasteGlobalGCEFullError("T13 test parent cohort hash changed")
-    recomputed = compute_standardized_metrics(test_rows, ordered, threshold)
+    recomputed = compute_standardized_metrics(test_rows, ordered, threshold,
+        parent_ids=[str(row["parent_id"]) for row in test_chunks["chunks"]], complete_scientific_run=True)
     expected_csvs = {
         "figure3_coverage_vs_k.csv": recomputed["figure3"],
         "figure4_coverage_vs_threshold.csv": recomputed["figure4"],
         "prefix_metrics.csv": recomputed["prefix"],
         "parent_best_distances.csv": recomputed["parent_best"],
         "destination_distribution.csv": recomputed["destination"],
-        "table2_globalgce_k10.csv": recomputed["table2"],
+        f"table2_globalgce_k{threshold.primary_report_k}.csv": recomputed["table2"],
     }
     for name, expected in expected_csvs.items():
         # CSV round-tripping changes scalar types.  Compare the canonical CSV

@@ -734,7 +734,7 @@ def validate_t13_release(
 
 
 def publish_verified_t13_locator(
-    *, spec_root: str | Path, terminal_root: str | Path
+    *, spec_root: str | Path, terminal_root: str | Path, final_eval_binding: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Verify AutoDL T13 and expose its root to the sole matrix publisher.
 
@@ -746,6 +746,20 @@ def publish_verified_t13_locator(
     root = _absolute(terminal_root, label="T13 terminal root", exists=True)
     if str(root) != specs["publisher"].get("expected_terminal_root"):
         raise T8HPCT13SpecError("T13 terminal differs from publisher claim")
+    summary = read_json(root / "summary.json", label="T13 final summary")
+    protocol = summary.get("threshold_contract", {}).get("final_eval_protocol")
+    if protocol == "CM4_TASTE_K20_THETA010_CLOSEOUT_V6":
+        if not final_eval_binding:
+            raise T8HPCT13SpecError("V6 publisher requires its bound final-eval overlay")
+        from src.utils.t13_performance_dispatch import bound_json
+        overlay = bound_json(final_eval_binding)
+        threshold = summary["threshold_contract"]
+        if (overlay.get("output_root") != str(root) or overlay.get("protocol") != protocol
+                or threshold.get("primary_report_k") != 20 or threshold.get("theta_star") != 0.1
+                or threshold.get("cost_cap") != 0.03416003659645076):
+            raise T8HPCT13SpecError("V6 actual output/publisher binding differs")
+    elif final_eval_binding is not None:
+        raise T8HPCT13SpecError("Legacy result cannot be relabelled V6")
     from src.baselines.tastemolnet_globalgce_full import verify_t13_output
 
     lease_path = _absolute(

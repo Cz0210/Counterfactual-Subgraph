@@ -80,4 +80,7 @@ def continue_branches(*,plan,out,checkpoint,selected,cohort,official,adapter,sam
         targets=list(results),formal_quota='1/1',source_attempt_id=plan['original_formal_attempt_id'],
         next_stage='EXISTING_TASTE_FULL_MERGE_CALIBRATION_TEST_UNDER_ITS_OWN_STORAGE_ADMISSION',
         final_evaluation_admission_required=True))
+    if plan.get('final_evaluation_binding'):
+        from src.baselines.t13_final_eval_v6 import run_final_successor
+        return run_final_successor(plan,out,sample)
     return 0

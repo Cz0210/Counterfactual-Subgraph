@@ -1,5 +1,18 @@
 # Decisions Log
 
+## [2026-09-16] V6 final evaluation independent of training budget
+
+Opt-in final protocol CM4_TASTE_K20_THETA010_CLOSEOUT_V6 separates finite
+theta>=0 from finite cap>0, reads K20 and accepts at-most20 final rules.
+Legacy behavior and sealed receipts are unchanged; native mining/training are
+not relaxed. A complete zero needs both actual native branch completions and
+the complete explicit parent base; failures/unknowns cannot become zero.
+The same-run compact continuation can call the original full evaluator and
+canonical publisher through a separately hashed final-evaluation binding.
+Post-training requires its own fresh resource admission, not the training
+probe's 32GiB/256-file envelope. Scientific training implementation unchanged.
+
+
 ## [2026-09-16] V5 T13 stage RAM overlay, original formal1/1 preserved
 
 The old recovery sampler hard-coded 16+384 GiB; the 384 component had no
