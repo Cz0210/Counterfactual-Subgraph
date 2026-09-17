@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from src.eval.selector_controlled_v7 import run
+from src.eval.selector_controlled_v7 import run,resume_test
 
 def main():
     p=argparse.ArgumentParser(__doc__)
@@ -14,7 +14,9 @@ def main():
     p.add_argument('--set',action='append',default=[])
     p.add_argument('--spec',required=True)
     p.add_argument('--phase',choices=['p0','p1'],default='p0')
+    p.add_argument('--action',choices=['select','resume-test'],default='select')
     args=p.parse_args()
-    print(json.dumps(run(args.spec,phase=args.phase),sort_keys=True))
+    fn=run if args.action=='select' else resume_test
+    print(json.dumps(fn(args.spec,phase=args.phase),sort_keys=True))
 
 if __name__=='__main__':main()

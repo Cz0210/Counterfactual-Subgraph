@@ -84,6 +84,42 @@ def load_matrix(path, candidate_ids, *, expected_parents=None, subset=False):
     return parents, d, failures
 
 
+def base_parent_ids(path, label_filter=None):
+    with Path(path).open() as stream:
+        reader=csv.DictReader(stream)
+        key='parent_id' if 'parent_id' in reader.fieldnames else 'molecule_id'
+        ids=[row[key] for row in reader if label_filter is None or str(row['label'])==str(label_filter)]
+    if len(ids)!=len(set(ids)):
+        raise ValueError('DUPLICATE_BASE_PARENT_IDS')
+    return ids
+
+
+def complete_non_source_rows(spec, parents, d):
+    """Only authenticated pre-intervention non-source predictions imply no flip.
+
+    This adds no new oracle values; an absent source row remains UNKNOWN.
+    """
+    base=base_parent_ids(spec['calibration_parent_csv'],spec.get('calibration_label_filter'))
+    with Path(spec['calibration_predictions_csv']).open() as stream:
+        predictions={r['parent_id']:r for r in csv.DictReader(stream)}
+    pi={p:i for i,p in enumerate(parents)}
+    result=np.full((len(base),d.shape[1]),np.nan);adopted=[]
+    for i,pid in enumerate(base):
+        if pid in pi:
+            result[i]=d[pi[pid]]
+            continue
+        r=predictions.get(pid)
+        if (r is None or r['checkpoint_id']!=spec['oracle_sha256'] or r['backbone']!='gine'
+                or float(r['temperature'])!=spec['temperature'] or int(r['source_label'])!=1):
+            raise ValueError('MISSING_PARENT_PREDICTION_BINDING:'+pid)
+        if int(r['predicted_label'])==1:
+            raise ValueError('MISSING_SOURCE_PARENT_REMAINS_UNKNOWN:'+pid)
+        result[i]=np.inf
+        adopted.append(dict(parent_id=pid,predicted_label=int(r['predicted_label']),reason='authenticated_non_source_before'))
+    if set(parents)-set(base):raise ValueError('DCAL_HAS_NONBASE_PARENT')
+    return base,result,adopted
+
+
 class Objective:
     def __init__(self, distances, chemistry):
         self.d = distances
@@ -194,6 +230,9 @@ def run(spec_path, *, phase='p0'):
     if len(set(ids)) != len(ids) or len(ids) != spec['expected_candidate_count']:
         raise ValueError('POOL_IDENTITY_OR_COUNT_CHANGED')
     parents, d, failures = load_matrix(spec['calibration_matrix'], ids)
+    non_source=[]
+    if spec.get('calibration_parent_csv'):
+        parents,d,non_source=complete_non_source_rows(spec,parents,d)
     if d.shape != (spec['expected_calibration_count'], len(ids)) or np.isnan(d).any():
         raise ValueError('INCOMPLETE_DCAL_UNKNOWN_NOT_INF:' + str(d.shape))
     # Actual matrix semantic identity is captured once, not repeated per variant.
@@ -201,6 +240,7 @@ def run(spec_path, *, phase='p0'):
     atomic_json(root/'input_binding.json', dict(spec=spec, spec_sha=digest(spec),
         calibration_parent_ids=parents, candidate_ids=ids, matrix_semantic_sha=matrix_sha,
         failure_funnel=failures, complete_pairs=int(d.size), raw_distance_reused=True,
+        adopted_non_source_rows=non_source,
         candidate_generation_repeated=False, test_loaded=False))
     objective = Objective(d, build_candidate_chemistry(candidates))
     sequences, all_metrics = {}, []
@@ -246,15 +286,43 @@ def run(spec_path, *, phase='p0'):
     atomic_json(root/'ALL_CALIBRATION_FROZEN.json',dict(variants=list(sequences),
         selected_union=[ids[i] for i in union], maximum_union=140 if phase=='p0' else 60,
         test_selection_allowed=False, matrix_semantic_sha=matrix_sha))
+    return consume_saved_test(spec,sequences,ids,root)
+
+
+def resume_test(spec_path, *, phase='p0'):
+    """Resume reduction only; never rerun or reset completed selector budgets."""
+    spec=json.loads(Path(spec_path).read_text());root=Path(spec['output_root'])/phase
+    binding=json.loads((root/'input_binding.json').read_text())
+    if binding['spec_sha']!=digest(spec):raise ValueError('FROZEN_SPEC_CHANGED')
+    all_freeze=json.loads((root/'ALL_CALIBRATION_FROZEN.json').read_text())
+    ids=binding['candidate_ids'];index={c:i for i,c in enumerate(ids)};sequences={}
+    for sid in all_freeze['variants']:
+        f=json.loads((root/(sid+'_freeze.json')).read_text());sha=f.pop('freeze_sha256')
+        if digest(f)!=sha:raise ValueError('CALIBRATION_FREEZE_CHANGED')
+        sequences[sid]=[index[c] for c in f['ordered_candidate_ids']]
+    return consume_saved_test(spec,sequences,ids,root)
+
+
+def consume_saved_test(spec,sequences,ids,root):
+    union=sorted(set(i for seq in sequences.values() for i in seq))
     # Consume saved test columns only after all calibration freezes. Missing
     # selected columns remain a precisely enumerated evaluation worklist.
-    with Path(spec['test_parent_csv']).open() as stream:
-        test_parents=[r['parent_id'] for r in csv.DictReader(stream)
-                      if spec.get('test_label_filter') is None or str(r['label'])==str(spec['test_label_filter'])]
+    test_parents=base_parent_ids(spec['test_parent_csv'],spec.get('test_label_filter'))
     if len(test_parents)!=spec['expected_test_count']:
         raise ValueError('TEST_BASE_COUNT_CHANGED:'+str(len(test_parents)))
     union_ids=[ids[i] for i in union]
     ptest, dt, _ = load_matrix(spec['saved_test_matrix'],union_ids,expected_parents=test_parents,subset=True)
+    if spec.get('test_predictions_csv'):
+        with Path(spec['test_predictions_csv']).open() as stream:
+            predictions={r['parent_id']:r for r in csv.DictReader(stream)}
+        for i,pid in enumerate(ptest):
+            r=predictions.get(pid)
+            if (r is None or r['checkpoint_id']!=spec['oracle_sha256'] or r['backbone']!='gine'
+                    or float(r['temperature'])!=spec['temperature'] or int(r['source_label'])!=1):
+                raise ValueError('TEST_BEFORE_PREDICTION_BINDING:'+pid)
+            if int(r['predicted_label'])!=1:
+                if np.isfinite(dt[i]).any():raise ValueError('NON_SOURCE_HAS_SAVED_STRICT_FLIP:'+pid)
+                dt[i]=np.inf
     missing=np.argwhere(np.isnan(dt))
     write_csv(root/'missing_selected_test_pairs.csv',[
         dict(parent_id=ptest[p],candidate_id=union_ids[c]) for p,c in missing])

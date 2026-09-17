@@ -103,6 +103,17 @@ def owner(*, template, root, registry, code_root):
     with lease.open('a+b') as held:
         fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
         spec=copy.deepcopy(old);spec['output_root']=str(root/'science')
+        # Distinguish the current owner wrapper from the separately reviewed
+        # scientific source tree. Neither commit is relabelled as the other.
+        spec['repo_root']=str(code_root)
+        spec['execution_commit']=subprocess.check_output(['git','-C',str(code_root),'rev-parse','HEAD'],text=True).strip()
+        spec['entrypoint']=str(code_root/'scripts/run_t12_v7_child.py')
+        spec['config_path']=str(code_root/'configs/hpc.yaml')
+        from src.utils.main_ready_task_specs import file_sha256
+        spec['config_sha256']=file_sha256(Path(spec['config_path']))
+        spec['science_contract']['v7_wrapper_binding']=dict(template=str(template),
+            template_sha256=file_sha256(template),source_base_binding=str(template.parent/'reviewed_source_base.json'),
+            source_base_binding_sha256=file_sha256(template.parent/'reviewed_source_base.json'))
         spec['expected_heartbeat_path']=str(root/'heartbeat.json');spec['expected_pid_file']=str(root/'runtime_identity.json')
         if 'expected_terminal_path' in spec:spec['expected_terminal_path']=str(root/'terminal.json')
         binding=spec['science_contract']['shadow_binding']
@@ -111,7 +122,7 @@ def owner(*, template, root, registry, code_root):
             '--config',str(code_root/'configs/hpc.yaml'),'--action','provider','--root',str(root)]
         spec['science_contract']['disposable_index_root']=str(root/'science/disposable-history-index')
         spec_path=root/'runtime-task-spec.json'
-        spec['arguments']=[str(spec_path) if x==str(template) else x for x in spec['arguments']]
+        spec['arguments']=[str(spec_path) if x==str(template) else spec['config_path'] if x==old['config_path'] else x for x in spec['arguments']]
         spec['expected_owner_command_sha256']=owner_command_sha256(spec)
         spec.pop('spec_sha256',None);spec['spec_sha256']=stable_sha256(spec)
         atomic_json(spec_path,spec);load_spec(spec_path)

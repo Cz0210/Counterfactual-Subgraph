@@ -16,4 +16,4 @@ export CUDA_VISIBLE_DEVICES=""
 export OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 MKL_NUM_THREADS=8
 echo "python=$(command -v python)"
 python --version
-python -I -B scripts/run_selector_controlled_v7.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --spec "${SELECTOR_SPEC:?}" --phase "${SELECTOR_PHASE:-p0}"
+python -I -B scripts/run_selector_controlled_v7.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --spec "${SELECTOR_SPEC:?}" --phase "${SELECTOR_PHASE:-p0}" --action "${SELECTOR_ACTION:-select}"

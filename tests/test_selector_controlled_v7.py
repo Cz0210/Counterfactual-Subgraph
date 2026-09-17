@@ -44,3 +44,27 @@ def test_refine_never_changes_fixed_members_or_decreases_objective():
     assert set(seq)=={0,1,2}
     assert o.value(seq,multi=True,prefix=True)>=o.value([2,1,0],multi=True,prefix=True)
     assert stats['proposals']<=40
+
+def test_known_nonsource_completes_base_without_inventing_unknown(tmp_path):
+    from src.eval.selector_controlled_v7 import complete_non_source_rows,base_parent_ids
+    parents=tmp_path/'parents.csv';parents.write_text('molecule_id,label\na,1\nb,1\n')
+    pred=tmp_path/'pred.csv';pred.write_text('parent_id,checkpoint_id,backbone,temperature,source_label,predicted_label\nb,sha,gine,1.5,1,0\n')
+    spec=dict(calibration_parent_csv=str(parents),calibration_label_filter=1,
+              calibration_predictions_csv=str(pred),oracle_sha256='sha',temperature=1.5)
+    base,d,proof=complete_non_source_rows(spec,['a'],np.array([[.2]]))
+    assert base==['a','b'] and np.isinf(d[1,0]) and proof[0]['parent_id']=='b'
+    pred.write_text(pred.read_text().replace('1.5,1,0','1.5,1,1'))
+    with pytest.raises(ValueError,match='REMAINS_UNKNOWN'):
+        complete_non_source_rows(spec,['a'],np.array([[.2]]))
+
+def test_resume_test_does_not_rerun_calibration(tmp_path,monkeypatch):
+    import src.eval.selector_controlled_v7 as s
+    root=tmp_path/'p0';root.mkdir()
+    spec={'output_root':str(tmp_path)};path=tmp_path/'spec.json';path.write_text(json.dumps(spec))
+    (root/'input_binding.json').write_text(json.dumps(dict(spec_sha=s.digest(spec),candidate_ids=['c'])))
+    (root/'ALL_CALIBRATION_FROZEN.json').write_text(json.dumps(dict(variants=['S0'])))
+    f=dict(ordered_candidate_ids=['c']);f['freeze_sha256']=s.digest(f)
+    (root/'S0_freeze.json').write_text(json.dumps(f))
+    monkeypatch.setattr(s,'consume_saved_test',lambda *a: {'reused':True})
+    monkeypatch.setattr(s.Objective,'refine',lambda *a,**k:pytest.fail('must not rerun selector'))
+    assert s.resume_test(path)=={'reused':True}
