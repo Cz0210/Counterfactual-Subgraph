@@ -131,6 +131,14 @@ def owner(*, template, root, registry, code_root, observer_receipt=None):
         binding['resource_provider_command']=[spec['python'],'-I','-B',str(code_root/'scripts/run_t12_v7_owner.py'),
             '--config',str(code_root/'configs/hpc.yaml'),'--action','provider','--root',str(root)]
         spec['science_contract']['disposable_index_root']=str(root/'science/disposable-history-index')
+        if observer_receipt is not None:
+            relocation=verified['official_source_relocation']
+            if (relocation['old_path']!=old['science_contract']['official_root']
+                    or relocation['inventory_sha256']!=old['input_hashes']['official_gcf_source']):
+                raise ValueError('T12_OFFICIAL_RELOCATION_BINDING_CHANGED')
+            spec['science_contract']['official_root']=relocation['new_path']
+            spec['input_roots']['official_gcf_source']=relocation['new_path']
+            spec['science_contract']['official_source_relocation']=relocation
         spec_path=root/'runtime-task-spec.json'
         spec['arguments']=[str(spec_path) if x==str(template) else spec['config_path'] if x==old['config_path'] else x for x in spec['arguments']]
         spec['expected_owner_command_sha256']=owner_command_sha256(spec)

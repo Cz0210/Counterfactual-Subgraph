@@ -12,6 +12,10 @@ raw arrays, buffers, RNG, identities and first-seen state; a separate verifier
 must pass before the existing recovery owner can consume the receipt.
 This does not establish algorithm reload/parity, chemical rejection coverage,
 full checkpoint restoration, or permission to promote a diagnostic checkpoint.
+The first real invocation failed before inference because the old spec referred
+to a different physical official checkout. Both complete retained inventories
+match the pinned identity. A new explicit relocation binding uses the reviewed
+tree's integrated copy; the old spec and four scientific files remain unchanged.
 The matching Slurm wrapper refuses production: HPC remains CPU-only and cannot
 silently replace the required AutoDL device in an observer comparison.
 

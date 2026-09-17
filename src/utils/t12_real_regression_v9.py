@@ -129,11 +129,21 @@ def produce(template, root, budget):
         from src.utils.t12_shadow_recovery import tensor_value, rng_snapshot
         from src.utils.t12_raw_evidence import BoundSelectedStepObserver, RawEvidenceResolver
         from src.utils.tastemolnet_t7_typed_release_v1 import hold_t7_release_sources
+        from src.utils.tastemolnet_t7_typed_release_v1 import verify_vendored_gcf_retained_inventory
         from src.baselines import tastemolnet_gcf_replay_canary as native
         from src.baselines import tastemolnet_gcf_smoke as smoke
         from src.baselines.tastemolnet_gcf_full_resume import T12StableGCFBridge
         import src.baselines.tastemolnet_gcf_full_resume as bridge_module
         backend = native.configure_exact_cuda_replay(torch=torch)
+        integrated_official = Path(base['base_root'])/'baselines/gcfexplainer_official'
+        original_inventory=verify_vendored_gcf_retained_inventory(Path(c['official_root']))
+        integrated_inventory=verify_vendored_gcf_retained_inventory(integrated_official)
+        if not (original_inventory['inventory_sha256']==integrated_inventory['inventory_sha256']
+                ==spec['input_hashes']['official_gcf_source']):
+            raise ValueError('OFFICIAL_PATH_RELOCATION_INVENTORY_CHANGED')
+        relocation=dict(old_path=c['official_root'],new_path=str(integrated_official),
+            inventory_sha256=integrated_inventory['inventory_sha256'])
+        c=copy.deepcopy(c);c['official_root']=str(integrated_official)
         threshold = read(c['threshold_authority'])['neurosed_distance_threshold']
         source_files = [Path(base['base_root']) / p for p in base['reviewed_files']]
         source_files += [Path(m.__file__) for m in (native, smoke, bridge_module)]
@@ -146,7 +156,8 @@ def produce(template, root, budget):
             device='cuda:0', gpu_uuid=gpu.uuid, torch=torch.__version__,
             groups=['normal', 'repeat', 'duplicate_cache', 'lineage_rejection'],
             rejection_scope='existing native missing_source_index branch; unchanged train graph, omitted lineage only',
-            transition_count=0, test_loaded=False, budget_path=str(budget))
+            transition_count=0, test_loaded=False, budget_path=str(budget),
+            official_source_relocation=relocation)
         write(root / 'contract.json', contract)
         with hold_t7_release_sources(managed_neurosed_root=c['managed_neurosed_root'],
                 t3_root=c['t3_root'], official_gcf_root=c['official_root'],
@@ -302,6 +313,7 @@ def verify(root, *, publish=True):
         evidence_root=str(root),evidence=producer['files'],producer_sha256=sha(root/'producer.json'),
         contract_sha256=sha(root/'contract.json'),model_input_hashes=contract['input_hashes'],
         observer_source_sha256={p:d for p,d in contract['sources'].items() if 't12_raw_evidence' in p or 't12_shadow_recovery' in p},
+        official_source_relocation=contract['official_source_relocation'],
         scope='REAL_ADAPTER_OBSERVER_ONLY_NOT_ALGORITHM_PARITY',
         transition_count=0, full_restore_or_parity_proven=False, budget=producer['budget'])
     if publish:write(root/'real-adapter-regression.json',receipt)
