@@ -19,6 +19,15 @@ def test_unknown_is_not_infinity(tmp_path):
     p.write_text(json.dumps(dict(parent_id='p',candidate_id='c',pair_strict_flip=False,failure_reason='ERROR'))+'\n')
     with pytest.raises(ValueError,match='UNCLASSIFIED'):load_matrix(p,['c'])
 
+def test_legacy_bace_label_needs_actual_zero_strict_count(tmp_path):
+    p=tmp_path/'pairs.jsonl'
+    row=dict(parent_id='p',candidate_id='c',pair_strict_flip=False,
+             failure_reason='no_valid_strict_flip_with_finite_wnode',num_strict_flip_matches=1)
+    p.write_text(json.dumps(row)+'\n')
+    with pytest.raises(ValueError,match='UNCLASSIFIED'):load_matrix(p,['c'])
+    row['num_strict_flip_matches']=0;p.write_text(json.dumps(row)+'\n')
+    assert np.isinf(load_matrix(p,['c'])[1][0,0])
+
 def test_same_members_terminal_invariant_and_cost_separate():
     d=np.array([[.12,.2],[np.inf,.04]])
     a=prefix_rows(d,[0,1],.03)[-1];b=prefix_rows(d,[1,0],.03)[-1]

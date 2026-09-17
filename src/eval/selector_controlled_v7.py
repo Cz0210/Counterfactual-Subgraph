@@ -24,6 +24,7 @@ VALID_FAILURES = {
     'no_substructure_match', 'no_teacher_strict_flip_match',
     'no_valid_connected_residual', 'no_valid_residual',
     'no_strict_flip_match', 'parent_not_source_class',
+    'no_substructure_match_or_fragment_parse_failed',
 }
 
 
@@ -62,7 +63,12 @@ def load_matrix(path, candidate_ids, *, expected_parents=None, subset=False):
             records[key] = float(value)
         else:
             reason = row.get('failure_reason')
-            if reason not in VALID_FAILURES:
+            # The older BACE producer shares this label between genuine
+            # non-flips and strict flips with a missing numerical distance.
+            # Only its explicit zero strict-match count proves the former.
+            proven_bace_nonflip = (reason == 'no_valid_strict_flip_with_finite_wnode'
+                                  and row.get('num_strict_flip_matches') == 0)
+            if reason not in VALID_FAILURES and not proven_bace_nonflip:
                 raise ValueError('UNCLASSIFIED_NOT_INFINITY:' + str(key) + ':' + str(reason))
             failures[reason] = failures.get(reason, 0) + 1
             records[key] = np.inf

@@ -78,6 +78,7 @@ def registry_update(path, spec, *, finish=False):
 def owner(*, template, root, registry, code_root):
     root=Path(root); code_root=Path(code_root)
     if datetime.now(timezone.utc)>=datetime.fromisoformat(CUTOFF):raise ValueError('V7_CUTOFF')
+    template=Path(template)
     old=load_spec(template)
     old_stage=Path(old['output_root'])/'shadow-ledger/reference_reload_501_510/attempt.json'
     if old_stage.exists():raise ValueError('PREVIOUS_STAGE_BUDGET_REQUIRES_RECONCILIATION:'+str(old_stage))
@@ -92,7 +93,7 @@ def owner(*, template, root, registry, code_root):
         t12_new_entries=256,t13_pending_entries=256,dynamic_buffer=256,
         persistent_available_minimum_bytes=512*GIB,deadline=DEADLINE,science_cutoff=CUTOFF,
         basis='Retain original T12 stage memory request; compact append journals and ten-step checkpoint/raw ledger, not per-candidate files; reserve T13 full32GiB concurrently.',
-        full_epoch_peak_measured=False,source_template=template)
+        full_epoch_peak_measured=False,source_template=str(template))
     atomic_json(root/'resource_policy.json',policy)
     evidence=provider(root);atomic_json(root/'admission.json',evidence)
     if not evidence['allowed']:raise ValueError('T12_ADMISSION:'+','.join(evidence['blockers']))

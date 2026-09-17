@@ -13,8 +13,17 @@ def test_original_contract_and_finite_budget_preserved():
     assert "spec=copy.deepcopy(old)" in text
     assert 'PREVIOUS_STAGE_BUDGET_REQUIRES_RECONCILIATION' in text
     assert "diagnostic_checkpoint_promotable=False" in text
-    assert "source_template=template" in text
+    assert "source_template=str(template)" in text
     assert 'run_t12_generation_segment' not in text
+
+def test_cli_string_template_is_converted_before_existing_loader(tmp_path,monkeypatch):
+    import pytest
+    def loader(path):
+        assert isinstance(path,Path)
+        raise RuntimeError('reached typed loader')
+    monkeypatch.setattr(v,'load_spec',loader)
+    with pytest.raises(RuntimeError,match='reached typed loader'):
+        v.owner(template=str(tmp_path/'spec.json'),root=tmp_path/'out',registry='unused',code_root=tmp_path)
 
 def test_posix_inherited_descriptor_and_exclusion(tmp_path):
     import fcntl,os,subprocess,sys
