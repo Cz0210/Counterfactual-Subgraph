@@ -1,5 +1,20 @@
 # Decisions Log
 
+## [2026-09-18] V9 real T12 observer producer
+
+Add a bounded real-GPU adapter/observer regression, not a mock PASS receipt.
+It imports the existing four-file-reviewed science, holds the original GPU
+coordination lease, preserves the existing resource floor, and charges actual
+GINE rows/NeuroSED pairs before calls against the shared 64/64 authorization.
+Two train inputs exercise normal, duplicate/cache and missing-lineage rejection
+without advancing VRRW or changing candidate generation. Persist both arms'
+raw arrays, buffers, RNG, identities and first-seen state; a separate verifier
+must pass before the existing recovery owner can consume the receipt.
+This does not establish algorithm reload/parity, chemical rejection coverage,
+full checkpoint restoration, or permission to promote a diagnostic checkpoint.
+The matching Slurm wrapper refuses production: HPC remains CPU-only and cannot
+silently replace the required AutoDL device in an observer comparison.
+
 ## [2026-09-17] V8 saved-record paper closeout
 
 The paper export binds each adopted numeric field to its source CSV, digest,

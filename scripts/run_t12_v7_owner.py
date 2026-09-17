@@ -8,8 +8,9 @@ def main():
     p=argparse.ArgumentParser('Bind the real existing T12 restore500 stage owner')
     p.add_argument('--config',required=True);p.add_argument('--action',choices=['owner','provider','status'],required=True)
     p.add_argument('--root',required=True);p.add_argument('--template');p.add_argument('--registry')
+    p.add_argument('--observer-receipt')
     a=p.parse_args()
-    if a.action=='owner':return owner(template=a.template,root=a.root,registry=a.registry,code_root=ROOT)
+    if a.action=='owner':return owner(template=a.template,root=a.root,registry=a.registry,code_root=ROOT,observer_receipt=a.observer_receipt)
     if a.action=='provider':result=provider(a.root)
     else:
         result={name:json.loads((Path(a.root)/name).read_text()) for name in ['runtime_identity.json','admission.json','heartbeat.json','terminal.json'] if (Path(a.root)/name).exists()}

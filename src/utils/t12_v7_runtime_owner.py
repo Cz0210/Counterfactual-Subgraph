@@ -75,11 +75,18 @@ def registry_update(path, spec, *, finish=False):
         atomic_write_owner_registry(path,updated)
 
 
-def owner(*, template, root, registry, code_root):
+def owner(*, template, root, registry, code_root, observer_receipt=None):
     root=Path(root); code_root=Path(code_root)
     if datetime.now(timezone.utc)>=datetime.fromisoformat(CUTOFF):raise ValueError('V7_CUTOFF')
     template=Path(template)
     old=load_spec(template)
+    if observer_receipt is not None:
+        from src.utils.t12_real_regression_v9 import verify
+        receipt=Path(observer_receipt)
+        verified=verify(receipt.parent,publish=False)
+        if read(receipt)!=verified:raise ValueError('T12_REAL_OBSERVER_RECEIPT_CHANGED')
+        if receipt.name!='real-adapter-regression.json' or verified['model_input_hashes']!=old['input_hashes']:
+            raise ValueError('T12_REAL_OBSERVER_INPUT_BINDING_CHANGED')
     old_stage=Path(old['output_root'])/'shadow-ledger/reference_reload_501_510/attempt.json'
     if old_stage.exists():raise ValueError('PREVIOUS_STAGE_BUDGET_REQUIRES_RECONCILIATION:'+str(old_stage))
     root.mkdir(parents=True,exist_ok=False)
@@ -117,6 +124,9 @@ def owner(*, template, root, registry, code_root):
         spec['expected_heartbeat_path']=str(root/'heartbeat.json');spec['expected_pid_file']=str(root/'runtime_identity.json')
         if 'expected_terminal_path' in spec:spec['expected_terminal_path']=str(root/'terminal.json')
         binding=spec['science_contract']['shadow_binding']
+        if observer_receipt is not None:
+            binding['observer_regression_receipt']=str(receipt)
+            binding['observer_regression_receipt_sha256']=file_sha256(receipt)
         binding['owner_identity']=dict(pid=os.getpid(),start_ticks=state['owner_start_ticks'])
         binding['resource_provider_command']=[spec['python'],'-I','-B',str(code_root/'scripts/run_t12_v7_owner.py'),
             '--config',str(code_root/'configs/hpc.yaml'),'--action','provider','--root',str(root)]

@@ -1,5 +1,11 @@
 # Refactor Plan
 
+## V9 runtime execution
+
+- Supply real adapter/observer evidence to the existing T12 recovery consumer.
+- Keep the active T13 training checkout immutable; admit postprocessing separately.
+- Do not repeat accepted selector/paper work; timing is an independent bounded job.
+
 ## V8 evidence closeout
 
 - Reuse V7 scientific freezes; independently time initialization and refinement.
