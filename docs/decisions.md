@@ -1,5 +1,17 @@
 # Decisions Log
 
+## [2026-09-17] V7 actual selected-union continuation and T12 provenance
+
+The P0 seven-per-dataset calibration freezes are retained across wrapper/ID
+repairs. A CPU-only continuation evaluates only missing selected-union pairs
+through existing RF/GINE and exact WNode kernels, commits compact parent
+blocks, rejects numerical/unknown failures, and reuses P0 blocks for P1.
+No test-driven reordering or candidate generation is introduced. Structural
+completion is explicitly separate from independent numerical acceptance.
+The T12 wrapper commit is separately bound from its reviewed four-file
+scientific tree; the original clean-tree/evidence checks remain active.
+The deployed old observer regression path proved absent, not a passed gate.
+
 ## [2026-09-17] T12 real runtime owner binding
 
 The reviewed restore500 scientific entrypoint remains immutable. A narrow

@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## V7 selected-union execution
+
+- Completed P0 calibration sequences are immutable; continue their missing test pairs only.
+- Reuse completed P0 pair blocks in P1; retain explicit independent-audit status.
+- T12 source/runtime binding is deployed; resolve missing real observer regression before transitions.
+- T13 training is running; postprocess cache/RAM stage admission still needs a quantified handoff.
+
 ## T12 V7 runtime binding
 
 - Seal real parent identity/provider only after acquiring the existing GPU3 FD.
