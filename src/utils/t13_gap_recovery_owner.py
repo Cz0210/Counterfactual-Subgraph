@@ -54,6 +54,9 @@ class RecoverySampler:
         self.idle_since=None;self.admitted_idle_seconds=None
     def bind_t13_held_lease(self,fd,run_id):
         if run_id!=self.t13_dispatch['task_id']:raise ValueError('T13_TASK_BINDING')
+        if self.t13_dispatch.get('v7_registry_binding_root'):
+            from src.utils.t13_v7_binding import registry_claim
+            registry_claim(self.t13_dispatch['v7_registry_binding_root'],held_fd=fd)
     def sample(self,*,child_pid=None,child_start_ticks=None):
         from src.utils.autodl_runtime import query_gpu_inventory
         from src.utils.final16_owner_registry_v1 import process_start_ticks,validate_owner_registry

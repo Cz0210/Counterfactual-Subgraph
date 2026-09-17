@@ -1,5 +1,23 @@
 # Decisions Log
 
+## [2026-09-17] V7 T13 plan and original publisher binding
+
+Use a fresh same-formal overlay, not a second full start. V7 explicitly grants
+visible AutoDL resources through 2026-09-24 23:59:59 CST; new science cutoff is
+21:59:59. The removed external 384-GiB future reservation is user authorization,
+not inferred from an idle GPU or a kernel measurement. Current actual usage,
+the probe-derived bounded-loader envelope and 64-GiB safety remain enforced.
+The old epoch29 plan, threshold and publisher spec remain immutable. A new
+hashed final-eval binding maps the real original attempt to a fresh recovery
+root and the same unique publisher/locator. Canonical task changes use CAS
+under the original publish lock. PREDEPLOYED is not a held physical GPU lease;
+HELD is recorded only after the existing owner acquires its real descriptor.
+Post-evaluation independently accounts for 1872 chunk entries plus caches;
+unknown cache/RAM peaks block that later stage, never become zero or borrow
+the training 256-entry allowance. The original training implementation and
+passed V6 scientific checks are unchanged.
+
+
 ## [2026-09-16] V6 final evaluation independent of training budget
 
 Opt-in final protocol CM4_TASTE_K20_THETA010_CLOSEOUT_V6 separates finite

@@ -1,5 +1,13 @@
 # Refactor Plan
 
+## V7 same-run T13 binding (2026-09-17)
+
+- Fresh old-plan-to-epoch29 continuation, V6 final-evaluation and original
+  publisher bindings use the existing GPU owner and canonical registry CAS.
+- New deadline and explicit project resource allocation are consumed at launch.
+- Follow-up: quantify/compact the final node-cache writer before postprocessing;
+  this is distinct from training readiness and remains explicitly unadmitted.
+
 ## 2026-09-16 V6 final-eval recovery bridge
 
 - Wire cap/theta separation, K20, at-most-K through producer/verifier/publisher.
