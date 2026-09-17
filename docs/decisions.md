@@ -1,5 +1,20 @@
 # Decisions Log
 
+## [2026-09-17] Controlled-v1 independent calibration study
+
+V7 explicitly freezes the Appendix C defaults for BACE GINE and Mut RF,
+without changing their generation pools or cached numerical distances. The
+S0--S9 study is not the production Qcost objective. Complete terminal raw
+matrices are required; unknown numerical failures cannot become infinity.
+Greedy ties use candidate IDs, zero-gain additions still fill the fixed length.
+Refinement uses seed7 fixed randomized traversal, first strict improvement,
+and the user-frozen proposal/accept budgets. A complete enumerated neighborhood
+alone permits the no-improvement stopping label. All selected sequences are
+sealed before saved test columns are consumed. Missing selected test pairs
+are enumerated, never silently evaluated as zero or non-flips. CPU-only Slurm
+uses the actual intel partition, overriding the historical GPU template.
+
+
 ## [2026-09-17] V7 T13 plan and original publisher binding
 
 Use a fresh same-formal overlay, not a second full start. V7 explicitly grants

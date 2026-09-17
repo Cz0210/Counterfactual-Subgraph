@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## Controlled-v1 V7 CPU study
+
+- Reuse BACE GINE/66 and Mut RF/683 complete calibration matrices.
+- Seal S0--S6, then union missing selected test pairs; P1 is separate backfill.
+- Fixed-member BACE S3 ordering diagnostics cannot change terminal metrics.
+
+
 ## V7 same-run T13 binding (2026-09-17)
 
 - Fresh old-plan-to-epoch29 continuation, V6 final-evaluation and original
