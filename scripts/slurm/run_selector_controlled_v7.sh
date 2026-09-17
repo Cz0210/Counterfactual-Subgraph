@@ -6,9 +6,10 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
-set -euo pipefail
+set -eo pipefail
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 cd "${SELECTOR_EXECUTION_ROOT:?immutable execution root required}"
 export PYTHONPATH="$PWD"
 export CUDA_VISIBLE_DEVICES=""
