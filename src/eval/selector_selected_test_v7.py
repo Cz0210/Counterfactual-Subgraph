@@ -76,7 +76,9 @@ def make_evaluator(spec, adapter, work):
             before=predict_with_teacher(teacher,p.smiles,1)
             pairs=[];matches=[]
             for c in candidates:
-                pair,ms=evaluate_parent_candidate_pair(p,c,teacher=teacher,distance_provider=provider,before_prediction=before)
+                pair,ms=evaluate_parent_candidate_pair(p,c,teacher=teacher,distance_provider=provider,before_prediction=before,
+                    distance_action_context={'teacher_sha256':spec['oracle_sha256'],
+                        'distance_implementation_version':'molclr_node_wasserstein_exact_emd2_v1'})
                 pairs.append(pair);matches.extend(ms)
             return dict(pairs=pairs,matches=matches)
     elif spec['dataset']=='BACE':

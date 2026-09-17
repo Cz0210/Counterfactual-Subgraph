@@ -2,6 +2,12 @@
 
 ## [2026-09-17] V7 actual selected-union continuation and T12 provenance
 
+The first Mut continuation failed at the action-aware WNode key because the
+legacy caller omitted teacher SHA and numerical implementation version.
+The wrapper now passes those existing immutable identities; graph actions,
+oracle and EMD implementation are unchanged. Already committed blocks and
+all calibration freezes are reused, with no new selector attempt.
+
 The P0 seven-per-dataset calibration freezes are retained across wrapper/ID
 repairs. A CPU-only continuation evaluates only missing selected-union pairs
 through existing RF/GINE and exact WNode kernels, commits compact parent
