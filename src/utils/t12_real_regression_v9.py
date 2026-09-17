@@ -211,6 +211,7 @@ def produce(template, root, budget):
                         all_model_buffers={k:tensor_value(dict(m.named_buffers())) for k,m in neural_modules.items()},
                         parameter_sha={k:parameter_digest(m) for k,m in neural_modules.items()},
                         model_modes={k:m.training for k,m in neural_modules.items()},
+                        adapter_report=adapter.report(),
                         candidate_registry=tensor_value(walk.counterfactual_candidates),
                         graph_index=tensor_value(walk.graph_index_map),
                         covered=tensor_value(walk.input_graphs_covered),
@@ -293,7 +294,8 @@ def verify(root, *, publish=True):
             failures.append('SCENARIO_ORDER_CHANGED')
         if calls[-1]['output']['valid_fullgraphs'] != [False]:
             failures.append('REJECTION_NOT_EXECUTED')
-        if calls[-1]['output']['failure_reasons'] != ['missing_source_index']:
+        if (calls[-1]['output']['failure_reasons'] != ['invalid_fullgraph']
+                or calls[-1]['state']['adapter_report']['decode_failures'].get('missing_source_index')!=1):
             failures.append('REJECTION_REASON_CHANGED')
         if len(arm['raw_neurosed'])!=1:
             failures.append('EXPECTED_REAL_CACHE_HIT_NOT_OBSERVED')
