@@ -16,6 +16,8 @@ def test_budgets_separate_and_transitions_never_allowed(tmp_path):
     p=tmp_path/'budget.json';charge(p,'neurosed_pairs',64);charge(p,'gine',1)
     with pytest.raises(ValueError,match='INVALID'):charge(p,'transitions',1)
     assert read(p)['transitions']==0
+    charge(p,'fixture_groups',16)
+    with pytest.raises(ValueError,match='EXHAUSTED'):charge(p,'fixture_groups',1)
 
 def test_verifier_reopens_and_rejects_changed_arrays(tmp_path):
     write(tmp_path/'off.json',{'changed':True})

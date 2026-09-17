@@ -16,6 +16,12 @@ The first real invocation failed before inference because the old spec referred
 to a different physical official checkout. Both complete retained inventories
 match the pinned identity. A new explicit relocation binding uses the reviewed
 tree's integrated copy; the old spec and four scientific files remain unchanged.
+The first model comparison produced identical scientific outputs but lacked
+NeuroSED observer rows: the probe had not installed the production bounded
+coverage context. Correct the probe composition, not the model or observer.
+Preserve that failed raw-binding attempt, count its 12 GINE/8 NeuroSED calls
+and eight executed fixture groups, and charge subsequent groups before running.
+Missing evidence is not itself proof that the observer changed the science.
 The matching Slurm wrapper refuses production: HPC remains CPU-only and cannot
 silently replace the required AutoDL device in an observer comparison.
 

@@ -14,10 +14,11 @@ def main():
     p.add_argument('--template',type=Path)
     p.add_argument('--root',required=True,type=Path)
     p.add_argument('--budget',type=Path)
+    p.add_argument('--prior-group-evidence',type=Path)
     a=p.parse_args()
     if not a.config.is_file():raise ValueError('CONFIG_MISSING')
     try:
-        if a.action=='produce':produce(a.template,a.root,a.budget)
+        if a.action=='produce':produce(a.template,a.root,a.budget,a.prior_group_evidence)
         else:print(json.dumps(verify(a.root),sort_keys=True))
     except Exception as e:
         if a.root.is_dir():write(a.root/'failure.json',dict(type=type(e).__name__,message=str(e)))

@@ -44,10 +44,12 @@ def charge(path, kind, count):
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         ledger = read(path) if path.exists() else {
             'authorization': 'T12_V8_REAL_ADAPTER_64_64',
-            'gine': 0, 'neurosed_pairs': 0, 'transitions': 0}
-        if kind not in ('gine', 'neurosed_pairs') or count < 1:
+            'gine': 0, 'neurosed_pairs': 0, 'fixture_groups': 0, 'transitions': 0}
+        limits={'gine':64,'neurosed_pairs':64,'fixture_groups':16}
+        if kind not in limits or count < 1:
             raise ValueError('INVALID_INFERENCE_CHARGE')
-        if ledger[kind] + count > 64:
+        if kind not in ledger:raise ValueError('PRIOR_FIXTURE_GROUP_ACCOUNTING_REQUIRED')
+        if ledger[kind] + count > limits[kind]:
             raise ValueError('T12_V8_INFERENCE_BUDGET_EXHAUSTED:' + kind)
         ledger[kind] += count
         write(path, ledger)
@@ -96,8 +98,23 @@ def private_rng(objects, np, torch, tensor_value):
     return found
 
 
-def produce(template, root, budget):
+def adopt_prior_group_accounting(budget, prior):
+    """One-way schema extension using completed real arm records, not a reset."""
+    if not Path(budget).exists() or 'fixture_groups' in read(budget):return
+    if prior is None:raise ValueError('PRIOR_GROUP_EVIDENCE_REQUIRED')
+    prior=Path(prior);p=read(prior/'producer.json')
+    for name,digest in p['files'].items():
+        if sha(prior/name)!=digest:raise ValueError('PRIOR_PRODUCER_CHANGED')
+    ledger=read(budget)
+    if p['budget']!=ledger:raise ValueError('LATER_UNACCOUNTED_CALLS_EXIST')
+    ledger['fixture_groups']=sum(len(read(prior/f)['calls']) for f in ('off.json','on.json'))
+    ledger['prior_groups_evidence']=dict(path=str(prior),producer_sha=sha(prior/'producer.json'))
+    write(budget,ledger)
+
+
+def produce(template, root, budget, prior=None):
     root = Path(root); root.mkdir(parents=True, exist_ok=False)
+    adopt_prior_group_accounting(budget,prior)
     spec, base = bootstrap(template)
     c = spec['science_contract']
     lease = Path(spec['gpu_request']['lease_path'])
@@ -244,14 +261,16 @@ def produce(template, root, budget):
                 before = state(); calls=[]
                 manager = observer.installed() if observed else contextlib.nullcontext()
                 try:
-                    with manager:
+                    with native._installed_bounded_neurosed_coverage(importance,coverage), manager:
                         for name, indexes in [('normal',[0,1]), ('repeat',[0,1]), ('duplicate_cache',[0,0])]:
+                            charge(budget,'fixture_groups',1)
                             result = bridge.call([graphs[i] for i in indexes], {})
                             ids = [bridge.calculate_hash(e) for e in result[1]]
                             calls.append(dict(group=name, input_indexes=indexes, graph_ids=ids,
                                 output=tensor_value(result), state=state()))
                         rejected = graphs[0].clone()
                         del rejected.gcf_origin_index
+                        charge(budget,'fixture_groups',1)
                         value = adapter.score([rejected])
                         calls.append(dict(group='lineage_rejection',
                             output=tensor_value(dataclasses.asdict(value)), state=state()))
@@ -280,8 +299,10 @@ def verify(root, *, publish=True):
             raise ValueError('REGRESSION_EVIDENCE_CHANGED:'+name)
     contract=read(root/'contract.json'); left=read(root/'off.json');right=read(root/'on.json')
     failures=[]
+    scientific_changes=[]
     for field in ('before','calls','after','batch_graph_sha','raw_logits','raw_neurosed','collated_graph_tensors'):
-        if left[field]!=right[field]:failures.append('OBSERVER_CHANGED:'+field)
+        if left[field]!=right[field]:scientific_changes.append('OBSERVER_CHANGED:'+field)
+    failures.extend(scientific_changes)
     if not left['raw_logits'] or not left['raw_neurosed']:
         failures.append('NO_REAL_MODEL_ARRAYS')
     if left['pending_transition'] is not None or right['pending_transition'] is not None:
@@ -311,7 +332,7 @@ def verify(root, *, publish=True):
         if sha(path)!=digest:failures.append('SOURCE_CHANGED:'+path)
     receipt=dict(schema='t12_real_adapter_observer_regression_v9',
         status='FAIL' if failures else 'PASS', failures=failures,
-        observer_changes_science=bool(failures),raw_binding_tested=not failures,
+        observer_changes_science=bool(scientific_changes),raw_binding_tested=not failures,
         evidence_root=str(root),evidence=producer['files'],producer_sha256=sha(root/'producer.json'),
         contract_sha256=sha(root/'contract.json'),model_input_hashes=contract['input_hashes'],
         observer_source_sha256={p:d for p,d in contract['sources'].items() if 't12_raw_evidence' in p or 't12_shadow_recovery' in p},
