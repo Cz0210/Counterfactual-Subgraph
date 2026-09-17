@@ -3,6 +3,8 @@
 ## V9 runtime execution
 
 - Supply real adapter/observer evidence to the existing T12 recovery consumer.
+- Distinguish original-GPU reference restoration from accelerated cross-GPU
+  transport without modifying the four reviewed scientific files or parity.
 - Keep the active T13 training checkout immutable; admit postprocessing separately.
 - Do not repeat accepted selector/paper work; timing is an independent bounded job.
 

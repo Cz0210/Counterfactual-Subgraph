@@ -1,5 +1,17 @@
 # Decisions Log
 
+## [2026-09-18] V9 same-GPU reference recovery identity
+
+The first real joint500 recovery reached the identity gate and exited before
+algorithm restoration/transitions: the accelerated transport helper rejects
+equal GPU UUIDs, while reference recovery correctly uses its original GPU3.
+Add a wrapper-only same-GPU path. It requires identical UUID/hardware and all
+scientific/runtime fields, permits selector/index transport notation only,
+and reuses the full reviewed source-equivalence validator for commit changes.
+Save both actual identities before comparison. Keep the original cross-GPU
+path, four reviewed source files, old failure, checkpoint, and parity gates.
+This is not algorithm parity and does not renew any observer/transition budget.
+
 ## [2026-09-18] V9 real T12 observer producer
 
 Add a bounded real-GPU adapter/observer regression, not a mock PASS receipt.

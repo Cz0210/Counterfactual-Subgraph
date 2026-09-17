@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from src.utils.main_ready_task_specs import load_spec,file_sha256
+from src.utils.t12_same_gpu_resume_v9 import validate_same_gpu_resume_identity
 
 
 def reviewed_view(spec):
@@ -51,9 +52,21 @@ def main():
         checked,_=reviewed_view(current)
         return original_validate(checked)  # Full existing clean-tree/inventory/receipt checks.
     native._validate_source_equivalence=validate
+    import src.baselines.tastemolnet_gcf_full as generation
+    original_transport=generation.validate_cross_gpu_resume_identity
+    def transport(**identities):
+        current=identities['current'];authority=identities['authority']
+        if current['identity_template']['gpu_uuid']==authority['identity_template']['gpu_uuid']:
+            # Persist the actual runtime comparison before accepting anything.
+            from src.eval.bace_frozen_gnn_contracts import atomic_json
+            atomic_json(Path(spec['output_root'])/'same_gpu_identity_inputs_v9.json',identities)
+            return validate_same_gpu_resume_identity(**identities)
+        return original_transport(**identities)
+    generation.validate_cross_gpu_resume_identity=transport
     try:
         return module.main(args)
     finally:
         native._validate_source_equivalence=original_validate
+        generation.validate_cross_gpu_resume_identity=original_transport
 
 if __name__=='__main__':raise SystemExit(main())

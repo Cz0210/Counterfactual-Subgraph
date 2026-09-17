@@ -1,5 +1,6 @@
 #!/bin/bash
-# V7: This is an AutoDL-only inherited-FD GPU child, never an HPC GPU request.
+# V9: AutoDL-only inherited-FD child; explicit same-GPU identity adapter.
+# The reviewed four scientific files and original cross-GPU guard are retained.
 #SBATCH --partition=intel
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
