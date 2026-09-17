@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## T12 V7 runtime binding
+
+- Seal real parent identity/provider only after acquiring the existing GPU3 FD.
+- Execute the reviewed restore500 child and retain its original raw/parity gate.
+- Formal activation remains dependent on complete scientific parity evidence.
+
+
 ## Controlled-v1 V7 CPU study
 
 - Reuse BACE GINE/66 and Mut RF/683 complete calibration matrices.

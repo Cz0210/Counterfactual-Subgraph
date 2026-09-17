@@ -1,5 +1,20 @@
 # Decisions Log
 
+## [2026-09-17] T12 real runtime owner binding
+
+The reviewed restore500 scientific entrypoint remains immutable. A narrow
+owner acquires its original GPU3 coordination lease and then binds its actual
+PID/start ticks into a fresh task spec. The inherited descriptor is checked by
+the existing child, not accepted as a static integer. Original canonical task
+ownership changes via the same publication-lock CAS. The original64-GiB
+minimum stage request is retained, with the full pending T13 32-GiB envelope
+and64-GiB safety accounted jointly. This is admission, not a measured T12 peak.
+The compact ten-transition stage reserves256 new entries, separately from
+T13's256 and a256 dynamic buffer. External future demand is removed only under
+explicit V7 authorization; actual usage remains counted. No reviewed source,
+state, scientific budget or diagnostic-promotion condition is changed.
+
+
 ## [2026-09-17] Controlled-v1 independent calibration study
 
 V7 explicitly freezes the Appendix C defaults for BACE GINE and Mut RF,
