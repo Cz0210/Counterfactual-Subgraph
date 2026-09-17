@@ -1,5 +1,15 @@
 # Decisions Log
 
+## [2026-09-17] V7 independent acceptance and saved-data diagnostics
+
+Bounded independent CPU reexecution compares new selected-pair outputs with
+the original frozen-test audit tolerance, not a difference-fitted tolerance.
+Saved-distance paired bootstrap uses1000 common parent resamples, seed7.
+The fixed BACE S3 membership is reduced in all22 frozen orders on held-out
+test without oracle/OT calls. Calibration Jaccard, structural similarity,
+normalized sizes, empty-rule counts and real selector runtime/move counts
+remain distinct diagnostics; none is used to reselect a test-winning version.
+
 ## [2026-09-17] V7 actual selected-union continuation and T12 provenance
 
 The first Mut continuation failed at the action-aware WNode key because the
