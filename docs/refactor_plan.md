@@ -1,5 +1,12 @@
 # Refactor Plan
 
+## V8 evidence closeout
+
+- Reuse V7 scientific freezes; independently time initialization and refinement.
+- Require identical frozen ordering before attaching a timing result.
+- Bind paper numbers to accepted source rows with explicit scope; preserve the
+  user's working paper and render changes in an independent delivery copy.
+
 ## V7 selected-union execution
 
 - Completed P0 calibration sequences are immutable; continue their missing test pairs only.

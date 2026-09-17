@@ -1,5 +1,30 @@
 # Decisions Log
 
+## [2026-09-17] V8 saved-record paper closeout
+
+The paper export binds each adopted numeric field to its source CSV, digest,
+acceptance scope and evaluation contract. CM-AIDS remains descriptive; BACE
+proposal-fixed GNN/LLM migrations are not end-to-end retraining or project SFT.
+Their threshold-only 0.1 view retains the original frozen order and is checked
+against the accepted original-threshold reduction before export. Unknown raw
+values are rejected; the archived migration's audited no-valid-match blanks
+are accepted only with its complete saved-record receipt and package hashes.
+Conditional median and capped mean stay separate. Figures and Table2 share
+the same raw-derived rows. The independent manuscript copy removes unbound
+aggregate gain claims, preserves zero selector effects, and marks incomplete
+panels PARTIAL. No authority, model or active science worktree is changed.
+
+## [2026-09-17] V8 independent selection timing
+
+V8 authorizes at most two allocated CPU job hours for selection-only timing.
+The new runner reuses unchanged Controlled-v1 code and complete calibration
+matrices. It includes greedy initialization for each S0–S9 configuration,
+separates shared loading/preparation, refinement and writing, and attaches
+timing only when ordered IDs match the authenticated prior freeze. It never
+opens test data or invokes an oracle/OT. One 8-CPU/32-GiB job has a 110-minute
+limit; no repeat is automatically launched. These are new measurements, not
+historical or end-to-end method runtimes. Scientific owners are unchanged.
+
 ## [2026-09-17] V7 independent acceptance and saved-data diagnostics
 
 Bounded independent CPU reexecution compares new selected-pair outputs with
