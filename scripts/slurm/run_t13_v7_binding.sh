@@ -1,4 +1,6 @@
 #!/bin/bash
+# V10: same owner may wait at most 24h for real GPU1 admission, capped at the
+# sealed science cutoff. This wrapper remains AutoDL-only; no HPC GPU request.
 #SBATCH --partition=cpu
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

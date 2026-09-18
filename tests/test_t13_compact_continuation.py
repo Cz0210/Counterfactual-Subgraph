@@ -21,4 +21,5 @@ def test_no_new_optimizer_loop_or_validation_skip():
     assert 'optimizer.step(' not in source
     assert 'EXISTING_TASTE_FULL_MERGE_CALIBRATION_TEST' in source
     assert 'new_optimizer_steps=None' in source
-    assert "completed_new_epochs=receipt['epoch']-29" in source
+    assert "completed_new_epochs=receipt['epoch']-(checkpoint['next_epoch']-1)" in source
+    assert "completed_epochs_since_original29=receipt['epoch']-29" in source

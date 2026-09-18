@@ -36,7 +36,8 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
-def prepare(*, old_plan_root, old_publisher_root, root, execution_root, authorization_file):
+def prepare(*, old_plan_root, old_publisher_root, root, execution_root, authorization_file,
+            checkpoint_recovery_binding=None, resource_wait_seconds=0):
     root = Path(root).absolute()
     root.mkdir(parents=True, exist_ok=False)
     execution_root = Path(execution_root).resolve()
@@ -137,12 +138,20 @@ def prepare(*, old_plan_root, old_publisher_root, root, execution_root, authoriz
         stage_resource_policy=policy,final_evaluation_binding=final,output_root=str(output),
         immutable_execution_commit=commit,other_remaining_reserve_bytes=0,
         authorization_overlay=auth,old_plan=descriptor(Path(old_plan_root)/'plan.json'))
+    if checkpoint_recovery_binding is not None:
+        recovery=descriptor(checkpoint_recovery_binding)
+        recovered=bound_json(recovery)
+        if (recovered['original_formal_attempt_id']!=plan['original_formal_attempt_id']
+                or recovered['formal_quota']!='1/1'):
+            raise ValueError('V10_LATEST_CHECKPOINT_ATTEMPT_CHANGED')
+        plan['latest_checkpoint_recovery']=recovery
     plan_binding = seal(root/'plan.json',plan)
     dispatch.update(plan_path=plan_binding['path'],plan_sha256=plan_binding['sha256'],
         stage_resource_policy=policy,other_remaining_reserve_bytes=0,process_peak_bound_bytes=32*GIB,
         task_id='t13-v7-same-run-'+root.name,owner_root=str(root/'owner'),
         v7_registry_binding_root=str(root),
-        nvme_root=str(Path(old_plan_root)),science_dispatch_cutoff_utc=CUTOFF,
+        nvme_root=dispatch['nvme_root'],science_dispatch_cutoff_utc=CUTOFF,
+        resource_wait_seconds=resource_wait_seconds,
         science_command_without_owner_fds=[python,'-I','-B',str(execution_root/'scripts/run_t13_compact_recovery.py'),
             '--config',str(execution_root/'configs/hpc.yaml'),'--plan',str(root/'plan.json'),'--action','continue'])
     seal(root/'dispatch.json',dispatch)
@@ -189,7 +198,9 @@ def registry_claim(root, *, finish=False, held_fd=None):
             owner_start_ticks=None if finish else ticks,heartbeat=str(root/'registry_heartbeat.json'),
             output_root=read(root/'plan.json')['output_root'],execution_commit=read(root/'plan.json')['immutable_execution_commit'],
             task_spec_sha=sha256_file(root/'dispatch.json'),
-            stage='V7_OWNER_EXITED_CHECK_TERMINAL' if finish else 'V7_SAME_RUN_EPOCH29_RECOVERY')
+            stage='V7_OWNER_EXITED_CHECK_TERMINAL' if finish else
+                'V10_SAME_RUN_LATEST_CHECKPOINT_RECOVERY' if read(root/'plan.json').get('latest_checkpoint_recovery')
+                else 'V7_SAME_RUN_EPOCH29_RECOVERY')
         for lease in reg['gpu_leases']:
             if lease['task_id']==spec['canonical_task_id']:
                 lease['state']='RELEASED' if finish else 'HELD' if held_fd is not None else 'PREDEPLOYED'

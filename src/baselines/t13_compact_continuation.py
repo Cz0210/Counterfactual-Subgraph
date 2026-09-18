@@ -52,7 +52,8 @@ def continue_branches(*,plan,out,checkpoint,selected,cohort,official,adapter,sam
                 # The native callback records epochs, not optimizer updates.
                 # Do not label an epoch difference as a measured step count.
                 new_optimizer_steps=None,
-                completed_new_epochs=receipt['epoch']-29 if target==0 else receipt['epoch']+1,
+                completed_new_epochs=receipt['epoch']-(checkpoint['next_epoch']-1) if target==0 else receipt['epoch']+1,
+                completed_epochs_since_original29=receipt['epoch']-29 if target==0 else None,
                 optimizer_step_count_state='NOT_REPORTED_BY_NATIVE_CHECKPOINT_CALLBACK',
                 checkpoint=receipt['checkpoint_file'],formal_quota='1/1',
                 source_attempt_id=plan['original_formal_attempt_id'],diagnostic_updates_adopted=0))

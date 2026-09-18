@@ -11,11 +11,14 @@ def main():
     p.add_argument('--action',choices=['prepare','owner','post-provider','status'],required=True)
     p.add_argument('--root',required=True)
     p.add_argument('--old-plan-root');p.add_argument('--old-publisher-root');p.add_argument('--authorization-file')
+    p.add_argument('--checkpoint-recovery-binding')
+    p.add_argument('--resource-wait-seconds',type=int,default=0)
     a=p.parse_args()
     if a.action=='owner':return binding.owner(a.root)
     if a.action=='prepare':
         value=binding.prepare(old_plan_root=a.old_plan_root,old_publisher_root=a.old_publisher_root,
-            root=a.root,execution_root=ROOT,authorization_file=a.authorization_file)
+            root=a.root,execution_root=ROOT,authorization_file=a.authorization_file,
+            checkpoint_recovery_binding=a.checkpoint_recovery_binding,resource_wait_seconds=a.resource_wait_seconds)
     elif a.action=='post-provider':value=binding.post_provider(a.root)
     else:
         value={}

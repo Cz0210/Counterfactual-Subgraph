@@ -44,6 +44,18 @@ def decision(spec, evidence):
     if not evidence.get('physical_gpu_safe'): blockers.append('T13_GPU1_ACTUAL_OCCUPANCY')
     return dict(allowed=not blockers,blockers=blockers,science_started=False)
 
+def resource_wait_seconds(spec, now=None):
+    """Finite existing-owner wait, never beyond the sealed dispatch cutoff."""
+    requested=spec.get('resource_wait_seconds',0)
+    if type(requested) is not int or not 0<=requested<=86400:
+        raise ValueError('T13_FINITE_RESOURCE_WAIT_REQUIRED')
+    if not requested:return 0
+    now=now or datetime.now(timezone.utc)
+    cutoff=datetime.fromisoformat(spec['science_dispatch_cutoff_utc'])
+    remaining=int((cutoff-now).total_seconds())
+    if remaining<=0:raise ValueError('T13_DISPATCH_CUTOFF_REACHED')
+    return min(requested,remaining)
+
 class RecoverySampler:
     task_family='t13_performance_diagnostic'
     def __init__(self,spec):
@@ -61,6 +73,9 @@ class RecoverySampler:
         from src.utils.autodl_runtime import query_gpu_inventory
         from src.utils.final16_owner_registry_v1 import process_start_ticks,validate_owner_registry
         spec=self.t13_dispatch;block=[]
+        if spec.get('science_dispatch_cutoff_utc') and not child_pid:
+            if datetime.now(timezone.utc)>=datetime.fromisoformat(spec['science_dispatch_cutoff_utc']):
+                block.append('T13_DISPATCH_CUTOFF_REACHED')
         reg=validate_owner_registry(json.loads(Path(spec['registry']).read_text()),check_processes=False)
         matches=[r for r in reg['tasks'] if r['task_id']==spec['canonical_task_id']]
         if len(matches)!=1 or matches[0]['gpu']!=1 or matches[0]['method']!='GlobalGCE':
@@ -132,4 +147,4 @@ def run(spec_path):
     env.update(CUBLAS_WORKSPACE_CONFIG=':4096:8',PYTHONDONTWRITEBYTECODE='1',TMPDIR=spec['nvme_root'])
     return run_owned_child(command=spec['science_command_without_owner_fds'],environment=env,
         sampler=RecoverySampler(spec),output_root=spec['owner_root'],lock_root=spec['lock_root'],
-        run_id=spec['task_id'],interval=60,max_wait_seconds=0)
+        run_id=spec['task_id'],interval=60,max_wait_seconds=resource_wait_seconds(spec))

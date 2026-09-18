@@ -1,5 +1,14 @@
 # Decisions Log
 
+## 2026-09-18: V10 latest-checkpoint owner handoff
+
+The existing T13 owner can consume an independently sealed latest-checkpoint
+binding and wait for actual GPU1 admission for at most 24 hours, bounded by the
+unchanged dispatch cutoff. It does not interrupt another process, start a fresh
+formal attempt, or use postprocessing uncertainty to block training. New epoch
+counters are relative to the adopted checkpoint; progress since original29 is
+separately labelled. Other owners keep their existing admission behavior.
+
 ## 2026-09-18: V10 narrow same-run recovery and future T12 history I/O
 
 The explicit V10 authorization permits the latest complete T13 native epoch
