@@ -5,9 +5,10 @@
 #SBATCH --time=00:20:00
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
-set -euo pipefail
+set -eo pipefail
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
 export CUDA_VISIBLE_DEVICES=""

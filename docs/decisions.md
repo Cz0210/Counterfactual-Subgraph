@@ -19403,3 +19403,10 @@ The existing T13 recovery owner now binds the other active project stage's
 remaining file/NVMe increments as well as RAM. Missing bounds remain errors;
 current usage is not counted again. This does not change model execution or
 grant a second formal start. Only the new V10 deployment adopts this overlay.
+# 2026-09-18 V10 future I/O receipt and CPU launcher
+
+The future-only T12 I/O overlay emits one location receipt per sealed segment,
+not one cumulative file rewrite per embedding lookup. The native reader,
+decoder and active reader are unchanged. The T14 CPU preflight launcher enables
+nounset after the site's bashrc/conda initialization, following actual job2743936
+startup failure; this does not change capture or transition allowances.

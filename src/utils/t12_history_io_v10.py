@@ -28,6 +28,7 @@ def history_io_overlay(descriptor, output_root):
     old_open = Path.open
     verified = set()
     opened = []
+    reported_paths=set()
     def read_open(path, mode='r', buffering=-1, *args, **kwargs):
         path = path.absolute()
         segment = mapping.get(path)
@@ -45,9 +46,13 @@ def history_io_overlay(descriptor, output_root):
             if (before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns) or h.hexdigest()!=segment['sha256']:
                 raise ValueError('T12_V10_CACHE_CHANGED')
             verified.add(actual)
-        opened.append(dict(requested_path=str(path),actual_path=str(actual),buffer_bytes=policy['buffer_bytes'],expected_prefix_sha256=segment['sha256']))
-        atomic_json(root/'actual_history_io_v10.json',dict(policy_sha256=descriptor['sha256'],pid=os.getpid(),opens=opened,
-            scientific_decoder_unchanged=True,model_calls=0,transitions_added=0))
+        # Index lookups may reopen a segment many times. The identity receipt
+        # is bounded by the sealed segment inventory, not the number of reads.
+        if path not in reported_paths:
+            opened.append(dict(requested_path=str(path),actual_path=str(actual),buffer_bytes=policy['buffer_bytes'],expected_prefix_sha256=segment['sha256']))
+            atomic_json(root/'actual_history_io_v10.json',dict(policy_sha256=descriptor['sha256'],pid=os.getpid(),opens=opened,
+                scientific_decoder_unchanged=True,model_calls=0,transitions_added=0))
+            reported_paths.add(path)
         return old_open(actual,mode,policy['buffer_bytes'],*args,**kwargs)
     Path.open=read_open
     try:yield

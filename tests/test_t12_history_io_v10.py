@@ -37,3 +37,15 @@ def test_unlisted_and_writes_not_redirected(tmp_path):
         assert p.read_bytes()==b'outside'
         p.write_bytes(b'new')
     assert p.read_bytes()==b'new'
+
+def test_repeated_lookup_does_not_grow_or_rewrite_receipt(tmp_path,monkeypatch):
+    from src.utils import t12_history_io_v10 as module
+    root,source,cache,b=setup(tmp_path);calls=[];original=module.atomic_json
+    def record(path,value):
+        calls.append(path);return original(path,value)
+    monkeypatch.setattr(module,'atomic_json',record)
+    with history_io_overlay(b,root):
+        for _ in range(100):
+            with source.open('rb',buffering=0) as stream:assert stream.read(6)==b'abc123'
+    assert len(calls)==1
+    assert len(json.loads((root/'actual_history_io_v10.json').read_text())['opens'])==1
