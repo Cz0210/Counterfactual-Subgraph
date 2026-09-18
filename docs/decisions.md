@@ -1,5 +1,17 @@
 # Decisions Log
 
+## 2026-09-18: V10 actual follower capture (no new transition budget)
+
+Reuse the existing diagnostic/replay driver from commit1564d1f7; observe the
+official head0 follower at its real NumPy argmin call. Copy original array bytes
+before consumption, call the original once, and preserve candidate order,
+NaN/Inf, exact ties, chosen action and in-scope before/after graph objects.
+The existing pinned-action verifier checks one-edit without oracle calls.
+Synthetic tests are not historical raw or parity. All real transitions remain
+charged to the V8 authorization, and the old failed170 is not reset. HPC paired
+wrapper is CPU-only. T13 retains explicit project future increments separately
+from authorized external-future R=0 and already observed usage.
+
 ## 2026-09-18: V10 latest-checkpoint owner handoff
 
 The existing T13 owner can consume an independently sealed latest-checkpoint

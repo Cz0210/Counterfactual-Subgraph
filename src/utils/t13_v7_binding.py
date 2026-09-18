@@ -37,7 +37,7 @@ def read(path):
 
 
 def prepare(*, old_plan_root, old_publisher_root, root, execution_root, authorization_file,
-            checkpoint_recovery_binding=None, resource_wait_seconds=0):
+            checkpoint_recovery_binding=None, resource_wait_seconds=0, project_increments=None):
     root = Path(root).absolute()
     root.mkdir(parents=True, exist_ok=False)
     execution_root = Path(execution_root).resolve()
@@ -61,13 +61,19 @@ def prepare(*, old_plan_root, old_publisher_root, root, execution_root, authoriz
         unexpected_live_processes_must_not_be_interrupted=True))
     probe_memory = Path(plan['gpu_probe_receipt']).parent/'memory_boundaries.json'
     peak = max(int(x['VmHWM_bytes']) for x in read(probe_memory)['samples'])
+    increments=[]
+    if project_increments is not None:
+        increments=read(project_increments)['concurrent_future_increments']
+        for row in increments:
+            if type(row.get('additional_bytes')) is not int or row['additional_bytes']<0 or not row.get('evidence'):
+                raise ValueError('V10_UNKNOWN_PROJECT_INCREMENT')
     policy = seal(root/'training_resource_policy.json', dict(schema='T13_V5_STAGE_INCREMENT_V1',
         formal_quota='1/1', gpu_uuid=plan['gpu_uuid'], safety_margin_bytes=64*GIB,
         process_peak_bound_bytes=32*GIB, maximum_retained_train_batches=5,
         adopted_probe_memory=descriptor(probe_memory), observed_probe_host_peak_bytes=peak,
         process_bound_scope='PROBE_DERIVED_BOUNDED_LOADER_NOT_FULL_EPOCH_PEAK_MEASUREMENT',
         retired_default_reason='UNIDENTIFIED_FIXED_HEADROOM_NOT_EXTERNAL_TASK_INCREMENT',
-        concurrent_future_increments=[], external_future_reservation_authorization=auth,
+        concurrent_future_increments=increments, external_future_reservation_authorization=auth,
         resource_window=window, own_other_loads_must_be_serial=True))
     # This provider is executable now but must not invent a bound for unbounded
     # new node-embedding files. It is intentionally independent of training.
