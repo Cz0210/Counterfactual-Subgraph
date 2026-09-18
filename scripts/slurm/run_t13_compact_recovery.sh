@@ -1,5 +1,7 @@
 #!/bin/bash
 # --action continue is a same-run AutoDL owner stage, never a fresh Slurm start.
+# V10 latest_checkpoint_recovery adopts a bound complete native checkpoint;
+# without that overlay, the original epoch29 branch remains unchanged.
 # AutoDL-only GPU1 owner/FD probe. Never sbatch on a mismatched HPC GPU.
 # V6 user override: HPC CPU only. This AutoDL-only launcher is not submitted.
 # Optional final_evaluation_binding executes the existing evaluator/publisher

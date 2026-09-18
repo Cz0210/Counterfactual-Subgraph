@@ -9,6 +9,8 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from src.utils.main_ready_task_specs import load_spec,file_sha256
 from src.utils.t12_same_gpu_resume_v9 import validate_same_gpu_resume_identity
+from src.utils.t12_history_io_v10 import history_io_overlay
+from contextlib import nullcontext
 
 
 def reviewed_view(spec):
@@ -64,7 +66,10 @@ def main():
         return original_transport(**identities)
     generation.validate_cross_gpu_resume_identity=transport
     try:
-        return module.main(args)
+        io_binding=spec['science_contract'].get('history_io_overlay')
+        context=history_io_overlay(io_binding,spec['output_root']) if io_binding else nullcontext()
+        with context:
+            return module.main(args)
     finally:
         native._validate_source_equivalence=original_validate
         generation.validate_cross_gpu_resume_identity=original_transport

@@ -76,8 +76,14 @@ def main():
         from src.baselines.t13_indexed_canary import restore_rng,rng_state,state_digest
         from src.baselines.t13_component_diagnostics import cpu_copy
         from src.baselines.t13_bounded_payload import install_committed_expansion
-        checkpoint=torch.load(plan['working_checkpoint'],map_location='cpu',weights_only=False)
-        if checkpoint['next_epoch']!=30:raise ValueError('NOT_EPOCH29_RECOVERY')
+        if a.action=='continue' and plan.get('latest_checkpoint_recovery'):
+            from src.baselines.t13_checkpoint_recovery_v10 import load_bound_checkpoint
+            checkpoint,recovery,physical=load_bound_checkpoint(torch,plan['latest_checkpoint_recovery'])
+            atomic_json(out/'actual_checkpoint_recovery.json',dict(binding=recovery,
+                source_physical=physical,formal_quota='1/1',diagnostic_updates_adopted=0))
+        else:
+            checkpoint=torch.load(plan['working_checkpoint'],map_location='cpu',weights_only=False)
+            if checkpoint['next_epoch']!=30:raise ValueError('NOT_EPOCH29_RECOVERY')
         from src.baselines.tastemolnet_globalgce_full import _checkpoint_payloads,load_full_train_split,select_full_sweet_train_cohort,FrozenTasteGINEScorer
         from src.baselines.globalgce_bace_native_rules import validate_official_globalgce_root
         from src.baselines import globalgce_mutagenicity_adapter as adapter
@@ -93,8 +99,12 @@ def main():
         generator.t13_indexed_options=dict(storage='t13_indexed_augmentation_v1',diagnostic_profile='deterministic')
         if a.action=='continue':
             from src.baselines.t13_compact_continuation import continue_branches
-            return continue_branches(plan=plan,out=out,checkpoint=checkpoint,selected=selected,
-                cohort=cohort,official=official,adapter=adapter,sample=sample,torch=torch)
+            from contextlib import nullcontext
+            from src.baselines.t13_checkpoint_recovery_v10 import checkpoint_io_scope
+            context=checkpoint_io_scope(out) if plan.get('latest_checkpoint_recovery') else nullcontext()
+            with context:
+                return continue_branches(plan=plan,out=out,checkpoint=checkpoint,selected=selected,
+                    cohort=cohort,official=official,adapter=adapter,sample=sample,torch=torch)
         def intercept(**kw):
             nonlocal updates
             model=kw['model'];install_committed_expansion(model.fsg,descriptor=plan['committed_compact_payload'],expected_identity=checkpoint['augmented_dataset_identity'])

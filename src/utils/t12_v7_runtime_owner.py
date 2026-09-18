@@ -75,7 +75,7 @@ def registry_update(path, spec, *, finish=False):
         atomic_write_owner_registry(path,updated)
 
 
-def owner(*, template, root, registry, code_root, observer_receipt=None):
+def owner(*, template, root, registry, code_root, observer_receipt=None, io_overlay=None):
     root=Path(root); code_root=Path(code_root)
     if datetime.now(timezone.utc)>=datetime.fromisoformat(CUTOFF):raise ValueError('V7_CUTOFF')
     template=Path(template)
@@ -131,6 +131,14 @@ def owner(*, template, root, registry, code_root, observer_receipt=None):
         binding['resource_provider_command']=[spec['python'],'-I','-B',str(code_root/'scripts/run_t12_v7_owner.py'),
             '--config',str(code_root/'configs/hpc.yaml'),'--action','provider','--root',str(root)]
         spec['science_contract']['disposable_index_root']=str(root/'science/disposable-history-index')
+        if io_overlay is not None:
+            from src.utils.t13_v7_binding import descriptor
+            from src.utils.t13_performance_dispatch import bound_json
+            io_binding=descriptor(io_overlay)
+            io_policy=bound_json(io_binding)
+            if io_policy['source_observer_receipt_sha256']!=binding['observer_regression_receipt_sha256']:
+                raise ValueError('T12_V10_OBSERVER_BINDING_CHANGED')
+            spec['science_contract']['history_io_overlay']=io_binding
         if observer_receipt is not None:
             relocation=verified['official_source_relocation']
             if (relocation['old_path']!=old['science_contract']['official_root']

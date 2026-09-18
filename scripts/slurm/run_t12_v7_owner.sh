@@ -1,6 +1,7 @@
 #!/bin/bash
 # V7 CPU-only status; T12 GPU science must run via the AutoDL canonical owner.
 # V9 --observer-receipt belongs to AutoDL owner activation, never this status job.
+# V10 --io-overlay is the content-bound future-reader policy; no HPC GPU.
 #SBATCH --partition=intel
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

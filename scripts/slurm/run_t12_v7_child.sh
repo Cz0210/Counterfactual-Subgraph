@@ -1,6 +1,7 @@
 #!/bin/bash
 # V9: AutoDL-only inherited-FD child; explicit same-GPU identity adapter.
 # The reviewed four scientific files and original cross-GPU guard are retained.
+# V10 may change only authenticated history read location/buffering in this child.
 #SBATCH --partition=intel
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

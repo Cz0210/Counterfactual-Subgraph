@@ -10,8 +10,12 @@ from pathlib import Path
 
 def validate_recovery(plan,checkpoint):
     probe=json.loads(Path(plan['gpu_probe_receipt']).read_text())
+    expected_next=30
+    if plan.get('latest_checkpoint_recovery'):
+        from src.utils.t13_performance_dispatch import bound_json
+        expected_next=bound_json(plan['latest_checkpoint_recovery'])['next_epoch']
     if (probe.get('state')!='REAL_GPU_TWO_TRAIN_ONE_VALIDATION_RELOAD_PASS'
-            or probe.get('formal_updates')!=0 or checkpoint.get('next_epoch')!=30
+            or probe.get('formal_updates')!=0 or checkpoint.get('next_epoch')!=expected_next
             or plan.get('formal_quota_used')!='1/1' or plan.get('target_order')!=[0,2]):
         raise ValueError('COMPLETE_PROBE_AND_ORIGINAL_EPOCH29_REQUIRED')
     if 'model_state' not in checkpoint or 'optimizer_state' not in checkpoint:
@@ -58,8 +62,9 @@ def continue_branches(*,plan,out,checkpoint,selected,cohort,official,adapter,sam
             if datetime.now(timezone.utc)>=datetime.fromisoformat(plan['deadline_utc'].replace('Z','+00:00')):
                 raise RuntimeError('ORIGINAL_DEADLINE_AT_DURABLE_EPOCH_BOUNDARY')
         kw['after_epoch_checkpoint']=committed
-        atomic_json(out/'formal_progress.json',dict(state='RESTORING_EPOCH29' if target==0 else 'ORIGINAL_TARGET2_FIRST_TRAINING',
-            target=target,new_optimizer_steps=0,formal_quota='1/1',validation_epoch30_required=target==0,
+        atomic_json(out/'formal_progress.json',dict(state='RESTORING_BOUND_SAME_RUN_CHECKPOINT' if target==0 else 'ORIGINAL_TARGET2_FIRST_TRAINING',
+            target=target,new_optimizer_steps=0,formal_quota='1/1',resume_next_epoch=checkpoint['next_epoch'] if target==0 else 0,
+            validation_epoch30_required=target==0 and checkpoint['next_epoch']==30,
             source_attempt_id=plan['original_formal_attempt_id'],diagnostic_updates_adopted=0))
         return original(**kw)
     adapter.train_globalgce_resumable=train

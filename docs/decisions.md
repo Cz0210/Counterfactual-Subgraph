@@ -1,5 +1,25 @@
 # Decisions Log
 
+## 2026-09-18: V10 narrow same-run recovery and future T12 history I/O
+
+The explicit V10 authorization permits the latest complete T13 native epoch
+checkpoint, with producer-phase evidence, instead of blindly replaying epoch29.
+The new bound descriptor checks original formal1/1, target, optimizer/scheduler,
+sampler, RNG, compact identity and source content. A continuation-only I/O scope
+retains same-FD metadata/content stability and named object identity while not
+treating path-vs-FD ctime ordering as a checksum. The default global guards and
+old failures remain unchanged. No scientific model, loss, RNG or budget changes.
+
+T12 uses a new child-only, exact-path read overlay: one authenticated immutable
+history cache, and bounded buffering for the sealed history/embedding readers.
+The four reviewed scientific files, decoding, chain hashes, observer and all
+numerical adapters remain unchanged. This is not a new observer fixture or a
+permission to hot-edit a live reader. Conditional migration still requires no
+event501/uncommitted state, verified cache, actual resource and speed evidence,
+and the prior PID/writer/lease to exit before a successor can acquire the lease.
+CPU-only Slurm status wrappers explicitly override the generic A800 template.
+
+
 ## [2026-09-18] V9 same-GPU reference recovery identity
 
 The first real joint500 recovery reached the identity gate and exited before
