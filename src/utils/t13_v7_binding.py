@@ -36,6 +36,17 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
+def project_stage_increments(path):
+    rows=[] if path is None else read(path)['concurrent_future_increments']
+    for row in rows:
+        if not row.get('task_id') or not row.get('evidence'):
+            raise ValueError('V10_UNBOUND_PROJECT_INCREMENT')
+        for field in ('additional_bytes','uncreated_persistent_entries','uncreated_nvme_bytes'):
+            if type(row.get(field)) is not int or row[field]<0:
+                raise ValueError('V10_UNKNOWN_PROJECT_INCREMENT:'+field)
+    return rows
+
+
 def prepare(*, old_plan_root, old_publisher_root, root, execution_root, authorization_file,
             checkpoint_recovery_binding=None, resource_wait_seconds=0, project_increments=None):
     root = Path(root).absolute()
@@ -61,12 +72,7 @@ def prepare(*, old_plan_root, old_publisher_root, root, execution_root, authoriz
         unexpected_live_processes_must_not_be_interrupted=True))
     probe_memory = Path(plan['gpu_probe_receipt']).parent/'memory_boundaries.json'
     peak = max(int(x['VmHWM_bytes']) for x in read(probe_memory)['samples'])
-    increments=[]
-    if project_increments is not None:
-        increments=read(project_increments)['concurrent_future_increments']
-        for row in increments:
-            if type(row.get('additional_bytes')) is not int or row['additional_bytes']<0 or not row.get('evidence'):
-                raise ValueError('V10_UNKNOWN_PROJECT_INCREMENT')
+    increments=project_stage_increments(project_increments)
     policy = seal(root/'training_resource_policy.json', dict(schema='T13_V5_STAGE_INCREMENT_V1',
         formal_quota='1/1', gpu_uuid=plan['gpu_uuid'], safety_margin_bytes=64*GIB,
         process_peak_bound_bytes=32*GIB, maximum_retained_train_batches=5,
@@ -157,6 +163,8 @@ def prepare(*, old_plan_root, old_publisher_root, root, execution_root, authoriz
         task_id='t13-v7-same-run-'+root.name,owner_root=str(root/'owner'),
         v7_registry_binding_root=str(root),
         nvme_root=dispatch['nvme_root'],science_dispatch_cutoff_utc=CUTOFF,
+        other_uncreated_peak=sum(r['uncreated_persistent_entries'] for r in increments),
+        nvme_uncreated_peak=dispatch['nvme_uncreated_peak']+sum(r['uncreated_nvme_bytes'] for r in increments),
         resource_wait_seconds=resource_wait_seconds,
         science_command_without_owner_fds=[python,'-I','-B',str(execution_root/'scripts/run_t13_compact_recovery.py'),
             '--config',str(execution_root/'configs/hpc.yaml'),'--plan',str(root/'plan.json'),'--action','continue'])

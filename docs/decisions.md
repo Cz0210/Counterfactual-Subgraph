@@ -19397,3 +19397,9 @@ validation), then runs the original target2 branch sequentially. No diagnostic
 updates or extra formal start are adopted. Durable epoch callbacks enforce the
 existing resource owner and deadline. The two-branch terminal is not a cell
 PASS; merge/evaluation requires its own quantified storage admission.
+# 2026-09-18 V10 joint storage increment binding
+
+The existing T13 recovery owner now binds the other active project stage's
+remaining file/NVMe increments as well as RAM. Missing bounds remain errors;
+current usage is not counted again. This does not change model execution or
+grant a second formal start. Only the new V10 deployment adopts this overlay.

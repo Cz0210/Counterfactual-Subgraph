@@ -19,3 +19,16 @@ def test_old_results_and_policy_are_not_relabelled():
     assert "cache_metadata_temp_entries='UNKNOWN'" in source
     assert 'run(root/\'dispatch.json\')' in source
     assert 'max_full_starts=1,new_fresh_start=False' in source
+
+def test_project_ram_and_storage_peaks_all_explicit(tmp_path):
+    p=tmp_path/'increments.json'
+    row=dict(task_id='t12',additional_bytes=64*1024**3,
+        uncreated_persistent_entries=256,uncreated_nvme_bytes=0,evidence={'path':'sealed-policy'})
+    import json
+    p.write_text(json.dumps({'concurrent_future_increments':[row]}))
+    assert v.project_stage_increments(p)==[row]
+    for field in ('additional_bytes','uncreated_persistent_entries','uncreated_nvme_bytes'):
+        bad=dict(row);bad[field]=None
+        p.write_text(json.dumps({'concurrent_future_increments':[bad]}))
+        with pytest.raises(ValueError,match='UNKNOWN_PROJECT_INCREMENT'):
+            v.project_stage_increments(p)

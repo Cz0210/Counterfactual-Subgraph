@@ -1,4 +1,5 @@
 #!/bin/bash
+# V10 --project-increments binds RAM, persistent entries and NVMe future peaks.
 # V10: same owner may wait at most 24h for real GPU1 admission, capped at the
 # sealed science cutoff. This wrapper remains AutoDL-only; no HPC GPU request.
 #SBATCH --partition=cpu
